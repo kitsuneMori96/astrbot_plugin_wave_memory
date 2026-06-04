@@ -1,0 +1,145 @@
+# Changelog
+
+## v0.6.0 (2025-07-14)
+
+### 架构重构
+
+- **数据层拆分 (P1)**：database.py 重构为 Facade 模式，内部委托 5 个 Repo（MemoryRepo, TagRepo, SocialRepo, KnowledgeRepo, BookLoreRepo）
+- **ConnectionManager**：线程写锁 + WAL + closed/reopen，统一连接管理
+- **预计算架构 (P2)**：PairSimilarityService（标签对相似度预计算 + O(1) Map 查表）+ SemanticGain 钟形增益函数
+- **三级降级 (P3)**：GeodesicReranker 支持 L0/L1/L2 降级 + try/catch 兜底
+- **TagWorker**：匀速后台标签提取（每5分钟醒一次，一次 batch 调用），替代实时打标签
+- **MessageWriter 简化**：只负责 embedding + 写入，不再同步打标签
+
+### 改进
+
+- DirectedCooccurrence：语义增益调制边权重 + 反向锚定高残差节点
+- CooccurrenceScheduler：修复防抖 bug，改成满阈值+过冷却期才触发（阈值 0.05）
+- IntrinsicResidualCalculator：top-N(max_tags=3000) + 按需加载向量
+- ResidualPyramid：接收 db 参数，analyze() 按需取向量
+- QueryEngine：删除全量 tag 缓存，改为按需加载；过滤改成只看相似度
+- SpikeRouter：删除 CooccurrenceMatrix import，改用 DirectedCooccurrence
+- VectorIndex：新增 mark_deleted 方法
+- TagBackfillJob：覆盖率改成 >=2 标签才算覆盖
+- ConsolidationService：LIKE 查询改前缀匹配
+- 所有 tools：call() 加 db 存活检测 + reopen
+- main.py：_terminated 防重入 + bg_tasks 追踪 + 残差间隔保护(30min)
+- WebUI：鉴权中间件 + CORS 收紧
+- _conf_schema.json：embedding_provider_id 去掉 _special
+
+### 删除
+
+- engine/cooccurrence.py（死代码，被 directed_cooccurrence 替代）
+- services/migration.py（死代码，从未被调用）
+
+## v0.5.0 (2025-07-13)
+
+### 新功能
+
+- **配置完善**：所有硬编码参数暴露到 AstrBot 插件配置界面
+  - 新增 Cross_Group_Settings（跨群记忆开关 + 画像合并开关）
+  - 新增 Affinity_Settings（五维度半衰期 + 态度阈值 + flush 间隔）
+  - Lifecycle 新增情绪阈值、做梦参数、consolidation 话题回写开关
+  - Tag_Settings 新增 tag_blacklist、consolidation_skip_topics
+- **WebUI 热调参面板**：配置 Tab 新增滑块区域，9 个参数实时调节无需重启
+- **README 完整配置文档**：50+ 配置项完整说明表 + 热调参文档
+
+### 改进
+
+- EPA 和测地线重排默认改为启用
+- DreamService 种子数/联想数参数化
+- PersonaEvolution 态度阈值可配置
+- ConsolidationService topic_backfill 开关 + skip_topics 可配置
+- QueryEngine 跨群过滤受配置控制
+
+## v0.4.3 (2025-07-13)
+
+### 新功能
+
+- **Consolidation topics 回写 memory_tags**：整合服务提取的段落级话题标签自动写回每条消息，零额外 LLM 成本，短消息不再需要单独猜话题
+
+### 改进
+
+- Tag backfill batch_size 500→50，避免 LLM 截断导致 tag 错位
+- 空 tag 结果标记 `skipped` 而非 `done`，不阻塞重新处理
+- Consolidation topic 回写过滤泛化词（日常闲聊/灌水等）
+
+## v0.4.1 (2025-07-13)
+
+### 修复
+
+- **deep_search 工具不可用**：方法名 `execute` → `call`，对齐 AstrBot FunctionTool 接口
+- **memory_search 偶发 TypeError**：timestamp 字段为 ISO 字符串，解析后再计算时间衰减
+
+## v0.4.0 (2025-07-13)
+
+### 新功能
+
+- **跨群记忆共享**：去掉 group_id 过滤，所有群共享同一记忆池；跨群人物画像自动合并
+- **Tag 审计系统**：LLM 驱动的 Tag 质量审计（合并/重分类/删除建议），SSE 流式进度
+- **Tag RAG 提取**：embedding 搜索已有 Tag 库注入提取 prompt，提升 Tag 复用率
+- **维护工作台 WebUI**：`/maintain` 页面 — 统计卡片、审计触发、建议列表、批量批准/拒绝
+- **社区检测**：Label Propagation 轻量实现，用于 Tag 聚类分析
+- **神经云图重构**：Sigma.js + Graphology 全新渲染，支持星图/联想/人物/路径四视角
+
+### 改进
+
+- Tag 提取引入已有 Tag 库参考词表（静态 top-200 fallback）
+- 审计 API 支持 action 类型过滤
+- 审计触发加并发保护，防止重复执行
+- 维护面板 XSS 防护
+
+### 修复
+
+- SSE 审计端点从 POST 改为 GET（EventSource 兼容）
+- 批量 resolve API 兼容前端简化格式
+- Tag RAG 补充 keyword 等未列出类型避免丢失
+- WebUI 查询 bot_mood 使用 is_active 而非 expires_at
+
+---
+
+## v0.3.0 (2025-07-07)
+
+### 新功能
+
+- **人格进化系统**：多维好感度引擎（familiarity/trust/fun/depth/hostility）→ 态度分级 → 动态 prompt 注入
+- **生命周期服务**：好感度 flush + 表达模式聚合 + 记忆衰减标记，30 分钟 tick 周期
+- **做梦系统**：6 小时周期后台记忆巩固，三层时间线（近期涟漪/中期回音/深渊浪潮）+ 共振桥梁发现
+- **Bot 情绪系统**：根据群消息密度和情感 tag 分布动态设置情绪（energetic/cheerful/concerned），注入 prompt
+- **事实三元组提取**：consolidation 整合时提取结构化 facts（subject/predicate/object）写入 facts 表
+- **人物搜索工具**：person_registry + memory_mentions 双层架构，支持按人物查询相关记忆
+- **深度搜索工具**：wave_memory_deep_search，多轮联想搜索
+- **LLM 摘要整合**：定时 4 小时周期，碎片消息 → 结构化知识（summary + topics + facts + relations）
+- **VCP 完整对齐**：Phase 1-7 全部实现（EPA/残差金字塔/脉冲传播/向量融合/测地线重排/有向共现/内禀残差）
+- **LLM 辅助导入验证**：未知数据源自动 LLM 分析表结构 + 字段映射
+
+### 改进
+
+- 有向共现矩阵 + 防抖调度器（双缓冲原子切换，不阻塞查询）
+- 内禀残差计算器（共现矩阵重建后自动重算）
+- 导入系统：rowid 游标增量导入 + 安全游标（失败不推进）+ 连续重复提前终止
+- 导入 batch_size 10→50, limit 500→5000, 批量去重
+- Tag 提取改为 JSON 文档批处理
+- 数据源列表 60s 缓存 + 手动刷新强制失效
+- WebUI：导入进度条 + 导入/LLM提取按钮互斥 + 模型配置迁移到智能导入 Tab
+
+### 修复
+
+- `_ensure_tag` 处理 UNIQUE 约束冲突
+- 发送者列表按 sender_id 分组，显示最新昵称
+- `on_message` 中好感度引擎变量名 content → message
+- SQL 优先级 bug：filter 条件必须加括号再拼 AND rowid
+- 游标安全性：有 error 的批次不推进游标 + memories 为空时重置
+- 配置页模型下拉框为空 / 不显示当前值
+- 导入全部失败（缺少 group_id 参数）
+- 导入进度超 100% 问题
+- 数据源加载慢 + 导入/提取并发卡死
+- tag_cfg NameError + tag_extraction_status migration + tag_job startup delay
+
+---
+
+## v0.2.1
+
+- 数据源进度估算 + 配置面板只读展示
+- 数据源列表批量 IN 查询避免超时
+- 初始版本稳定化

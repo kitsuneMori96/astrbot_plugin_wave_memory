@@ -1,0 +1,430 @@
+{
+  "embedding_provider_id": {
+    "description": "Embedding 提供商 ID",
+    "type": "string",
+    "hint": "填写 Embedding 提供商的完整 ID（如 'siliconflow/Qwen3-Embedding-0.6B'）。需要先在 AstrBot 的 Provider 管理中创建 Embedding 类型的提供商，然后将其 ID 填写到此处",
+    "obvious_hint": true,
+    "default": ""
+  },
+  "embedding_dimension": {
+    "description": "向量维度",
+    "type": "int",
+    "hint": "必须与所选 Embedding 模型输出维度一致。Qwen3-Embedding-0.6B 默认 1024",
+    "default": 1024
+  },
+  "tag_llm_provider_id": {
+    "description": "Tag 提取 LLM",
+    "type": "string",
+    "hint": "用于从消息中提取关键标签的 LLM 提供商 ID，需要手动填写完整 ID（如 'provider_xxx'）。留空则禁用 Tag 提取",
+    "default": ""
+  },
+  "WebUI_Settings": {
+    "description": "WebUI 管理面板",
+    "hint": "Wave Memory 可视化管理面板配置",
+    "type": "object",
+    "items": {
+      "webui_enabled": {
+        "description": "启用 WebUI",
+        "hint": "开启后可通过浏览器访问记忆管理面板",
+        "type": "bool",
+        "default": true
+      },
+      "webui_host": {
+        "description": "监听地址",
+        "hint": "127.0.0.1 仅本机访问；0.0.0.0 允许局域网访问",
+        "type": "string",
+        "default": "0.0.0.0"
+      },
+      "webui_port": {
+        "description": "监听端口",
+        "hint": "WebUI 服务端口，确保不与其他服务冲突",
+        "type": "int",
+        "default": 9876
+      },
+      "webui_password": {
+        "description": "访问密码",
+        "hint": "登录 WebUI 所需密码。留空则无需密码",
+        "type": "string",
+        "default": ""
+      }
+    }
+  },
+  "Query_Settings": {
+    "description": "记忆召回配置",
+    "hint": "控制记忆检索和注入行为",
+    "type": "object",
+    "items": {
+      "enable_auto_inject": {
+        "description": "自动注入记忆",
+        "hint": "每次 LLM 请求前自动检索并注入相关记忆到 prompt",
+        "type": "bool",
+        "default": true
+      },
+      "inject_top_k": {
+        "description": "注入记忆条数",
+        "hint": "每次注入的最大记忆片段数量（1-20）",
+        "type": "int",
+        "default": 5
+      },
+      "min_similarity": {
+        "description": "最低相似度阈值",
+        "hint": "低于此分数的记忆不会被注入（0-1）",
+        "type": "string",
+        "default": "0.35"
+      },
+      "injection_format": {
+        "description": "注入格式",
+        "hint": "记忆注入到 prompt 的格式模板。可用变量：{content} {sender} {time}",
+        "type": "string",
+        "default": "[记忆] {sender}({time}): {content}"
+      },
+      "enable_spike_routing": {
+        "description": "启用脉冲传播",
+        "hint": "通过 Tag 共现图发现间接关联记忆，提升联想能力",
+        "type": "bool",
+        "default": true
+      },
+      "enable_residual_pyramid": {
+        "description": "启用残差金字塔",
+        "hint": "多层语义分解，提升复杂问题的召回精度",
+        "type": "bool",
+        "default": true
+      },
+      "enable_epa": {
+        "description": "启用 EPA 分析",
+        "hint": "嵌入投影分析，根据问题聚焦度动态调整检索策略",
+        "type": "bool",
+        "default": true
+      },
+      "enable_geodesic_rerank": {
+        "description": "启用测地线重排",
+        "hint": "基于共现拓扑修正向量距离偏差",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "Cross_Group_Settings": {
+    "description": "跨群记忆",
+    "hint": "控制不同群之间的记忆共享行为",
+    "type": "object",
+    "items": {
+      "cross_group_enabled": {
+        "description": "启用跨群记忆共享",
+        "hint": "开启后所有群共享同一记忆池。关闭后每个群的记忆互相隔离",
+        "type": "bool",
+        "default": true
+      },
+      "cross_group_persona_merge": {
+        "description": "跨群人物画像合并",
+        "hint": "同一用户在不同群的好感度、表达模式、personality_tags 自动聚合",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "Affinity_Settings": {
+    "description": "好感度引擎",
+    "hint": "多维好感度参数，影响 Bot 对不同用户的态度",
+    "type": "object",
+    "items": {
+      "familiarity_halflife_days": {
+        "description": "熟悉度半衰期（天）",
+        "hint": "互动频率积累的衰减速度。越短越容易变生疏",
+        "type": "int",
+        "default": 200
+      },
+      "trust_halflife_days": {
+        "description": "信任半衰期（天）",
+        "hint": "正面情感/深度对话积累的衰减速度",
+        "type": "int",
+        "default": 90
+      },
+      "fun_halflife_days": {
+        "description": "趣味半衰期（天）",
+        "hint": "玩梗整活积累的衰减速度",
+        "type": "int",
+        "default": 30
+      },
+      "depth_halflife_days": {
+        "description": "深度半衰期（天）",
+        "hint": "深入讨论积累的衰减速度",
+        "type": "int",
+        "default": 150
+      },
+      "hostility_halflife_days": {
+        "description": "敌意半衰期（天）",
+        "hint": "负面行为惩罚的衰减速度。越短越容易原谅",
+        "type": "int",
+        "default": 60
+      },
+      "flush_interval_minutes": {
+        "description": "好感度刷新间隔（分钟）",
+        "hint": "多久将内存中的好感度变化写入数据库",
+        "type": "int",
+        "default": 30
+      },
+      "intimate_threshold": {
+        "description": "亲密态度阈值",
+        "hint": "好感度 >= 此值时态度为 intimate（轻松随意、主动关心）",
+        "type": "int",
+        "default": 60
+      },
+      "friendly_threshold": {
+        "description": "友好态度阈值",
+        "hint": "好感度 >= 此值时态度为 friendly（友好正常、偶尔调侃）",
+        "type": "int",
+        "default": 30
+      },
+      "neutral_threshold": {
+        "description": "中立态度阈值",
+        "hint": "好感度 >= 此值时态度为 neutral（礼貌但保持距离）",
+        "type": "int",
+        "default": 10
+      }
+    }
+  },
+  "Lifecycle_Settings": {
+    "description": "人格与情绪",
+    "hint": "好感度引擎、人格进化、Bot 情绪、做梦系统",
+    "type": "object",
+    "items": {
+      "enable_affinity": {
+        "description": "启用好感度系统",
+        "hint": "追踪每个用户的多维好感度，影响 Bot 态度",
+        "type": "bool",
+        "default": true
+      },
+      "enable_persona_evolution": {
+        "description": "启用人格进化",
+        "hint": "根据好感度等级动态调整 Bot 对不同用户的态度和语气",
+        "type": "bool",
+        "default": true
+      },
+      "enable_mood": {
+        "description": "启用 Bot 情绪",
+        "hint": "根据群消息密度和情感分布动态生成情绪状态",
+        "type": "bool",
+        "default": true
+      },
+      "mood_duration_hours": {
+        "description": "情绪持续时间（小时）",
+        "hint": "情绪触发后持续多久自动过期",
+        "type": "string",
+        "default": "2.0"
+      },
+      "mood_msg_threshold": {
+        "description": "活跃情绪消息阈值",
+        "hint": "30 分钟内消息超过此数量触发 energetic 情绪",
+        "type": "int",
+        "default": 30
+      },
+      "positive_emotion_threshold": {
+        "description": "正面情绪触发阈值",
+        "hint": "正面情感 tag 占比超过此值触发 cheerful（0-1）",
+        "type": "string",
+        "default": "0.6"
+      },
+      "negative_emotion_threshold": {
+        "description": "负面情绪触发阈值",
+        "hint": "负面情感 tag 占比超过此值触发 concerned（0-1）",
+        "type": "string",
+        "default": "0.4"
+      },
+      "enable_dream": {
+        "description": "启用做梦系统",
+        "hint": "后台定时记忆巩固：三层时间线涟漪浪潮 + 共振桥梁发现",
+        "type": "bool",
+        "default": true
+      },
+      "dream_interval_hours": {
+        "description": "做梦间隔（小时）",
+        "hint": "每隔多少小时执行一次做梦（记忆巩固）",
+        "type": "string",
+        "default": "6.0"
+      },
+      "dream_recent_seeds": {
+        "description": "近期种子数",
+        "hint": "做梦时近期涟漪阶段抽取的种子记忆数量",
+        "type": "int",
+        "default": 3
+      },
+      "dream_recent_k": {
+        "description": "近期联想数",
+        "hint": "每个种子联想的相关记忆数量",
+        "type": "int",
+        "default": 5
+      },
+      "dream_mid_seeds": {
+        "description": "中期种子数",
+        "type": "int",
+        "default": 2
+      },
+      "dream_mid_k": {
+        "description": "中期联想数",
+        "type": "int",
+        "default": 3
+      },
+      "enable_consolidation": {
+        "description": "启用 LLM 摘要整合",
+        "hint": "定时将碎片消息整合为结构化知识（summary + facts + relations + topics 回写）",
+        "type": "bool",
+        "default": true
+      },
+      "consolidation_interval_hours": {
+        "description": "整合间隔（小时）",
+        "hint": "每隔多少小时执行一次 LLM 摘要整合",
+        "type": "string",
+        "default": "4.0"
+      },
+      "consolidation_topic_backfill": {
+        "description": "整合话题回写",
+        "hint": "Consolidation 提取的段落级话题自动写回 memory_tags",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "Message_Filter": {
+    "description": "消息过滤",
+    "hint": "控制哪些消息会被记录为记忆",
+    "type": "object",
+    "items": {
+      "min_message_length": {
+        "description": "最小消息长度",
+        "hint": "短于此长度的消息不会被记录",
+        "type": "int",
+        "default": 4
+      },
+      "max_message_length": {
+        "description": "最大消息长度",
+        "hint": "超过此长度的消息会被截断后记录",
+        "type": "int",
+        "default": 2000
+      },
+      "ignore_bot_messages": {
+        "description": "忽略 Bot 自身消息",
+        "hint": "关闭后 Bot 的回复也会被记录为记忆",
+        "type": "bool",
+        "default": false
+      },
+      "group_whitelist": {
+        "description": "群组白名单",
+        "hint": "只记录这些群组的消息。留空则记录所有群组。格式：逗号分隔的群号",
+        "type": "string",
+        "default": ""
+      },
+      "group_blacklist": {
+        "description": "群组黑名单",
+        "hint": "不记录这些群组的消息。格式：逗号分隔的群号",
+        "type": "string",
+        "default": ""
+      }
+    }
+  },
+  "Tag_Settings": {
+    "description": "Tag 提取参数",
+    "hint": "控制 Tag 提取行为和质量",
+    "type": "object",
+    "items": {
+      "tag_extraction_enabled": {
+        "description": "启用 LLM Tag 提取",
+        "hint": "关闭后仅使用向量相似度检索，不提取 Tag，不构建共现图",
+        "type": "bool",
+        "default": true
+      },
+      "max_tags_per_message": {
+        "description": "每条消息最大 Tag 数",
+        "hint": "LLM 每次提取的最大标签数量",
+        "type": "int",
+        "default": 10
+      },
+      "tag_batch_size": {
+        "description": "Tag 提取批次大小",
+        "hint": "每批提取 Tag 的消息数量（实时模式）",
+        "type": "int",
+        "default": 5
+      },
+      "tag_backfill_batch_size": {
+        "description": "Tag 回填批次大小",
+        "hint": "后台 Tag 回填任务每批处理的记忆数量。过大可能导致 LLM 截断",
+        "type": "int",
+        "default": 50
+      },
+      "tag_blacklist": {
+        "description": "Tag 黑名单",
+        "hint": "逗号分隔的词，这些词不会被提取为 Tag",
+        "type": "string",
+        "default": ""
+      },
+      "consolidation_skip_topics": {
+        "description": "话题回写过滤词",
+        "hint": "逗号分隔，这些话题不会被回写到 memory_tags",
+        "type": "string",
+        "default": "日常闲聊,日常灌水,闲聊,灌水,群聊,聊天,日常"
+      }
+    }
+  },
+  "Storage_Settings": {
+    "description": "存储与衰减",
+    "hint": "记忆存储上限和衰减策略",
+    "type": "object",
+    "items": {
+      "max_memories": {
+        "description": "最大记忆条数",
+        "hint": "超过上限后最旧且重要性最低的记忆会被清理",
+        "type": "int",
+        "default": 100000
+      },
+      "memory_decay_enabled": {
+        "description": "启用记忆衰减",
+        "hint": "长期未访问的记忆重要性逐渐降低",
+        "type": "bool",
+        "default": true
+      },
+      "decay_rate": {
+        "description": "每日衰减率",
+        "hint": "每天未访问时重要性乘以此系数（0.99=慢衰减，0.95=快衰减）",
+        "type": "string",
+        "default": "0.995"
+      },
+      "cleanup_importance_threshold": {
+        "description": "清理重要性阈值",
+        "hint": "重要性低于此值的记忆会在自动清理时被删除",
+        "type": "string",
+        "default": "0.1"
+      },
+      "auto_cleanup_enabled": {
+        "description": "启用自动清理",
+        "hint": "每日自动清理低重要性记忆",
+        "type": "bool",
+        "default": false
+      }
+    }
+  },
+  "Performance_Settings": {
+    "description": "性能调优",
+    "hint": "控制 Embedding 调用频率和批量大小",
+    "type": "object",
+    "items": {
+      "embedding_batch_size": {
+        "description": "Embedding 批量大小",
+        "hint": "每次批量 Embedding 的文本数量，过大可能触发 API 限流",
+        "type": "int",
+        "default": 10
+      },
+      "write_flush_interval": {
+        "description": "写入刷新间隔（秒）",
+        "hint": "消息队列等待多久后强制处理",
+        "type": "int",
+        "default": 30
+      },
+      "cooccurrence_rebuild_interval": {
+        "description": "共现矩阵重建间隔（秒）",
+        "hint": "多久重建一次共现矩阵。0=仅启动时重建",
+        "type": "int",
+        "default": 3600
+      }
+    }
+  }
+}
