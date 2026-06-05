@@ -16,7 +16,8 @@
     "description": "Tag 提取 LLM",
     "type": "string",
     "hint": "用于从消息中提取关键标签的 LLM 提供商 ID，需要手动填写完整 ID（如 'provider_xxx'）。留空则禁用 Tag 提取",
-    "default": ""
+    "default": "",
+    "_special": "select_provider"
   },
   "WebUI_Settings": {
     "description": "WebUI 管理面板",
@@ -397,7 +398,8 @@
         "description": "默认模型",
         "hint": "未在 Bot 配置中指定时使用",
         "type": "string",
-        "default": "claude-opus-4-20250918"
+        "default": "",
+        "_special": "select_provider"
       },
       "spam_threshold": {
         "description": "刷屏检测阈值",
@@ -444,7 +446,8 @@
       "model": {
         "description": "模型（留空用全局默认）",
         "type": "string",
-        "default": ""
+        "default": "",
+        "_special": "select_provider"
       },
       "proactive_enabled": {
         "description": "启用主动对话",
@@ -481,7 +484,8 @@
       "model": {
         "description": "模型（留空用全局默认）",
         "type": "string",
-        "default": "claude-sonnet-4-20250514"
+        "default": "",
+        "_special": "select_provider"
       },
       "proactive_enabled": {
         "description": "启用主动对话",
