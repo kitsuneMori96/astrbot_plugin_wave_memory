@@ -93,6 +93,8 @@ class MetaThinking:
         db,
         context,
         bot_qq_id: str = "2500447291",
+        bot_qq_ids: list[str] = None,
+        bot_prompts: dict[str, str] = None,
         admin_ids: list[str] = None,
         config: dict | None = None,
         global_fallback_ids: str | list[str] | None = None,
@@ -100,6 +102,9 @@ class MetaThinking:
         self.db = db
         self.context = context
         self.bot_qq_id = bot_qq_id
+        self.bot_qq_ids = set(bot_qq_ids or [bot_qq_id])
+        # 每个 bot 可以有自己的 MetaThinking prompt；没设置的用默认
+        self.bot_prompts = bot_prompts or {}
         self.admin_ids = set(admin_ids or [])
         self.config = config or {}
         self.enabled = bool(self.config.get("enabled", True))
@@ -209,6 +214,7 @@ class MetaThinking:
         message: str,
         is_at_bot: bool,
         context_messages: list[str],
+        bot_id: str = None,
     ) -> dict:
         """
         核心判断：要不要回、怎么回。
@@ -256,8 +262,9 @@ class MetaThinking:
         # 读取发送者资料
         profile = self._get_profile(sender_id, group_id)
 
-        # 构建 prompt
-        prompt = META_THINKING_PROMPT.format(
+        # 构建 prompt（按 bot_id 选对应模板，没有则用默认）
+        prompt_template = self.bot_prompts.get(bot_id or self.bot_qq_id, META_THINKING_PROMPT)
+        prompt = prompt_template.format(
             nickname=nickname or sender_id,
             qq=sender_id,
             affection=profile.get("affection", 0),

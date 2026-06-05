@@ -56,6 +56,7 @@ class WaveMemoryPlugin(Star):
         self.context = context
         self.config = config or {}
         self._terminated = False
+        self._bot_qq_ids = ["2500447291", "1336495069"]  # 羽书 + 白真真
 
         # 解析配置（顶层字段 + 嵌套 object）
         query_cfg = self.config.get("Query_Settings", {})
@@ -424,10 +425,13 @@ class WaveMemoryPlugin(Star):
         meta_cfg = self.config.get("MetaThinking_Settings", {})
         if meta_cfg.get("enabled", True):
             try:
+                from .services.meta_thinking_prompts import BAIZZ_META_PROMPT
                 self.meta_thinking = MetaThinking(
                     db=self.db,
                     context=self.context,
                     bot_qq_id="2500447291",
+                    bot_qq_ids=self._bot_qq_ids,
+                    bot_prompts={"1336495069": BAIZZ_META_PROMPT},
                     config=meta_cfg,
                     global_fallback_ids=self.config.get("meta_thinking_fallback_ids", ""),
                 )
@@ -534,6 +538,7 @@ class WaveMemoryPlugin(Star):
         message = event.get_message_str() or ""
         sender_id = event.get_sender_id() or ""
         group_id = event.get_group_id() or ""
+        bot_id = event.get_self_id() or ""
         is_at_bot = getattr(event, "is_at_or_wake_command", False)
         nickname = ""
         if event.message_obj and event.message_obj.sender:
@@ -550,6 +555,7 @@ class WaveMemoryPlugin(Star):
             message=message,
             is_at_bot=is_at_bot,
             context_messages=context_messages,
+            bot_id=bot_id,
         )
 
         action = result.get("action", "reply")
@@ -642,7 +648,20 @@ class WaveMemoryPlugin(Star):
         if not message or len(message.strip()) < self.min_message_length:
             return
 
-        group_id = event.get_group_id() or f"private:{event.get_sender_id()}"
+        sender_id = event.get_sender_id() or ""
+
+        # 多 bot 去重：同一条群消息会被多个 NapCat 上报，只写一次
+        dedup_key = f"{sender_id}:{message[:50]}"
+        now = time.time()
+        if not hasattr(self, '_msg_dedup_cache'):
+            self._msg_dedup_cache = {}
+        # 清理 10 秒前的旧条目
+        self._msg_dedup_cache = {k: v for k, v in self._msg_dedup_cache.items() if now - v < 10}
+        if dedup_key in self._msg_dedup_cache:
+            return  # 重复消息，跳过
+        self._msg_dedup_cache[dedup_key] = now
+
+        group_id = event.get_group_id() or f"private:{sender_id}"
 
         if self.group_whitelist and group_id not in self.group_whitelist:
             return
@@ -666,7 +685,8 @@ class WaveMemoryPlugin(Star):
         })
 
         if hasattr(self, 'lifecycle') and self.lifecycle:
-            is_at_bot = '2500447291' in (event.message_str or '')
+            bot_ids = getattr(self, '_bot_qq_ids', ['2500447291'])
+            is_at_bot = any(bid in (event.message_str or '') for bid in bot_ids)
             hour = int(time.strftime('%H', time.localtime()))
             self.lifecycle.affinity.process_message(
                 sender_id=sender_id,
