@@ -426,5 +426,152 @@
         "default": 3600
       }
     }
+  },
+  "MetaThinking_Settings": {
+    "description": "元思考（MetaThinking）",
+    "hint": "羽书/白真真在回复前先'想一下'的判断层",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用 MetaThinking",
+        "hint": "关闭后 Bot 被 @ 直接回复，不做行为判断",
+        "type": "bool",
+        "default": true
+      },
+      "provider_1": {
+        "description": "MetaThinking 首选模型",
+        "hint": "用于元思考判断的 LLM Provider ID（优先使用）",
+        "type": "string",
+        "_special": "select_provider",
+        "default": ""
+      },
+      "provider_2": {
+        "description": "MetaThinking 备选模型 1",
+        "type": "string",
+        "_special": "select_provider",
+        "default": ""
+      },
+      "provider_3": {
+        "description": "MetaThinking 备选模型 2",
+        "type": "string",
+        "_special": "select_provider",
+        "default": ""
+      },
+      "spam_threshold": {
+        "description": "刷屏检测阈值",
+        "hint": "同一用户在窗口内 @ bot 超过此次数触发冷却",
+        "type": "int",
+        "default": 6
+      },
+      "spam_window_seconds": {
+        "description": "刷屏检测窗口（秒）",
+        "type": "int",
+        "default": 60
+      },
+      "proactive_enabled": {
+        "description": "启用主动对话",
+        "hint": "群聊命中兴趣词时 Bot 主动判断是否插话",
+        "type": "bool",
+        "default": true
+      },
+      "proactive_interval_seconds": {
+        "description": "主动对话最小间隔（秒）",
+        "hint": "两次主动插话之间至少间隔多少秒",
+        "type": "int",
+        "default": 600
+      },
+      "proactive_max_per_hour": {
+        "description": "每小时最多主动插话次数",
+        "type": "int",
+        "default": 3
+      },
+      "silent_hours_start": {
+        "description": "静默时段开始（小时）",
+        "hint": "此时段内不主动插话（0-23）",
+        "type": "int",
+        "default": 0
+      },
+      "silent_hours_end": {
+        "description": "静默时段结束（小时）",
+        "type": "int",
+        "default": 6
+      },
+      "interest_sample_size": {
+        "description": "兴趣关键词数量",
+        "hint": "从高频 Tag 中自动提取多少个作为兴趣触发器",
+        "type": "int",
+        "default": 20
+      }
+    }
+  },
+  "LLM_Settings": {
+    "description": "内部 LLM fallback",
+    "hint": "WaveMemory 内部 LLM 调用（Tag 提取、整合、审计）的备用模型链",
+    "type": "object",
+    "items": {
+      "fallback_provider_1": {
+        "description": "Fallback 模型 1",
+        "hint": "Tag 提取/整合首选失败时的第一备选",
+        "type": "string",
+        "_special": "select_provider",
+        "default": ""
+      },
+      "fallback_provider_2": {
+        "description": "Fallback 模型 2",
+        "type": "string",
+        "_special": "select_provider",
+        "default": ""
+      },
+      "fallback_provider_3": {
+        "description": "Fallback 模型 3",
+        "type": "string",
+        "_special": "select_provider",
+        "default": ""
+      }
+    }
+  },
+  "TagWorker_Settings": {
+    "description": "Tag 提取调度",
+    "hint": "匀速后台标签提取（替代实时模式，降低 LLM 并发压力）",
+    "type": "object",
+    "items": {
+      "interval_seconds": {
+        "description": "提取间隔（秒）",
+        "hint": "每隔多少秒醒一次，取出积攒的无标签消息一次性打完。推荐 300（5分钟）",
+        "type": "int",
+        "default": 300
+      },
+      "max_batch_per_cycle": {
+        "description": "每周期最大处理条数",
+        "hint": "每次醒来最多处理多少条消息。过大可能导致单次 LLM token 过多",
+        "type": "int",
+        "default": 50
+      }
+    }
+  },
+  "SemanticGain_Settings": {
+    "description": "语义增益（VCP V8.2）",
+    "hint": "钟形语义增益函数，调制共现矩阵边权重。抑制同义复读、放大概念邻接、弱化噪声",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用语义增益",
+        "hint": "关闭后共现矩阵不做语义距离调制",
+        "type": "bool",
+        "default": true
+      },
+      "peak": {
+        "description": "黄金邻接区中心",
+        "hint": "钟形曲线的峰值位置。需要根据 embedding 模型的相似度分布调整（默认 0.65 适用于 OpenAI，Qwen 可能不同）",
+        "type": "string",
+        "default": "0.65"
+      },
+      "sigma": {
+        "description": "高斯宽度",
+        "hint": "钟形曲线的宽度，越大越平缓",
+        "type": "string",
+        "default": "0.25"
+      }
+    }
   }
 }
