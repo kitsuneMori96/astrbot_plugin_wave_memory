@@ -148,16 +148,14 @@ class QueryEngine:
         matched_tags = []
 
         if self.enable_pyramid and self.residual_pyramid:
-            # 按需加载 tag 向量（不缓存全量）
-            tag_vecs = self._load_tag_vectors()
-            if tag_vecs:
-                pyramid_result = self.residual_pyramid.analyze(query_vec, tag_vecs)
-                for level_tags in pyramid_result.get("levels", []):
-                    for tag_info in level_tags:
-                        tid = tag_info.get("tag_id")
-                        sim = tag_info.get("similarity", 0)
-                        if tid and sim > 0.1:
-                            matched_tags.append((tid, sim))
+            # 残差金字塔内部按需从 db 取候选 tag 向量
+            pyramid_result = self.residual_pyramid.analyze(query_vec, None)
+            for level_tags in pyramid_result.get("levels", []):
+                for tag_info in level_tags:
+                    tid = tag_info.get("tag_id")
+                    sim = tag_info.get("similarity", 0)
+                    if tid and sim > 0.1:
+                        matched_tags.append((tid, sim))
         else:
             tag_results = self.tag_index.search(query_vec, k=10)
             for tid, dist in tag_results:

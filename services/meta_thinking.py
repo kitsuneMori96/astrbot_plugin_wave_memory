@@ -116,11 +116,13 @@ class MetaThinking:
         self.silent_hours_start = int(self.config.get("silent_hours_start", 0))
         self.silent_hours_end = int(self.config.get("silent_hours_end", 6))
         self.interest_sample_size = int(self.config.get("interest_sample_size", 20))
+        # Provider 链：优先 default_model，fallback 到旧格式 provider_1/2/3
+        default_model = self.config.get("default_model", "")
         meta_fallback_ids = (
             provider_ids_from_config(self.config, prefix="provider_")
             or parse_provider_ids(self.config.get("provider_fallback_ids", ""))
         )
-        self.provider_ids = build_provider_chain("", meta_fallback_ids or parse_provider_ids(global_fallback_ids))
+        self.provider_ids = build_provider_chain(default_model, meta_fallback_ids or parse_provider_ids(global_fallback_ids))
         self.llm = LLMFallbackClient(self.context, self.provider_ids, log_prefix="[MetaThinking]")
 
         # @ 频率追踪
