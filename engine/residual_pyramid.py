@@ -30,25 +30,10 @@ class ResidualPyramid:
         Args:
             query_vector: 原始查询向量 (float32)
             tag_vectors_by_id: {tag_id: vector} 映射。如果为 None，按需从 db 加载。
-
-        Returns:
-            {
-                "levels": [{tag_id, similarity, contribution}, ...],
-                "all_tag_ids": [所有层命中的 tag_id],
-                "coverage": 被解释的能量比 (0~1),
-                "final_residual": 最终残差向量
-            }
+                （推荐 None，避免全量加载 8 万 tag 向量到内存）
         """
-        # 按需加载 tag 向量
-        if tag_vectors_by_id is None and self.db:
-            tag_data = self.db.get_all_tag_vectors()
-            tag_vectors_by_id = {t[0]: t[2] for t in tag_data}
-        elif tag_vectors_by_id is None:
-            tag_vectors_by_id = {}
-
         query = query_vector.astype(np.float32)
         original_energy = float(np.dot(query, query))
-
         if original_energy < 1e-12:
             return {"levels": [], "all_tag_ids": [], "coverage": 0.0, "final_residual": query}
 
@@ -61,13 +46,23 @@ class ResidualPyramid:
             if not results:
                 break
 
+            # 按需取这一层候选 tag 的向量
+            cand_ids = [tid for tid, _ in results]
+            if tag_vectors_by_id is not None:
+                level_vecs = {tid: tag_vectors_by_id[tid] for tid in cand_ids if tid in tag_vectors_by_id}
+            elif self.db is not None:
+                level_vecs = self.db.get_tag_vectors_by_ids(cand_ids)
+            else:
+                level_vecs = {}
+                break
+
             level_tags = []
             projection_vectors = []
 
             for tag_id, distance in results:
-                if tag_id not in tag_vectors_by_id:
+                if tag_id not in level_vecs:
                     continue
-                tag_vec = tag_vectors_by_id[tag_id]
+                tag_vec = level_vecs[tag_id]
                 similarity = 1.0 - distance
 
                 if similarity < 0.05:

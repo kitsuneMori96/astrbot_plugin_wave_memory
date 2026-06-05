@@ -67,11 +67,11 @@ class TagRepo:
             );
 
             CREATE TABLE IF NOT EXISTS tag_pair_similarity (
-                tag_a_id INTEGER NOT NULL,
-                tag_b_id INTEGER NOT NULL,
+                tag_a INTEGER NOT NULL,
+                tag_b INTEGER NOT NULL,
                 similarity REAL NOT NULL,
-                computed_at REAL NOT NULL,
-                PRIMARY KEY (tag_a_id, tag_b_id)
+                computed_at REAL,
+                PRIMARY KEY (tag_a, tag_b)
             );
 
             CREATE INDEX IF NOT EXISTS idx_tags_type ON tags(tag_type);
@@ -147,6 +147,24 @@ class TagRepo:
             "SELECT id, name, vector FROM tags WHERE vector IS NOT NULL"
         ).fetchall()
         return [(r[0], r[1], np.frombuffer(r[2], dtype=np.float32)) for r in rows]
+
+    def get_tag_vectors_by_ids(self, ids: list[int]) -> dict[int, np.ndarray]:
+        """按需批量查询指定 tag_id 的向量，避免全量加载到内存。"""
+        if not ids:
+            return {}
+        result: dict[int, np.ndarray] = {}
+        CHUNK = 900
+        unique_ids = list({int(i) for i in ids})
+        for i in range(0, len(unique_ids), CHUNK):
+            chunk = unique_ids[i:i + CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            rows = self.cm.execute_read(
+                f"SELECT id, vector FROM tags WHERE id IN ({placeholders}) AND vector IS NOT NULL",
+                chunk,
+            ).fetchall()
+            for r in rows:
+                result[r[0]] = np.frombuffer(r[1], dtype=np.float32)
+        return result
 
     def add_tag_relation(
         self,

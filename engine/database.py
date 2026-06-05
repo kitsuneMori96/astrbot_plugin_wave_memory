@@ -127,6 +127,9 @@ class WaveMemoryDB:
     def get_all_tag_vectors(self):
         return self._tag_repo.get_all_tag_vectors()
 
+    def get_tag_vectors_by_ids(self, ids: list[int]) -> dict:
+        return self._tag_repo.get_tag_vectors_by_ids(ids)
+
     def add_tag_relation(self, source_tag_id, target_tag_id, relation_type, weight=1.0, confidence=1.0, metadata=None):
         return self._tag_repo.add_tag_relation(source_tag_id, target_tag_id, relation_type, weight, confidence, metadata)
 

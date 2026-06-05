@@ -185,14 +185,17 @@ class QueryEngine:
         dynamic_factor = logic_depth * (1.0 / (1.0 + entropy * 0.5))
         alpha = min(0.6, base_boost * max(0.5, min(2.0, dynamic_factor)))
 
-        tag_vecs = self._load_tag_vectors()
-        context_vec = np.zeros_like(query_vec)
-        total_weight = 0.0
-
+        # 去重（保留最高权重）
         tag_weights = {}
         for tid, w in matched_tags:
             if tid not in tag_weights or w > tag_weights[tid]:
                 tag_weights[tid] = w
+
+        # 按需只取命中 tag 的向量（避免全量加载 8 万 tag）
+        tag_vecs = self.db.get_tag_vectors_by_ids(list(tag_weights.keys()))
+
+        context_vec = np.zeros_like(query_vec)
+        total_weight = 0.0
 
         for tid, weight in tag_weights.items():
             if tid in tag_vecs:
@@ -212,11 +215,6 @@ class QueryEngine:
             return fused.astype(np.float32), energy_field
 
         return query_vec, energy_field
-
-    def _load_tag_vectors(self) -> dict:
-        """按需加载 tag 向量（不缓存全量，每次查询时新加载）。"""
-        tag_data = self.db.get_all_tag_vectors()
-        return {t[0]: t[2] for t in tag_data}
 
     async def shotgun_query(
         self,

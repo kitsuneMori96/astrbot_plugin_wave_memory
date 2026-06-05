@@ -386,7 +386,7 @@ class WaveMemoryPlugin(Star):
             config=self.tag_cfg,
         )
         tag_coverage = self.tag_job.get_coverage()
-        if tag_coverage < 0.90:
+        if tag_coverage < 0.50:
             logger.info(f"[WaveMemory] Tag coverage {tag_coverage:.1%} < 90%, starting backfill job")
             self.tag_job.start()
         else:
@@ -523,6 +523,63 @@ class WaveMemoryPlugin(Star):
 
         logger.info("[WaveMemory] Shutdown complete")
 
+    # ─── Hook: MetaThinking 元思考 ───
+
+    @filter.on_llm_request(priority=1)
+    async def meta_thinking_check(self, event: AstrMessageEvent, req=None):
+        """在 LLM 请求前，羽书先'想一下'再决定怎么做。"""
+        if not req or not self.meta_thinking:
+            return
+
+        message = event.get_message_str() or ""
+        sender_id = event.get_sender_id() or ""
+        group_id = event.get_group_id() or ""
+        is_at_bot = getattr(event, "is_at_or_wake_command", False)
+        nickname = ""
+        if event.message_obj and event.message_obj.sender:
+            nickname = event.message_obj.sender.nickname or ""
+
+        # 获取最近群聊上下文
+        context_messages = self._get_recent_messages(event, max_messages=5)
+
+        # MetaThinking 判断（内部会自动更新好感度/印象/标签）
+        result = await self.meta_thinking.should_respond(
+            sender_id=sender_id,
+            group_id=group_id,
+            nickname=nickname,
+            message=message,
+            is_at_bot=is_at_bot,
+            context_messages=context_messages,
+        )
+
+        action = result.get("action", "reply")
+        tone = result.get("tone", "正常")
+        inner = result.get("inner_thought", "")
+
+        if inner:
+            logger.info(f"[MetaThinking] {nickname or sender_id}: {inner} → {action}")
+
+        # 根据行动决策
+        if action == "ignore":
+            event.should_call_llm(False)
+            return
+
+        if action == "attack_back":
+            from astrbot.core.agent.message import TextPart
+            tone_inject = f"[语气指令] 这个人在骂你/惹你不爽。用{tone}的语气怼回去，不要客气。"
+            req.extra_user_content_parts.append(TextPart(text=tone_inject))
+            return
+
+        if action == "short_reply":
+            from astrbot.core.agent.message import TextPart
+            req.extra_user_content_parts.append(TextPart(text="[语气指令] 简短回复，一句话，不要展开。"))
+            return
+
+        # action == "reply" → 正常继续
+        if tone and tone != "正常":
+            from astrbot.core.agent.message import TextPart
+            req.extra_user_content_parts.append(TextPart(text=f"[语气指令] 用{tone}的语气回复。"))
+
     # ─── Hook: 自动注入记忆 ───
 
     @filter.on_llm_request(priority=5)
@@ -618,6 +675,26 @@ class WaveMemoryPlugin(Star):
                 is_at_bot=is_at_bot,
                 hour=hour,
             )
+
+        # 主动对话触发：轻量关键词匹配，命中才调 LLM 判断
+        if (self.meta_thinking
+            and self.meta_thinking.proactive_enabled
+            and not getattr(event, "is_at_or_wake_command", False)
+            and group_id
+            and self.meta_thinking.is_interesting(message)):
+            try:
+                context_messages = self._get_recent_messages(event, max_messages=10)
+                result = await self.meta_thinking.should_proactive(group_id, context_messages)
+                if result.get("action") == "主动插话":
+                    inner = result.get("inner_thought", "")
+                    reply_text = await self.meta_thinking.generate_proactive_reply(
+                        context_messages, inner
+                    )
+                    if reply_text:
+                        logger.info(f"[MetaThinking] 主动插话: {inner[:50]}")
+                        await event.send(event.plain_result(reply_text))
+            except Exception as e:
+                logger.debug(f"[MetaThinking] Proactive failed: {e}")
 
     @filter.after_message_sent()
     async def on_bot_sent(self, event: AstrMessageEvent):

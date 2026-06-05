@@ -52,8 +52,11 @@ class IntrinsicResidualCalculator:
                     result[r[0]] = np.frombuffer(r[1], dtype=np.float32)
             return result
         else:
-            tag_data = self.db.get_all_tag_vectors()
-            return {tid: vec for tid, _, vec in tag_data}
+            return self.db.get_tag_vectors_by_ids(
+                [r[0] for r in self.db.conn.execute(
+                    "SELECT id FROM tags WHERE vector IS NOT NULL LIMIT ?", (self.max_tags,)
+                ).fetchall()]
+            )
 
     def compute_all(self) -> dict[int, float]:
         """计算 top-N Tag 的内生残差。返回 {tag_id: residual_energy}。"""
