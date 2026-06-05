@@ -624,6 +624,7 @@ class WaveMemoryPlugin(Star):
             return
 
         group_id = event.get_group_id()
+        bot_id = event.get_self_id() or ""
 
         try:
             if self.enable_shotgun:
@@ -641,22 +642,41 @@ class WaveMemoryPlugin(Star):
                     top_k=self.inject_top_k,
                 )
 
+            injection_parts = []
+
             if memories:
-                injection = self.query_engine.format_injection(memories)
+                injection_parts.append(self.query_engine.format_injection(memories))
 
-                if self.persona_evolution:
-                    sender_id = event.get_sender_id()
-                    persona_text = self.persona_evolution.get_persona_injection(sender_id, group_id)
-                    if persona_text:
-                        injection = injection + chr(10) + chr(10) + persona_text
+            # 白真真额外注入：从 BookLore 搜第一人称经历记忆
+            if bot_id == "1336495069" and self.book_lore_index:
+                try:
+                    lore_results = await self.book_lore_index.search(
+                        query=message,
+                        top_k=3,
+                        category_filter="白真真经历",
+                    )
+                    if lore_results:
+                        lore_text = "\n".join(
+                            f"[你的经历] {r.get('content', '')[:200]}" for r in lore_results
+                        )
+                        injection_parts.append(lore_text)
+                except Exception:
+                    pass
 
-                if self.enable_mood and group_id:
-                    mood = self.db.get_active_mood(group_id)
-                    if mood:
-                        mood_text = f"[当前情绪] {mood['mood_type']}（{mood['description']}）"
-                        injection = injection + chr(10) + mood_text
+            if self.persona_evolution:
+                sender_id = event.get_sender_id()
+                persona_text = self.persona_evolution.get_persona_injection(sender_id, group_id)
+                if persona_text:
+                    injection_parts.append(persona_text)
 
+            if self.enable_mood and group_id:
+                mood = self.db.get_active_mood(group_id)
+                if mood:
+                    injection_parts.append(f"[当前情绪] {mood['mood_type']}（{mood['description']}）")
+
+            if injection_parts:
                 from astrbot.core.agent.message import TextPart
+                injection = "\n\n".join(injection_parts)
                 req.extra_user_content_parts.append(TextPart(text=injection))
 
         except Exception as e:
