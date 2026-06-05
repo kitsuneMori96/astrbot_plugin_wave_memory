@@ -413,7 +413,15 @@ class LifecycleService:
     - 记忆衰减标记: 每 24 小时
     """
 
-    def __init__(self, db: WaveMemoryDB, bot_qq_id: str = "2500447291"):
+    def __init__(
+        self,
+        db: WaveMemoryDB,
+        bot_qq_id: str = "2500447291",
+        mood_duration_hours: float = 2.0,
+        mood_msg_threshold: int = 30,
+        positive_emotion_threshold: float = 0.6,
+        negative_emotion_threshold: float = 0.4,
+    ):
         self.db = db
         self.affinity = AffinityEngine(db, bot_qq_id=bot_qq_id)
         self.patterns = PatternAggregator(db)
@@ -421,6 +429,11 @@ class LifecycleService:
         self._running = False
         self._last_pattern_update: float = 0
         self._last_decay_run: float = 0
+        # 情绪参数
+        self.mood_duration_hours = mood_duration_hours
+        self.mood_msg_threshold = mood_msg_threshold
+        self.positive_emotion_threshold = positive_emotion_threshold
+        self.negative_emotion_threshold = negative_emotion_threshold
 
     def start(self):
         self._running = True
@@ -431,11 +444,7 @@ class LifecycleService:
         self._running = False
         if self._task:
             self._task.cancel()
-        # 最后一次 flush
-        try:
-            self.affinity.flush()
-        except Exception:
-            pass
+        # affinity.flush() 已废弃，不再写入
 
     async def _loop(self):
         """主循环：每 30 分钟执行一次。"""
@@ -450,13 +459,13 @@ class LifecycleService:
                 await asyncio.sleep(60)
 
     def _tick(self):
-        """一次 tick：flush 好感度 + 可能触发模式更新/衰减/情绪。"""
+        """一次 tick：模式更新 + 衰减 + 情绪。（好感度写入已由 MetaThinking 接管）"""
         now = time.time()
 
-        # 1. 好感度 flush（每次 tick 都做）
-        flushed = self.affinity.flush()
-        if flushed > 0:
-            logger.info(f"[WaveMemory] Affinity flushed: {flushed} users")
+        # 1. 好感度 flush 已废弃 —— 由 MetaThinking 直接写 user_profiles
+        # flushed = self.affinity.flush()
+        # if flushed > 0:
+        #     logger.info(f"[WaveMemory] Affinity flushed: {flushed} users")
 
         # 2. 表达模式聚合（每 6 小时）
         if now - self._last_pattern_update > 21600:
@@ -593,19 +602,19 @@ class LifecycleService:
             # 情感 tag 匹配数
             emotion_matched = positive + negative + fun
 
-            if msg_count > 30:
+            if msg_count > self.mood_msg_threshold:
                 # 高密度互动 → energetic（不依赖情感分类）
                 mood_type = "energetic"
                 intensity = min(0.5 + msg_count / 100, 0.9)
                 description = "群里很热闹，大家聊得起劲"
-            elif emotion_matched > 0 and pos_ratio > 0.6:
+            elif emotion_matched > 0 and pos_ratio > self.positive_emotion_threshold:
                 mood_type = "cheerful"
                 intensity = 0.5 + pos_ratio * 0.3
                 description = "氛围不错，心情愉快"
-            elif emotion_matched > 0 and neg_ratio > 0.4:
+            elif emotion_matched > 0 and neg_ratio > self.negative_emotion_threshold:
                 mood_type = "concerned"
                 intensity = 0.4 + neg_ratio * 0.3
                 description = "感觉到一些负面情绪"
 
             if mood_type:
-                self.db.set_mood(group_id, mood_type, intensity, description, duration_hours=2.0)
+                self.db.set_mood(group_id, mood_type, intensity, description, duration_hours=self.mood_duration_hours)

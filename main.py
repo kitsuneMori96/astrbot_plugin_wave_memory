@@ -56,7 +56,16 @@ class WaveMemoryPlugin(Star):
         self.context = context
         self.config = config or {}
         self._terminated = False
-        self._bot_qq_ids = ["2500447291", "1336495069"]  # 羽书 + 白真真
+
+        # 从 MetaThinking_Bot1/Bot2 配置读取 bot QQ IDs
+        bot1_cfg = self.config.get("MetaThinking_Bot1", {})
+        bot2_cfg = self.config.get("MetaThinking_Bot2", {})
+        self._bot_qq_ids = [
+            bid for bid in [
+                bot1_cfg.get("qq_id", "2500447291"),
+                bot2_cfg.get("qq_id", "1336495069"),
+            ] if bid
+        ]
 
         # 解析配置（顶层字段 + 嵌套 object）
         query_cfg = self.config.get("Query_Settings", {})
@@ -67,7 +76,6 @@ class WaveMemoryPlugin(Star):
         perf_cfg = self.config.get("Performance_Settings", {})
         lifecycle_cfg = self.config.get("Lifecycle_Settings", {})
         cross_group_cfg = self.config.get("Cross_Group_Settings", {})
-        affinity_cfg = self.config.get("Affinity_Settings", {})
 
         self.embedding_provider_id = self.config.get("embedding_provider_id", "")
         self.dimension = int(self.config.get("embedding_dimension", 1024))
@@ -106,8 +114,8 @@ class WaveMemoryPlugin(Star):
         self.cross_group_enabled = cross_group_cfg.get("cross_group_enabled", True)
         self.cross_group_persona_merge = cross_group_cfg.get("cross_group_persona_merge", True)
 
-        # 好感度引擎配置
-        self.affinity_cfg = affinity_cfg
+        # 好感度引擎配置（已废弃独立配置组，保留空字典兼容）
+        self.affinity_cfg = {}
 
         # 生命周期配置
         self.enable_affinity = lifecycle_cfg.get("enable_affinity", True)
@@ -165,7 +173,14 @@ class WaveMemoryPlugin(Star):
         self.pair_sim_service = PairSimilarityService(db=self.db)
 
         # 语义增益配置
-        self.semantic_gain_config = SemanticGainConfig()
+        sg_cfg = self.config.get("SemanticGain_Settings", {})
+        if sg_cfg.get("enabled", True):
+            self.semantic_gain_config = SemanticGainConfig(
+                center=float(sg_cfg.get("peak", "0.65")),
+                width=float(sg_cfg.get("sigma", "0.25")),
+            )
+        else:
+            self.semantic_gain_config = None
 
         # 共现矩阵（有向序位 + 语义增益）
         self.intrinsic_residual = None  # 先声明，后面初始化
@@ -267,12 +282,13 @@ class WaveMemoryPlugin(Star):
         # TagWorker（匀速后台标签提取）
         self.tag_worker = None
         if self.tag_extractor:
+            tag_worker_cfg = self.config.get("TagWorker_Settings", {})
             self.tag_worker = TagWorker(
                 db=self.db,
                 tag_extractor=self.tag_extractor,
                 embedding_service=self.embedding_service,
                 tag_index=self.tag_index,
-                config=tag_cfg,
+                config=tag_worker_cfg,
             )
             self.tag_worker.on_tags_written = self.cooccurrence_scheduler.notify_tag_change
 
@@ -395,7 +411,14 @@ class WaveMemoryPlugin(Star):
 
         # 启动生命周期服务
         if self.enable_affinity:
-            self.lifecycle = LifecycleService(db=self.db, bot_qq_id="2500447291")
+            self.lifecycle = LifecycleService(
+                db=self.db,
+                bot_qq_id="2500447291",
+                mood_duration_hours=self.mood_duration_hours,
+                mood_msg_threshold=self.mood_msg_threshold,
+                positive_emotion_threshold=self.positive_emotion_threshold,
+                negative_emotion_threshold=self.negative_emotion_threshold,
+            )
             self.lifecycle.start()
         else:
             self.lifecycle = None
@@ -719,6 +742,9 @@ class WaveMemoryPlugin(Star):
     @filter.after_message_sent()
     async def on_bot_sent(self, event: AstrMessageEvent):
         """捕获 bot 回复，写入记忆。"""
+        if self.ignore_bot_messages:
+            return
+
         result = event.get_result()
         if not result or not result.chain:
             return

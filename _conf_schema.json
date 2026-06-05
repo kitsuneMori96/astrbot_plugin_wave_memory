@@ -101,6 +101,12 @@
         "hint": "基于共现拓扑修正向量距离偏差",
         "type": "bool",
         "default": true
+      },
+      "enable_shotgun": {
+        "description": "启用霰弹枪查询",
+        "hint": "多角度上下文拆分查询，适合长对话场景（略增延迟）",
+        "type": "bool",
+        "default": false
       }
     }
   },
@@ -120,67 +126,6 @@
         "hint": "同一用户在不同群的好感度、表达模式、personality_tags 自动聚合",
         "type": "bool",
         "default": true
-      }
-    }
-  },
-  "Affinity_Settings": {
-    "description": "好感度引擎",
-    "hint": "多维好感度参数，影响 Bot 对不同用户的态度",
-    "type": "object",
-    "items": {
-      "familiarity_halflife_days": {
-        "description": "熟悉度半衰期（天）",
-        "hint": "互动频率积累的衰减速度。越短越容易变生疏",
-        "type": "int",
-        "default": 200
-      },
-      "trust_halflife_days": {
-        "description": "信任半衰期（天）",
-        "hint": "正面情感/深度对话积累的衰减速度",
-        "type": "int",
-        "default": 90
-      },
-      "fun_halflife_days": {
-        "description": "趣味半衰期（天）",
-        "hint": "玩梗整活积累的衰减速度",
-        "type": "int",
-        "default": 30
-      },
-      "depth_halflife_days": {
-        "description": "深度半衰期（天）",
-        "hint": "深入讨论积累的衰减速度",
-        "type": "int",
-        "default": 150
-      },
-      "hostility_halflife_days": {
-        "description": "敌意半衰期（天）",
-        "hint": "负面行为惩罚的衰减速度。越短越容易原谅",
-        "type": "int",
-        "default": 60
-      },
-      "flush_interval_minutes": {
-        "description": "好感度刷新间隔（分钟）",
-        "hint": "多久将内存中的好感度变化写入数据库",
-        "type": "int",
-        "default": 30
-      },
-      "intimate_threshold": {
-        "description": "亲密态度阈值",
-        "hint": "好感度 >= 此值时态度为 intimate（轻松随意、主动关心）",
-        "type": "int",
-        "default": 60
-      },
-      "friendly_threshold": {
-        "description": "友好态度阈值",
-        "hint": "好感度 >= 此值时态度为 friendly（友好正常、偶尔调侃）",
-        "type": "int",
-        "default": 30
-      },
-      "neutral_threshold": {
-        "description": "中立态度阈值",
-        "hint": "好感度 >= 此值时态度为 neutral（礼貌但保持距离）",
-        "type": "int",
-        "default": 10
       }
     }
   },
@@ -304,7 +249,7 @@
       },
       "ignore_bot_messages": {
         "description": "忽略 Bot 自身消息",
-        "hint": "关闭后 Bot 的回复也会被记录为记忆",
+        "hint": "开启后 Bot 的回复不会被记录为记忆",
         "type": "bool",
         "default": false
       },
@@ -429,37 +374,33 @@
   },
   "MetaThinking_Settings": {
     "description": "元思考（MetaThinking）",
-    "hint": "羽书/白真真在回复前先'想一下'的判断层",
+    "hint": "Bot 回复前先'想一下'的判断层。支持多 Bot 独立配置。",
     "type": "object",
     "items": {
       "enabled": {
         "description": "启用 MetaThinking",
-        "hint": "关闭后 Bot 被 @ 直接回复，不做行为判断",
         "type": "bool",
         "default": true
       },
-      "provider_1": {
-        "description": "MetaThinking 首选模型",
-        "hint": "用于元思考判断的 LLM Provider ID（优先使用）",
+      "base_url": {
+        "description": "LLM API 地址",
+        "hint": "MetaThinking 调用的 API endpoint",
         "type": "string",
-        "_special": "select_provider",
-        "default": ""
+        "default": "http://host.docker.internal:5580/v1"
       },
-      "provider_2": {
-        "description": "MetaThinking 备选模型 1",
+      "api_key": {
+        "description": "API Key",
         "type": "string",
-        "_special": "select_provider",
-        "default": ""
+        "default": "123456"
       },
-      "provider_3": {
-        "description": "MetaThinking 备选模型 2",
+      "default_model": {
+        "description": "默认模型",
+        "hint": "未在 Bot 配置中指定时使用",
         "type": "string",
-        "_special": "select_provider",
-        "default": ""
+        "default": "claude-opus-4-20250918"
       },
       "spam_threshold": {
         "description": "刷屏检测阈值",
-        "hint": "同一用户在窗口内 @ bot 超过此次数触发冷却",
         "type": "int",
         "default": 6
       },
@@ -468,26 +409,8 @@
         "type": "int",
         "default": 60
       },
-      "proactive_enabled": {
-        "description": "启用主动对话",
-        "hint": "群聊命中兴趣词时 Bot 主动判断是否插话",
-        "type": "bool",
-        "default": true
-      },
-      "proactive_interval_seconds": {
-        "description": "主动对话最小间隔（秒）",
-        "hint": "两次主动插话之间至少间隔多少秒",
-        "type": "int",
-        "default": 600
-      },
-      "proactive_max_per_hour": {
-        "description": "每小时最多主动插话次数",
-        "type": "int",
-        "default": 3
-      },
       "silent_hours_start": {
         "description": "静默时段开始（小时）",
-        "hint": "此时段内不主动插话（0-23）",
         "type": "int",
         "default": 0
       },
@@ -498,35 +421,82 @@
       },
       "interest_sample_size": {
         "description": "兴趣关键词数量",
-        "hint": "从高频 Tag 中自动提取多少个作为兴趣触发器",
         "type": "int",
         "default": 20
       }
     }
   },
-  "LLM_Settings": {
-    "description": "内部 LLM fallback",
-    "hint": "WaveMemory 内部 LLM 调用（Tag 提取、整合、审计）的备用模型链",
+  "MetaThinking_Bot1": {
+    "description": "Bot 1 配置（羽书）",
+    "hint": "羽书的 MetaThinking 独立设置",
     "type": "object",
     "items": {
-      "fallback_provider_1": {
-        "description": "Fallback 模型 1",
-        "hint": "Tag 提取/整合首选失败时的第一备选",
+      "qq_id": {
+        "description": "QQ 号",
         "type": "string",
-        "_special": "select_provider",
+        "default": "2500447291"
+      },
+      "name": {
+        "description": "名称",
+        "type": "string",
+        "default": "羽书"
+      },
+      "model": {
+        "description": "模型（留空用全局默认）",
+        "type": "string",
         "default": ""
       },
-      "fallback_provider_2": {
-        "description": "Fallback 模型 2",
-        "type": "string",
-        "_special": "select_provider",
-        "default": ""
+      "proactive_enabled": {
+        "description": "启用主动对话",
+        "type": "bool",
+        "default": true
       },
-      "fallback_provider_3": {
-        "description": "Fallback 模型 3",
+      "proactive_interval_seconds": {
+        "description": "主动对话最小间隔（秒）",
+        "type": "int",
+        "default": 600
+      },
+      "proactive_max_per_hour": {
+        "description": "每小时最多主动插话",
+        "type": "int",
+        "default": 3
+      }
+    }
+  },
+  "MetaThinking_Bot2": {
+    "description": "Bot 2 配置（白真真）",
+    "hint": "白真真的 MetaThinking 独立设置",
+    "type": "object",
+    "items": {
+      "qq_id": {
+        "description": "QQ 号",
         "type": "string",
-        "_special": "select_provider",
-        "default": ""
+        "default": "1336495069"
+      },
+      "name": {
+        "description": "名称",
+        "type": "string",
+        "default": "白真真"
+      },
+      "model": {
+        "description": "模型（留空用全局默认）",
+        "type": "string",
+        "default": "claude-sonnet-4-20250514"
+      },
+      "proactive_enabled": {
+        "description": "启用主动对话",
+        "type": "bool",
+        "default": false
+      },
+      "proactive_interval_seconds": {
+        "description": "主动对话最小间隔（秒）",
+        "type": "int",
+        "default": 900
+      },
+      "proactive_max_per_hour": {
+        "description": "每小时最多主动插话",
+        "type": "int",
+        "default": 2
       }
     }
   },

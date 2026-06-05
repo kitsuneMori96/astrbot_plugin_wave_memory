@@ -12,19 +12,19 @@ from astrbot.api import logger
 class TagWorker:
     """匀速标签提取工作线程。
 
-    每 300 秒醒一次，取无标签记忆（< 2个标签），
+    每 interval_seconds 秒醒一次，取无标签记忆（< 2个标签），
     一次 batch LLM 调用打完，写回。
     不阻塞在线查询路径。
     """
-
-    WAKE_INTERVAL = 300  # 5 分钟
 
     def __init__(self, db, tag_extractor, embedding_service, tag_index, config: dict = None):
         self.db = db
         self.extractor = tag_extractor
         self.embedding = embedding_service
         self.tag_index = tag_index
-        self.batch_size = int((config or {}).get("tag_worker_batch_size", 30))
+        cfg = config or {}
+        self.wake_interval = int(cfg.get("interval_seconds", 300))
+        self.batch_size = int(cfg.get("max_batch_per_cycle", cfg.get("tag_worker_batch_size", 50)))
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self.on_tags_written = None  # callback(count)
@@ -55,7 +55,7 @@ class TagWorker:
                 logger.warning(f"[WaveMemory] TagWorker error: {e}")
             # 固定间隔休眠
             try:
-                await asyncio.sleep(self.WAKE_INTERVAL)
+                await asyncio.sleep(self.wake_interval)
             except asyncio.CancelledError:
                 break
         logger.info("[WaveMemory] TagWorker stopped")
