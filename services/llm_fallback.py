@@ -1,18 +1,11 @@
-"""Unified LLM client for WaveMemory on Hermes — 直接调用 OpenAI-compatible API"""
+"""WaveMemory LLM 调用客户端 — 通过 AstrBot Provider 系统调用"""
 
 from __future__ import annotations
 
-import json
 import logging
-import urllib.request
 from typing import Any, Optional
 
 logger = logging.getLogger("wavememory")
-
-# 默认使用 codiz.dev（和 Hermes gateway 同一个 API）
-DEFAULT_BASE_URL = "http://host.docker.internal:5580/v1"
-DEFAULT_API_KEY = "123456"
-DEFAULT_MODEL = "claude-opus-4.6"
 
 
 class LLMResponse:
@@ -22,66 +15,85 @@ class LLMResponse:
 
 
 class LLMFallbackClient:
-    """直接调用 OpenAI-compatible API（不依赖 AstrBot context）"""
+    """通过 AstrBot Provider 系统调用 LLM。
 
-    def __init__(self, context=None, provider_ids=None, *, 
-                 log_prefix: str = "[WaveMemory]",
-                 base_url: str = DEFAULT_BASE_URL,
-                 api_key: str = DEFAULT_API_KEY,
-                 model: str = DEFAULT_MODEL):
+    支持 provider_id fallback 链：按顺序尝试，第一个成功即返回。
+    """
+
+    def __init__(self, context, provider_ids: list[str] = None, *,
+                 log_prefix: str = "[WaveMemory]", **kwargs):
+        self.context = context
+        self.provider_ids = [p for p in (provider_ids or []) if p]
         self.log_prefix = log_prefix
-        self.base_url = base_url
-        self.api_key = api_key
-        self.model = model
 
-    async def text_chat(self, *, prompt: str, system_prompt: Optional[str] = None, 
+    async def text_chat(self, *, prompt: str, system_prompt: Optional[str] = None,
                         contexts: Optional[list] = None, **kwargs) -> LLMResponse:
-        """调用 LLM API（Anthropic 格式）"""
-        messages = []
-        if contexts:
-            for ctx in contexts:
-                if isinstance(ctx, dict):
-                    messages.append(ctx)
-                else:
-                    messages.append({"role": "user", "content": str(ctx)})
-        messages.append({"role": "user", "content": prompt})
+        """通过 AstrBot provider 调用 LLM。"""
+        if not self.provider_ids:
+            raise RuntimeError(f"{self.log_prefix} No provider_ids configured")
 
-        body = {
-            "model": self.model,
-            "messages": messages,
-            "max_tokens": 500,
-        }
-        if system_prompt:
-            body["system"] = system_prompt
+        last_error = None
+        for provider_id in self.provider_ids:
+            try:
+                provider = self.context.get_provider_by_id(provider_id)
+                if not provider:
+                    continue
 
-        data = json.dumps(body).encode()
+                # 构建 prompt（AstrBot provider 的 text_chat 接口）
+                full_prompt = prompt
+                if system_prompt:
+                    full_prompt = f"{system_prompt}\n\n{prompt}"
 
-        req = urllib.request.Request(
-            f"{self.base_url}/messages",
-            data=data,
-            headers={
-                "x-api-key": self.api_key,
-                "Content-Type": "application/json",
-                "anthropic-version": "2023-06-01"
-            }
-        )
+                response = await provider.text_chat(
+                    prompt=full_prompt,
+                    contexts=contexts or [],
+                )
 
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                result = json.loads(resp.read())
-                text = result["content"][0]["text"]
-                return LLMResponse(text)
-        except Exception as e:
-            logger.error(f"{self.log_prefix} LLM call failed: {e}")
-            raise
+                if response and response.completion_text:
+                    return LLMResponse(response.completion_text)
+
+            except Exception as e:
+                last_error = e
+                logger.warning(f"{self.log_prefix} provider '{provider_id}' failed: {e}")
+                continue
+
+        if last_error:
+            logger.error(f"{self.log_prefix} LLM 调用失败: {last_error}")
+            raise last_error
+        raise RuntimeError(f"{self.log_prefix} All providers failed")
 
 
-# 兼容旧接口
+# 辅助函数：从配置构建 provider_id 链
 def parse_provider_ids(value) -> list[str]:
-    return []
+    """解析逗号分隔的 provider_id 字符串。"""
+    if not value:
+        return []
+    if isinstance(value, list):
+        return [v.strip() for v in value if v and v.strip()]
+    return [v.strip() for v in str(value).split(",") if v.strip()]
 
-def provider_ids_from_config(config=None, **kwargs) -> list[str]:
-    return []
 
-def build_provider_chain(primary="", fallback=None) -> list[str]:
-    return []
+def provider_ids_from_config(config: dict, prefix: str = "provider_") -> list[str]:
+    """从配置字典中按 prefix_1, prefix_2, ... 顺序提取 provider_id 列表。"""
+    if not config:
+        return []
+    ids = []
+    for i in range(1, 10):
+        key = f"{prefix}{i}"
+        val = config.get(key, "")
+        if val and val.strip():
+            ids.append(val.strip())
+    return ids
+
+
+def build_provider_chain(primary: str = "", fallback=None) -> list[str]:
+    """构建 provider 优先级链：primary 在前，fallback 在后。"""
+    chain = []
+    if primary and primary.strip():
+        chain.append(primary.strip())
+    if fallback:
+        if isinstance(fallback, str):
+            chain.extend(parse_provider_ids(fallback))
+        elif isinstance(fallback, list):
+            chain.extend([f for f in fallback if f and f.strip()])
+    return chain

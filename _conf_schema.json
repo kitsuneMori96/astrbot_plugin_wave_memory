@@ -383,17 +383,6 @@
         "type": "bool",
         "default": true
       },
-      "base_url": {
-        "description": "LLM API 地址",
-        "hint": "MetaThinking 调用的 API endpoint",
-        "type": "string",
-        "default": "http://host.docker.internal:5580/v1"
-      },
-      "api_key": {
-        "description": "API Key",
-        "type": "string",
-        "default": "123456"
-      },
       "default_model": {
         "description": "默认模型",
         "hint": "未在 Bot 配置中指定时使用",
