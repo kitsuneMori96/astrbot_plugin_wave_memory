@@ -649,6 +649,7 @@ class WaveMemoryPlugin(Star):
 
             # 白真真额外注入：从 BookLore 搜第一人称经历记忆
             if bot_id == "1336495069" and self.book_lore_index and self.embedding_service:
+                logger.info(f"[WaveMemory] BookLore injection triggered for baizz, query: {message[:30]}")
                 try:
                     query_vec = await self.embedding_service.get_embedding(message)
                     if query_vec is not None:
@@ -661,7 +662,7 @@ class WaveMemoryPlugin(Star):
                             for note_id, score in note_results:
                                 row = lore_conn.execute(
                                     "SELECT content, category FROM book_notes WHERE id = ?",
-                                    (int(note_id),)
+                                    (note_id,)
                                 ).fetchone()
                                 if row and row[1] == "白真真经历":
                                     lore_parts.append(f"[你的经历] {row[0][:200]}")
@@ -670,8 +671,9 @@ class WaveMemoryPlugin(Star):
                             lore_conn.close()
                             if lore_parts:
                                 injection_parts.append("\n".join(lore_parts))
+                                logger.info(f"[WaveMemory] BookLore injected {len(lore_parts)} experiences for baizz")
                 except Exception as e:
-                    logger.debug(f"[WaveMemory] BookLore injection for baizz failed: {e}")
+                    logger.warning(f"[WaveMemory] BookLore injection for baizz failed: {e}")
 
             if self.persona_evolution:
                 sender_id = event.get_sender_id()
@@ -688,9 +690,12 @@ class WaveMemoryPlugin(Star):
                 from astrbot.core.agent.message import TextPart
                 injection = "\n\n".join(injection_parts)
                 req.extra_user_content_parts.append(TextPart(text=injection))
+                logger.info(f"[WaveMemory] inject_memory SUCCESS: {len(injection_parts)} parts, {len(injection)} chars")
+            else:
+                logger.info("[WaveMemory] inject_memory: no memories found to inject")
 
         except Exception as e:
-            logger.warning(f"[WaveMemory] Injection failed: {e}")
+            logger.warning(f"[WaveMemory] Injection failed: {e}", exc_info=True)
 
     # ─── Hook: 捕获消息 ───
 
