@@ -1765,10 +1765,21 @@ class WaveMemoryWebUI:
             port=self.port,
             log_level="warning",
         )
-        server = uvicorn.Server(config)
-        self._task = asyncio.create_task(server.serve())
+        self._server = uvicorn.Server(config)
+
+        async def _safe_serve():
+            try:
+                await self._server.serve()
+            except SystemExit:
+                logger.warning(f"[WaveMemory] WebUI 端口 {self.port} 绑定失败（可能热重载时旧进程未释放），跳过")
+            except Exception as e:
+                logger.warning(f"[WaveMemory] WebUI 启动失败: {e}")
+
+        self._task = asyncio.create_task(_safe_serve())
         logger.info(f"[WaveMemory] WebUI started at http://{self.host}:{self.port}")
 
     def stop(self):
-        if self._task:
+        if hasattr(self, '_server') and self._server:
+            self._server.should_exit = True
+        if self._task and not self._task.done():
             self._task.cancel()
