@@ -70,7 +70,7 @@ class BookLoreSearchTool(FunctionTool[AstrAgentContext]):
 
         try:
             # 获取查询向量
-            query_vec = await self.embedding_service.embed(query)
+            query_vec = await self.embedding_service.get_embedding(query)
             if query_vec is None:
                 return "Embedding 生成失败"
 
