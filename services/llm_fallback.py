@@ -36,10 +36,8 @@ class LLMFallbackClient:
 
     async def text_chat(self, *, prompt: str, system_prompt: Optional[str] = None, 
                         contexts: Optional[list] = None, **kwargs) -> LLMResponse:
-        """调用 LLM API"""
+        """调用 LLM API（Anthropic 格式）"""
         messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
         if contexts:
             for ctx in contexts:
                 if isinstance(ctx, dict):
@@ -48,26 +46,30 @@ class LLMFallbackClient:
                     messages.append({"role": "user", "content": str(ctx)})
         messages.append({"role": "user", "content": prompt})
 
-        data = json.dumps({
+        body = {
             "model": self.model,
             "messages": messages,
             "max_tokens": 500,
-            "temperature": 0.7,
-        }).encode()
+        }
+        if system_prompt:
+            body["system"] = system_prompt
+
+        data = json.dumps(body).encode()
 
         req = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
+            f"{self.base_url}/messages",
             data=data,
             headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
+                "x-api-key": self.api_key,
+                "Content-Type": "application/json",
+                "anthropic-version": "2023-06-01"
             }
         )
 
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 result = json.loads(resp.read())
-                text = result["choices"][0]["message"]["content"]
+                text = result["content"][0]["text"]
                 return LLMResponse(text)
         except Exception as e:
             logger.error(f"{self.log_prefix} LLM call failed: {e}")
