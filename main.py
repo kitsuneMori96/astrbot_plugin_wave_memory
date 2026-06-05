@@ -648,20 +648,30 @@ class WaveMemoryPlugin(Star):
                 injection_parts.append(self.query_engine.format_injection(memories))
 
             # 白真真额外注入：从 BookLore 搜第一人称经历记忆
-            if bot_id == "1336495069" and self.book_lore_index:
+            if bot_id == "1336495069" and self.book_lore_index and self.embedding_service:
                 try:
-                    lore_results = await self.book_lore_index.search(
-                        query=message,
-                        top_k=3,
-                        category_filter="白真真经历",
-                    )
-                    if lore_results:
-                        lore_text = "\n".join(
-                            f"[你的经历] {r.get('content', '')[:200]}" for r in lore_results
-                        )
-                        injection_parts.append(lore_text)
-                except Exception:
-                    pass
+                    query_vec = await self.embedding_service.get_embedding(message)
+                    if query_vec is not None:
+                        note_results = self.book_lore_index.search_notes(query_vec, k=10)
+                        if note_results:
+                            # 从 db 读笔记内容，过滤 category=白真真经历
+                            import sqlite3
+                            lore_conn = sqlite3.connect(self.lore_db_path)
+                            lore_parts = []
+                            for note_id, score in note_results:
+                                row = lore_conn.execute(
+                                    "SELECT content, category FROM book_notes WHERE id = ?",
+                                    (int(note_id),)
+                                ).fetchone()
+                                if row and row[1] == "白真真经历":
+                                    lore_parts.append(f"[你的经历] {row[0][:200]}")
+                                if len(lore_parts) >= 3:
+                                    break
+                            lore_conn.close()
+                            if lore_parts:
+                                injection_parts.append("\n".join(lore_parts))
+                except Exception as e:
+                    logger.debug(f"[WaveMemory] BookLore injection for baizz failed: {e}")
 
             if self.persona_evolution:
                 sender_id = event.get_sender_id()
