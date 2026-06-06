@@ -59,8 +59,13 @@ class QueryEngine:
         text: str,
         group_id: Optional[str] = None,
         top_k: int = 5,
+        exclude_sources: Optional[list[str]] = None,
     ) -> list[dict]:
-        """执行完整的浪潮查询管线。"""
+        """执行完整的浪潮查询管线。
+        
+        Args:
+            exclude_sources: 排除特定 source 类型的记忆（如 ["bzz_experience"]）
+        """
         start = time.time()
 
         query_vec = await self.embedding.get_embedding(text)
@@ -79,6 +84,10 @@ class QueryEngine:
         memory_ids = [r[0] for r in results]
         distances = {r[0]: r[1] for r in results}
         memories = self.db.get_memories_by_ids(memory_ids)
+
+        # 按 source 字段过滤（用于多 bot 场景：羽书排除白真真经历等）
+        if exclude_sources:
+            memories = [m for m in memories if m.get("source", "live") not in exclude_sources]
 
         cross_group_enabled = self.config.get("cross_group_enabled", True)
         if not cross_group_enabled and group_id:

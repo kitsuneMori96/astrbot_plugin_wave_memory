@@ -626,6 +626,11 @@ class WaveMemoryPlugin(Star):
         group_id = event.get_group_id()
         bot_id = event.get_self_id() or ""
 
+        # 多 bot 过滤：羽书排除白真真第一人称经历
+        exclude_sources = None
+        if bot_id != "1336495069":
+            exclude_sources = ["bzz_experience"]
+
         try:
             if self.enable_shotgun:
                 context_messages = self._get_recent_messages(event, max_messages=8)
@@ -640,6 +645,7 @@ class WaveMemoryPlugin(Star):
                     text=message,
                     group_id=group_id,
                     top_k=self.inject_top_k,
+                    exclude_sources=exclude_sources,
                 )
 
             injection_parts = []
