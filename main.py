@@ -653,25 +653,27 @@ class WaveMemoryPlugin(Star):
                 try:
                     query_vec = await self.embedding_service.get_embedding(message)
                     if query_vec is not None:
-                        note_results = self.book_lore_index.search_notes(query_vec, k=10)
+                        note_results = self.book_lore_index.search_notes(query_vec, k=20)
                         if note_results:
                             # 从 db 读笔记内容，过滤 category=白真真经历
                             import sqlite3
                             lore_conn = sqlite3.connect(self.lore_db_path)
                             lore_parts = []
                             for note_id, score in note_results:
+                                if score < 0.3:
+                                    continue
                                 row = lore_conn.execute(
                                     "SELECT content, category FROM book_notes WHERE id = ?",
                                     (note_id,)
                                 ).fetchone()
                                 if row and row[1] == "白真真经历":
-                                    lore_parts.append(f"[你的经历] {row[0][:200]}")
-                                if len(lore_parts) >= 3:
+                                    lore_parts.append(f"[相关经历] {row[0][:300]}")
+                                if len(lore_parts) >= 8:
                                     break
                             lore_conn.close()
                             if lore_parts:
                                 injection_parts.append("\n".join(lore_parts))
-                                logger.info(f"[WaveMemory] BookLore injected {len(lore_parts)} experiences for baizz")
+                                logger.info(f"[WaveMemory] BookLore injected {len(lore_parts)} experiences for baizz (top score: {note_results[0][1]:.3f})")
                 except Exception as e:
                     logger.warning(f"[WaveMemory] BookLore injection for baizz failed: {e}")
 
