@@ -284,7 +284,7 @@ class MetaThinking:
             result = self._parse_response(response)
 
             # 更新标签/印象/好感度
-            self._apply_updates(sender_id, group_id, result)
+            self._apply_updates(sender_id, group_id, result, bot_id=bot_id)
 
             return result
         except Exception as e:
@@ -511,8 +511,10 @@ class MetaThinking:
         except Exception:
             return 0
 
-    def _apply_updates(self, sender_id: str, group_id: str, result: dict):
+    def _apply_updates(self, sender_id: str, group_id: str, result: dict, bot_id: str = None):
         """将 MetaThinking 的判断写入 DB。"""
+        # 确定写入哪个 bot 的 profile
+        db_bot_id = "baizz" if bot_id == "1336495069" else "yushu"
         updates = []
         meta_updates = {}
 
@@ -558,13 +560,13 @@ class MetaThinking:
             # 写入
             if result.get("affection_update") is not None:
                 self.db.conn.execute(
-                    "UPDATE user_profiles SET affection = ?, metadata = ? WHERE user_id = ? AND group_id = ?",
-                    (result["affection_update"], meta_str, sender_id, group_id)
+                    "UPDATE user_profiles SET affection = ?, metadata = ? WHERE user_id = ? AND group_id = ? AND bot_id = ?",
+                    (result["affection_update"], meta_str, sender_id, group_id, db_bot_id)
                 )
             else:
                 self.db.conn.execute(
-                    "UPDATE user_profiles SET metadata = ? WHERE user_id = ? AND group_id = ?",
-                    (meta_str, sender_id, group_id)
+                    "UPDATE user_profiles SET metadata = ? WHERE user_id = ? AND group_id = ? AND bot_id = ?",
+                    (meta_str, sender_id, group_id, db_bot_id)
                 )
             self.db.conn.commit()
 

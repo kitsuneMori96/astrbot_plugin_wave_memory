@@ -36,6 +36,27 @@ ATTITUDE_INSTRUCTIONS = {
     ),
 }
 
+# 白真真专用态度模板（更傲娇、更冷淡）
+ATTITUDE_INSTRUCTIONS_BAIZZ = {
+    "intimate": (
+        "你对这个人还算顺眼，偶尔可以多说两句。"
+        "但不要太热情，保持你的距离感。可以带点傲娇的关心。"
+    ),
+    "friendly": (
+        "这个人还行，不讨厌。正常回应，偶尔吐槽一下。"
+    ),
+    "neutral": (
+        "不认识，不熟。简短回答，不废话。"
+    ),
+    "cold": (
+        "没什么好聊的。一个字能解决的不用两个字。"
+    ),
+    "hostile": (
+        "这个人让你不舒服。冷嘲热讽，但不失态。"
+        "用讽刺而非脏话。"
+    ),
+}
+
 # 好感度维度对行为的细化影响
 DIMENSION_HINTS = {
     "high_fun": "这个人经常和你玩梗整活，你可以用更活泼的方式回应。",
@@ -54,27 +75,30 @@ class PersonaEvolution:
         self.cross_group_merge = cross_group_merge
         self.affinity_cfg = affinity_cfg or {}
 
-    def get_persona_injection(self, sender_id: str, group_id: str) -> str:
+    def get_persona_injection(self, sender_id: str, group_id: str, bot_id: str = "yushu") -> str:
         """为指定用户生成人格态度注入文本。
 
         跨群画像合并：聚合同一 user_id 在所有群的数据，
         以当前群 profile 为主，其他群数据补充。
+        
+        Args:
+            bot_id: 当前 bot 标识（"yushu"/"baizz"），用于读取对应的好感度和切换态度模板
         """
         if not sender_id:
             return ""
 
-        # 读取 profile
+        # 读取 profile（按 bot_id 过滤）
         if self.cross_group_merge:
             # 跨群合并：读取所有群的 profile
             rows = self.db.conn.execute(
-                "SELECT group_id, nickname, affection, interaction_count, personality_tags, metadata FROM user_profiles WHERE user_id = ?",
-                (sender_id,),
+                "SELECT group_id, nickname, affection, interaction_count, personality_tags, metadata FROM user_profiles WHERE user_id = ? AND bot_id = ?",
+                (sender_id, bot_id),
             ).fetchall()
         else:
             # 仅当前群
             rows = self.db.conn.execute(
-                "SELECT group_id, nickname, affection, interaction_count, personality_tags, metadata FROM user_profiles WHERE user_id = ? AND group_id = ?",
-                (sender_id, group_id),
+                "SELECT group_id, nickname, affection, interaction_count, personality_tags, metadata FROM user_profiles WHERE user_id = ? AND group_id = ? AND bot_id = ?",
+                (sender_id, group_id, bot_id),
             ).fetchall()
 
         if not rows:
@@ -144,7 +168,12 @@ class PersonaEvolution:
             parts.append(f"- 特征: {', '.join(traits)}")
 
         # 态度指令
-        instruction = ATTITUDE_INSTRUCTIONS.get(attitude, ATTITUDE_INSTRUCTIONS["neutral"])
+        # 态度指令（根据 bot_id 切换模板）
+        if bot_id == "baizz":
+            instructions = ATTITUDE_INSTRUCTIONS_BAIZZ
+        else:
+            instructions = ATTITUDE_INSTRUCTIONS
+        instruction = instructions.get(attitude, instructions["neutral"])
         parts.append(f"- 态度指令: {instruction}")
 
         # 维度细化提示

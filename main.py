@@ -685,7 +685,9 @@ class WaveMemoryPlugin(Star):
 
             if self.persona_evolution:
                 sender_id = event.get_sender_id()
-                persona_text = self.persona_evolution.get_persona_injection(sender_id, group_id)
+                # 根据 bot_id 选择对应的好感度数据和态度模板
+                pe_bot_id = "baizz" if bot_id == "1336495069" else "yushu"
+                persona_text = self.persona_evolution.get_persona_injection(sender_id, group_id, bot_id=pe_bot_id)
                 if persona_text:
                     injection_parts.append(persona_text)
 
