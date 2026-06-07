@@ -66,13 +66,14 @@ class MemoryRepo:
         sender_name: str = "",
         timestamp: Optional[float] = None,
         importance: float = 1.0,
+        source: str = "live",
     ) -> int:
         ts = timestamp or time.time()
         vec_blob = vector.astype(np.float32).tobytes() if vector is not None else None
         cur = self.cm.execute_write(
-            """INSERT INTO memories (group_id, sender_id, sender_name, content, vector, timestamp, importance)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (group_id, sender_id, sender_name, content, vec_blob, ts, importance),
+            """INSERT INTO memories (group_id, sender_id, sender_name, content, vector, timestamp, importance, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (group_id, sender_id, sender_name, content, vec_blob, ts, importance, source),
         )
         self.cm.commit()
         return cur.lastrowid

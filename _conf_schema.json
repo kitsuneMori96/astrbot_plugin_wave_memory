@@ -536,5 +536,42 @@
         "default": "0.25"
       }
     }
+  },
+  "Study_Settings": {
+    "description": "自主学习（白真真进化系统）",
+    "hint": "白真真每 N 小时从 BookLore 知识库采样世界观知识，以第一人称内化为自己的记忆",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用自主学习",
+        "hint": "开启后白真真会定时从 book_lore 学习世界观知识",
+        "type": "bool",
+        "default": true
+      },
+      "interval_hours": {
+        "description": "学习间隔（小时）",
+        "hint": "每隔多少小时执行一次学习循环",
+        "type": "int",
+        "default": 6
+      },
+      "max_new_per_cycle": {
+        "description": "每轮最多内化条数",
+        "hint": "每次学习循环最多生成几条内化记忆",
+        "type": "int",
+        "default": 2
+      },
+      "dedup_threshold": {
+        "description": "去重阈值",
+        "hint": "余弦相似度超过此值视为重复，不再生成。0.85 = 非常相似",
+        "type": "string",
+        "default": "0.85"
+      },
+      "self_reflect_enabled": {
+        "description": "启用自省（纠正学习）",
+        "hint": "群友纠正白真真时自动触发学习",
+        "type": "bool",
+        "default": true
+      }
+    }
   }
 }

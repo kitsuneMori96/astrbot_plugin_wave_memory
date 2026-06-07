@@ -41,6 +41,9 @@ from .tools.book_lore_search import BookLoreSearchTool, BookLoreGraphTool
 from .engine.book_lore_index import BookLoreIndex
 from .services.meta_thinking import MetaThinking
 from .services.dream import DreamService
+from .services.study_service import StudyService
+from .services.self_reflect import SelfReflectService
+from .services.llm_fallback import LLMFallbackClient, build_provider_chain
 
 
 @register(
@@ -479,6 +482,54 @@ class WaveMemoryPlugin(Star):
         else:
             self.dream_service = None
 
+        # 白真真自主学习系统
+        study_cfg = self.config.get("Study_Settings", {})
+        if study_cfg.get("enabled", True) and self.book_lore_index and self.tag_llm_provider_id:
+            try:
+                study_llm = LLMFallbackClient(
+                    context=self.context,
+                    provider_ids=build_provider_chain(self.tag_llm_provider_id),
+                    log_prefix="[StudyService]",
+                )
+                self.study_service = StudyService(
+                    db=self.db,
+                    memory_index=self.memory_index,
+                    embedding_service=self.embedding_service,
+                    llm_client=study_llm,
+                    lore_db_path=self.lore_db_path,
+                    study_interval_hours=float(study_cfg.get("interval_hours", 6.0)),
+                    max_new_per_cycle=int(study_cfg.get("max_new_per_cycle", 2)),
+                    dedup_threshold=float(study_cfg.get("dedup_threshold", 0.85)),
+                )
+                self.study_service.start()
+            except Exception as e:
+                logger.warning(f"[WaveMemory] StudyService init failed: {e}")
+                self.study_service = None
+        else:
+            self.study_service = None
+
+        # 白真真自省系统（检测纠正 → 学习）
+        if study_cfg.get("self_reflect_enabled", True) and self.book_lore_index and self.tag_llm_provider_id:
+            try:
+                reflect_llm = LLMFallbackClient(
+                    context=self.context,
+                    provider_ids=build_provider_chain(self.tag_llm_provider_id),
+                    log_prefix="[SelfReflect]",
+                )
+                self.self_reflect = SelfReflectService(
+                    db=self.db,
+                    memory_index=self.memory_index,
+                    embedding_service=self.embedding_service,
+                    llm_client=reflect_llm,
+                    book_lore_index=self.book_lore_index,
+                    lore_db_path=self.lore_db_path,
+                )
+            except Exception as e:
+                logger.warning(f"[WaveMemory] SelfReflectService init failed: {e}")
+                self.self_reflect = None
+        else:
+            self.self_reflect = None
+
         logger.info("[WaveMemory] Fully initialized")
 
     async def terminate(self):
@@ -498,6 +549,12 @@ class WaveMemoryPlugin(Star):
                 self.dream_service.stop()
         except Exception as e:
             logger.debug(f"[WaveMemory] dream_service stop error: {e}")
+
+        try:
+            if hasattr(self, 'study_service') and self.study_service:
+                self.study_service.stop()
+        except Exception as e:
+            logger.debug(f"[WaveMemory] study_service stop error: {e}")
 
         try:
             if hasattr(self, 'consolidation') and self.consolidation:
@@ -650,13 +707,13 @@ class WaveMemoryPlugin(Star):
                     exclude_sources=exclude_sources,
                 )
 
-            # 白真真独立经历通道：并行从 bzz_experience 搜 top 2
+            # 白真真独立经历通道：并行从 bzz_experience + bzz_evolution 搜 top 2
             if is_baizz:
                 exp_memories = await self.query_engine.query(
                     text=message,
                     group_id=None,
                     top_k=2,
-                    source_filter="bzz_experience",
+                    source_filter=["bzz_experience", "bzz_evolution"],
                 )
                 if exp_memories:
                     # 去重：排除已在主搜索结果中的经历
@@ -766,6 +823,13 @@ class WaveMemoryPlugin(Star):
             "timestamp": time.time(),
         })
 
+        # 白真真自省：检测群友对白真真的纠正
+        if self.self_reflect and group_id:
+            try:
+                await self.self_reflect.check_correction(message, sender_name, group_id)
+            except Exception:
+                pass
+
         if hasattr(self, 'lifecycle') and self.lifecycle:
             bot_ids = getattr(self, '_bot_qq_ids', ['2500447291'])
             is_at_bot = any(bid in (event.message_str or '') for bid in bot_ids)
@@ -826,6 +890,11 @@ class WaveMemoryPlugin(Star):
             "content": bot_text,
             "timestamp": time.time(),
         })
+
+        # 白真真自省：记录回复供后续检测纠正
+        bot_id = event.get_self_id() or ""
+        if bot_id == "1336495069" and self.self_reflect:
+            self.self_reflect.record_reply(bot_text, group_id)
 
     # ─── 后台任务 ───
 

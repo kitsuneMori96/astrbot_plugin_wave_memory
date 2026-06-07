@@ -66,8 +66,8 @@ class WaveMemoryDB:
     # Memory 委托
     # ═══════════════════════════════════════════════════════
 
-    def add_memory(self, group_id, content, vector=None, sender_id="", sender_name="", timestamp=None, importance=1.0):
-        return self._memory_repo.add_memory(group_id, content, vector, sender_id, sender_name, timestamp, importance)
+    def add_memory(self, group_id, content, vector=None, sender_id="", sender_name="", timestamp=None, importance=1.0, source="live"):
+        return self._memory_repo.add_memory(group_id, content, vector, sender_id, sender_name, timestamp, importance, source)
 
     def get_memory_by_id(self, memory_id):
         return self._memory_repo.get_memory_by_id(memory_id)

@@ -60,13 +60,13 @@ class QueryEngine:
         group_id: Optional[str] = None,
         top_k: int = 5,
         exclude_sources: Optional[list[str]] = None,
-        source_filter: Optional[str] = None,
+        source_filter: Optional[str | list[str]] = None,
     ) -> list[dict]:
         """执行完整的浪潮查询管线。
         
         Args:
             exclude_sources: 排除特定 source 类型的记忆（如 ["bzz_experience"]）
-            source_filter: 只保留特定 source 类型的记忆（如 "bzz_experience"）
+            source_filter: 只保留特定 source 类型的记忆，支持单个或列表
         """
         start = time.time()
 
@@ -90,7 +90,9 @@ class QueryEngine:
 
         # 只保留特定 source（优先于 exclude_sources）
         if source_filter:
-            memories = [m for m in memories if m.get("source", "live") == source_filter]
+            if isinstance(source_filter, str):
+                source_filter = [source_filter]
+            memories = [m for m in memories if m.get("source", "live") in source_filter]
         # 按 source 字段过滤（用于多 bot 场景：羽书排除白真真经历等）
         elif exclude_sources:
             memories = [m for m in memories if m.get("source", "live") not in exclude_sources]
