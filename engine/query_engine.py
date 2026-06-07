@@ -60,11 +60,13 @@ class QueryEngine:
         group_id: Optional[str] = None,
         top_k: int = 5,
         exclude_sources: Optional[list[str]] = None,
+        source_filter: Optional[str] = None,
     ) -> list[dict]:
         """执行完整的浪潮查询管线。
         
         Args:
             exclude_sources: 排除特定 source 类型的记忆（如 ["bzz_experience"]）
+            source_filter: 只保留特定 source 类型的记忆（如 "bzz_experience"）
         """
         start = time.time()
 
@@ -75,7 +77,8 @@ class QueryEngine:
         embed_ms = (time.time() - start) * 1000
 
         search_vec, energy_field = self._wave_boost(query_vec)
-        candidates_k = top_k * 3
+        # 当只搜特定 source 时，需要更多候选（因为大部分会被过滤掉）
+        candidates_k = top_k * 20 if source_filter else top_k * 3
         results = self.memory_index.search(search_vec, k=candidates_k)
 
         if not results:
@@ -85,8 +88,11 @@ class QueryEngine:
         distances = {r[0]: r[1] for r in results}
         memories = self.db.get_memories_by_ids(memory_ids)
 
+        # 只保留特定 source（优先于 exclude_sources）
+        if source_filter:
+            memories = [m for m in memories if m.get("source", "live") == source_filter]
         # 按 source 字段过滤（用于多 bot 场景：羽书排除白真真经历等）
-        if exclude_sources:
+        elif exclude_sources:
             memories = [m for m in memories if m.get("source", "live") not in exclude_sources]
 
         cross_group_enabled = self.config.get("cross_group_enabled", True)

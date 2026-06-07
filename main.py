@@ -643,29 +643,27 @@ class WaveMemoryPlugin(Star):
                     top_k=self.inject_top_k,
                 )
             else:
-                # 白真真多取候选以便保底塞入经历
-                fetch_k = self.inject_top_k * 2 if is_baizz else self.inject_top_k
                 memories = await self.query_engine.query(
                     text=message,
                     group_id=group_id,
-                    top_k=fetch_k,
+                    top_k=self.inject_top_k,
                     exclude_sources=exclude_sources,
                 )
 
-            # 白真真保底：确保至少 1 条 bzz_experience 进入结果
-            if is_baizz and memories:
-                exp_memories = [m for m in memories if m.get("source") == "bzz_experience"]
-                other_memories = [m for m in memories if m.get("source") != "bzz_experience"]
-                if exp_memories:
-                    # 保留最高分的 1 条经历 + 剩余 top_k-1 条其他记忆
-                    exp_memories.sort(key=lambda m: m.get("score", 0), reverse=True)
-                    other_memories.sort(key=lambda m: m.get("score", 0), reverse=True)
-                    memories = exp_memories[:1] + other_memories[:self.inject_top_k - 1]
-                    memories.sort(key=lambda m: m.get("score", 0), reverse=True)
-                else:
-                    memories = memories[:self.inject_top_k]
-            elif not is_baizz and memories:
-                memories = memories[:self.inject_top_k]
+            # 白真真保底：从 bzz_experience 子集额外搜 1 条最相关经历
+            if is_baizz and memories is not None:
+                has_exp = any(m.get("source") == "bzz_experience" for m in memories)
+                if not has_exp:
+                    exp_hit = await self.query_engine.query(
+                        text=message,
+                        group_id=None,  # 经历无 group_id 限制
+                        top_k=1,
+                        source_filter="bzz_experience",
+                    )
+                    if exp_hit:
+                        # 替换得分最低的一条
+                        memories.sort(key=lambda m: m.get("score", 0), reverse=True)
+                        memories = memories[:self.inject_top_k - 1] + exp_hit
 
             injection_parts = []
 
