@@ -666,10 +666,36 @@ class WaveMemoryPlugin(Star):
                         memories = []
                     memories = exp_memories + memories
 
+            # 书设知识自动注入（白真真 bot 专用）
+            lore_text = ""
+            if is_baizz and self.book_lore_index:
+                try:
+                    lore_vec = await self.query_engine.embedding.get_embedding(message)
+                    if lore_vec is not None:
+                        # 搜社区报告 top 1（世界观级知识）
+                        community_hits = self.book_lore_index.search_communities(lore_vec, k=1)
+                        if community_hits:
+                            import sqlite3
+                            conn_lore = sqlite3.connect(self.lore_db_path)
+                            for cid, score in community_hits:
+                                if score >= 0.35:
+                                    row = conn_lore.execute(
+                                        "SELECT title, summary FROM book_communities WHERE id = ?",
+                                        (cid,)
+                                    ).fetchone()
+                                    if row:
+                                        lore_text = f"<world_knowledge>\n{row[0]}：{row[1][:300]}\n</world_knowledge>"
+                            conn_lore.close()
+                except Exception:
+                    pass
+
             injection_parts = []
 
             if memories:
                 injection_parts.append(self.query_engine.format_injection(memories))
+
+            if lore_text:
+                injection_parts.append(lore_text)
 
             if self.persona_evolution:
                 sender_id = event.get_sender_id()
