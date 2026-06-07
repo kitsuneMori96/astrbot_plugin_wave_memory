@@ -650,20 +650,21 @@ class WaveMemoryPlugin(Star):
                     exclude_sources=exclude_sources,
                 )
 
-            # 白真真保底：从 bzz_experience 子集额外搜 1 条最相关经历
-            if is_baizz and memories is not None:
-                has_exp = any(m.get("source") == "bzz_experience" for m in memories)
-                if not has_exp:
-                    exp_hit = await self.query_engine.query(
-                        text=message,
-                        group_id=None,  # 经历无 group_id 限制
-                        top_k=1,
-                        source_filter="bzz_experience",
-                    )
-                    if exp_hit:
-                        # 替换得分最低的一条
-                        memories.sort(key=lambda m: m.get("score", 0), reverse=True)
-                        memories = memories[:self.inject_top_k - 1] + exp_hit
+            # 白真真独立经历通道：并行从 bzz_experience 搜 top 2
+            if is_baizz:
+                exp_memories = await self.query_engine.query(
+                    text=message,
+                    group_id=None,
+                    top_k=2,
+                    source_filter="bzz_experience",
+                )
+                if exp_memories:
+                    # 去重：排除已在主搜索结果中的经历
+                    existing_ids = {m.get("id") for m in (memories or [])}
+                    exp_memories = [m for m in exp_memories if m.get("id") not in existing_ids]
+                    if memories is None:
+                        memories = []
+                    memories = exp_memories + memories
 
             injection_parts = []
 
