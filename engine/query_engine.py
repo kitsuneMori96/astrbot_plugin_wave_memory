@@ -361,23 +361,61 @@ class QueryEngine:
             return memories
 
     def format_injection(self, memories: list[dict], template: str = "", current_group_id: str = "") -> str:
-        """将记忆列表格式化为注入文本。"""
+        """将记忆列表格式化为注入文本，按 source 类型分段。"""
         if not memories:
             return ""
         if not template:
             template = "[记忆] {sender}({time}): {content}"
 
-        parts = ["<wave_memory>"]
+        # 按 source 分组
+        your_memories = []  # bzz_experience — 白真真第一人称经历
+        world_knowledge = []  # book_lore — 书设常识
+        chat_memories = []  # live 及其他 — 群聊记忆
+
         for mem in memories:
-            sender = mem.get("sender_name") or mem.get("sender_id") or "unknown"
-            ts = time.strftime("%m-%d %H:%M", time.localtime(mem["timestamp"]))
-            content = mem.get("content", "")
-            score = mem.get("score", 0)
-            group_id = mem.get("group_id", "")
-            group_tag = ""
-            if mem.get("_is_cross_group") and group_id:
-                group_tag = f"[群{group_id}] "
-            line = template.replace("{sender}", sender).replace("{time}", ts).replace("{content}", content)
-            parts.append(f"{group_tag}{line} (relevance: {score:.2f})")
-        parts.append("</wave_memory>")
-        return "\n".join(parts)
+            source = mem.get("source", "live")
+            if source == "bzz_experience":
+                your_memories.append(mem)
+            elif source == "book_lore":
+                world_knowledge.append(mem)
+            else:
+                chat_memories.append(mem)
+
+        sections = []
+
+        # 第一人称经历：简洁格式，不加 sender 前缀
+        if your_memories:
+            lines = ["<your_memory>"]
+            for mem in your_memories:
+                content = mem.get("content", "")
+                lines.append(content)
+            lines.append("</your_memory>")
+            sections.append("\n".join(lines))
+
+        # 群聊记忆：标准格式
+        if chat_memories:
+            lines = ["<wave_memory>"]
+            for mem in chat_memories:
+                sender = mem.get("sender_name") or mem.get("sender_id") or "unknown"
+                ts = time.strftime("%m-%d %H:%M", time.localtime(mem["timestamp"]))
+                content = mem.get("content", "")
+                score = mem.get("score", 0)
+                group_id = mem.get("group_id", "")
+                group_tag = ""
+                if mem.get("_is_cross_group") and group_id:
+                    group_tag = f"[群{group_id}] "
+                line = template.replace("{sender}", sender).replace("{time}", ts).replace("{content}", content)
+                lines.append(f"{group_tag}{line} (relevance: {score:.2f})")
+            lines.append("</wave_memory>")
+            sections.append("\n".join(lines))
+
+        # 书设常识：简洁格式
+        if world_knowledge:
+            lines = ["<world_knowledge>"]
+            for mem in world_knowledge:
+                content = mem.get("content", "")
+                lines.append(content)
+            lines.append("</world_knowledge>")
+            sections.append("\n".join(lines))
+
+        return "\n\n".join(sections)

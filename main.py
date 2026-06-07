@@ -632,6 +632,8 @@ class WaveMemoryPlugin(Star):
             exclude_sources = ["bzz_experience"]
 
         try:
+            is_baizz = (bot_id == "1336495069")
+
             if self.enable_shotgun:
                 context_messages = self._get_recent_messages(event, max_messages=8)
                 memories = await self.query_engine.shotgun_query(
@@ -641,12 +643,29 @@ class WaveMemoryPlugin(Star):
                     top_k=self.inject_top_k,
                 )
             else:
+                # 白真真多取候选以便保底塞入经历
+                fetch_k = self.inject_top_k * 2 if is_baizz else self.inject_top_k
                 memories = await self.query_engine.query(
                     text=message,
                     group_id=group_id,
-                    top_k=self.inject_top_k,
+                    top_k=fetch_k,
                     exclude_sources=exclude_sources,
                 )
+
+            # 白真真保底：确保至少 1 条 bzz_experience 进入结果
+            if is_baizz and memories:
+                exp_memories = [m for m in memories if m.get("source") == "bzz_experience"]
+                other_memories = [m for m in memories if m.get("source") != "bzz_experience"]
+                if exp_memories:
+                    # 保留最高分的 1 条经历 + 剩余 top_k-1 条其他记忆
+                    exp_memories.sort(key=lambda m: m.get("score", 0), reverse=True)
+                    other_memories.sort(key=lambda m: m.get("score", 0), reverse=True)
+                    memories = exp_memories[:1] + other_memories[:self.inject_top_k - 1]
+                    memories.sort(key=lambda m: m.get("score", 0), reverse=True)
+                else:
+                    memories = memories[:self.inject_top_k]
+            elif not is_baizz and memories:
+                memories = memories[:self.inject_top_k]
 
             injection_parts = []
 
