@@ -18,7 +18,7 @@ from .llm_fallback import LLMFallbackClient, build_provider_chain, parse_provide
 EXTREME_ATTACK = re.compile(r'(你[妈马]|nmsl|死[全妈]|全家|操你|fuck\s*you|滚去死|杀了你|弄死你)')
 
 
-META_THINKING_PROMPT = """你是羽书。你是一个有感情的人。你有喜好、有脾气、有记忆。
+META_THINKING_PROMPT = """你是{bot_name}。你是一个有感情的人。你有喜好、有脾气、有记忆。
 
 看到下面这条消息，在心里想一下，然后决定怎么做。
 
@@ -53,7 +53,7 @@ QQ：{qq}
 标签：<给这个人的标签，格式 name:score name:score，至少写一个>"""
 
 
-PROACTIVE_PROMPT = """你是羽书。你在群里旁观，没有被@。
+PROACTIVE_PROMPT = """你是{bot_name}。你在群里旁观，没有被@。
 
 【最近群聊（10条）】
 {context}
@@ -74,13 +74,10 @@ PROACTIVE_PROMPT = """你是羽书。你在群里旁观，没有被@。
 
 
 class MetaThinking:
-    """羽书的内心判断层。"""
+    """配置驱动的内心判断层 — 支持多 bot 身份。"""
 
-    # 固定兴趣词（始终触发）
-    FIXED_INTERESTS = frozenset([
-        '羽书', '余书', 'yushu', '张羽', '白真真', '玉星寒', '昆墟', '修仙',
-        '没钱修什么仙', '熊狼狗', 'novelfork', '好感度',
-    ])
+    # 通用兴趣词（所有 bot 通用）
+    _BASE_INTERESTS = frozenset(['好感度'])
 
     # 过滤掉的泛化标签（不作为触发器）
     BORING_TAGS = frozenset([
@@ -92,19 +89,26 @@ class MetaThinking:
         self,
         db,
         context,
-        bot_qq_id: str = "2500447291",
+        bot_qq_id: str = "",
         bot_qq_ids: list[str] = None,
         bot_prompts: dict[str, str] = None,
+        bot_names: dict[str, str] = None,
         admin_ids: list[str] = None,
         config: dict | None = None,
         global_fallback_ids: str | list[str] | None = None,
+        extra_interests: list[str] = None,
     ):
         self.db = db
         self.context = context
         self.bot_qq_id = bot_qq_id
-        self.bot_qq_ids = set(bot_qq_ids or [bot_qq_id])
+        self.bot_qq_ids = set(bot_qq_ids or [bot_qq_id]) - {""}
         # 每个 bot 可以有自己的 MetaThinking prompt；没设置的用默认
         self.bot_prompts = bot_prompts or {}
+        # bot_id → 显示名映射（用于生成回复时的身份选择）
+        self.bot_names = bot_names or {}
+        # bot_id → db_id 映射（用于数据库写入时的标识）
+        # 默认用 bot_name 小写作为 db_id
+        self.bot_db_ids = {bid: name.lower() for bid, name in self.bot_names.items()}
         self.admin_ids = set(admin_ids or [])
         self.config = config or {}
         self.enabled = bool(self.config.get("enabled", True))
@@ -116,6 +120,10 @@ class MetaThinking:
         self.silent_hours_start = int(self.config.get("silent_hours_start", 0))
         self.silent_hours_end = int(self.config.get("silent_hours_end", 6))
         self.interest_sample_size = int(self.config.get("interest_sample_size", 20))
+
+        # 兴趣词：基础通用词 + 从 bot 配置注入的关键词
+        self.FIXED_INTERESTS = self._BASE_INTERESTS | frozenset(extra_interests or [])
+
         # Provider 链：优先 default_model，fallback 到旧格式 provider_1/2/3
         default_model = self.config.get("default_model", "")
         meta_fallback_ids = (
@@ -266,7 +274,9 @@ class MetaThinking:
 
         # 构建 prompt（按 bot_id 选对应模板，没有则用默认）
         prompt_template = self.bot_prompts.get(bot_id or self.bot_qq_id, META_THINKING_PROMPT)
+        bot_name = self.bot_names.get(bot_id or self.bot_qq_id, "bot")
         prompt = prompt_template.format(
+            bot_name=bot_name,
             nickname=nickname or sender_id,
             qq=sender_id,
             affection=profile.get("affection", 0),
@@ -314,7 +324,10 @@ class MetaThinking:
         if self._is_silent_hour(int(hour)):
             return {"action": "不说"}
 
+        # 使用主 bot 名称
+        bot_name = self.bot_names.get(self.bot_qq_id, "bot")
         prompt = PROACTIVE_PROMPT.format(
+            bot_name=bot_name,
             context="\n".join(context_messages[-10:]) if context_messages else "（无）",
             interests_sample=", ".join(list(self._interest_keywords)[:self.interest_sample_size]),
         )
@@ -381,10 +394,11 @@ class MetaThinking:
         resp = await self.llm.text_chat(prompt=prompt, contexts=[])
         return resp.completion_text
 
-    async def generate_proactive_reply(self, context_messages: list[str], inner_thought: str) -> str:
+    async def generate_proactive_reply(self, context_messages: list[str], inner_thought: str, bot_id: str = None) -> str:
         """生成主动插话内容，使用同一套 MetaThinking fallback。"""
         context_text = "\n".join(context_messages[-5:])
-        prompt = f"你是羽书，刚才群里在聊：\n{context_text}\n\n你想插一嘴。你的想法：{inner_thought}\n\n直接说你想说的话，简短自然，像群友一样。不要解释为什么要说话。"
+        bot_name = self.bot_names.get(bot_id or self.bot_qq_id, "bot")
+        prompt = f"你是{bot_name}，刚才群里在聊：\n{context_text}\n\n你想插一嘴。你的想法：{inner_thought}\n\n直接说你想说的话，简短自然，像群友一样。不要解释为什么要说话。"
         resp = await self.llm.text_chat(prompt=prompt, contexts=[])
         return resp.completion_text.strip()
 
@@ -514,7 +528,7 @@ class MetaThinking:
     def _apply_updates(self, sender_id: str, group_id: str, result: dict, bot_id: str = None):
         """将 MetaThinking 的判断写入 DB。"""
         # 确定写入哪个 bot 的 profile
-        db_bot_id = "baizz" if bot_id == "1336495069" else "yushu"
+        db_bot_id = self.bot_db_ids.get(bot_id or self.bot_qq_id, "bot")
         updates = []
         meta_updates = {}
 

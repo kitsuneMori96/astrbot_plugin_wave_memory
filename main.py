@@ -6,6 +6,7 @@ AstrBot Wave Memory 插件 — 基于 VCP TagMemo 浪潮算法的高性能记忆
 import asyncio
 import os
 import time
+from dataclasses import dataclass, field
 from typing import Optional
 
 from astrbot.api import logger, AstrBotConfig
@@ -46,11 +47,55 @@ from .services.self_reflect import SelfReflectService
 from .services.llm_fallback import LLMFallbackClient, build_provider_chain
 
 
+@dataclass
+class BotProfile:
+    """配置驱动的 Bot 身份描述，消除所有硬编码。"""
+    qq_id: str
+    name: str
+    db_id: str = ""                          # 数据库标识（如 "yushu"）
+    aliases: list[str] = field(default_factory=list)  # 别名，用于兴趣词匹配
+    meta_prompt: str = ""                    # 自定义 MetaThinking prompt（留空用默认模板）
+    proactive_enabled: bool = True
+    proactive_interval_seconds: int = 600
+    proactive_max_per_hour: int = 3
+    exclude_sources: list[str] = field(default_factory=list)  # 排除的记忆 source
+    interest_keywords: list[str] = field(default_factory=list)  # 自定义兴趣词
+
+    @property
+    def all_keywords(self) -> list[str]:
+        """该 bot 的所有兴趣关键词（名字 + 别名 + 自定义词）。"""
+        words = [self.name] + self.aliases + self.interest_keywords
+        return [w for w in words if w]
+
+
+def _parse_bot_config(cfg: dict, fallback_db_id: str = "") -> BotProfile:
+    """从配置字典解析出 BotProfile。"""
+    qq_id = cfg.get("qq_id", "").strip()
+    name = cfg.get("name", "").strip()
+    db_id = cfg.get("db_id", "").strip() or fallback_db_id or name.lower()
+    aliases = [a.strip() for a in cfg.get("aliases", "").split(",") if a.strip()]
+    meta_prompt = cfg.get("meta_prompt", "").strip()
+    exclude_sources = [s.strip() for s in cfg.get("exclude_sources", "").split(",") if s.strip()]
+    interest_keywords = [k.strip() for k in cfg.get("interest_keywords", "").split(",") if k.strip()]
+    return BotProfile(
+        qq_id=qq_id,
+        name=name,
+        db_id=db_id,
+        aliases=aliases,
+        meta_prompt=meta_prompt,
+        proactive_enabled=cfg.get("proactive_enabled", True),
+        proactive_interval_seconds=int(cfg.get("proactive_interval_seconds", 600)),
+        proactive_max_per_hour=int(cfg.get("proactive_max_per_hour", 3)),
+        exclude_sources=exclude_sources,
+        interest_keywords=interest_keywords,
+    )
+
+
 @register(
     "astrbot_plugin_wave_memory",
     "vivy1024",
     "基于 VCP TagMemo 浪潮算法的高性能记忆插件",
-    "0.6.0",
+    "0.7.0",
     "https://github.com/vivy1024/astrbot_plugin_wave_memory",
 )
 class WaveMemoryPlugin(Star):
@@ -60,15 +105,17 @@ class WaveMemoryPlugin(Star):
         self.config = config or {}
         self._terminated = False
 
-        # 从 MetaThinking_Bot1/Bot2 配置读取 bot QQ IDs
+        # 从配置构建 Bot Registry（配置驱动，无硬编码）
         bot1_cfg = self.config.get("MetaThinking_Bot1", {})
         bot2_cfg = self.config.get("MetaThinking_Bot2", {})
-        self._bot_qq_ids = [
-            bid for bid in [
-                bot1_cfg.get("qq_id", "2500447291"),
-                bot2_cfg.get("qq_id", "1336495069"),
-            ] if bid
-        ]
+
+        self._bot_registry: dict[str, BotProfile] = {}  # key = qq_id
+        for cfg, fallback_id in [(bot1_cfg, "bot1"), (bot2_cfg, "bot2")]:
+            profile = _parse_bot_config(cfg, fallback_db_id=fallback_id)
+            if profile.qq_id:
+                self._bot_registry[profile.qq_id] = profile
+
+        self._bot_qq_ids = list(self._bot_registry.keys())
 
         # 解析配置（顶层字段 + 嵌套 object）
         query_cfg = self.config.get("Query_Settings", {})
@@ -312,6 +359,15 @@ class WaveMemoryPlugin(Star):
         self._bg_tasks.append(task)
         return task
 
+    def _get_bot(self, bot_id: str) -> Optional[BotProfile]:
+        """通过 QQ 号获取 Bot 配置，未找到返回 None。"""
+        return self._bot_registry.get(bot_id)
+
+    def _get_bot_name(self, bot_id: str) -> str:
+        """获取 bot 显示名，fallback 为 'bot'。"""
+        p = self._bot_registry.get(bot_id)
+        return p.name if p else "bot"
+
     async def initialize(self):
         """AstrBot 完成 handler 绑定后调用。"""
         # 启动写入器
@@ -328,12 +384,12 @@ class WaveMemoryPlugin(Star):
         if self.tag_index.count == 0 and self.db.get_tag_count() > 0:
             self._spawn(self._rebuild_tag_index())
 
-        # 构建共现矩阵
-        if self.enable_spike and self.db.get_tag_count() > 10:
-            self._spawn(self._rebuild_cooccurrence())
-
-        # 刷新 pair similarity
+        # 刷新 pair similarity（从 DB 加载缓存，通常 <1s）
         self.pair_sim_service.refresh_if_needed()
+
+        # 构建共现矩阵（仅在内存中为空时才 rebuild）
+        if self.enable_spike and self.db.get_tag_count() > 10 and not self.cooccurrence.forward:
+            self._spawn(self._rebuild_cooccurrence())
 
         # 初始化 EPA
         if self.epa:
@@ -416,7 +472,7 @@ class WaveMemoryPlugin(Star):
         if self.enable_affinity:
             self.lifecycle = LifecycleService(
                 db=self.db,
-                bot_qq_id="2500447291",
+                bot_qq_id=self._bot_qq_ids[0] if self._bot_qq_ids else "",
                 mood_duration_hours=self.mood_duration_hours,
                 mood_msg_threshold=self.mood_msg_threshold,
                 positive_emotion_threshold=self.positive_emotion_threshold,
@@ -451,15 +507,24 @@ class WaveMemoryPlugin(Star):
         meta_cfg = self.config.get("MetaThinking_Settings", {})
         if meta_cfg.get("enabled", True):
             try:
-                from .services.meta_thinking_prompts import BAIZZ_META_PROMPT
+                # 从 bot registry 构建 prompt 映射（配置驱动）
+                bot_prompts = {}
+                interest_keywords = set()
+                for profile in self._bot_registry.values():
+                    if profile.meta_prompt:
+                        bot_prompts[profile.qq_id] = profile.meta_prompt
+                    interest_keywords.update(profile.all_keywords)
+
                 self.meta_thinking = MetaThinking(
                     db=self.db,
                     context=self.context,
-                    bot_qq_id="2500447291",
+                    bot_qq_id=self._bot_qq_ids[0] if self._bot_qq_ids else "",
                     bot_qq_ids=self._bot_qq_ids,
-                    bot_prompts={"1336495069": BAIZZ_META_PROMPT},
+                    bot_prompts=bot_prompts,
+                    bot_names={p.qq_id: p.name for p in self._bot_registry.values()},
                     config=meta_cfg,
                     global_fallback_ids=self.config.get("meta_thinking_fallback_ids", ""),
+                    extra_interests=list(interest_keywords),
                 )
             except Exception as e:
                 logger.warning(f"[WaveMemory] MetaThinking init failed: {e}")
@@ -482,9 +547,14 @@ class WaveMemoryPlugin(Star):
         else:
             self.dream_service = None
 
-        # 白真真自主学习系统
+        # 自主学习系统（对有经历通道的 bot 生效）
+        # 找到没有 exclude_sources 的 bot（即经历所有者）
+        experience_bot = next(
+            (p for p in self._bot_registry.values() if not p.exclude_sources),
+            None
+        )
         study_cfg = self.config.get("Study_Settings", {})
-        if study_cfg.get("enabled", True) and self.book_lore_index and self.tag_llm_provider_id:
+        if study_cfg.get("enabled", True) and self.book_lore_index and self.tag_llm_provider_id and experience_bot:
             try:
                 study_llm = LLMFallbackClient(
                     context=self.context,
@@ -497,6 +567,8 @@ class WaveMemoryPlugin(Star):
                     embedding_service=self.embedding_service,
                     llm_client=study_llm,
                     lore_db_path=self.lore_db_path,
+                    bot_name=experience_bot.name,
+                    bot_qq_id=experience_bot.qq_id,
                     study_interval_hours=float(study_cfg.get("interval_hours", 6.0)),
                     max_new_per_cycle=int(study_cfg.get("max_new_per_cycle", 2)),
                     dedup_threshold=float(study_cfg.get("dedup_threshold", 0.85)),
@@ -508,8 +580,8 @@ class WaveMemoryPlugin(Star):
         else:
             self.study_service = None
 
-        # 白真真自省系统（检测纠正 → 学习）
-        if study_cfg.get("self_reflect_enabled", True) and self.book_lore_index and self.tag_llm_provider_id:
+        # 自省系统（检测纠正 → 学习）
+        if study_cfg.get("self_reflect_enabled", True) and self.book_lore_index and self.tag_llm_provider_id and experience_bot:
             try:
                 reflect_llm = LLMFallbackClient(
                     context=self.context,
@@ -523,6 +595,9 @@ class WaveMemoryPlugin(Star):
                     llm_client=reflect_llm,
                     book_lore_index=self.book_lore_index,
                     lore_db_path=self.lore_db_path,
+                    bot_name=experience_bot.name,
+                    bot_qq_id=experience_bot.qq_id,
+                    bot_aliases=experience_bot.aliases,
                 )
             except Exception as e:
                 logger.warning(f"[WaveMemory] SelfReflectService init failed: {e}")
@@ -576,7 +651,7 @@ class WaveMemoryPlugin(Star):
 
         try:
             if hasattr(self, 'webui') and self.webui:
-                self.webui.stop()
+                await self.webui.stop()
         except Exception as e:
             logger.debug(f"[WaveMemory] webui stop error: {e}")
 
@@ -683,13 +758,15 @@ class WaveMemoryPlugin(Star):
         group_id = event.get_group_id()
         bot_id = event.get_self_id() or ""
 
-        # 多 bot 过滤：羽书排除白真真第一人称经历
-        exclude_sources = None
-        if bot_id != "1336495069":
-            exclude_sources = ["bzz_experience"]
+        # 多 bot 过滤：根据 bot 配置的 exclude_sources 排除特定来源
+        bot_profile = self._get_bot(bot_id)
+        exclude_sources = bot_profile.exclude_sources if bot_profile and bot_profile.exclude_sources else None
 
         try:
-            is_baizz = (bot_id == "1336495069")
+            # 判断该 bot 是否有独立经历通道（没有 exclude 这些 source 的 bot 就是所有者）
+            has_experience_channel = (
+                bot_profile and not bot_profile.exclude_sources
+            ) or (not bot_profile)
 
             if self.enable_shotgun:
                 context_messages = self._get_recent_messages(event, max_messages=8)
@@ -707,8 +784,8 @@ class WaveMemoryPlugin(Star):
                     exclude_sources=exclude_sources,
                 )
 
-            # 白真真独立经历通道：并行从 bzz_experience + bzz_evolution 搜 top 2
-            if is_baizz:
+            # 独立经历通道：并行从 bzz_experience + bzz_evolution 搜 top 2
+            if has_experience_channel:
                 exp_memories = await self.query_engine.query(
                     text=message,
                     group_id=None,
@@ -723,9 +800,9 @@ class WaveMemoryPlugin(Star):
                         memories = []
                     memories = exp_memories + memories
 
-            # 书设知识自动注入（白真真 bot 专用）
+            # 书设知识自动注入（有 book_lore 且无排除的 bot 可用）
             lore_text = ""
-            if is_baizz and self.book_lore_index:
+            if has_experience_channel and self.book_lore_index:
                 try:
                     lore_vec = await self.query_engine.embedding.get_embedding(message)
                     if lore_vec is not None:
@@ -757,7 +834,7 @@ class WaveMemoryPlugin(Star):
             if self.persona_evolution:
                 sender_id = event.get_sender_id()
                 # 根据 bot_id 选择对应的好感度数据和态度模板
-                pe_bot_id = "baizz" if bot_id == "1336495069" else "yushu"
+                pe_bot_id = bot_profile.db_id if bot_profile else "bot"
                 persona_text = self.persona_evolution.get_persona_injection(sender_id, group_id, bot_id=pe_bot_id)
                 if persona_text:
                     injection_parts.append(persona_text)
@@ -831,7 +908,7 @@ class WaveMemoryPlugin(Star):
                 pass
 
         if hasattr(self, 'lifecycle') and self.lifecycle:
-            bot_ids = getattr(self, '_bot_qq_ids', ['2500447291'])
+            bot_ids = self._bot_qq_ids
             is_at_bot = any(bid in (event.message_str or '') for bid in bot_ids)
             hour = int(time.strftime('%H', time.localtime()))
             self.lifecycle.affinity.process_message(
@@ -843,18 +920,22 @@ class WaveMemoryPlugin(Star):
             )
 
         # 主动对话触发：轻量关键词匹配，命中才调 LLM 判断
+        bot_id = event.get_self_id() or ""
+        bot_profile = self._get_bot(bot_id)
+        proactive_ok = bot_profile.proactive_enabled if bot_profile else self.meta_thinking.proactive_enabled if self.meta_thinking else False
         if (self.meta_thinking
-            and self.meta_thinking.proactive_enabled
+            and proactive_ok
             and not getattr(event, "is_at_or_wake_command", False)
             and group_id
             and self.meta_thinking.is_interesting(message)):
             try:
+                bot_id = event.get_self_id() or ""
                 context_messages = self._get_recent_messages(event, max_messages=10)
                 result = await self.meta_thinking.should_proactive(group_id, context_messages)
                 if result.get("action") == "主动插话":
                     inner = result.get("inner_thought", "")
                     reply_text = await self.meta_thinking.generate_proactive_reply(
-                        context_messages, inner
+                        context_messages, inner, bot_id=bot_id
                     )
                     if reply_text:
                         logger.info(f"[MetaThinking] 主动插话: {inner[:50]}")
@@ -882,18 +963,19 @@ class WaveMemoryPlugin(Star):
             return
 
         group_id = event.get_group_id() or f"private:{event.get_sender_id()}"
+        bot_id = event.get_self_id() or ""
 
         await self.writer.enqueue({
             "group_id": group_id,
             "sender_id": "bot",
-            "sender_name": "羽书",
+            "sender_name": self._get_bot_name(bot_id),
             "content": bot_text,
             "timestamp": time.time(),
         })
 
-        # 白真真自省：记录回复供后续检测纠正
-        bot_id = event.get_self_id() or ""
-        if bot_id == "1336495069" and self.self_reflect:
+        # 自省：记录回复供后续检测纠正（只对配置了 self_reflect 的 bot 生效）
+        bot_profile = self._get_bot(bot_id)
+        if bot_profile and self.self_reflect and not bot_profile.exclude_sources:
             self.self_reflect.record_reply(bot_text, group_id)
 
     # ─── 后台任务 ───

@@ -94,7 +94,7 @@ def _get_attitude_level(affection: int) -> str:
 class AffinityEngine:
     """多维好感度引擎。内存缓冲 + 定时持久化。"""
 
-    def __init__(self, db: WaveMemoryDB, bot_qq_id: str = "2500447291"):
+    def __init__(self, db: WaveMemoryDB, bot_qq_id: str = ""):
         self.db = db
         self.bot_qq_id = bot_qq_id
         self._buffer: dict[tuple[str, str], dict[str, float]] = defaultdict(
@@ -416,7 +416,7 @@ class LifecycleService:
     def __init__(
         self,
         db: WaveMemoryDB,
-        bot_qq_id: str = "2500447291",
+        bot_qq_id: str = "",
         mood_duration_hours: float = 2.0,
         mood_msg_threshold: int = 30,
         positive_emotion_threshold: float = 0.6,

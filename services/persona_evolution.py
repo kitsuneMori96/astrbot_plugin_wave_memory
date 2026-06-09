@@ -57,6 +57,13 @@ ATTITUDE_INSTRUCTIONS_BAIZZ = {
     ),
 }
 
+# 态度指令注册表：{db_id: instructions}，用户可通过代码扩展
+# 默认回退到 ATTITUDE_INSTRUCTIONS
+_ATTITUDE_REGISTRY: dict[str, dict] = {
+    "baizz": ATTITUDE_INSTRUCTIONS_BAIZZ,
+    "白真真": ATTITUDE_INSTRUCTIONS_BAIZZ,
+}
+
 # 好感度维度对行为的细化影响
 DIMENSION_HINTS = {
     "high_fun": "这个人经常和你玩梗整活，你可以用更活泼的方式回应。",
@@ -75,14 +82,14 @@ class PersonaEvolution:
         self.cross_group_merge = cross_group_merge
         self.affinity_cfg = affinity_cfg or {}
 
-    def get_persona_injection(self, sender_id: str, group_id: str, bot_id: str = "yushu") -> str:
+    def get_persona_injection(self, sender_id: str, group_id: str, bot_id: str = "") -> str:
         """为指定用户生成人格态度注入文本。
 
         跨群画像合并：聚合同一 user_id 在所有群的数据，
         以当前群 profile 为主，其他群数据补充。
         
         Args:
-            bot_id: 当前 bot 标识（"yushu"/"baizz"），用于读取对应的好感度和切换态度模板
+            bot_id: 当前 bot 的 db_id 标识，用于读取对应的好感度和切换态度模板
         """
         if not sender_id:
             return ""
@@ -167,10 +174,9 @@ class PersonaEvolution:
         if traits:
             parts.append(f"- 特征: {', '.join(traits)}")
 
-        # 态度指令
-        # 态度指令（根据 bot_id 切换模板）
-        if bot_id == "baizz":
-            instructions = ATTITUDE_INSTRUCTIONS_BAIZZ
+        # 态度指令（根据 bot_id 切换模板，有备用模板就用，否则用默认）
+        if bot_id in _ATTITUDE_REGISTRY:
+            instructions = _ATTITUDE_REGISTRY[bot_id]
         else:
             instructions = ATTITUDE_INSTRUCTIONS
         instruction = instructions.get(attitude, instructions["neutral"])

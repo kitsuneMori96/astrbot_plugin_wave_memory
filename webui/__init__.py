@@ -1778,8 +1778,14 @@ class WaveMemoryWebUI:
         self._task = asyncio.create_task(_safe_serve())
         logger.info(f"[WaveMemory] WebUI started at http://{self.host}:{self.port}")
 
-    def stop(self):
+    async def stop(self):
         if hasattr(self, '_server') and self._server:
             self._server.should_exit = True
-        if self._task and not self._task.done():
+            # 等待 server 实际退出，最多 3 秒
+            if self._task and not self._task.done():
+                try:
+                    await asyncio.wait_for(self._task, timeout=3.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    self._task.cancel()
+        elif self._task and not self._task.done():
             self._task.cancel()

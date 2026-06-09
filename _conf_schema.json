@@ -418,19 +418,44 @@
     }
   },
   "MetaThinking_Bot1": {
-    "description": "Bot 1 配置（羽书）",
-    "hint": "羽书的 MetaThinking 独立设置",
+    "description": "Bot 1 配置",
+    "hint": "主 Bot 的身份与行为配置",
     "type": "object",
     "items": {
       "qq_id": {
         "description": "QQ 号",
         "type": "string",
-        "default": "2500447291"
+        "default": ""
       },
       "name": {
-        "description": "名称",
+        "description": "显示名称",
         "type": "string",
-        "default": "羽书"
+        "default": ""
+      },
+      "db_id": {
+        "description": "数据库标识（留空则用 name 小写）",
+        "type": "string",
+        "default": ""
+      },
+      "aliases": {
+        "description": "别名（逗号分隔，用于兴趣词匹配和纠正检测）",
+        "type": "string",
+        "default": ""
+      },
+      "meta_prompt": {
+        "description": "自定义 MetaThinking 完整 prompt（留空用默认模板，模板中 {bot_name} 会自动替换）",
+        "type": "string",
+        "default": ""
+      },
+      "exclude_sources": {
+        "description": "排除的记忆来源（逗号分隔，如 bzz_experience,bzz_evolution）",
+        "type": "string",
+        "default": "bzz_experience"
+      },
+      "interest_keywords": {
+        "description": "自定义兴趣关键词（逗号分隔，触发主动对话）",
+        "type": "string",
+        "default": ""
       },
       "model": {
         "description": "模型（留空用全局默认）",
@@ -456,19 +481,44 @@
     }
   },
   "MetaThinking_Bot2": {
-    "description": "Bot 2 配置（白真真）",
-    "hint": "白真真的 MetaThinking 独立设置",
+    "description": "Bot 2 配置",
+    "hint": "第二个 Bot 的身份与行为配置（如不需要可留空 qq_id）",
     "type": "object",
     "items": {
       "qq_id": {
-        "description": "QQ 号",
+        "description": "QQ 号（留空则不启用该 bot）",
         "type": "string",
-        "default": "1336495069"
+        "default": ""
       },
       "name": {
-        "description": "名称",
+        "description": "显示名称",
         "type": "string",
-        "default": "白真真"
+        "default": ""
+      },
+      "db_id": {
+        "description": "数据库标识（留空则用 name 小写）",
+        "type": "string",
+        "default": ""
+      },
+      "aliases": {
+        "description": "别名（逗号分隔）",
+        "type": "string",
+        "default": ""
+      },
+      "meta_prompt": {
+        "description": "自定义 MetaThinking 完整 prompt（留空用默认模板）",
+        "type": "string",
+        "default": ""
+      },
+      "exclude_sources": {
+        "description": "排除的记忆来源（逗号分隔，留空表示不排除任何来源）",
+        "type": "string",
+        "default": ""
+      },
+      "interest_keywords": {
+        "description": "自定义兴趣关键词（逗号分隔）",
+        "type": "string",
+        "default": ""
       },
       "model": {
         "description": "模型（留空用全局默认）",
@@ -492,6 +542,8 @@
         "default": 2
       }
     }
+  },
+  "TagWorker_Settings": {
   },
   "TagWorker_Settings": {
     "description": "Tag 提取调度",
@@ -538,13 +590,13 @@
     }
   },
   "Study_Settings": {
-    "description": "自主学习（白真真进化系统）",
-    "hint": "白真真每 N 小时从 BookLore 知识库采样世界观知识，以第一人称内化为自己的记忆",
+    "description": "自主学习（进化系统）",
+    "hint": "Bot 每 N 小时从 BookLore 知识库采样世界观知识，以第一人称内化为自己的记忆",
     "type": "object",
     "items": {
       "enabled": {
         "description": "启用自主学习",
-        "hint": "开启后白真真会定时从 book_lore 学习世界观知识",
+        "hint": "开启后 Bot 会定时从 book_lore 学习世界观知识",
         "type": "bool",
         "default": true
       },
@@ -568,7 +620,7 @@
       },
       "self_reflect_enabled": {
         "description": "启用自省（纠正学习）",
-        "hint": "群友纠正白真真时自动触发学习",
+        "hint": "群友纠正 Bot 时自动触发学习",
         "type": "bool",
         "default": true
       }

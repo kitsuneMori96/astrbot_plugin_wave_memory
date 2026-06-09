@@ -48,7 +48,7 @@ class PairSimilarityService:
         # 先尝试从 DB 加载
         try:
             rows = self.db.conn.execute(
-                "SELECT tag_a, tag_b, similarity FROM tag_pair_similarity"
+                "SELECT tag_id_a, tag_id_b, similarity FROM tag_pair_similarity"
             ).fetchall()
             if rows:
                 self._cache = {(r[0], r[1]): r[2] for r in rows}
@@ -119,7 +119,7 @@ class PairSimilarityService:
             try:
                 self.db.conn.execute("DELETE FROM tag_pair_similarity")
                 self.db.conn.executemany(
-                    "INSERT INTO tag_pair_similarity (tag_a, tag_b, similarity, computed_at) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO tag_pair_similarity (tag_id_a, tag_id_b, similarity, updated_at) VALUES (?, ?, ?, ?)",
                     batch_params,
                 )
                 self.db.conn.commit()

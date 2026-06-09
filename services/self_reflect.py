@@ -1,6 +1,6 @@
-"""SelfReflect — 白真真自省循环
+"""SelfReflect — Bot 自省循环
 
-检测群友对白真真回复的纠正信号，触发时从 book_lore 搜索相关知识并内化。
+检测群友对 bot 回复的纠正信号，触发时从 book_lore 搜索相关知识并内化。
 集成到 MetaThinking 后续流程中。
 """
 
@@ -23,17 +23,16 @@ from ..engine.book_lore_index import BookLoreIndex
 from .llm_fallback import LLMFallbackClient
 
 
-# 纠正信号正则（群友常见的纠错方式）
+# 纠正信号正则（群友常见的纠错方式 — 通用部分）
 CORRECTION_PATTERNS = [
     re.compile(r'(你说错|不是这样|你搞错|你弄错|不对吧|说反了|记错了)', re.I),
-    re.compile(r'(白真真.*不[是会对]|小白.*不[是会对]|bzz.*不[是会对])', re.I),
     re.compile(r'(原文[是写说]|书[里中].*[是写说]|作者[说写])', re.I),
     re.compile(r'(你不懂|你没看|你没读|没看过原文)', re.I),
     re.compile(r'(其实是|实际上是|应该是|正确的是)', re.I),
 ]
 
-# 内化纠正知识的 prompt
-CORRECT_PROMPT = """你是白真真。你刚才说了一些不太准确的话，有人纠正了你。
+# 内化纠正知识的 prompt（{bot_name} 由运行时替换）
+CORRECT_PROMPT = """你是{bot_name}。你刚才说了一些不太准确的话，有人纠正了你。
 
 你说的：{bot_reply}
 别人纠正：{correction}
@@ -49,7 +48,7 @@ CORRECT_PROMPT = """你是白真真。你刚才说了一些不太准确的话，
 
 
 class SelfReflectService:
-    """白真真自省服务：检测纠正信号 → 学习修正。"""
+    """Bot 自省服务：检测纠正信号 → 学习修正。"""
 
     def __init__(
         self,
@@ -59,6 +58,9 @@ class SelfReflectService:
         llm_client: LLMFallbackClient,
         book_lore_index: Optional[BookLoreIndex],
         lore_db_path: str,
+        bot_name: str = "bot",
+        bot_qq_id: str = "",
+        bot_aliases: list[str] = None,
         cooldown_seconds: float = 300.0,  # 同一话题 5 分钟内不重复触发
     ):
         self.db = db
@@ -67,9 +69,20 @@ class SelfReflectService:
         self.llm = llm_client
         self.book_lore_index = book_lore_index
         self.lore_db_path = lore_db_path
+        self.bot_name = bot_name
+        self.bot_qq_id = bot_qq_id
         self.cooldown = cooldown_seconds
 
-        # 记录白真真最近的回复（用于检测纠正）
+        # 动态构建 bot 名字相关的纠正模式
+        self._correction_patterns = list(CORRECTION_PATTERNS)
+        all_names = [bot_name] + (bot_aliases or [])
+        name_pattern = "|".join(re.escape(n) for n in all_names if n)
+        if name_pattern:
+            self._correction_patterns.append(
+                re.compile(rf'({name_pattern}).*不[是会对]', re.I)
+            )
+
+        # 记录 bot 最近的回复（用于检测纠正）
         self._recent_replies: deque = deque(maxlen=10)
         # 冷却记录：{topic_hash: timestamp}
         self._cooldown_map: dict[str, float] = {}
@@ -100,7 +113,7 @@ class SelfReflectService:
             return False
 
         # 检测纠正信号
-        is_correction = any(p.search(message) for p in CORRECTION_PATTERNS)
+        is_correction = any(p.search(message) for p in self._correction_patterns)
         if not is_correction:
             return False
 
@@ -152,6 +165,7 @@ class SelfReflectService:
 
         # 2. LLM 内化
         prompt = CORRECT_PROMPT.format(
+            bot_name=self.bot_name,
             bot_reply=bot_reply[:200],
             correction=correction[:200],
             knowledge=knowledge[:500],
@@ -186,8 +200,8 @@ class SelfReflectService:
             group_id="__bzz_evolution__",
             content=text,
             vector=mem_vec,
-            sender_id="1336495069",
-            sender_name="白真真",
+            sender_id=self.bot_qq_id or "bot",
+            sender_name=self.bot_name,
             importance=1.5,  # 纠正学习的重要度更高
             source="bzz_evolution",
         )

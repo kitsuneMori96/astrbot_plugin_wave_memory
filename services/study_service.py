@@ -23,7 +23,7 @@ from ..engine.vector_index import VectorIndex
 from .llm_fallback import LLMFallbackClient
 
 
-INTERNALIZE_PROMPT = """你是白真真。以下是你世界里的一个常识性知识。
+INTERNALIZE_PROMPT = """你是{bot_name}。以下是你世界里的一个常识性知识。
 
 ---
 {knowledge}
@@ -40,7 +40,7 @@ INTERNALIZE_PROMPT = """你是白真真。以下是你世界里的一个常识�
 
 
 class StudyService:
-    """白真真自主学习服务。"""
+    """Bot 自主学习服务。"""
 
     def __init__(
         self,
@@ -49,6 +49,8 @@ class StudyService:
         embedding_service,
         llm_client: LLMFallbackClient,
         lore_db_path: str,
+        bot_name: str = "bot",
+        bot_qq_id: str = "",
         study_interval_hours: float = 6.0,
         max_new_per_cycle: int = 2,
         dedup_threshold: float = 0.85,
@@ -58,6 +60,8 @@ class StudyService:
         self.embedding = embedding_service
         self.llm = llm_client
         self.lore_db_path = lore_db_path
+        self.bot_name = bot_name
+        self.bot_qq_id = bot_qq_id
         self.study_interval = study_interval_hours * 3600
         self.max_new_per_cycle = max_new_per_cycle
         self.dedup_threshold = dedup_threshold
@@ -133,8 +137,8 @@ class StudyService:
                 group_id="__bzz_evolution__",
                 content=internalized,
                 vector=mem_vec,
-                sender_id="1336495069",
-                sender_name="白真真",
+                sender_id=self.bot_qq_id or "bot",
+                sender_name=self.bot_name,
                 importance=1.2,
                 source="bzz_evolution",
             )
@@ -202,9 +206,9 @@ class StudyService:
             return False
 
     async def _internalize(self, knowledge: str) -> Optional[str]:
-        """用 LLM 以白真真口吻内化知识。"""
+        """用 LLM 以 bot 口吻内化知识。"""
         try:
-            prompt = INTERNALIZE_PROMPT.format(knowledge=knowledge)
+            prompt = INTERNALIZE_PROMPT.format(bot_name=self.bot_name, knowledge=knowledge)
             resp = await self.llm.text_chat(prompt=prompt)
             text = resp.completion_text.strip()
 
