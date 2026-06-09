@@ -543,7 +543,37 @@
       }
     }
   },
-  "TagWorker_Settings": {
+  "Eviction_Settings": {
+    "description": "记忆淘汰",
+    "hint": "定期清理低价值记忆，减少内存占用",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用记忆淘汰",
+        "type": "bool",
+        "default": true
+      },
+      "noise_max_length": {
+        "description": "噪声阈值（低于此字数的消息标记为 noise，不入向量索引）",
+        "type": "int",
+        "default": 10
+      },
+      "noise_ttl_days": {
+        "description": "noise 记忆保留天数（超过后从 DB 删除）",
+        "type": "int",
+        "default": 7
+      },
+      "chat_stale_days": {
+        "description": "chat 记忆闲置天数（超过后从内存索引移除，DB 保留）",
+        "type": "int",
+        "default": 30
+      },
+      "interval_hours": {
+        "description": "淘汰任务执行间隔（小时）",
+        "type": "int",
+        "default": 6
+      }
+    }
   },
   "TagWorker_Settings": {
     "description": "Tag 提取调度",

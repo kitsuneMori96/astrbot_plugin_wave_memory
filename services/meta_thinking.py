@@ -47,10 +47,12 @@ QQ：{qq}
 
 内心：<你此刻的真实想法，一两句话>
 行动：<回复 / 不理 / 怼回去 / 简短回 / 主动插话>
-语气：<正常 / 热情 / 冷淡 / 讽刺 / 愤怒>
+语气：<正常 / 热情 / 冷淡 / 讽刺 / 愤怒 / 犹豫>
 好感度：<你现在觉得这个人应该是多少分，-100到100的整数，必须给出数字>
 印象：<你对这个人的一句话印象，每次都写>
-标签：<给这个人的标签，格式 name:score name:score，至少写一个>"""
+标签：<给这个人的标签，格式 name:score name:score，至少写一个>
+关切：<这件事你要关注吗？写"关注:主题"或"不关注">
+情绪：<这件事对你情绪的影响，-1到1的小数，0表示无影响>"""
 
 
 PROACTIVE_PROMPT = """你是{bot_name}。你在群里旁观，没有被@。
@@ -456,6 +458,17 @@ class MetaThinking:
             if v is not None:
                 if v and v != "不变":
                     result["tags_update"] = self._parse_tags(v)
+                continue
+            v = _field(line, "关切")
+            if v is not None:
+                result["concern_update"] = v
+                continue
+            v = _field(line, "情绪")
+            if v is not None:
+                try:
+                    result["mood_impact"] = max(-1.0, min(1.0, float(re.search(r'-?[\d.]+', v).group())))
+                except (ValueError, AttributeError):
+                    pass
                 continue
 
         return result

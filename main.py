@@ -45,6 +45,11 @@ from .services.dream import DreamService
 from .services.study_service import StudyService
 from .services.self_reflect import SelfReflectService
 from .services.llm_fallback import LLMFallbackClient, build_provider_chain
+from .services.eviction import EvictionService
+from .services.concern_tracker import ConcernTracker
+from .services.mood_trajectory import MoodTrajectory
+from .services.subjective_time import SubjectiveTime
+from .services.desire_engine import DesireEngine
 
 
 @dataclass
@@ -95,7 +100,7 @@ def _parse_bot_config(cfg: dict, fallback_db_id: str = "") -> BotProfile:
     "astrbot_plugin_wave_memory",
     "vivy1024",
     "基于 VCP TagMemo 浪潮算法的高性能记忆插件",
-    "0.7.0",
+    "0.8.0",
     "https://github.com/vivy1024/astrbot_plugin_wave_memory",
 )
 class WaveMemoryPlugin(Star):
@@ -322,11 +327,18 @@ class WaveMemoryPlugin(Star):
                 tag_index=self.tag_index,
             )
 
-        # 异步写入器（简化版：不打标签）
+        # 异步写入器（带 source 分层门控）
+        # 收集所有 bot 的关键词用于 classify_source
+        all_bot_keywords = set()
+        for profile in self._bot_registry.values():
+            all_bot_keywords.update(profile.all_keywords)
+
         self.writer = MessageWriter(
             db=self.db,
             memory_index=self.memory_index,
             embedding_service=self.embedding_service,
+            bot_keywords=all_bot_keywords,
+            noise_max_length=int(self.config.get("Eviction_Settings", {}).get("noise_max_length", 10)),
         )
 
         # TagWorker（匀速后台标签提取）
@@ -339,6 +351,7 @@ class WaveMemoryPlugin(Star):
                 embedding_service=self.embedding_service,
                 tag_index=self.tag_index,
                 config=tag_worker_cfg,
+                bot_keywords=all_bot_keywords,
             )
             self.tag_worker.on_tags_written = self.cooccurrence_scheduler.notify_tag_change
 
@@ -482,6 +495,53 @@ class WaveMemoryPlugin(Star):
         else:
             self.lifecycle = None
 
+        # 信念引擎（BeliefEngine）
+        self.belief_engine = None
+        belief_cfg = self.config.get("Belief_Settings", {})
+        if belief_cfg.get("enabled", True) and self.tag_llm_provider_id:
+            from .services.belief_engine import BeliefEngine
+            belief_llm = LLMFallbackClient(
+                context=self.context,
+                provider_ids=build_provider_chain(self.tag_llm_provider_id),
+                log_prefix="[BeliefEngine]",
+            )
+            # 使用第一个 bot 的 db_id 作为信念归属
+            belief_bot_id = list(self._bot_registry.values())[0].db_id if self._bot_registry else "bot"
+            self.belief_engine = BeliefEngine(
+                db=self.db,
+                llm_client=belief_llm,
+                bot_id=belief_bot_id,
+                max_beliefs=int(belief_cfg.get("max_beliefs", 50)),
+            )
+
+        # 绑定 belief_engine 到 desire_engine
+        if hasattr(self, 'desire_engine') and self.belief_engine:
+            self.desire_engine.belief_engine = self.belief_engine
+
+        # 关切追踪器
+        concern_bot_id = list(self._bot_registry.values())[0].db_id if self._bot_registry else "bot"
+        self.concern_tracker = ConcernTracker(
+            db=self.db,
+            bot_id=concern_bot_id,
+            max_concerns=int(self.config.get("Concern_Settings", {}).get("max_concerns", 10)),
+        )
+
+        # 情绪轨迹
+        self.mood_trajectory = MoodTrajectory(
+            db=self.db,
+            bot_id=concern_bot_id,
+            window_size=int(self.config.get("Mood_Settings", {}).get("window_size", 20)),
+        )
+
+        # 主观时间引擎
+        self.subjective_time = SubjectiveTime(
+            db=self.db,
+            bot_id=concern_bot_id,
+        )
+
+        # 欲望引擎（初始化时 belief_engine 可能还没创建，后面绑定）
+        self.desire_engine = DesireEngine(bot_id=concern_bot_id)
+
         # 启动记忆整合服务
         if self.enable_consolidation and self.tag_llm_provider_id:
             self.consolidation = ConsolidationService(
@@ -491,10 +551,25 @@ class WaveMemoryPlugin(Star):
                 interval_hours=self.consolidation_interval_hours,
                 topic_backfill=self.consolidation_topic_backfill,
                 skip_topics=self.consolidation_skip_topics,
+                belief_engine=self.belief_engine,
             )
             self.consolidation.start()
         else:
             self.consolidation = None
+
+        # 记忆淘汰服务
+        eviction_cfg = self.config.get("Eviction_Settings", {})
+        if eviction_cfg.get("enabled", True):
+            self.eviction_service = EvictionService(
+                db=self.db,
+                memory_index=self.memory_index,
+                noise_ttl_days=int(eviction_cfg.get("noise_ttl_days", 7)),
+                chat_stale_days=int(eviction_cfg.get("chat_stale_days", 30)),
+                eviction_interval_hours=float(eviction_cfg.get("interval_hours", 6.0)),
+            )
+            self.eviction_service.start()
+        else:
+            self.eviction_service = None
 
         # 人格进化引擎
         self.persona_evolution = PersonaEvolution(
@@ -580,8 +655,9 @@ class WaveMemoryPlugin(Star):
         else:
             self.study_service = None
 
-        # 自省系统（检测纠正 → 学习）
-        if study_cfg.get("self_reflect_enabled", True) and self.book_lore_index and self.tag_llm_provider_id and experience_bot:
+        # 自省系统（检测纠正 → 学习，所有 bot 共用）
+        reflect_bot = experience_bot or (list(self._bot_registry.values())[0] if self._bot_registry else None)
+        if study_cfg.get("self_reflect_enabled", True) and self.tag_llm_provider_id and reflect_bot:
             try:
                 reflect_llm = LLMFallbackClient(
                     context=self.context,
@@ -593,11 +669,11 @@ class WaveMemoryPlugin(Star):
                     memory_index=self.memory_index,
                     embedding_service=self.embedding_service,
                     llm_client=reflect_llm,
-                    book_lore_index=self.book_lore_index,
+                    book_lore_index=self.book_lore_index,  # 可为 None
                     lore_db_path=self.lore_db_path,
-                    bot_name=experience_bot.name,
-                    bot_qq_id=experience_bot.qq_id,
-                    bot_aliases=experience_bot.aliases,
+                    bot_name=reflect_bot.name,
+                    bot_qq_id=reflect_bot.qq_id,
+                    bot_aliases=reflect_bot.aliases,
                 )
             except Exception as e:
                 logger.warning(f"[WaveMemory] SelfReflectService init failed: {e}")
@@ -636,6 +712,12 @@ class WaveMemoryPlugin(Star):
                 self.consolidation.stop()
         except Exception as e:
             logger.debug(f"[WaveMemory] consolidation stop error: {e}")
+
+        try:
+            if hasattr(self, 'eviction_service') and self.eviction_service:
+                self.eviction_service.stop()
+        except Exception as e:
+            logger.debug(f"[WaveMemory] eviction_service stop error: {e}")
 
         try:
             if hasattr(self, 'lifecycle') and self.lifecycle:
@@ -720,6 +802,22 @@ class WaveMemoryPlugin(Star):
         if inner:
             logger.info(f"[MetaThinking] {nickname or sender_id}: {inner} → {action}")
 
+        # 处理扩展输出：关切 + 情绪
+        concern_update = result.get("concern_update", "")
+        if concern_update and concern_update.startswith("关注:"):
+            topic = concern_update[3:].strip()
+            if topic and hasattr(self, 'concern_tracker'):
+                self.concern_tracker.add(topic)
+
+        mood_impact = result.get("mood_impact")
+        if mood_impact is not None and abs(mood_impact) > 0.2 and hasattr(self, 'mood_trajectory'):
+            cause = f"{nickname or sender_id}: {inner[:30]}" if inner else ""
+            self.mood_trajectory.record(
+                valence=mood_impact,
+                arousal=min(1.0, abs(mood_impact) * 1.5),
+                cause=cause,
+            )
+
         # 根据行动决策
         if action == "ignore":
             event.should_call_llm(False)
@@ -777,11 +875,15 @@ class WaveMemoryPlugin(Star):
                     top_k=self.inject_top_k,
                 )
             else:
+                # 默认只搜高价值记忆（core + evolution + experience + lore）
+                # 不搜 chat 和 noise — 需要时由 deep_search 工具单独搜
+                default_sources = ["core", "evolution", "experience", "lore", "bzz_experience", "bzz_evolution", "book_lore"]
                 memories = await self.query_engine.query(
                     text=message,
                     group_id=group_id,
                     top_k=self.inject_top_k,
                     exclude_sources=exclude_sources,
+                    source_filter=default_sources if not exclude_sources else None,
                 )
 
             # 独立经历通道：并行从 bzz_experience + bzz_evolution 搜 top 2
@@ -839,10 +941,34 @@ class WaveMemoryPlugin(Star):
                 if persona_text:
                     injection_parts.append(persona_text)
 
+            # 信念注入
+            if hasattr(self, 'belief_engine') and self.belief_engine:
+                sender_id_for_belief = event.get_sender_id() or ""
+                # 从消息中提取几个关键词作为话题匹配
+                belief_keywords = [w for w in message.split()[:5] if len(w) > 1]
+                belief_text = self.belief_engine.get_injection(
+                    sender_id=sender_id_for_belief,
+                    keywords=belief_keywords,
+                )
+                if belief_text:
+                    injection_parts.append(belief_text)
+
+            # 关切摘要注入
+            if hasattr(self, 'concern_tracker'):
+                concern_summary = self.concern_tracker.summary
+                if concern_summary:
+                    injection_parts.append(concern_summary)
+
             if self.enable_mood and group_id:
                 mood = self.db.get_active_mood(group_id)
                 if mood:
                     injection_parts.append(f"[当前情绪] {mood['mood_type']}（{mood['description']}）")
+
+            # 情绪轨迹注入
+            if hasattr(self, 'mood_trajectory'):
+                mood_summary = self.mood_trajectory.summary
+                if mood_summary:
+                    injection_parts.append(mood_summary)
 
             if injection_parts:
                 from astrbot.core.agent.message import TextPart
@@ -898,6 +1024,7 @@ class WaveMemoryPlugin(Star):
             "sender_name": sender_name,
             "content": message,
             "timestamp": time.time(),
+            "is_at_bot": getattr(event, "is_at_or_wake_command", False),
         })
 
         # 白真真自省：检测群友对白真真的纠正
@@ -919,15 +1046,29 @@ class WaveMemoryPlugin(Star):
                 hour=hour,
             )
 
-        # 主动对话触发：轻量关键词匹配，命中才调 LLM 判断
+        # 欲望触发：检测红包等特殊事件
+        if hasattr(self, 'desire_engine'):
+            raw_msg = event.message_str or ""
+            if "redbag" in raw_msg or "红包" in message:
+                self.desire_engine.trigger(
+                    desire_type="想抢红包",
+                    trigger_desc=f"{sender_name}发了红包",
+                    intensity=0.6,
+                    action="react_to_hongbao",
+                    ttl=30.0,
+                )
+
+        # 主动对话触发：兴趣词匹配 OR 关切命中，才调 LLM 判断
         bot_id = event.get_self_id() or ""
         bot_profile = self._get_bot(bot_id)
         proactive_ok = bot_profile.proactive_enabled if bot_profile else self.meta_thinking.proactive_enabled if self.meta_thinking else False
+        concern_score = self.concern_tracker.match(message) if hasattr(self, 'concern_tracker') else 0.0
+        is_interesting = self.meta_thinking.is_interesting(message) if self.meta_thinking else False
         if (self.meta_thinking
             and proactive_ok
             and not getattr(event, "is_at_or_wake_command", False)
             and group_id
-            and self.meta_thinking.is_interesting(message)):
+            and (is_interesting or concern_score > 0.3)):
             try:
                 bot_id = event.get_self_id() or ""
                 context_messages = self._get_recent_messages(event, max_messages=10)
@@ -975,7 +1116,7 @@ class WaveMemoryPlugin(Star):
 
         # 自省：记录回复供后续检测纠正（只对配置了 self_reflect 的 bot 生效）
         bot_profile = self._get_bot(bot_id)
-        if bot_profile and self.self_reflect and not bot_profile.exclude_sources:
+        if bot_profile and self.self_reflect:
             self.self_reflect.record_reply(bot_text, group_id)
 
     # ─── 后台任务 ───

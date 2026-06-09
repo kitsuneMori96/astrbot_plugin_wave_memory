@@ -16,6 +16,7 @@ from .db.tag_repo import TagRepo
 from .db.social_repo import SocialRepo
 from .db.knowledge_repo import KnowledgeRepo
 from .db.booklore_repo import BookLoreRepo
+from .db.belief_repo import BeliefRepo
 
 
 class WaveMemoryDB:
@@ -34,6 +35,7 @@ class WaveMemoryDB:
         self._social_repo = SocialRepo(self._cm)
         self._knowledge_repo = KnowledgeRepo(self._cm)
         self._booklore_repo = BookLoreRepo(self._cm)
+        self._belief_repo = BeliefRepo(self._cm)
 
         # FTS5 + 其他迁移
         self._setup_fts5()
@@ -92,6 +94,46 @@ class WaveMemoryDB:
 
     def delete_memory(self, memory_id):
         return self._memory_repo.delete_memory(memory_id)
+
+    def update_source(self, memory_id: int, new_source: str):
+        """更新记忆的 source 分类。"""
+        self.conn.execute("UPDATE memories SET source = ? WHERE id = ?", (new_source, memory_id))
+        self.conn.commit()
+
+    def get_stale_memories(self, source: str, last_accessed_before: float) -> list[int]:
+        """获取指定 source 中长时间未被访问的记忆 ID。"""
+        cutoff = time.time() - last_accessed_before
+        rows = self.conn.execute(
+            "SELECT id FROM memories WHERE source = ? AND (last_accessed IS NULL OR last_accessed < ?)",
+            (source, cutoff),
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def delete_memories_by_source(self, source: str, older_than_seconds: float) -> int:
+        """删除指定 source 中超过一定时间的记忆。返回删除数量。"""
+        cutoff = time.time() - older_than_seconds
+        cursor = self.conn.execute(
+            "DELETE FROM memories WHERE source = ? AND timestamp < ?",
+            (source, cutoff),
+        )
+        self.conn.commit()
+        return cursor.rowcount
+
+    def mark_evicted(self, memory_id: int):
+        """标记记忆为已从索引中移除（保留 DB 数据）。"""
+        self.conn.execute(
+            "UPDATE memories SET memory_type = 'evicted' WHERE id = ?",
+            (memory_id,),
+        )
+        self.conn.commit()
+
+    def get_memory_ids_by_source(self, source: str) -> list[int]:
+        """获取指定 source 的所有记忆 ID（用于索引重建）。"""
+        rows = self.conn.execute(
+            "SELECT id FROM memories WHERE source = ? AND vector IS NOT NULL",
+            (source,),
+        ).fetchall()
+        return [r[0] for r in rows]
 
     def delete_memories(self, ids):
         return self._memory_repo.delete_memories(ids)
@@ -398,3 +440,34 @@ class WaveMemoryDB:
             self.conn.commit()
         except Exception:
             pass
+
+    # ═══════════════════════════════════════════════════════
+    # Belief 委托
+    # ═══════════════════════════════════════════════════════
+
+    def add_belief(self, content, belief_type, bot_id, strength=0.5, sources=None):
+        return self._belief_repo.add_belief(content, belief_type, bot_id, strength, sources)
+
+    def get_beliefs(self, bot_id=None, belief_type=None, status="active", limit=50):
+        return self._belief_repo.get_beliefs(bot_id, belief_type, status, limit)
+
+    def get_belief_by_id(self, belief_id):
+        return self._belief_repo.get_belief_by_id(belief_id)
+
+    def reinforce_belief(self, belief_id, amount=0.05):
+        return self._belief_repo.reinforce(belief_id, amount)
+
+    def weaken_belief(self, belief_id, amount=0.1):
+        return self._belief_repo.weaken(belief_id, amount)
+
+    def archive_belief(self, belief_id, reason=""):
+        return self._belief_repo.archive(belief_id, reason)
+
+    def add_belief_source(self, belief_id, memory_id):
+        return self._belief_repo.add_source(belief_id, memory_id)
+
+    def search_beliefs(self, keywords, bot_id=None, limit=5):
+        return self._belief_repo.search_by_content(keywords, bot_id, limit)
+
+    def belief_count(self, bot_id=None):
+        return self._belief_repo.count(bot_id)

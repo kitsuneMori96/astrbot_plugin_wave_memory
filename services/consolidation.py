@@ -59,6 +59,7 @@ class ConsolidationService:
         batch_size: int = 50,
         topic_backfill: bool = True,
         skip_topics: list = None,
+        belief_engine=None,
     ):
         self.db = db
         self.context = context
@@ -67,6 +68,7 @@ class ConsolidationService:
         self.batch_size = batch_size
         self.topic_backfill = topic_backfill
         self.skip_topics = set(skip_topics or ["日常闲聊", "日常灌水", "闲聊", "灌水", "群聊", "聊天", "日常"])
+        self.belief_engine = belief_engine
         self._task: Optional[asyncio.Task] = None
         self._running = False
         self._last_consolidated_ts: float = 0
@@ -219,6 +221,14 @@ class ConsolidationService:
         # 回写 topics 到 memory_tags（让每条消息获得段落级话题标签）
         if self.topic_backfill:
             self._backfill_topic_tags(msg_ids, topics)
+
+        # 信念提取：从摘要中提取稳定判断
+        if self.belief_engine and summary and summary != "日常灌水":
+            try:
+                full_text = f"{summary}\n事实: {json.dumps(facts, ensure_ascii=False)}" if facts else summary
+                await self.belief_engine.extract_from_summary(full_text, source_memory_ids=msg_ids[:5])
+            except Exception as e:
+                logger.debug(f"[Consolidation] Belief extraction failed: {e}")
 
         return {"messages": len(msg_ids), "relations": relations_written, "facts": facts_written}
 

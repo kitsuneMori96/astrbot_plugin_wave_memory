@@ -1,4 +1,4 @@
-"""Wave Memory 异步写入服务 — 简化版：只负责写入+embedding（不打标签）"""
+"""Wave Memory 异步写入服务 — 带 source 分层门控"""
 
 from __future__ import annotations
 
@@ -15,11 +15,43 @@ from ..engine.vector_index import VectorIndex
 from ..engine.embedding import EmbeddingService
 
 
-class MessageWriter:
-    """异步消息写入服务 — 简化版。
+# noise 判定：这些消息不入向量索引
+_NOISE_MAX_LENGTH = 10
 
-    只负责：批量 embedding → 写入 memories + 向量索引。
-    不打标签（TagWorker 异步后台处理）。
+
+def classify_source(
+    message: str,
+    sender_id: str,
+    bot_keywords: set[str],
+    is_at_bot: bool = False,
+    noise_max_length: int = _NOISE_MAX_LENGTH,
+) -> str:
+    """规则引擎：零 LLM 调用判断 source 分类。
+
+    Returns: "core" / "chat" / "noise"
+    """
+    # 1. bot 自己发的 → core
+    if sender_id == "bot":
+        return "core"
+    # 2. 消息含 @bot → core
+    if is_at_bot:
+        return "core"
+    # 3. 消息含 bot 名字/别名 → core
+    msg_lower = message.lower()
+    if any(kw.lower() in msg_lower for kw in bot_keywords if kw):
+        return "core"
+    # 4. 过短 → noise
+    if len(message.strip()) < noise_max_length:
+        return "noise"
+    # 5. 其余 → chat
+    return "chat"
+
+
+class MessageWriter:
+    """异步消息写入服务。
+
+    负责：批量 embedding → 按 source 分类 → 写入 memories → 按策略入索引。
+    noise 不入 HNSW 索引（省内存），core/chat 入索引。
     """
 
     def __init__(
@@ -27,12 +59,16 @@ class MessageWriter:
         db: WaveMemoryDB,
         memory_index: VectorIndex,
         embedding_service: EmbeddingService,
+        bot_keywords: set[str] = None,
+        noise_max_length: int = _NOISE_MAX_LENGTH,
         batch_size: int = 10,
         flush_interval: float = 30.0,
     ):
         self.db = db
         self.memory_index = memory_index
         self.embedding = embedding_service
+        self.bot_keywords = bot_keywords or set()
+        self.noise_max_length = noise_max_length
         self.batch_size = batch_size
         self.flush_interval = flush_interval
 
@@ -41,6 +77,9 @@ class MessageWriter:
         self._running = False
         self._write_count = 0
         self._save_threshold = 100
+
+        # 统计
+        self._stats = {"core": 0, "chat": 0, "noise": 0}
 
     def start(self):
         self._running = True
@@ -87,11 +126,31 @@ class MessageWriter:
         self.memory_index.save()
 
     async def _process_batch(self, batch: list[dict]):
-        """处理一批消息：embedding + 存储。"""
-        texts = [item["content"] for item in batch]
-        vectors = await self.embedding.get_embeddings(texts)
+        """处理一批消息：分类 + embedding + 存储。"""
+        # 分类
+        for item in batch:
+            if "source" not in item:
+                item["source"] = classify_source(
+                    message=item["content"],
+                    sender_id=item.get("sender_id", ""),
+                    bot_keywords=self.bot_keywords,
+                    is_at_bot=item.get("is_at_bot", False),
+                    noise_max_length=self.noise_max_length,
+                )
 
-        for item, vec in zip(batch, vectors):
+        # noise 不需要 embedding（省 API 调用）
+        need_embed = [item for item in batch if item["source"] != "noise"]
+        noise_items = [item for item in batch if item["source"] == "noise"]
+
+        # embed 非 noise 消息
+        if need_embed:
+            texts = [item["content"] for item in need_embed]
+            vectors = await self.embedding.get_embeddings(texts)
+        else:
+            vectors = []
+
+        # 写入有向量的消息
+        for item, vec in zip(need_embed, vectors):
             try:
                 memory_id = self.db.add_memory(
                     group_id=item["group_id"],
@@ -100,17 +159,39 @@ class MessageWriter:
                     sender_id=item.get("sender_id", ""),
                     sender_name=item.get("sender_name", ""),
                     timestamp=item.get("timestamp", time.time()),
+                    source=item["source"],
                 )
 
                 if vec is not None:
                     self.memory_index.add([memory_id], vec.reshape(1, -1))
 
                 self._write_count += 1
+                self._stats[item["source"]] = self._stats.get(item["source"], 0) + 1
 
             except Exception as e:
                 logger.debug(f"[WaveMemory] Single write failed: {e}")
+
+        # 写入 noise（无向量，不入索引）
+        for item in noise_items:
+            try:
+                self.db.add_memory(
+                    group_id=item["group_id"],
+                    content=item["content"],
+                    vector=None,
+                    sender_id=item.get("sender_id", ""),
+                    sender_name=item.get("sender_name", ""),
+                    timestamp=item.get("timestamp", time.time()),
+                    source="noise",
+                )
+                self._stats["noise"] = self._stats.get("noise", 0) + 1
+            except Exception:
+                pass
 
         if self._write_count >= self._save_threshold:
             self.memory_index.save()
             self._write_count = 0
             logger.debug(f"[WaveMemory] Index saved, total: {self.memory_index.count}")
+
+    @property
+    def stats(self) -> dict:
+        return dict(self._stats)

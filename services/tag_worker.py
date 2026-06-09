@@ -1,4 +1,4 @@
-"""TagWorker — 匀速后台标签提取（每5分钟醒一次，一次batch调用）"""
+"""TagWorker — 匀速后台标签提取 + source 升级判断"""
 
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ class TagWorker:
 
     每 interval_seconds 秒醒一次，取无标签记忆（< 2个标签），
     一次 batch LLM 调用打完，写回。
-    不阻塞在线查询路径。
+    打完标签后检查是否应将 chat → core（bot 相关标签升级）。
     """
 
-    def __init__(self, db, tag_extractor, embedding_service, tag_index, config: dict = None):
+    def __init__(self, db, tag_extractor, embedding_service, tag_index, config: dict = None, bot_keywords: set = None):
         self.db = db
         self.extractor = tag_extractor
         self.embedding = embedding_service
@@ -25,6 +25,7 @@ class TagWorker:
         cfg = config or {}
         self.wake_interval = int(cfg.get("interval_seconds", 300))
         self.batch_size = int(cfg.get("max_batch_per_cycle", cfg.get("tag_worker_batch_size", 50)))
+        self.bot_keywords = bot_keywords or set()
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self.on_tags_written = None  # callback(count)
@@ -101,6 +102,8 @@ class TagWorker:
                         "INSERT OR REPLACE INTO tag_extraction_status (memory_id, status, updated_at) VALUES (?, 'done', ?)",
                         (mem_id, now),
                     )
+                    # source 升级：如果标签涉及 bot → chat 升级为 core
+                    self._maybe_upgrade_source(mem_id, tags)
                 else:
                     self.db.conn.execute(
                         "INSERT OR REPLACE INTO tag_extraction_status (memory_id, status, updated_at) VALUES (?, 'skipped', ?)",
@@ -149,3 +152,18 @@ class TagWorker:
 
         if tag_ids:
             self.db.link_memory_tags(memory_id, tag_ids)
+
+    def _maybe_upgrade_source(self, memory_id: int, tags: list[dict]):
+        """如果标签中包含 bot 相关词，将 chat 升级为 core。"""
+        if not self.bot_keywords:
+            return
+        tag_names = {t.get("name", "").lower() for t in tags}
+        bot_kw_lower = {kw.lower() for kw in self.bot_keywords if kw}
+        if tag_names & bot_kw_lower:
+            # 只升级 chat → core，不动其他 source
+            row = self.db.conn.execute(
+                "SELECT source FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+            if row and row[0] == "chat":
+                self.db.update_source(memory_id, "core")
+                logger.debug(f"[TagWorker] Upgraded memory {memory_id} to core (bot-related tags)")
