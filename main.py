@@ -866,65 +866,90 @@ class WaveMemoryPlugin(Star):
                 bot_profile and not bot_profile.exclude_sources
             ) or (not bot_profile)
 
-            if self.enable_shotgun:
-                context_messages = self._get_recent_messages(event, max_messages=8)
-                memories = await self.query_engine.shotgun_query(
-                    text=message,
-                    context_messages=context_messages,
-                    group_id=group_id,
-                    top_k=self.inject_top_k,
-                )
-            else:
-                # 默认只搜高价值记忆（core + evolution + experience + lore）
-                # 不搜 chat 和 noise — 需要时由 deep_search 工具单独搜
-                default_sources = ["core", "evolution", "experience", "lore", "bzz_experience", "bzz_evolution", "book_lore"]
-                memories = await self.query_engine.query(
-                    text=message,
-                    group_id=group_id,
-                    top_k=self.inject_top_k,
-                    exclude_sources=exclude_sources,
-                    source_filter=default_sources if not exclude_sources else None,
+            sender_id = event.get_sender_id() or ""
+            sender_name = ""
+            if event.message_obj and event.message_obj.sender:
+                sender_name = event.message_obj.sender.nickname or ""
+
+            # ═══ 并行检索阶段（所有 async IO 同时发出）═══
+            async def _search_main():
+                """主记忆搜索。"""
+                if self.enable_shotgun:
+                    ctx = self._get_recent_messages(event, max_messages=8)
+                    return await self.query_engine.shotgun_query(
+                        text=message, context_messages=ctx,
+                        group_id=group_id, top_k=self.inject_top_k,
+                    )
+                return await self.query_engine.query(
+                    text=message, group_id=group_id,
+                    top_k=self.inject_top_k, exclude_sources=exclude_sources,
                 )
 
-            # 独立经历通道：并行从 bzz_experience + bzz_evolution 搜 top 2
-            if has_experience_channel:
-                exp_memories = await self.query_engine.query(
-                    text=message,
-                    group_id=None,
-                    top_k=2,
+            async def _search_experience():
+                """经历通道。"""
+                if not has_experience_channel:
+                    return []
+                return await self.query_engine.query(
+                    text=message, group_id=None, top_k=2,
                     source_filter=["bzz_experience", "bzz_evolution"],
                 )
-                if exp_memories:
-                    # 去重：排除已在主搜索结果中的经历
-                    existing_ids = {m.get("id") for m in (memories or [])}
-                    exp_memories = [m for m in exp_memories if m.get("id") not in existing_ids]
-                    if memories is None:
-                        memories = []
-                    memories = exp_memories + memories
 
-            # 书设知识自动注入（有 book_lore 且无排除的 bot 可用）
-            lore_text = ""
-            if has_experience_channel and self.book_lore_index:
+            async def _search_relation():
+                """关系记忆通道。"""
+                if not sender_id or sender_id == "bot":
+                    return []
+                query = sender_name or sender_id
+                return await self.query_engine.query(
+                    text=query, group_id=group_id, top_k=3,
+                    exclude_sources=exclude_sources,
+                )
+
+            async def _search_lore():
+                """书设知识搜索。"""
+                if not has_experience_channel or not self.book_lore_index:
+                    return ""
                 try:
                     lore_vec = await self.query_engine.embedding.get_embedding(message)
-                    if lore_vec is not None:
-                        # 搜社区报告 top 1（世界观级知识）
-                        community_hits = self.book_lore_index.search_communities(lore_vec, k=1)
-                        if community_hits:
-                            import sqlite3
-                            conn_lore = sqlite3.connect(self.lore_db_path)
-                            for cid, score in community_hits:
-                                if score >= 0.35:
-                                    row = conn_lore.execute(
-                                        "SELECT title, summary FROM book_communities WHERE id = ?",
-                                        (cid,)
-                                    ).fetchone()
-                                    if row:
-                                        lore_text = f"<world_knowledge>\n{row[0]}：{row[1][:300]}\n</world_knowledge>"
-                            conn_lore.close()
+                    if lore_vec is None:
+                        return ""
+                    hits = self.book_lore_index.search_communities(lore_vec, k=1)
+                    if hits:
+                        import sqlite3
+                        conn_lore = sqlite3.connect(self.lore_db_path)
+                        for cid, score in hits:
+                            if score >= 0.35:
+                                row = conn_lore.execute(
+                                    "SELECT title, summary FROM book_communities WHERE id = ?", (cid,)
+                                ).fetchone()
+                                conn_lore.close()
+                                if row:
+                                    return f"<world_knowledge>\n{row[0]}：{row[1][:300]}\n</world_knowledge>"
+                        conn_lore.close()
                 except Exception:
                     pass
+                return ""
 
+            # 并行执行所有检索
+            main_result, exp_result, rel_result, lore_text = await asyncio.gather(
+                _search_main(), _search_experience(), _search_relation(), _search_lore()
+            )
+
+            # ═══ 合并阶段（同步，毫秒级）═══
+            memories = main_result or []
+
+            # 合并经历（去重后前置）
+            if exp_result:
+                existing_ids = {m.get("id") for m in memories}
+                exp_dedup = [m for m in exp_result if m.get("id") not in existing_ids]
+                memories = exp_dedup + memories
+
+            # 合并关系（去重后追加）
+            if rel_result:
+                existing_ids = {m.get("id") for m in memories}
+                rel_dedup = [m for m in rel_result if m.get("id") not in existing_ids]
+                memories = memories + rel_dedup
+
+            # ═══ 注入拼装阶段 ═══
             injection_parts = []
 
             if memories:
@@ -934,8 +959,6 @@ class WaveMemoryPlugin(Star):
                 injection_parts.append(lore_text)
 
             if self.persona_evolution:
-                sender_id = event.get_sender_id()
-                # 根据 bot_id 选择对应的好感度数据和态度模板
                 pe_bot_id = bot_profile.db_id if bot_profile else "bot"
                 persona_text = self.persona_evolution.get_persona_injection(sender_id, group_id, bot_id=pe_bot_id)
                 if persona_text:
