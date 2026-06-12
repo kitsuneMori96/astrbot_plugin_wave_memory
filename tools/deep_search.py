@@ -115,7 +115,7 @@ class WaveMemoryDeepSearchTool(FunctionTool[AstrAgentContext]):
 
                 # 获取上下文窗口
                 window = self.db.conn.execute("""
-                    SELECT id, sender_name, content, created_at
+                    SELECT id, sender_name, content, timestamp
                     FROM memories
                     WHERE group_id = ? AND id BETWEEN ? AND ?
                     ORDER BY id ASC
