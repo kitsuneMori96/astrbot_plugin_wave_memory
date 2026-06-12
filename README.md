@@ -94,9 +94,22 @@ asyncio.gather（每通道 3s 独立超时）：
 | 功能 | 说明 |
 |------|------|
 | 多维好感度 | familiarity / trust / fun / depth / hostility，独立半衰期 |
+| 好感度约束 | 单次 ±5 / 每日 ±15 上限，防止 LLM 偏见造成剧烈波动 |
 | 人格进化 | 好感度 → 四级态度（intimate/friendly/neutral/cold）→ 动态 prompt |
 | 跨群画像合并 | 同一用户在不同群的好感度、标签、印象自动聚合 |
 | 多 Bot 支持 | 2+ Bot 共存，独立好感度、经历通道、MetaThinking 配置 |
+
+### 记忆重要性分级
+
+记忆不再平等 — importance 动态变化影响检索排序：
+
+| 事件 | importance 变化 |
+|------|----------------|
+| 新消息写入 | 初始 1.0 |
+| noise 消息 | 初始 0.3 |
+| 被 inject_memory 召回 | +0.02（上限 3.0） |
+| 被 DreamService 联想到 | +0.05（上限 3.0） |
+| 检索评分 | `similarity × importance × time_decay` |
 
 ### 黑话系统 (v0.9)
 
@@ -179,6 +192,88 @@ API 端点：记忆 CRUD、Tag 管理、信念审核、情绪轨迹、黑话管�
 ### WebUI
 
 启动后访问 `http://<host>:7890`（端口可配置）
+
+---
+
+## 配置参考
+
+所有配置均可在 AstrBot 插件配置页面调整。
+
+### 基础配置
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| embedding_provider_id | （必填） | Embedding 模型 Provider ID |
+| tag_llm_provider_id | （必填） | Tag/黑话/风格用 LLM |
+| embedding_dimension | 1024 | 向量维度 |
+
+### 记忆召回 (Query_Settings)
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| enable_auto_inject | true | 自动注入记忆到 prompt |
+| inject_top_k | 5 | 注入记忆条数 |
+| min_similarity | 0.35 | 最低相似度 |
+| enable_spike_routing | true | 脉冲传播（联想能力） |
+| enable_residual_pyramid | true | 残差金字塔 |
+| enable_epa | true | EPA 嵌入投影分析 |
+| enable_geodesic_rerank | true | 测地线重排 |
+| enable_shotgun | false | 霰弹枪查询（多角度上下文） |
+
+### 好感度约束 (Affinity_Constraints)
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| max_change_per_message | 5 | 单次消息好感度最大变化量 |
+| max_change_per_day | 15 | 每日累计变化量上限 |
+| min_value | -50 | 好感度下限 |
+| max_value | 100 | 好感度上限 |
+
+### 黑话系统 (Jargon_Settings)
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| enabled | true | 启用黑话系统 |
+| min_frequency | 5 | 7 天内最低频率阈值 |
+| max_inject | 3 | 单次最多注入黑话解释数 |
+| global_threshold | 3 | 跨群全局化阈值（N 群确认） |
+
+### 风格学习 (FewShot_Settings)
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| enabled | true | 启用风格学习 |
+| min_score | 0.7 | 最低风格代表性评分 |
+| max_inject | 3 | 每次注入范例数 |
+| drift_threshold | 0.5 | 漂移告警阈值 |
+
+### 人格与情绪 (Lifecycle_Settings)
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| enable_affinity | true | 好感度系统 |
+| enable_persona_evolution | true | 人格进化 |
+| enable_mood | true | Bot 情绪 |
+| enable_dream | true | 做梦系统 |
+| dream_interval_hours | 6.0 | 做梦间隔 |
+| enable_consolidation | true | LLM 摘要整合 |
+| consolidation_interval_hours | 4.0 | 整合间隔 |
+
+### 记忆淘汰 (Eviction_Settings)
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| enabled | true | 启用淘汰 |
+| noise_ttl_days | 7 | noise 保留天数 |
+| chat_stale_days | 30 | chat 闲置天数 |
+
+### 自主学习 (Study_Settings)
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| enabled | true | 启用自主学习 |
+| interval_hours | 6 | 学习间隔 |
+| self_reflect_enabled | true | 启用自省 |
 
 ---
 
