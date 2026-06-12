@@ -113,6 +113,17 @@ class WaveMemoryPlugin(Star):
         self._terminated = False
         self._bot_qq_ids = ["2500447291", "1336495069"]  # 羽书 + 白真真
 
+        # 构建 Bot Registry（从配置解析多 bot 身份）
+        self._bot_registry: dict = {}
+        for key in ("MetaThinking_Bot1", "MetaThinking_Bot2"):
+            bot_cfg = self.config.get(key, {})
+            if bot_cfg.get("qq_id"):
+                profile = _parse_bot_config(bot_cfg, fallback_db_id=key.split("_")[-1].lower())
+                self._bot_registry[profile.qq_id] = profile
+        # 确保 _bot_qq_ids 与 registry 一致
+        if self._bot_registry:
+            self._bot_qq_ids = [p.qq_id for p in self._bot_registry.values()]
+
         # 解析配置（顶层字段 + 嵌套 object）
         query_cfg = self.config.get("Query_Settings", {})
         self.tag_cfg = tag_cfg = self.config.get("Tag_Settings", {})
