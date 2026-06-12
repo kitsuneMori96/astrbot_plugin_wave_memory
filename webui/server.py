@@ -53,6 +53,17 @@ class Server:
             logger.info("[WaveMemory WebUI] 服务器已在运行中")
             return
 
+        # 热重载时等待旧端口释放（最多 5s）
+        if self._is_port_listening():
+            logger.info(f"[WaveMemory WebUI] 端口 {self.port} 被占用，等待释放...")
+            for _ in range(10):
+                await asyncio.sleep(0.5)
+                if not self._is_port_listening():
+                    break
+            else:
+                logger.warning(f"[WaveMemory WebUI] 端口 {self.port} 仍被占用，跳过 WebUI 启动")
+                return
+
         self.app = create_app()
 
         self._thread = threading.Thread(
