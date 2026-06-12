@@ -372,6 +372,19 @@ class WaveMemoryPlugin(Star):
         """通过 QQ 号获取 Bot 配置，未找到返回 None。"""
         return self._bot_registry.get(bot_id)
 
+    def _get_admin_ids(self) -> list:
+        """从 AstrBot 框架配置获取管理员 ID 列表。"""
+        try:
+            from astrbot.core.config import get_config
+            cfg = get_config()
+            admins = cfg.get("admins_id", [])
+            if admins:
+                return [str(a) for a in admins if a and a != "astrbot"]
+        except Exception:
+            pass
+        # fallback: bot 自身 QQ 号
+        return list(self._bot_qq_ids)
+
     def _get_bot_name(self, bot_id: str) -> str:
         """获取 bot 显示名，fallback 为 'bot'。"""
         p = self._bot_registry.get(bot_id)
@@ -584,6 +597,7 @@ class WaveMemoryPlugin(Star):
                     bot_qq_ids=self._bot_qq_ids,
                     bot_prompts=bot_prompts,
                     bot_names={p.qq_id: p.name for p in self._bot_registry.values()},
+                    admin_ids=self._get_admin_ids(),
                     config=meta_cfg,
                     global_fallback_ids=self.config.get("meta_thinking_fallback_ids", ""),
                     extra_interests=list(interest_keywords),
