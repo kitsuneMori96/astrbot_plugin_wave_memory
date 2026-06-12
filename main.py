@@ -927,15 +927,19 @@ class WaveMemoryPlugin(Star):
                             group_id=group_id, top_k=self.inject_top_k,
                         ), timeout=_CHANNEL_TIMEOUT)
                 else:
+                    # 只搜高价值记忆（不搜 chat/noise，避免复读群友的话）
+                    default_sources = ["core", "evolution", "experience", "lore", "bzz_experience", "bzz_evolution", "book_lore"]
                     memories = await asyncio.wait_for(
                         self.query_engine.query(
                             text=message, group_id=group_id,
-                            top_k=self.inject_top_k, exclude_sources=exclude_sources,
+                            top_k=self.inject_top_k,
+                            exclude_sources=exclude_sources,
+                            source_filter=default_sources if not exclude_sources else None,
                         ), timeout=_CHANNEL_TIMEOUT)
             except asyncio.TimeoutError:
                 logger.warning("[WaveMemory] main_search timed out")
             except Exception as e:
-                logger.debug(f"[WaveMemory] main_search error: {e}")
+                logger.warning(f"[WaveMemory] main_search error: {e}")
             timing["main_search_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
 
         # ─── 通道 2: 经历 ───
@@ -1075,7 +1079,7 @@ class WaveMemoryPlugin(Star):
                     fewshot_text = self.few_shot_service.get_injection(bot_id=bot_id)
 
             except Exception as e:
-                logger.debug(f"[WaveMemory] soul channel error: {e}")
+                logger.warning(f"[WaveMemory] soul channel error: {e}", exc_info=True)
             timing["soul_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
 
         # ─── 并行执行所有通道 (US-2.1) ───
@@ -1136,8 +1140,25 @@ class WaveMemoryPlugin(Star):
             from .utils.perf import get_perf_tracker
             get_perf_tracker().record_injection(timing)
 
+            # 详细注入日志
+            parts_detail = []
+            if memories:
+                parts_detail.append(f"memories={len(memories)}")
+            if persona_text:
+                parts_detail.append("persona")
+            if belief_text:
+                parts_detail.append("belief")
+            if concern_summary:
+                parts_detail.append("concern")
+            if mood_text:
+                parts_detail.append("mood")
+            if jargon_text:
+                parts_detail.append("jargon")
+            if fewshot_text:
+                parts_detail.append("fewshot")
+
             if injection_parts:
-                logger.info(f"[WaveMemory] inject_memory SUCCESS: {len(injection_parts)} parts, {len(injection)} chars, {timing['total_ms']:.0f}ms")
+                logger.info(f"[WaveMemory] inject_memory SUCCESS: {len(injection_parts)} parts [{','.join(parts_detail)}], {len(injection)} chars, {timing['total_ms']:.0f}ms")
 
                 # 记忆重要性提升：被召回的记忆 importance += 0.02（上限 3.0）
                 if memories:
