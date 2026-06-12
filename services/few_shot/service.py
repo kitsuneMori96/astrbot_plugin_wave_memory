@@ -43,13 +43,19 @@ _DRIFT_CHECK_PROMPT = """你是一个对话风格一致性分析师。
 class FewShotService:
     """Few-Shot 风格学习主服务。"""
 
-    def __init__(self, db: Any, llm_client: Any = None, embedding_service: Any = None, enabled: bool = True):
+    def __init__(self, db: Any, llm_client: Any = None, embedding_service: Any = None, enabled: bool = True, config: dict = None):
         self._db = db
         self._llm = llm_client
         self._embedding = embedding_service
         self._enabled = enabled
+        self._config = config or {}
         self._last_extract: float = 0  # 上次提取时间
         self._last_injected_ids: List[int] = []  # 避免连续注入同一条
+
+        # 从配置读取参数
+        self._min_score = float(self._config.get("min_score", 0.7))
+        self._max_inject = int(self._config.get("max_inject", 3))
+        self._drift_threshold = float(self._config.get("drift_threshold", 0.5))
         self._ensure_table()
 
     def _ensure_table(self) -> None:
@@ -102,7 +108,7 @@ class FewShotService:
             try:
                 result = await self._evaluate_style(content)
                 score = result.get("score", 0)
-                if score >= 0.7:
+                if score >= self._min_score:
                     candidates.append({
                         "content": content,
                         "score": score,
@@ -129,10 +135,12 @@ class FewShotService:
 
     # ─── US-5.2: 注入 few-shot ───
 
-    def get_injection(self, bot_id: str = "", max_items: int = 3) -> str:
+    def get_injection(self, bot_id: str = "", max_items: int = None) -> str:
         """获取 2-3 条已批准 few-shot 注入文本。"""
         if not self._enabled:
             return ""
+        if max_items is None:
+            max_items = self._max_inject
 
         rows = self._db.conn.execute(
             """SELECT id, content FROM few_shot_examples
@@ -179,7 +187,7 @@ class FewShotService:
         try:
             result = await self._call_llm(prompt)
             similarity = result.get("similarity", 1.0)
-            if similarity < 0.5:
+            if similarity < self._drift_threshold:
                 logger.warning(f"[FewShot] 风格漂移检测: similarity={similarity:.2f}")
                 return {"similarity": similarity, "drift_detected": True, "reason": result.get("reason", "")}
         except Exception:

@@ -119,13 +119,16 @@ class JargonInferenceEngine:
 class JargonInjector:
     """黑话注入器 — 消息含已知黑话时注入解释 (US-4.3)。"""
 
-    def __init__(self, db: Any):
+    def __init__(self, db: Any, max_inject: int = 3):
         self._db = db
+        self._max_inject = max_inject
         self._cache: Dict[str, List[Dict]] = {}  # group_id -> jargon list
         self._cache_ts: Dict[str, float] = {}
 
-    def get_injection(self, text: str, group_id: str, max_items: int = 3) -> str:
-        """检查消息是否含已知黑话，返回注入文本（最多 max_items 条）。"""
+    def get_injection(self, text: str, group_id: str, max_items: int = None) -> str:
+        """检查消息是否含已知黑话，返回注入文本。"""
+        if max_items is None:
+            max_items = self._max_inject
         jargons = self._get_group_jargons(group_id)
         if not jargons:
             return ""

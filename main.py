@@ -512,6 +512,7 @@ class WaveMemoryPlugin(Star):
                 )
                 self.jargon_service = JargonService(
                     db=self.db, llm_client=jargon_llm, enabled=True,
+                    config=jargon_cfg,
                 )
                 logger.info("[WaveMemory] Jargon system initialized")
             except Exception as e:
@@ -532,6 +533,7 @@ class WaveMemoryPlugin(Star):
                 self.few_shot_service = FewShotService(
                     db=self.db, llm_client=fewshot_llm,
                     embedding_service=self.embedding_service, enabled=True,
+                    config=fewshot_cfg,
                 )
                 logger.info("[WaveMemory] Few-Shot system initialized")
             except Exception as e:

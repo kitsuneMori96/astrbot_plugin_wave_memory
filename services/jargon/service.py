@@ -14,16 +14,21 @@ from .inference import JargonInferenceEngine, JargonInjector
 class JargonService:
     """黑话系统主服务。"""
 
-    def __init__(self, db: Any, llm_client: Any = None, enabled: bool = True):
+    def __init__(self, db: Any, llm_client: Any = None, enabled: bool = True, config: dict = None):
         self._db = db
         self._enabled = enabled
+        self._config = config or {}
         self._filter = JargonStatisticalFilter()
         self._inference = JargonInferenceEngine(llm_client) if llm_client else None
-        self._injector = JargonInjector(db)
+        self._injector = JargonInjector(db, max_inject=int(self._config.get("max_inject", 3)))
         # 挖掘冷却: group_id -> last_mine_ts
         self._last_mine: Dict[str, float] = {}
         # 消息计数: group_id -> count since last mine
         self._msg_count: Dict[str, int] = {}
+
+        # 从配置读取参数
+        self._min_frequency = int(self._config.get("min_frequency", 5))
+        self._global_threshold = int(self._config.get("global_threshold", 3))
 
         # 确保 jargon 表存在
         self._ensure_table()
@@ -79,7 +84,7 @@ class JargonService:
         self._last_mine[group_id] = time.time()
 
         # Step 1: 统计候选
-        candidates = self._filter.get_candidates(group_id, min_freq=5, top_k=10)
+        candidates = self._filter.get_candidates(group_id, min_freq=self._min_frequency, top_k=10)
         if not candidates:
             return []
 
@@ -145,12 +150,14 @@ class JargonService:
         return self._injector.get_injection(text, group_id)
 
     def _check_global_promotion(self) -> None:
-        """US-4.5: 同词在 >= 3 群确认 → 自动全局化。"""
+        """US-4.5: 同词在 >= N 群确认 → 自动全局化。"""
         try:
+            threshold = self._global_threshold
             rows = self._db.conn.execute(
-                """SELECT word, COUNT(DISTINCT group_id) as cnt
+                f"""SELECT word, COUNT(DISTINCT group_id) as cnt
                    FROM jargon WHERE is_jargon = 1 AND is_global = 0
-                   GROUP BY word HAVING cnt >= 3"""
+                   GROUP BY word HAVING cnt >= ?""",
+                (threshold,),
             ).fetchall()
             if rows:
                 now = int(time.time())
