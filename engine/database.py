@@ -43,8 +43,8 @@ class WaveMemoryDB:
 
     @property
     def conn(self):
-        """兼容旧代码直接访问 conn 的场景。"""
-        return self._cm.conn
+        """返回带锁代理，确保所有通过 db.conn.execute() 的调用都序列化。"""
+        return self._cm
 
     @property
     def memory_index(self):
