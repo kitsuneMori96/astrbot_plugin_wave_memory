@@ -487,7 +487,26 @@ class WaveMemoryPlugin(Star):
                 positive_emotion_threshold=self.positive_emotion_threshold,
                 negative_emotion_threshold=self.negative_emotion_threshold,
             )
-            self.consolidation.start()
+            # LLM 摘要整合
+            if self.enable_consolidation and self.tag_llm_provider_id:
+                consolidation_llm = LLMFallbackClient(
+                    context=self.context,
+                    provider_ids=build_provider_chain(self.tag_llm_provider_id),
+                    log_prefix="[Consolidation]",
+                )
+                self.consolidation = ConsolidationService(
+                    db=self.db,
+                    llm_client=consolidation_llm,
+                    embedding_service=self.embedding_service,
+                    memory_index=self.memory_index,
+                    tag_index=self.tag_index,
+                    interval_hours=self.consolidation_interval_hours,
+                    topic_backfill=self.consolidation_topic_backfill,
+                    skip_topics=self.consolidation_skip_topics,
+                )
+                self.consolidation.start()
+            else:
+                self.consolidation = None
         else:
             self.consolidation = None
 
