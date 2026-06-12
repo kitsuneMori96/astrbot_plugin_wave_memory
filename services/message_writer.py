@@ -181,6 +181,7 @@ class MessageWriter:
                     sender_id=item.get("sender_id", ""),
                     sender_name=item.get("sender_name", ""),
                     timestamp=item.get("timestamp", time.time()),
+                    importance=0.3,  # noise 低初始重要性
                     source="noise",
                 )
                 self._stats["noise"] = self._stats.get("noise", 0) + 1

@@ -118,12 +118,13 @@ class MemoryRepo:
             for r in rows
         ]
 
-    def touch_memories(self, ids: list):
+    def touch_memories(self, ids: list, importance_boost: float = 0.01):
+        """标记记忆被访问 + 微量提升 importance。"""
         now = time.time()
         for mid in ids:
             self.cm.execute_write(
-                "UPDATE memories SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
-                (now, mid),
+                "UPDATE memories SET access_count = access_count + 1, last_accessed = ?, importance = MIN(3.0, importance + ?) WHERE id = ?",
+                (now, importance_boost, mid),
             )
         self.cm.commit()
 

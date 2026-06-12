@@ -115,7 +115,7 @@ class DreamService:
         # 强化被联想到的记忆（增加 importance）
         reinforced_ids = list(set(all_associations + deep_associations))
         if reinforced_ids:
-            self.db.touch_memories(reinforced_ids[:50])
+            self.db.touch_memories(reinforced_ids[:50], importance_boost=0.05)
 
         result = {
             "recent_seeds": len(recent_seeds),

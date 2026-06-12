@@ -563,6 +563,7 @@ class WaveMemoryPlugin(Star):
                     global_fallback_ids=self.config.get("meta_thinking_fallback_ids", ""),
                     extra_interests=list(interest_keywords),
                 )
+                self.meta_thinking._plugin_config = self.config  # 好感度约束需要顶层 config
             except Exception as e:
                 logger.warning(f"[WaveMemory] MetaThinking init failed: {e}")
                 self.meta_thinking = None
@@ -1098,6 +1099,14 @@ class WaveMemoryPlugin(Star):
 
             if injection_parts:
                 logger.info(f"[WaveMemory] inject_memory SUCCESS: {len(injection_parts)} parts, {len(injection)} chars, {timing['total_ms']:.0f}ms")
+
+                # 记忆重要性提升：被召回的记忆 importance += 0.02（上限 3.0）
+                if memories:
+                    for mem in memories[:10]:
+                        mid = mem.get("id")
+                        cur_imp = mem.get("importance", 1.0)
+                        if mid and cur_imp < 3.0:
+                            self.db.update_memory(mid, importance=min(3.0, cur_imp + 0.02))
             else:
                 logger.info("[WaveMemory] inject_memory: no memories found to inject")
 

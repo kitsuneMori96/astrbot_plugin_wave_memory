@@ -655,5 +655,98 @@
         "default": true
       }
     }
+  },
+  "Jargon_Settings": {
+    "description": "黑话系统",
+    "hint": "自动发现群内黑话/暗语，推断含义并在对话中辅助理解",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用黑话系统",
+        "hint": "开启后自动统计高频非常规词并尝试推断含义",
+        "type": "bool",
+        "default": true
+      },
+      "min_frequency": {
+        "description": "最低频率阈值",
+        "hint": "7 天内出现次数 >= 此值的词才进入候选",
+        "type": "int",
+        "default": 5
+      },
+      "max_inject": {
+        "description": "单次最多注入黑话解释数",
+        "hint": "消息命中多条黑话时最多注入几条解释",
+        "type": "int",
+        "default": 3
+      },
+      "global_threshold": {
+        "description": "跨群全局化阈值",
+        "hint": "同一词在 N 个群被确认为黑话后自动升级为全局黑话",
+        "type": "int",
+        "default": 3
+      }
+    }
+  },
+  "FewShot_Settings": {
+    "description": "风格学习（Few-Shot）",
+    "hint": "从 Bot 历史回复中提取高质量风格范例，注入 LLM 请求保持风格一致性",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用风格学习",
+        "hint": "开启后每天自动提取风格范例并在回复时注入",
+        "type": "bool",
+        "default": true
+      },
+      "min_score": {
+        "description": "最低风格代表性评分",
+        "hint": "LLM 评估的风格代表性 >= 此值的回复才入库（0-1）",
+        "type": "string",
+        "default": "0.7"
+      },
+      "max_inject": {
+        "description": "每次注入范例数",
+        "hint": "LLM 请求时注入几条风格范例",
+        "type": "int",
+        "default": 3
+      },
+      "drift_threshold": {
+        "description": "漂移告警阈值",
+        "hint": "最新回复与范例库相似度低于此值时告警（0-1）",
+        "type": "string",
+        "default": "0.5"
+      }
+    }
+  },
+  "Affinity_Constraints": {
+    "description": "好感度约束",
+    "hint": "限制 LLM 好感度判断的变化幅度，防止单次交互造成好感度剧烈波动",
+    "type": "object",
+    "items": {
+      "max_change_per_message": {
+        "description": "单次消息最大变化量",
+        "hint": "MetaThinking 单次输出的好感度变化不超过此值（绝对值）",
+        "type": "int",
+        "default": 5
+      },
+      "max_change_per_day": {
+        "description": "每日最大累计变化量",
+        "hint": "同一用户每日好感度变化总量上限",
+        "type": "int",
+        "default": 15
+      },
+      "min_value": {
+        "description": "好感度下限",
+        "hint": "好感度不会低于此值（防止极端负面）",
+        "type": "int",
+        "default": -50
+      },
+      "max_value": {
+        "description": "好感度上限",
+        "hint": "好感度不会高于此值",
+        "type": "int",
+        "default": 100
+      }
+    }
   }
 }

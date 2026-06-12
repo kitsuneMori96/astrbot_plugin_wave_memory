@@ -539,15 +539,18 @@ class MetaThinking:
             return 0
 
     def _apply_updates(self, sender_id: str, group_id: str, result: dict, bot_id: str = None):
-        """将 MetaThinking 的判断写入 DB。"""
+        """将 MetaThinking 的判断写入 DB（带好感度约束）。"""
         # 确定写入哪个 bot 的 profile
         db_bot_id = self.bot_db_ids.get(bot_id or self.bot_qq_id, "bot")
         updates = []
         meta_updates = {}
 
         if result.get("affection_update") is not None:
-            aff = max(-100, min(100, result["affection_update"]))
-            updates.append(("affection", aff))
+            # 好感度约束 (Affinity_Constraints)
+            new_aff = result["affection_update"]
+            new_aff = self._constrain_affection(sender_id, group_id, db_bot_id, new_aff)
+            result["affection_update"] = new_aff
+            updates.append(("affection", new_aff))
 
         if result.get("impression_update"):
             meta_updates["impression"] = result["impression_update"]
@@ -599,3 +602,44 @@ class MetaThinking:
 
         except Exception as e:
             logger.warning(f"[MetaThinking] 更新失败: {e}")
+
+    def _constrain_affection(self, sender_id: str, group_id: str, bot_id: str, new_value: int) -> int:
+        """好感度约束：限制单次变化量和每日累计变化量。"""
+        # 读取约束配置
+        constraints = self._plugin_config.get("Affinity_Constraints", {}) if hasattr(self, '_plugin_config') else {}
+        max_per_msg = int(constraints.get("max_change_per_message", 5))
+        max_per_day = int(constraints.get("max_change_per_day", 15))
+        min_val = int(constraints.get("min_value", -50))
+        max_val = int(constraints.get("max_value", 100))
+
+        # 读取当前好感度
+        row = self.db.conn.execute(
+            "SELECT affection FROM user_profiles WHERE user_id = ? AND group_id = ? AND bot_id = ?",
+            (sender_id, group_id, bot_id),
+        ).fetchone()
+        current = row[0] if row else 0
+
+        # 计算变化量并约束
+        delta = new_value - current
+        delta = max(-max_per_msg, min(max_per_msg, delta))
+
+        # 每日累计约束（用内存追踪）
+        if not hasattr(self, '_daily_affection_changes'):
+            self._daily_affection_changes = {}
+        today = time.strftime("%Y-%m-%d")
+        key = f"{sender_id}:{bot_id}:{today}"
+        daily_total = self._daily_affection_changes.get(key, 0)
+
+        remaining = max_per_day - abs(daily_total)
+        if remaining <= 0:
+            delta = 0
+        elif abs(delta) > remaining:
+            delta = remaining if delta > 0 else -remaining
+
+        self._daily_affection_changes[key] = daily_total + delta
+
+        # 应用约束后的值
+        result = max(min_val, min(max_val, current + delta))
+        if delta != 0:
+            logger.debug(f"[MetaThinking] 好感度约束: {sender_id} {current} → {result} (delta={delta}, LLM wanted={new_value})")
+        return result
