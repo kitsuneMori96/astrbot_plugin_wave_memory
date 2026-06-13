@@ -460,7 +460,7 @@ function initGraph() {
 async function loadGalaxy() {
     showLoading('正在加载星图...');
     try {
-        const res = await fetch('/api/tags/graph');
+        const res = await fetch('/api/explore/galaxy');
         const data = await res.json();
         renderGraph(data.nodes || [], data.edges || []);
     } catch(e) {
@@ -524,27 +524,41 @@ function renderGraph(nodes, edges) {
     }, 150);
 }
 
-// ─── Query (联想) ───
+// ─── Query (图内搜索聚焦) ───
 async function doQuery() {
     const q = document.getElementById('search-input').value.trim();
     if (!q) return;
-    showLoading('联想中...');
-    try {
-        const res = await fetch(`/api/tags/graph?query=${encodeURIComponent(q)}&limit=30`);
-        const data = await res.json();
-        if (data.nodes && data.nodes.length) {
-            // Add source node
-            data.nodes.unshift({ id: '__query__', name: q, type: 'source', isSource: true, degree: 0 });
-            if (data.edges) {
-                const firstFew = data.nodes.slice(1, 6);
-                firstFew.forEach(n => {
-                    data.edges.push({ source: '__query__', target: String(n.id || n.tag_id), weight: 2 });
-                });
-            }
-            renderGraph(data.nodes, data.edges || []);
-        }
-    } catch(e) { console.error('Query failed:', e); }
-    hideLoading();
+    if (graph.order === 0) {
+        showLoading('请先加载星图...');
+        await loadGalaxy();
+    }
+    // 在已加载图中查找匹配节点（名称包含关键词）
+    const matches = [];
+    graph.forEachNode((nid, attrs) => {
+        if ((attrs.label || '').toLowerCase().includes(q.toLowerCase())) matches.push(nid);
+    });
+    if (matches.length === 0) {
+        showLoading(`星图中无 "${q}"，试试展开节点或人物视图`);
+        setTimeout(hideLoading, 1500);
+        return;
+    }
+    // 高亮匹配 + 邻居，淡化其余，聚焦相机
+    const keep = new Set(matches);
+    matches.forEach(nid => graph.forEachNeighbor(nid, nb => keep.add(nb)));
+    graph.forEachNode((nid, attrs) => {
+        const hit = matches.includes(nid);
+        const near = keep.has(nid);
+        const baseColor = TYPE_COLORS[attrs.nodeType] || TYPE_COLORS.keyword;
+        graph.setNodeAttribute(nid, 'highlighted', hit);
+        graph.setNodeAttribute(nid, 'color', hit ? TYPE_COLORS.source : (near ? baseColor : '#33415533'));
+    });
+    // 聚焦第一个匹配节点
+    const target = matches[0];
+    const x = graph.getNodeAttribute(target, 'x'), y = graph.getNodeAttribute(target, 'y');
+    const camera = renderer.getCamera();
+    camera.animate({ x, y, ratio: 0.4 }, { duration: 500 });
+    selectedNode = target;
+    showDetail(target);
 }
 
 // ─── Person View ───
@@ -552,13 +566,16 @@ async function loadPersonList() {
     const list = document.getElementById('person-list');
     list.innerHTML = '<p class="text-slate-600 text-xs">加载中...</p>';
     try {
-        const res = await fetch('/api/tags?type=person&limit=50');
-        const data = await res.json();
-        const tags = data.tags || data || [];
-        list.innerHTML = tags.map(t => `
-            <div class="person-item" onclick="loadPersonGraph('${t.name || t.tag_name}')">
-                <div class="text-slate-200 text-xs font-medium">${t.name || t.tag_name}</div>
-                <div class="text-slate-500 text-[10px] mt-0.5">${t.memory_count || t.count || 0} 条记忆</div>
+        const res = await fetch('/api/explore/persons?limit=50');
+        const persons = await res.json();
+        if (!Array.isArray(persons) || persons.length === 0) {
+            list.innerHTML = '<p class="text-slate-600 text-xs">暂无人物</p>';
+            return;
+        }
+        list.innerHTML = persons.map(p => `
+            <div class="person-item" onclick="loadPersonGraph('${String(p.id).replace(/'/g, "\\'")}', '${(p.name||'').replace(/'/g, "\\'")}')">
+                <div class="text-slate-200 text-xs font-medium">${p.name || p.id}</div>
+                <div class="text-slate-500 text-[10px] mt-0.5">${p.count || 0} 条记忆</div>
             </div>
         `).join('');
     } catch(e) {
@@ -566,40 +583,83 @@ async function loadPersonList() {
     }
 }
 
-async function loadPersonGraph(name) {
-    showLoading(`加载 ${name} 的关系网...`);
+async function loadPersonGraph(qqId, name) {
+    showLoading(`加载 ${name || qqId} 的关系网...`);
     try {
-        const res = await fetch(`/api/tags/graph?query=${encodeURIComponent(name)}&limit=25`);
+        const res = await fetch(`/api/explore/person/${encodeURIComponent(qqId)}?max_memories=80`);
         const data = await res.json();
-        if (data.nodes) renderGraph(data.nodes, data.edges || []);
+        if (data.nodes && data.nodes.length) {
+            renderGraph(data.nodes, data.edges || []);
+        } else {
+            showLoading(`${name || qqId} 暂无记忆网络`);
+            setTimeout(hideLoading, 1200);
+            return;
+        }
     } catch(e) { console.error(e); }
     hideLoading();
 }
 
 // ─── Path Finding ───
+async function _resolveTagId(name) {
+    // 先在已加载图中按 label 精确匹配
+    let hit = null;
+    graph.forEachNode((nid, attrs) => {
+        if (!hit && (attrs.label || '') === name) hit = nid;
+    });
+    if (hit) return parseInt(hit, 10);
+    // 否则查 tag 表
+    const res = await fetch(`/api/tags/?search=${encodeURIComponent(name)}&limit=1`);
+    const data = await res.json();
+    const items = data.items || [];
+    return items.length ? items[0].id : null;
+}
+
 async function doPathFind() {
     const from = document.getElementById('path-from').value.trim();
     const to = document.getElementById('path-to').value.trim();
     if (!from || !to) return;
     showLoading('寻路中...');
     try {
-        const res = await fetch(`/api/tags/path?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+        const [sid, tid] = await Promise.all([_resolveTagId(from), _resolveTagId(to)]);
+        if (!sid || !tid) {
+            showLoading(`未找到 Tag: ${!sid ? from : to}`);
+            setTimeout(hideLoading, 1500);
+            return;
+        }
+        const res = await fetch('/api/explore/path', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source_id: sid, target_id: tid, max_depth: 6 }),
+        });
         const data = await res.json();
-        if (data.nodes) renderGraph(data.nodes, data.edges || []);
+        if (data.nodes && data.nodes.length) {
+            renderGraph(data.nodes, data.edges || []);
+        } else {
+            showLoading(`${from} → ${to} 之间无连通路径`);
+            setTimeout(hideLoading, 1500);
+            return;
+        }
     } catch(e) { console.error(e); }
     hideLoading();
 }
 
-// ─── Expand Node ───
+// ─── Expand Node (展开所在社区) ───
 async function expandNode() {
     if (!selectedNode) return;
     const attrs = graph.getNodeAttributes(selectedNode);
-    const name = attrs.label || selectedNode;
+    const cid = attrs._data?.community;
+    if (cid === undefined || cid === null) {
+        showLoading('该节点无社区信息，无法展开');
+        setTimeout(hideLoading, 1200);
+        return;
+    }
+    showLoading('展开社区...');
     try {
-        const res = await fetch(`/api/tags/graph?query=${encodeURIComponent(name)}&limit=15`);
+        const res = await fetch(`/api/explore/community/${cid}?max_nodes=60`);
         const data = await res.json();
-        if (data.nodes) appendGraphData(data.nodes, data.edges || []);
+        if (data.nodes && data.nodes.length) appendGraphData(data.nodes, data.edges || []);
     } catch(e) { console.error(e); }
+    hideLoading();
 }
 
 function appendGraphData(newNodes, newEdges) {
