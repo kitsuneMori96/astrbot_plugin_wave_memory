@@ -445,8 +445,8 @@ class WaveMemoryDB:
     # Belief 委托
     # ═══════════════════════════════════════════════════════
 
-    def add_belief(self, content, belief_type, bot_id, strength=0.5, sources=None):
-        return self._belief_repo.add_belief(content, belief_type, bot_id, strength, sources)
+    def add_belief(self, content, belief_type, bot_id, strength=0.5, sources=None, status="active"):
+        return self._belief_repo.add_belief(content, belief_type, bot_id, strength, sources, status)
 
     def get_beliefs(self, bot_id=None, belief_type=None, status="active", limit=50):
         return self._belief_repo.get_beliefs(bot_id, belief_type, status, limit)

@@ -33,6 +33,32 @@ class JargonService:
         # 确保 jargon 表存在
         self._ensure_table()
 
+        # 启动预热：从近 7 天 memories 重放重建词频（变相持久化，
+        # 避免重启清零导致 min_frequency 永远累积不到 → 黑话学不到）
+        if self._enabled:
+            try:
+                self._warmup_from_memories(days=7, max_rows=20000)
+            except Exception as e:
+                logger.debug(f"[Jargon] warmup skipped: {e}")
+
+    def _warmup_from_memories(self, days: int = 7, max_rows: int = 20000) -> None:
+        """从近 N 天 memories 重放消息，重建内存词频统计。"""
+        cutoff = time.time() - days * 86400
+        rows = self._db.conn.execute(
+            """SELECT content, group_id, sender_id FROM memories
+               WHERE timestamp >= ? AND group_id IS NOT NULL AND group_id != ''
+               ORDER BY timestamp DESC LIMIT ?""",
+            (cutoff, max_rows),
+        ).fetchall()
+        n = 0
+        for content, group_id, sender_id in rows:
+            if content and group_id:
+                self._filter.feed(content, str(group_id), str(sender_id or ""))
+                n += 1
+        if n:
+            groups = len(self._filter._group_freq)
+            logger.info(f"[Jargon] 预热完成：重放 {n} 条消息，覆盖 {groups} 个群的词频")
+
     def _ensure_table(self) -> None:
         """创建 jargon 表（如不存在）。"""
         try:

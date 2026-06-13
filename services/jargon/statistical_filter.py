@@ -15,7 +15,6 @@ from astrbot.api import logger
 # jieba 可选依赖
 try:
     import jieba
-    import jieba.dt
     _HAS_JIEBA = True
 except ImportError:
     _HAS_JIEBA = False

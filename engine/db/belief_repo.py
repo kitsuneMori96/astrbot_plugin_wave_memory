@@ -45,13 +45,14 @@ class BeliefRepo:
         bot_id: str,
         strength: float = 0.5,
         sources: list[int] = None,
+        status: str = "active",
     ) -> int:
-        """新增信念，返回 ID。"""
+        """新增信念，返回 ID。status 默认 active；传 'pending' 进入待审。"""
         now = time.time()
         cursor = self.cm.execute_write(
-            """INSERT INTO beliefs (content, type, strength, bot_id, sources, created_at, last_reinforced)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (content, belief_type, strength, bot_id, json.dumps(sources or []), now, now),
+            """INSERT INTO beliefs (content, type, strength, bot_id, sources, status, created_at, last_reinforced)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (content, belief_type, strength, bot_id, json.dumps(sources or []), status, now, now),
         )
         self.cm.commit()
         return cursor.lastrowid

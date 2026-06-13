@@ -16,10 +16,21 @@ from ..engine.database import WaveMemoryDB
 from .llm_fallback import LLMFallbackClient
 
 
-EXTRACT_PROMPT = """分析以下记忆摘要，提取 0-2 条稳定判断（如果有的话）。
+EXTRACT_PROMPT = """分析以下记忆摘要，提取 0-2 条**高质量**稳定判断（宁缺毋滥，没有就返回 []）。
 
 稳定判断 = 反复出现的模式、对某人/某事的一致性看法、或对自己的认知。
 不是事实陈述（"今天下雨"不是），是主观判断（"这个人说话不可信"是）。
+
+【严格排除以下情况，命中则不要提取】
+1. 跑团/角色扮演/小说情节：TRPG、COC、DND、模组、剧透、"角色""设定""模组""队友当储备粮"等。
+   这些是**虚构游戏内行为**，绝不能当成对真人的判断。
+   例：群友在玩跑团说"搜刮尸体"，这是游戏行为，不是"此人是逐利狂"。
+2. 实体边界错误：主语必须是**清晰的真实人物/群体名**，不能把定语黏进昵称
+   （如"在雪山救了白狐的感恩芒果"应是"感恩芒果"），不能拿群名/区名/书名当人。
+3. 琐碎偏好：口味、零食、表情等无意义细节（如"喜欢炒饭配玉米"）一律不提取。
+4. 来自小说/书籍内化的世界观（书名、虚构地名人名），不是真实社交判断。
+
+【只提取】对真实群友的稳定社交判断、bot 真实的自我认知、反复验证的真实世界观。
 
 记忆摘要：
 {summary}
@@ -27,14 +38,14 @@ EXTRACT_PROMPT = """分析以下记忆摘要，提取 0-2 条稳定判断（如�
 已有信念（避免重复或与之矛盾的也列出来）：
 {existing_beliefs}
 
-输出格式（JSON 数组，没有就返回 []）：
-[{{"content": "一句话判断", "type": "person_judgment|world_view|self_identity|preference", "challenges": []}}]
+输出格式（JSON 数组，没有合格的就返回 []）：
+[{{"content": "一句话判断（主语是真实人物/自己）", "type": "person_judgment|world_view|self_identity|preference", "challenges": []}}]
 
 type 说明：
-- person_judgment: 对某个人的判断（如"斯扎拉克说话绕但没恶意"）
-- world_view: 对世界/事物的看法（如"修仙界讲究实力为尊"）
+- person_judgment: 对某个真实群友的判断（如"斯扎拉克对跑团细节要求严格"）
+- world_view: 对真实世界/事物的看法
 - self_identity: 对自己的认知（如"我不喜欢被当成工具"）
-- preference: 偏好（如"我对深夜聊天没什么兴趣"）
+- preference: bot 自己的重要偏好（非琐碎口味）
 
 challenges: 如果这条新判断与已有信念矛盾，列出矛盾信念的 ID。
 
@@ -106,13 +117,14 @@ class BeliefEngine:
                                 self.db.add_belief_source(similar["id"], mid)
                     continue
 
-                # 新增信念
+                # 新增信念（进入待审，避免低质/误判直接生效注入；在 WebUI 信念页批准后才 active）
                 belief_id = self.db.add_belief(
                     content=content,
                     belief_type=belief_type,
                     bot_id=self.bot_id,
                     strength=0.4,  # 初始强度较低，需要多次强化
                     sources=source_memory_ids[:10] if source_memory_ids else [],
+                    status="pending",
                 )
                 new_beliefs.append({"id": belief_id, "content": content, "type": belief_type})
 
@@ -156,6 +168,10 @@ class BeliefEngine:
             if b["id"] not in seen_ids:
                 seen_ids.add(b["id"])
                 unique_beliefs.append(b)
+
+        # 按 strength 阈值过滤：挡掉被动摇到很低的低质信念（已批准 active 默认 0.4 仍通过）
+        _MIN_INJECT_STRENGTH = 0.35
+        unique_beliefs = [b for b in unique_beliefs if (b.get("strength") or 0) >= _MIN_INJECT_STRENGTH]
 
         if not unique_beliefs:
             return ""
