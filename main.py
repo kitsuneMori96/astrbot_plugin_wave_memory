@@ -50,6 +50,7 @@ from .services.concern_tracker import ConcernTracker
 from .services.mood_trajectory import MoodTrajectory
 from .services.subjective_time import SubjectiveTime
 from .services.desire_engine import DesireEngine
+from .services.belief_engine import BeliefEngine
 from .services.jargon.service import JargonService
 from .services.few_shot.service import FewShotService
 
@@ -683,6 +684,54 @@ class WaveMemoryPlugin(Star):
         else:
             self.self_reflect = None
 
+        # ─── BDI / 灵魂子系统实例化（修复 06-12 集体停摆：原代码仅有 hasattr 守卫调用，缺实例化）───
+        soul_bot = experience_bot or reflect_bot
+        soul_bot_id = soul_bot.qq_id if soul_bot else ""
+        # 信念引擎（提取在 consolidation 内触发，注入在 on_llm_request）
+        try:
+            if self.tag_llm_provider_id and soul_bot_id:
+                belief_llm = LLMFallbackClient(
+                    context=self.context,
+                    provider_ids=build_provider_chain(self.tag_llm_provider_id),
+                    log_prefix="[BeliefEngine]",
+                )
+                self.belief_engine = BeliefEngine(db=self.db, llm_client=belief_llm, bot_id=soul_bot_id)
+                # 把信念引擎接到 consolidation，让摘要提取信念重新生效
+                if getattr(self, "consolidation", None):
+                    self.consolidation.belief_engine = self.belief_engine
+            else:
+                self.belief_engine = None
+        except Exception as e:
+            logger.warning(f"[WaveMemory] BeliefEngine init failed: {e}")
+            self.belief_engine = None
+        # 关切 / 情绪轨迹 / 时间锚点（纯 DB，无需 LLM）
+        try:
+            self.concern_tracker = ConcernTracker(db=self.db, bot_id=soul_bot_id)
+        except Exception as e:
+            logger.warning(f"[WaveMemory] ConcernTracker init failed: {e}")
+            self.concern_tracker = None
+        try:
+            self.mood_trajectory = MoodTrajectory(db=self.db, bot_id=soul_bot_id)
+        except Exception as e:
+            logger.warning(f"[WaveMemory] MoodTrajectory init failed: {e}")
+            self.mood_trajectory = None
+        try:
+            self.subjective_time = SubjectiveTime(db=self.db, bot_id=soul_bot_id)
+        except Exception as e:
+            logger.warning(f"[WaveMemory] SubjectiveTime init failed: {e}")
+            self.subjective_time = None
+        # 欲望引擎（依赖信念引擎）
+        try:
+            self.desire_engine = DesireEngine(belief_engine=self.belief_engine, bot_id=soul_bot_id)
+        except Exception as e:
+            logger.warning(f"[WaveMemory] DesireEngine init failed: {e}")
+            self.desire_engine = None
+        logger.info(
+            f"[WaveMemory] 灵魂子系统就绪: belief={bool(self.belief_engine)} "
+            f"concern={bool(self.concern_tracker)} mood_traj={bool(self.mood_trajectory)} "
+            f"time_anchor={bool(self.subjective_time)} desire={bool(self.desire_engine)}"
+        )
+
         # 高频互动者缓存预热 (US-2.3)
         try:
             from .utils.cache import get_cache_manager
@@ -833,13 +882,21 @@ class WaveMemoryPlugin(Star):
                 self.concern_tracker.add(topic)
 
         mood_impact = result.get("mood_impact")
-        if mood_impact is not None and abs(mood_impact) > 0.2 and hasattr(self, 'mood_trajectory'):
+        if mood_impact is not None and abs(mood_impact) > 0.2 and hasattr(self, 'mood_trajectory') and self.mood_trajectory:
             cause = f"{nickname or sender_id}: {inner[:30]}" if inner else ""
             self.mood_trajectory.record(
                 valence=mood_impact,
                 arousal=min(1.0, abs(mood_impact) * 1.5),
                 cause=cause,
             )
+            # 强情绪事件沉淀为时间锚点（修复 add_anchor 无调用点）
+            if abs(mood_impact) > 0.5 and getattr(self, 'subjective_time', None):
+                try:
+                    summary = (f"{nickname or sender_id}: {inner}" if inner else cause)[:80]
+                    if summary:
+                        self.subjective_time.add_anchor(summary, emotional_weight=min(1.0, abs(mood_impact)))
+                except Exception:
+                    pass
 
         # 根据行动决策
         if action == "ignore":
