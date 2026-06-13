@@ -21,7 +21,7 @@ async def list_beliefs():
     limit = int(request.args.get("limit", 50))
     offset = int(request.args.get("offset", 0))
 
-    sql = "SELECT id, content, status, confidence, source, created_at, updated_at FROM beliefs WHERE 1=1"
+    sql = "SELECT id, content, type, strength, bot_id, sources, status, created_at, last_reinforced FROM beliefs WHERE 1=1"
     params = []
     if status:
         sql += " AND status = ?"
@@ -34,8 +34,9 @@ async def list_beliefs():
     pending_count = c.db.conn.execute("SELECT COUNT(*) FROM beliefs WHERE status = 'pending'").fetchone()[0]
 
     items = [
-        {"id": r[0], "content": r[1], "status": r[2], "confidence": r[3],
-         "source": r[4], "created_at": r[5], "updated_at": r[6]}
+        {"id": r[0], "content": r[1], "type": r[2], "confidence": r[3],
+         "source": r[4], "sources": r[5], "status": r[6],
+         "created_at": r[7], "updated_at": r[8]}
         for r in rows
     ]
     return jsonify({"items": items, "total": total, "pending_count": pending_count})
@@ -47,7 +48,7 @@ async def approve_belief(belief_id: int):
     """审核通过：pending → active。"""
     c = get_container()
     c.db.conn.execute(
-        "UPDATE beliefs SET status = 'active', updated_at = ? WHERE id = ? AND status = 'pending'",
+        "UPDATE beliefs SET status = 'active', last_reinforced = ? WHERE id = ? AND status IN ('pending','challenged')",
         (int(time.time()), belief_id),
     )
     c.db.conn.commit()
@@ -60,8 +61,8 @@ async def archive_belief(belief_id: int):
     """归档信念。"""
     c = get_container()
     c.db.conn.execute(
-        "UPDATE beliefs SET status = 'archived', updated_at = ? WHERE id = ?",
-        (int(time.time()), belief_id),
+        "UPDATE beliefs SET status = 'archived', archived_reason = ? WHERE id = ?",
+        ("webui_manual", belief_id),
     )
     c.db.conn.commit()
     return jsonify({"ok": True, "belief_id": belief_id, "new_status": "archived"})

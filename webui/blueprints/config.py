@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from quart import Blueprint, jsonify, request
 
@@ -10,6 +11,36 @@ from ..container import get_container
 from ..middleware.auth import require_auth
 
 config_bp = Blueprint("config", __name__, url_prefix="/api")
+
+# 插件根目录下的 _conf_schema.json（webui/blueprints/config.py 往上 2 级）
+_SCHEMA_PATH = Path(__file__).resolve().parents[2] / "_conf_schema.json"
+
+
+def _load_schema() -> dict:
+    """读取插件配置 schema。"""
+    try:
+        return json.loads(_SCHEMA_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _coerce(value, type_name: str):
+    """按 schema 声明的类型转换前端传入的值。"""
+    try:
+        if type_name == "bool":
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.strip().lower() in ("1", "true", "yes", "on")
+            return bool(value)
+        if type_name == "int":
+            if isinstance(value, bool):
+                return int(value)
+            return int(float(value)) if value != "" and value is not None else 0
+        # string / 其它：保持原样（含可表示小数的 string 字段）
+        return value
+    except (ValueError, TypeError):
+        return value
 
 
 @config_bp.route("/config", methods=["GET"])
@@ -117,6 +148,103 @@ async def update_hot_config():
     if validated:
         hot.update(validated)
     return jsonify({"ok": len(errors) == 0, "updated": list(validated.keys()), "errors": errors})
+
+
+@config_bp.route("/config/schema", methods=["GET"])
+@require_auth
+async def get_config_schema():
+    """返回完整配置 schema + 当前实际值，供前端动态生成全量表单。"""
+    c = get_container()
+    cfg = c.plugin_config
+    schema = _load_schema()
+
+    groups = []
+    for key, meta in schema.items():
+        if not isinstance(meta, dict):
+            continue
+        mtype = meta.get("type", "string")
+        if mtype == "object":
+            items = []
+            cur_group = cfg.get(key, {}) or {}
+            for sub_key, sub_meta in (meta.get("items", {}) or {}).items():
+                if not isinstance(sub_meta, dict):
+                    continue
+                default = sub_meta.get("default")
+                items.append({
+                    "key": sub_key,
+                    "type": sub_meta.get("type", "string"),
+                    "description": sub_meta.get("description", sub_key),
+                    "hint": sub_meta.get("hint", ""),
+                    "default": default,
+                    "value": cur_group.get(sub_key, default),
+                    "special": sub_meta.get("_special", ""),
+                })
+            groups.append({
+                "key": key, "kind": "object",
+                "description": meta.get("description", key),
+                "hint": meta.get("hint", ""),
+                "items": items,
+            })
+        else:
+            default = meta.get("default")
+            groups.append({
+                "key": key, "kind": "scalar",
+                "type": mtype,
+                "description": meta.get("description", key),
+                "hint": meta.get("hint", ""),
+                "default": default,
+                "value": cfg.get(key, default),
+                "special": meta.get("_special", ""),
+            })
+
+    return jsonify({"groups": groups})
+
+
+@config_bp.route("/config/full", methods=["POST"])
+@require_auth
+async def update_config_full():
+    """按 schema 校验并保存任意配置项（全量编辑入口）。"""
+    c = get_container()
+    cfg = c.plugin_config
+    schema = _load_schema()
+    body = await request.get_json(silent=True) or {}
+
+    changed = []
+    errors = []
+
+    for key, incoming in body.items():
+        meta = schema.get(key)
+        if not isinstance(meta, dict):
+            errors.append(f"未知配置项: {key}")
+            continue
+        mtype = meta.get("type", "string")
+        if mtype == "object":
+            if not isinstance(incoming, dict):
+                errors.append(f"{key} 应为对象")
+                continue
+            sub_schema = meta.get("items", {}) or {}
+            existing = dict(cfg.get(key, {}) or {})
+            for sub_key, sub_val in incoming.items():
+                sub_meta = sub_schema.get(sub_key)
+                if not isinstance(sub_meta, dict):
+                    errors.append(f"未知配置项: {key}.{sub_key}")
+                    continue
+                existing[sub_key] = _coerce(sub_val, sub_meta.get("type", "string"))
+            cfg[key] = existing
+            changed.append(key)
+        else:
+            cfg[key] = _coerce(incoming, mtype)
+            changed.append(key)
+
+    if changed and hasattr(cfg, "save_config"):
+        cfg.save_config()
+
+    return jsonify({
+        "ok": len(errors) == 0,
+        "changed": changed,
+        "errors": errors,
+        "message": "配置已保存，部分参数（数据库/端口/维度）需重启插件生效",
+    })
 
 
 @config_bp.route("/providers", methods=["GET"])

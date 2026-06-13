@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Wave Memory · 管理面板</title>
+    <script defer src="https://cdn.jsdelivr.net/npm/@alpinejs/collapse@3.x.x/dist/cdn.min.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -111,6 +112,54 @@
         /* ─── Animations ─── */
         @keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
         [x-cloak] { display: none !important; }
+
+        /* ─── shadcn-flavored components ─── */
+        .btn-outline { background: transparent; color: var(--fg); border: 1px solid var(--border); }
+        .btn-outline:hover:not(:disabled) { background: var(--muted); border-color: var(--border-hover); }
+        .btn-destructive { background: var(--danger); color: #fff; }
+        .btn-destructive:hover:not(:disabled) { opacity: 0.88; }
+        .btn-success { background: var(--success); color: #fff; }
+        .btn-success:hover:not(:disabled) { opacity: 0.88; }
+        .btn-xs { padding: 4px 10px; font-size: 11px; border-radius: 7px; }
+
+        /* Select (shadcn) */
+        .select {
+            padding: 6px 12px; border-radius: 8px; font-size: 12px;
+            background: var(--muted); border: 1px solid var(--border); color: var(--fg);
+            outline: none; transition: border-color 0.15s, box-shadow 0.15s; cursor: pointer;
+        }
+        .select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-dim); }
+        .input:focus { box-shadow: 0 0 0 3px var(--primary-dim); }
+
+        /* Label + field */
+        .field-label { font-size: 11px; font-weight: 500; color: var(--fg); display:block; margin-bottom: 4px; }
+        .field-hint { font-size: 10.5px; color: var(--muted-fg); line-height: 1.5; margin-top: 4px; }
+        .switch-row { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding:10px 12px; border-radius:9px; background: var(--muted); }
+
+        /* Accordion (config groups) */
+        .accordion-item { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--card); }
+        .accordion-trigger { display:flex; align-items:center; justify-content:space-between; width:100%; padding:14px 16px; cursor:pointer; transition: background 0.15s; }
+        .accordion-trigger:hover { background: var(--card-hover); }
+        .accordion-chevron { transition: transform 0.2s; }
+        .accordion-chevron.open { transform: rotate(90deg); }
+
+        /* Dialog / modal */
+        .dialog-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,0.55); backdrop-filter: blur(2px); display:flex; align-items:center; justify-content:center; padding: 16px; animation: fadeIn 0.12s; }
+        .dialog-content { background: var(--card); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow-lg); width: 100%; max-width: 520px; max-height: 88vh; overflow-y: auto; }
+
+        /* Separator */
+        .separator { height: 1px; background: var(--border); width: 100%; }
+
+        /* Empty state */
+        .empty-state { text-align:center; padding: 48px 16px; color: var(--muted-fg); font-size: 12px; }
+
+        /* Status pills */
+        .pill { padding: 2px 9px; border-radius: 999px; font-size: 10.5px; font-weight: 600; white-space: nowrap; }
+        .pill-pending { background: rgba(245,158,11,0.14); color: #fbbf24; }
+        .pill-active { background: rgba(16,185,129,0.14); color: #34d399; }
+        .pill-archived { background: rgba(100,116,139,0.16); color: #94a3b8; }
+        .pill-rejected { background: rgba(239,68,68,0.14); color: #f87171; }
+        .pill-global { background: rgba(139,92,246,0.16); color: var(--primary); }
     </style>
 </head>
 <body class="bg-[var(--bg)] text-[var(--fg)] min-h-screen transition-colors duration-300" x-data="dashboard()">
@@ -130,7 +179,13 @@
             <button class="tab-btn px-3 py-1.5 text-xs rounded-md" :class="tab==='overview' && 'active'" @click="tab='overview'">概览</button>
             <button class="tab-btn px-3 py-1.5 text-xs rounded-md" :class="tab==='memories' && 'active'" @click="tab='memories'; loadMemories()">记忆管理</button>
             <button class="tab-btn px-3 py-1.5 text-xs rounded-md" :class="tab==='import' && 'active'" @click="tab='import'; loadProviders()">智能导入</button>
-            <button class="tab-btn px-3 py-1.5 text-xs rounded-md" :class="tab==='config' && 'active'" @click="tab='config'">配置</button>
+            <button class="tab-btn px-3 py-1.5 text-xs rounded-md" :class="tab==='beliefs' && 'active'" @click="tab='beliefs'; loadBeliefs()">
+                信念<span x-show="beliefPending>0" class="ml-1 pill pill-pending" x-text="beliefPending"></span>
+            </button>
+            <button class="tab-btn px-3 py-1.5 text-xs rounded-md" :class="tab==='jargon' && 'active'" @click="tab='jargon'; loadJargon()">
+                黑话<span x-show="jargonPending>0" class="ml-1 pill pill-pending" x-text="jargonPending"></span>
+            </button>
+            <button class="tab-btn px-3 py-1.5 text-xs rounded-md" :class="tab==='config' && 'active'" @click="tab='config'; loadSchema()">配置</button>
         </nav>
     </div>
     <div class="flex items-center gap-2">
@@ -530,157 +585,229 @@
         </div>
     </div>
 
+    <!-- ═══ 信念审核 Tab ═══ -->
+    <div x-show="tab==='beliefs'" x-cloak>
+        <div class="flex flex-wrap items-center gap-2 mt-4 mb-3">
+            <select x-model="beliefFilter" @change="loadBeliefs()" class="select w-32">
+                <option value="">全部状态</option>
+                <option value="pending">待审核</option>
+                <option value="active">已生效</option>
+                <option value="archived">已归档</option>
+            </select>
+            <button @click="loadBeliefs()" class="btn btn-outline btn-xs">🔄 刷新</button>
+            <div class="ml-auto text-xs" style="color:var(--muted-fg)">
+                待审 <span class="font-mono" style="color:var(--warning)" x-text="beliefPending"></span> ·
+                共 <span class="font-mono" x-text="beliefTotal"></span> 条
+            </div>
+        </div>
+
+        <div x-show="beliefs.length === 0" class="empty-state">暂无信念记录</div>
+
+        <div class="space-y-2.5" x-show="beliefs.length > 0">
+            <template x-for="b in beliefs" :key="b.id">
+                <div class="card !p-3.5">
+                    <div class="flex items-start gap-3">
+                        <div class="flex-1 min-w-0">
+                            <div class="flex items-center gap-2 mb-1.5">
+                                <span class="pill" :class="`pill-${b.status}`" x-text="{pending:'待审核',active:'已生效',archived:'已归档'}[b.status]||b.status"></span>
+                                <span class="text-xs font-mono" style="color:var(--muted-fg)">#<span x-text="b.id"></span></span>
+                                <span x-show="b.source" class="text-xs" style="color:var(--muted-fg)" x-text="'来源: '+b.source"></span>
+                                <span x-show="b.confidence!=null" class="text-xs font-mono ml-auto" style="color:var(--primary)" x-text="'置信 '+Math.round((b.confidence||0)*100)+'%'"></span>
+                            </div>
+                            <div class="text-xs leading-relaxed" x-text="b.content"></div>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2 mt-3 pt-3" style="border-top:1px solid var(--border)">
+                        <button x-show="b.status==='pending'" @click="approveBelief(b.id)" class="btn btn-success btn-xs">✓ 通过</button>
+                        <button x-show="b.status!=='archived'" @click="archiveBelief(b.id)" class="btn btn-outline btn-xs">📥 归档</button>
+                        <button @click="deleteBelief(b.id)" class="btn btn-outline btn-xs ml-auto" style="color:var(--danger)">🗑 删除</button>
+                    </div>
+                </div>
+            </template>
+        </div>
+    </div>
+
+    <!-- ═══ 黑话审核 Tab ═══ -->
+    <div x-show="tab==='jargon'" x-cloak>
+        <div class="flex flex-wrap items-center gap-2 mt-4 mb-3">
+            <input type="text" x-model="jargonGroup" @keyup.enter="loadJargon()" placeholder="按群号筛选..." class="input w-36">
+            <select x-model="jargonFilter" @change="loadJargon()" class="select w-32">
+                <option value="">全部状态</option>
+                <option value="pending">待确认</option>
+                <option value="confirmed">已确认</option>
+                <option value="rejected">已否决</option>
+            </select>
+            <button @click="loadJargon()" class="btn btn-outline btn-xs">🔄 刷新</button>
+            <div class="ml-auto text-xs" style="color:var(--muted-fg)">
+                待确认 <span class="font-mono" style="color:var(--warning)" x-text="jargonPending"></span> ·
+                共 <span class="font-mono" x-text="jargonTotal"></span> 条
+            </div>
+        </div>
+
+        <div x-show="jargonItems.length === 0" class="empty-state">暂无黑话记录</div>
+
+        <div class="card !p-0 overflow-hidden" x-show="jargonItems.length > 0">
+            <table class="w-full text-xs">
+                <thead>
+                    <tr style="border-bottom:1px solid var(--border); color:var(--muted-fg)">
+                        <th class="px-3 py-2.5 text-left font-medium">词条</th>
+                        <th class="px-3 py-2.5 text-left font-medium">释义</th>
+                        <th class="px-3 py-2.5 text-left font-medium w-16">频次</th>
+                        <th class="px-3 py-2.5 text-left font-medium w-20">状态</th>
+                        <th class="px-3 py-2.5 text-left font-medium w-16">群</th>
+                        <th class="px-3 py-2.5 text-right font-medium w-56">操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <template x-for="j in jargonItems" :key="j.id">
+                        <tr class="table-row" style="border-bottom:1px solid var(--border)">
+                            <td class="px-3 py-2.5 font-medium" x-text="j.word"></td>
+                            <td class="px-3 py-2.5" style="color:var(--muted-fg); max-width:240px" x-text="j.meaning || '—'"></td>
+                            <td class="px-3 py-2.5 font-mono" x-text="j.frequency"></td>
+                            <td class="px-3 py-2.5">
+                                <span class="pill" :class="j.is_jargon===1?'pill-active':(j.is_jargon===0?'pill-rejected':'pill-pending')"
+                                    x-text="j.is_jargon===1?'已确认':(j.is_jargon===0?'已否决':'待确认')"></span>
+                            </td>
+                            <td class="px-3 py-2.5">
+                                <span x-show="j.is_global" class="pill pill-global">全局</span>
+                                <span x-show="!j.is_global" class="font-mono" style="color:var(--muted-fg)" x-text="j.group_id || '—'"></span>
+                            </td>
+                            <td class="px-3 py-2.5 text-right whitespace-nowrap">
+                                <button @click="reviewJargon(j.id,'approve')" class="btn btn-success btn-xs">✓</button>
+                                <button @click="reviewJargon(j.id,'reject')" class="btn btn-outline btn-xs" style="color:var(--danger)">✕</button>
+                                <button @click="openJargonEdit(j)" class="btn btn-outline btn-xs">✎</button>
+                                <button @click="toggleJargonGlobal(j.id)" class="btn btn-outline btn-xs" :title="j.is_global?'取消全局':'设为全局'">🌐</button>
+                                <button @click="deleteJargon(j.id)" class="btn btn-outline btn-xs" style="color:var(--danger)">🗑</button>
+                            </td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- 编辑黑话弹窗 -->
+        <div x-show="jargonEdit" x-cloak class="dialog-overlay" @click.self="jargonEdit=null">
+            <div class="dialog-content" x-show="jargonEdit">
+                <div class="px-5 py-4" style="border-bottom:1px solid var(--border)">
+                    <h3 class="text-sm font-semibold">编辑黑话 #<span x-text="jargonEdit?.id"></span></h3>
+                </div>
+                <div class="px-5 py-4 space-y-3">
+                    <div>
+                        <label class="field-label">词条</label>
+                        <input type="text" x-model="jargonEditForm.word" class="input w-full">
+                    </div>
+                    <div>
+                        <label class="field-label">释义</label>
+                        <textarea x-model="jargonEditForm.meaning" rows="3" class="input w-full" style="resize:vertical"></textarea>
+                    </div>
+                </div>
+                <div class="px-5 py-4 flex justify-end gap-2" style="border-top:1px solid var(--border)">
+                    <button @click="jargonEdit=null" class="btn btn-outline btn-xs">取消</button>
+                    <button @click="saveJargonEdit()" class="btn btn-primary btn-xs">保存</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- ═══ 配置 Tab ═══ -->
     <div x-show="tab==='config'" x-cloak>
         <div class="flex items-center justify-between mt-4 mb-3">
-            <span class="text-xs" style="color:var(--muted-fg)">修改后点击保存，部分参数需重启生效</span>
+            <div>
+                <span class="text-xs" style="color:var(--muted-fg)">全量配置（按 schema 自动生成）。修改后点击保存，部分参数需重启生效</span>
+            </div>
             <div class="flex gap-2">
-                <button @click="loadConfig()" class="btn btn-muted text-xs">🔄 重载</button>
-                <button @click="saveConfig()" class="btn btn-ghost text-xs" :disabled="configSaving">💾 保存配置</button>
+                <input type="text" x-model="schemaSearch" placeholder="搜索配置项..." class="input text-xs w-40">
+                <button @click="loadSchema()" class="btn btn-outline btn-xs">🔄 重载</button>
+                <button @click="saveSchemaConfig()" class="btn btn-primary btn-xs" :disabled="configSaving">💾 保存配置</button>
             </div>
         </div>
-        <div x-show="configMsg" class="text-xs mb-3 p-2 rounded" :style="`background:var(--muted); color:var(${configMsgOk ? '--success' : '--error'})`" x-text="configMsg"></div>
+        <div x-show="configMsg" class="text-xs mb-3 p-2.5 rounded-lg" :style="`background:var(--muted); color:var(${configMsgOk ? '--success' : '--danger'})`" x-text="configMsg"></div>
 
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <!-- 查询配置 -->
-            <div class="card">
-                <h3 class="text-sm font-medium mb-3">🔍 记忆召回</h3>
-                <div class="space-y-3">
-                    <label class="flex items-center justify-between p-2.5 rounded cursor-pointer" style="background:var(--muted)">
-                        <span class="text-xs">自动注入记忆</span>
-                        <input type="checkbox" x-model="pluginConfig.query.enable_auto_inject" class="toggle">
-                    </label>
-                    <div>
-                        <label class="text-xs block mb-1" style="color:var(--muted-fg)">注入 Top-K</label>
-                        <input type="number" x-model.number="pluginConfig.query.inject_top_k" class="input text-xs w-full" min="1" max="20">
-                    </div>
-                    <div>
-                        <label class="text-xs block mb-1" style="color:var(--muted-fg)">最低相似度</label>
-                        <input type="text" x-model="pluginConfig.query.min_similarity" class="input text-xs w-full" placeholder="0.35">
-                    </div>
-                    <label class="flex items-center justify-between p-2.5 rounded cursor-pointer" style="background:var(--muted)">
-                        <span class="text-xs">脉冲传播</span>
-                        <input type="checkbox" x-model="pluginConfig.query.enable_spike_routing" class="toggle">
-                    </label>
-                    <label class="flex items-center justify-between p-2.5 rounded cursor-pointer" style="background:var(--muted)">
-                        <span class="text-xs">残差金字塔</span>
-                        <input type="checkbox" x-model="pluginConfig.query.enable_residual_pyramid" class="toggle">
-                    </label>
-                    <label class="flex items-center justify-between p-2.5 rounded cursor-pointer" style="background:var(--muted)">
-                        <span class="text-xs">EPA 分析（实验性）</span>
-                        <input type="checkbox" x-model="pluginConfig.query.enable_epa" class="toggle">
-                    </label>
-                    <label class="flex items-center justify-between p-2.5 rounded cursor-pointer" style="background:var(--muted)">
-                        <span class="text-xs">测地线重排（实验性）</span>
-                        <input type="checkbox" x-model="pluginConfig.query.enable_geodesic_rerank" class="toggle">
-                    </label>
-                </div>
-            </div>
+        <div x-show="schemaGroups.length === 0" class="empty-state">加载配置中...</div>
 
-            <!-- 消息过滤 -->
-            <div class="card">
-                <h3 class="text-sm font-medium mb-3">📝 消息过滤</h3>
-                <div class="space-y-3">
-                    <div>
-                        <label class="text-xs block mb-1" style="color:var(--muted-fg)">最小消息长度</label>
-                        <input type="number" x-model.number="pluginConfig.filter.min_message_length" class="input text-xs w-full" min="1" max="100">
+        <!-- Accordion: 每个配置组一节 -->
+        <div class="space-y-2.5" x-show="schemaGroups.length > 0">
+            <template x-for="g in filteredSchemaGroups" :key="g.key">
+                <div class="accordion-item">
+                    <div class="accordion-trigger" @click="toggleGroup(g.key)">
+                        <div class="flex items-center gap-2 min-w-0">
+                            <svg class="w-3.5 h-3.5 accordion-chevron" :class="openGroups.includes(g.key) && 'open'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                            <span class="text-xs font-semibold" x-text="g.description"></span>
+                            <span class="text-xs font-mono" style="color:var(--muted-fg)" x-text="g.key"></span>
+                        </div>
+                        <span class="text-xs" style="color:var(--muted-fg)" x-text="g.kind==='object' ? (g.items.length+' 项') : ''"></span>
                     </div>
-                    <div>
-                        <label class="text-xs block mb-1" style="color:var(--muted-fg)">最大消息长度</label>
-                        <input type="number" x-model.number="pluginConfig.filter.max_message_length" class="input text-xs w-full" min="100" max="10000">
-                    </div>
-                    <label class="flex items-center justify-between p-2.5 rounded cursor-pointer" style="background:var(--muted)">
-                        <span class="text-xs">忽略 Bot 自身消息</span>
-                        <input type="checkbox" x-model="pluginConfig.filter.ignore_bot_messages" class="toggle">
-                    </label>
-                    <div>
-                        <label class="text-xs block mb-1" style="color:var(--muted-fg)">群组白名单（逗号分隔）</label>
-                        <input type="text" x-model="pluginConfig.filter.group_whitelist" class="input text-xs w-full" placeholder="留空=全部">
-                    </div>
-                    <div>
-                        <label class="text-xs block mb-1" style="color:var(--muted-fg)">群组黑名单（逗号分隔）</label>
-                        <input type="text" x-model="pluginConfig.filter.group_blacklist" class="input text-xs w-full" placeholder="留空=不排除">
-                    </div>
-                </div>
-            </div>
-
-            <!-- 存储与性能 -->
-            <div class="card">
-                <h3 class="text-sm font-medium mb-3">⚙️ 存储与性能</h3>
-                <div class="space-y-3">
-                    <div>
-                        <label class="text-xs block mb-1" style="color:var(--muted-fg)">最大记忆条数</label>
-                        <input type="number" x-model.number="pluginConfig.storage.max_memories" class="input text-xs w-full" min="1000" max="1000000">
-                    </div>
-                    <label class="flex items-center justify-between p-2.5 rounded cursor-pointer" style="background:var(--muted)">
-                        <span class="text-xs">记忆衰减</span>
-                        <input type="checkbox" x-model="pluginConfig.storage.memory_decay_enabled" class="toggle">
-                    </label>
-                    <div>
-                        <label class="text-xs block mb-1" style="color:var(--muted-fg)">每日衰减率</label>
-                        <input type="text" x-model="pluginConfig.storage.decay_rate" class="input text-xs w-full" placeholder="0.995">
-                    </div>
-                    <label class="flex items-center justify-between p-2.5 rounded cursor-pointer" style="background:var(--muted)">
-                        <span class="text-xs">自动清理</span>
-                        <input type="checkbox" x-model="pluginConfig.storage.auto_cleanup_enabled" class="toggle">
-                    </label>
-                    <div>
-                        <label class="text-xs block mb-1" style="color:var(--muted-fg)">Embedding 批量大小</label>
-                        <input type="number" x-model.number="pluginConfig.performance.embedding_batch_size" class="input text-xs w-full" min="1" max="100">
-                    </div>
-                    <div>
-                        <label class="text-xs block mb-1" style="color:var(--muted-fg)">写入刷新间隔（秒）</label>
-                        <input type="number" x-model.number="pluginConfig.performance.write_flush_interval" class="input text-xs w-full" min="5" max="300">
-                    </div>
-                    <div>
-                        <label class="text-xs block mb-1" style="color:var(--muted-fg)">共现矩阵重建间隔（秒）</label>
-                        <input type="number" x-model.number="pluginConfig.performance.cooccurrence_rebuild_interval" class="input text-xs w-full" min="0" max="86400">
+                    <div x-show="openGroups.includes(g.key)" x-collapse>
+                        <div class="separator"></div>
+                        <div class="p-4">
+                            <p x-show="g.hint" class="field-hint mb-3" x-text="g.hint"></p>
+                            <!-- object 组：渲染子项 -->
+                            <template x-if="g.kind==='object'">
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-x-5 gap-y-3.5">
+                                    <template x-for="it in g.items" :key="it.key">
+                                        <div :class="it.type==='bool' && 'md:col-span-2'">
+                                            <!-- bool → switch -->
+                                            <template x-if="it.type==='bool'">
+                                                <label class="switch-row cursor-pointer">
+                                                    <div class="min-w-0">
+                                                        <span class="text-xs font-medium" x-text="it.description"></span>
+                                                        <p x-show="it.hint" class="field-hint" x-text="it.hint"></p>
+                                                    </div>
+                                                    <input type="checkbox" class="toggle shrink-0" x-model="it.value">
+                                                </label>
+                                            </template>
+                                            <!-- provider 下拉 -->
+                                            <template x-if="it.type!=='bool' && it.special==='select_provider'">
+                                                <div>
+                                                    <label class="field-label" x-text="it.description"></label>
+                                                    <select class="select w-full" x-model="it.value">
+                                                        <option value="">（留空禁用）</option>
+                                                        <template x-for="p in providers" :key="p.id">
+                                                            <option :value="p.id" x-text="`${p.id} · ${p.model}`"></option>
+                                                        </template>
+                                                    </select>
+                                                    <p x-show="it.hint" class="field-hint" x-text="it.hint"></p>
+                                                </div>
+                                            </template>
+                                            <!-- int / string → input -->
+                                            <template x-if="it.type!=='bool' && it.special!=='select_provider'">
+                                                <div>
+                                                    <label class="field-label" x-text="it.description"></label>
+                                                    <input :type="it.type==='int' ? 'number' : 'text'" class="input w-full"
+                                                        x-model="it.value" :placeholder="it.default">
+                                                    <p x-show="it.hint" class="field-hint" x-text="it.hint"></p>
+                                                </div>
+                                            </template>
+                                        </div>
+                                    </template>
+                                </div>
+                            </template>
+                            <!-- scalar 组（顶层标量项） -->
+                            <template x-if="g.kind==='scalar'">
+                                <div>
+                                    <template x-if="g.type==='bool'">
+                                        <label class="switch-row cursor-pointer">
+                                            <span class="text-xs font-medium" x-text="g.description"></span>
+                                            <input type="checkbox" class="toggle shrink-0" x-model="g.value">
+                                        </label>
+                                    </template>
+                                    <template x-if="g.type!=='bool' && g.special==='select_provider'">
+                                        <select class="select w-full" x-model="g.value">
+                                            <option value="">（留空禁用）</option>
+                                            <template x-for="p in providers" :key="p.id">
+                                                <option :value="p.id" x-text="`${p.id} · ${p.model}`"></option>
+                                            </template>
+                                        </select>
+                                    </template>
+                                    <template x-if="g.type!=='bool' && g.special!=='select_provider'">
+                                        <input :type="g.type==='int' ? 'number' : 'text'" class="input w-full" x-model="g.value" :placeholder="g.default">
+                                    </template>
+                                </div>
+                            </template>
+                        </div>
                     </div>
                 </div>
-            </div>
-
-            <!-- 人格与情绪 -->
-            <div class="card">
-                <h3 class="text-sm font-medium mb-3">🧠 人格与情绪</h3>
-                <div class="space-y-3">
-                    <label class="flex items-center justify-between p-2.5 rounded cursor-pointer" style="background:var(--muted)">
-                        <span class="text-xs">好感度系统</span>
-                        <input type="checkbox" x-model="pluginConfig.lifecycle.enable_affinity" class="toggle">
-                    </label>
-                    <label class="flex items-center justify-between p-2.5 rounded cursor-pointer" style="background:var(--muted)">
-                        <span class="text-xs">人格进化</span>
-                        <input type="checkbox" x-model="pluginConfig.lifecycle.enable_persona_evolution" class="toggle">
-                    </label>
-                    <label class="flex items-center justify-between p-2.5 rounded cursor-pointer" style="background:var(--muted)">
-                        <span class="text-xs">Bot 情绪</span>
-                        <input type="checkbox" x-model="pluginConfig.lifecycle.enable_mood" class="toggle">
-                    </label>
-                    <div>
-                        <label class="text-xs block mb-1" style="color:var(--muted-fg)">情绪持续时间（小时）</label>
-                        <input type="text" x-model="pluginConfig.lifecycle.mood_duration_hours" class="input text-xs w-full" placeholder="2.0">
-                    </div>
-                    <div>
-                        <label class="text-xs block mb-1" style="color:var(--muted-fg)">活跃消息阈值（30min）</label>
-                        <input type="number" x-model.number="pluginConfig.lifecycle.mood_msg_threshold" class="input text-xs w-full" min="5" max="200">
-                    </div>
-                    <label class="flex items-center justify-between p-2.5 rounded cursor-pointer" style="background:var(--muted)">
-                        <span class="text-xs">做梦系统</span>
-                        <input type="checkbox" x-model="pluginConfig.lifecycle.enable_dream" class="toggle">
-                    </label>
-                    <div>
-                        <label class="text-xs block mb-1" style="color:var(--muted-fg)">做梦间隔（小时）</label>
-                        <input type="text" x-model="pluginConfig.lifecycle.dream_interval_hours" class="input text-xs w-full" placeholder="6.0">
-                    </div>
-                    <label class="flex items-center justify-between p-2.5 rounded cursor-pointer" style="background:var(--muted)">
-                        <span class="text-xs">LLM 摘要整合</span>
-                        <input type="checkbox" x-model="pluginConfig.lifecycle.enable_consolidation" class="toggle">
-                    </label>
-                    <div>
-                        <label class="text-xs block mb-1" style="color:var(--muted-fg)">整合间隔（小时）</label>
-                        <input type="text" x-model="pluginConfig.lifecycle.consolidation_interval_hours" class="input text-xs w-full" placeholder="4.0">
-                    </div>
-                </div>
-            </div>
+            </template>
         </div>
 
         <!-- 热调参（运行时生效，无需重启） -->
@@ -776,6 +903,37 @@ function dashboard() {
         // 热调参
         hotParams: [],
 
+        // ─── 全量配置（schema 驱动） ───
+        schemaGroups: [],
+        openGroups: [],
+        schemaSearch: '',
+        get filteredSchemaGroups() {
+            const q = (this.schemaSearch || '').trim().toLowerCase();
+            if (!q) return this.schemaGroups;
+            return this.schemaGroups.filter(g => {
+                if (g.key.toLowerCase().includes(q) || (g.description||'').toLowerCase().includes(q)) return true;
+                if (g.kind === 'object') {
+                    return (g.items||[]).some(it => it.key.toLowerCase().includes(q) || (it.description||'').toLowerCase().includes(q));
+                }
+                return false;
+            });
+        },
+
+        // ─── 信念审核 ───
+        beliefs: [],
+        beliefFilter: '',
+        beliefTotal: 0,
+        beliefPending: 0,
+
+        // ─── 黑话审核 ───
+        jargonItems: [],
+        jargonFilter: '',
+        jargonGroup: '',
+        jargonTotal: 0,
+        jargonPending: 0,
+        jargonEdit: null,
+        jargonEditForm: { word: '', meaning: '' },
+
         async init() {
             // 读取主题偏好
             const saved = localStorage.getItem('wm-theme');
@@ -784,7 +942,7 @@ function dashboard() {
             await this.loadSystem();
             this.loadSenders();
             await this.loadProviders();
-            await this.loadConfig();
+            await this.loadSchema();
             await this.loadHotConfig();
         },
 
@@ -875,6 +1033,138 @@ function dashboard() {
                 this.configMsgOk = false;
             }
             setTimeout(() => this.configMsg = '', 5000);
+        },
+
+        // ─── 全量配置（schema 驱动） ───
+        async loadSchema() {
+            try {
+                const r = await fetch('/api/config/schema');
+                const d = await r.json();
+                this.schemaGroups = d.groups || [];
+                // 默认展开前 2 组
+                if (this.openGroups.length === 0) {
+                    this.openGroups = this.schemaGroups.slice(0, 2).map(g => g.key);
+                }
+            } catch(e) { console.error('loadSchema:', e); }
+        },
+
+        toggleGroup(key) {
+            const i = this.openGroups.indexOf(key);
+            if (i >= 0) this.openGroups.splice(i, 1);
+            else this.openGroups.push(key);
+        },
+
+        async saveSchemaConfig() {
+            this.configSaving = true;
+            this.configMsg = '';
+            // 组装 payload：object → {子项:值}，scalar → 值
+            const payload = {};
+            for (const g of this.schemaGroups) {
+                if (g.kind === 'object') {
+                    const obj = {};
+                    for (const it of g.items) {
+                        let v = it.value;
+                        if (it.type === 'int') v = (v === '' || v == null) ? 0 : parseInt(v, 10);
+                        obj[it.key] = v;
+                    }
+                    payload[g.key] = obj;
+                } else {
+                    let v = g.value;
+                    if (g.type === 'int') v = (v === '' || v == null) ? 0 : parseInt(v, 10);
+                    payload[g.key] = v;
+                }
+            }
+            try {
+                const r = await fetch('/api/config/full', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload),
+                });
+                const d = await r.json();
+                if (d.ok) {
+                    this.configMsg = '✓ ' + (d.message || '配置已保存');
+                    this.configMsgOk = true;
+                } else {
+                    this.configMsg = '✗ ' + (d.errors || []).join('; ');
+                    this.configMsgOk = false;
+                }
+            } catch(e) {
+                this.configMsg = '✗ 网络错误: ' + e.message;
+                this.configMsgOk = false;
+            }
+            this.configSaving = false;
+            setTimeout(() => this.configMsg = '', 6000);
+        },
+
+        // ─── 信念审核 ───
+        async loadBeliefs() {
+            try {
+                const params = new URLSearchParams({ limit: 100 });
+                if (this.beliefFilter) params.set('status', this.beliefFilter);
+                const r = await fetch('/api/beliefs/?' + params);
+                const d = await r.json();
+                this.beliefs = d.items || [];
+                this.beliefTotal = d.total || 0;
+                this.beliefPending = d.pending_count || 0;
+            } catch(e) { console.error('loadBeliefs:', e); }
+        },
+        async approveBelief(id) {
+            await fetch(`/api/beliefs/${id}/approve`, { method: 'POST' });
+            await this.loadBeliefs();
+        },
+        async archiveBelief(id) {
+            await fetch(`/api/beliefs/${id}/archive`, { method: 'POST' });
+            await this.loadBeliefs();
+        },
+        async deleteBelief(id) {
+            if (!confirm('确认删除该信念？')) return;
+            await fetch(`/api/beliefs/${id}`, { method: 'DELETE' });
+            await this.loadBeliefs();
+        },
+
+        // ─── 黑话审核 ───
+        async loadJargon() {
+            try {
+                const params = new URLSearchParams({ limit: 100 });
+                if (this.jargonFilter) params.set('status', this.jargonFilter);
+                if (this.jargonGroup) params.set('group_id', this.jargonGroup.trim());
+                const r = await fetch('/api/jargon/?' + params);
+                const d = await r.json();
+                this.jargonItems = d.items || [];
+                this.jargonTotal = d.total || 0;
+                this.jargonPending = this.jargonItems.filter(j => j.is_jargon == null).length;
+            } catch(e) { console.error('loadJargon:', e); }
+        },
+        async reviewJargon(id, action) {
+            await fetch(`/api/jargon/${id}/review`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ action }),
+            });
+            await this.loadJargon();
+        },
+        openJargonEdit(j) {
+            this.jargonEdit = j;
+            this.jargonEditForm = { word: j.word, meaning: j.meaning || '' };
+        },
+        async saveJargonEdit() {
+            if (!this.jargonEdit) return;
+            await fetch(`/api/jargon/${this.jargonEdit.id}`, {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(this.jargonEditForm),
+            });
+            this.jargonEdit = null;
+            await this.loadJargon();
+        },
+        async toggleJargonGlobal(id) {
+            await fetch(`/api/jargon/${id}/toggle_global`, { method: 'POST' });
+            await this.loadJargon();
+        },
+        async deleteJargon(id) {
+            if (!confirm('确认删除该黑话词条？')) return;
+            await fetch(`/api/jargon/${id}`, { method: 'DELETE' });
+            await this.loadJargon();
         },
 
         async loadSenders() {
