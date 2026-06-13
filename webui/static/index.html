@@ -185,6 +185,7 @@
             <button class="tab-btn px-3 py-1.5 text-xs rounded-md" :class="tab==='jargon' && 'active'" @click="tab='jargon'; loadJargon()">
                 黑话<span x-show="jargonPending>0" class="ml-1 pill pill-pending" x-text="jargonPending"></span>
             </button>
+            <button class="tab-btn px-3 py-1.5 text-xs rounded-md" :class="tab==='soul' && 'active'" @click="tab='soul'; loadSoul()">灵魂</button>
             <button class="tab-btn px-3 py-1.5 text-xs rounded-md" :class="tab==='config' && 'active'" @click="tab='config'; loadSchema()">配置</button>
         </nav>
     </div>
@@ -709,6 +710,84 @@
         </div>
     </div>
 
+    <!-- ═══ 灵魂状态 Tab ═══ -->
+    <div x-show="tab==='soul'" x-cloak>
+        <div class="flex items-center justify-between mt-4 mb-3">
+            <span class="text-xs" style="color:var(--muted-fg)">BDI 心智状态：关切焦点 · 情绪轨迹 · 时间锚点（情感记忆）</span>
+            <button @click="loadSoul()" class="btn btn-outline btn-xs">🔄 刷新</button>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <!-- 关切 -->
+            <div class="card">
+                <h3 class="text-sm font-medium mb-3 flex items-center gap-2">🎯 当前关切 <span class="text-xs" style="color:var(--muted-fg)" x-text="`(${concerns.length})`"></span></h3>
+                <div x-show="concerns.length === 0" class="empty-state !py-8">暂无关切焦点</div>
+                <div class="space-y-2.5" x-show="concerns.length > 0">
+                    <template x-for="c in concerns" :key="c.id">
+                        <div class="p-2.5 rounded-lg" style="background:var(--muted)">
+                            <div class="flex items-center justify-between gap-2 mb-1.5">
+                                <span class="text-xs font-medium truncate" x-text="c.topic"></span>
+                                <span class="text-xs font-mono shrink-0" style="color:var(--primary)" x-text="Math.round((c.intensity||0)*100)+'%'"></span>
+                            </div>
+                            <div class="w-full h-1.5 rounded-full" style="background:var(--border)">
+                                <div class="h-full rounded-full progress-bar" style="background:var(--primary)" :style="`width:${Math.round((c.intensity||0)*100)}%`"></div>
+                            </div>
+                            <div class="flex items-center gap-2 mt-1.5 text-xs" style="color:var(--muted-fg)">
+                                <span x-show="c.bot_id" x-text="c.bot_id"></span>
+                                <span x-show="c.last_triggered" x-text="'最近触发 '+fmtTime(c.last_triggered)"></span>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+
+            <!-- 时间锚点 -->
+            <div class="card">
+                <h3 class="text-sm font-medium mb-3 flex items-center gap-2">⚓ 时间锚点 <span class="text-xs" style="color:var(--muted-fg)" x-text="`(${timeAnchors.length})`"></span></h3>
+                <div x-show="timeAnchors.length === 0" class="empty-state !py-8">暂无时间锚点</div>
+                <div class="space-y-0" x-show="timeAnchors.length > 0">
+                    <template x-for="(a, i) in timeAnchors" :key="a.id">
+                        <div class="flex gap-3 pb-3" :class="i < timeAnchors.length-1 && 'border-l-2 ml-1.5'" style="border-color:var(--border)">
+                            <div class="shrink-0 -ml-1.5 mt-0.5 w-2.5 h-2.5 rounded-full" :style="`background:var(${(a.emotional_weight||0)>=0.6?'--danger':(a.emotional_weight||0)>=0.4?'--warning':'--primary'})`"></div>
+                            <div class="flex-1 min-w-0 pl-1">
+                                <div class="text-xs leading-relaxed" x-text="a.event_summary"></div>
+                                <div class="flex items-center gap-2 mt-1 text-xs" style="color:var(--muted-fg)">
+                                    <span x-text="fmtTime(a.timestamp)"></span>
+                                    <span class="font-mono" x-text="'情感权重 '+Math.round((a.emotional_weight||0)*100)+'%'"></span>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+
+        <!-- 情绪轨迹 -->
+        <div class="card mt-4">
+            <div class="flex items-center justify-between mb-3">
+                <h3 class="text-sm font-medium flex items-center gap-2">📈 情绪轨迹 <span class="text-xs" style="color:var(--muted-fg)" x-text="`(${moodTrajectory.length})`"></span></h3>
+                <input type="text" x-model="moodGroup" @keyup.enter="loadMood()" placeholder="按群号筛选..." class="input text-xs w-36">
+            </div>
+            <div x-show="moodTrajectory.length === 0" class="empty-state !py-8">暂无情绪记录</div>
+            <div x-show="moodTrajectory.length > 0">
+                <!-- SVG 折线图 -->
+                <svg :viewBox="`0 0 ${moodChart.w} ${moodChart.h}`" class="w-full" style="height:160px" preserveAspectRatio="none">
+                    <polyline :points="moodChart.points" fill="none" stroke="var(--primary)" stroke-width="2" vector-effect="non-scaling-stroke"/>
+                </svg>
+                <!-- 最近情绪标签 -->
+                <div class="flex flex-wrap gap-1.5 mt-3">
+                    <template x-for="(m, i) in moodTrajectory.slice(-12)" :key="i">
+                        <div class="flex items-center gap-1.5 px-2 py-1 rounded-md" style="background:var(--muted)">
+                            <span class="badge badge-emotion" x-text="m.type"></span>
+                            <span class="text-xs font-mono" style="color:var(--muted-fg)" x-text="Math.round((m.intensity||0)*100)+'%'"></span>
+                            <span x-show="m.is_active" class="pill pill-active">活跃</span>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- ═══ 配置 Tab ═══ -->
     <div x-show="tab==='config'" x-cloak>
         <div class="flex items-center justify-between mt-4 mb-3">
@@ -933,6 +1012,34 @@ function dashboard() {
         jargonPending: 0,
         jargonEdit: null,
         jargonEditForm: { word: '', meaning: '' },
+
+        // ─── 灵魂状态 ───
+        concerns: [],
+        timeAnchors: [],
+        moodTrajectory: [],
+        moodGroup: '',
+        get moodChart() {
+            const data = this.moodTrajectory;
+            const w = 600, h = 100, pad = 6;
+            if (!data.length) return { w, h, points: '', dots: [] };
+            const n = data.length;
+            const step = n > 1 ? (w - pad*2) / (n - 1) : 0;
+            const colorOf = (t) => {
+                const pos = ['cheerful','energetic','happy','excited'];
+                const neg = ['concerned','sad','angry','tired'];
+                if (pos.includes(t)) return 'var(--success)';
+                if (neg.includes(t)) return 'var(--danger)';
+                return 'var(--primary)';
+            };
+            const dots = data.map((m, i) => {
+                const x = pad + i * step;
+                let iv = Number(m.intensity);
+                if (!isFinite(iv)) iv = 0;
+                const y = h - pad - (Math.max(0, Math.min(1, iv)) * (h - pad*2));
+                return { x: x.toFixed(1), y: y.toFixed(1), color: colorOf(m.type) };
+            });
+            return { w, h, points: dots.map(d => `${d.x},${d.y}`).join(' '), dots };
+        },
 
         async init() {
             // 读取主题偏好
@@ -1165,6 +1272,41 @@ function dashboard() {
             if (!confirm('确认删除该黑话词条？')) return;
             await fetch(`/api/jargon/${id}`, { method: 'DELETE' });
             await this.loadJargon();
+        },
+
+        // ─── 灵魂状态 ───
+        fmtTime(ts) {
+            if (!ts) return '';
+            const d = new Date(ts * 1000);
+            if (isNaN(d.getTime())) return '';
+            const pad = (n) => String(n).padStart(2, '0');
+            return `${d.getMonth()+1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        },
+        async loadSoul() {
+            await Promise.all([this.loadConcerns(), this.loadAnchors(), this.loadMood()]);
+        },
+        async loadConcerns() {
+            try {
+                const r = await fetch('/api/concerns');
+                const d = await r.json();
+                this.concerns = d.items || [];
+            } catch(e) { console.error('loadConcerns:', e); }
+        },
+        async loadAnchors() {
+            try {
+                const r = await fetch('/api/time-anchors?limit=30');
+                const d = await r.json();
+                this.timeAnchors = d.items || [];
+            } catch(e) { console.error('loadAnchors:', e); }
+        },
+        async loadMood() {
+            try {
+                const params = new URLSearchParams({ limit: 100 });
+                if (this.moodGroup) params.set('group_id', this.moodGroup.trim());
+                const r = await fetch('/api/mood/trajectory?' + params);
+                const d = await r.json();
+                this.moodTrajectory = d.items || [];
+            } catch(e) { console.error('loadMood:', e); }
         },
 
         async loadSenders() {
