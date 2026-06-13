@@ -19,38 +19,221 @@ _import_lock = asyncio.Lock()
 @memories_bp.route("/memories", methods=["GET"])
 @require_auth
 async def list_memories():
-    """分页查看记忆列表。"""
+    """分页查看记忆列表（兼容 page/size 与 limit/offset，支持搜索与筛选）。"""
     c = get_container()
-    limit = int(request.args.get("limit", 50))
-    offset = int(request.args.get("offset", 0))
+
+    # 分页：优先 page/size（前端），回退 limit/offset
+    page = request.args.get("page")
+    size = request.args.get("size")
+    if page is not None or size is not None:
+        size_i = max(1, min(200, int(size or 30)))
+        page_i = max(1, int(page or 1))
+        limit = size_i
+        offset = (page_i - 1) * size_i
+    else:
+        limit = max(1, min(200, int(request.args.get("limit", 50))))
+        offset = max(0, int(request.args.get("offset", 0)))
+
     source = request.args.get("source")
     sender_id = request.args.get("sender_id")
+    sender = request.args.get("sender")  # 按 sender_name
     group_id = request.args.get("group_id")
-    limit = max(1, min(200, limit))
+    search = (request.args.get("search") or "").strip()
+    has_tags = request.args.get("has_tags")      # 'true'/'false'
+    has_vector = request.args.get("has_vector")  # 'true'/'false'
 
-    sql = "SELECT id, content, sender_id, sender_name, group_id, source, timestamp FROM memories WHERE 1=1"
+    where = ["1=1"]
     params = []
     if source:
-        sql += " AND source = ?"
-        params.append(source)
+        where.append("source = ?"); params.append(source)
     if sender_id:
-        sql += " AND sender_id = ?"
-        params.append(sender_id)
+        where.append("sender_id = ?"); params.append(sender_id)
+    if sender:
+        where.append("sender_name = ?"); params.append(sender)
     if group_id:
-        sql += " AND group_id = ?"
-        params.append(group_id)
-    sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
+        where.append("group_id = ?"); params.append(group_id)
+    if search:
+        where.append("content LIKE ?"); params.append(f"%{search}%")
+    if has_vector == "true":
+        where.append("vector IS NOT NULL")
+    elif has_vector == "false":
+        where.append("vector IS NULL")
+    if has_tags == "true":
+        where.append("EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = memories.id)")
+    elif has_tags == "false":
+        where.append("NOT EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = memories.id)")
 
-    rows = c.db.conn.execute(sql, params).fetchall()
-    total = c.db.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+    where_sql = " AND ".join(where)
+    sql = (
+        f"SELECT id, content, sender_id, sender_name, group_id, source, timestamp, "
+        f"vector IS NOT NULL FROM memories WHERE {where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
+    )
+    rows = c.db.conn.execute(sql, params + [limit, offset]).fetchall()
+
+    # total：无筛选时用快速全表计数，有筛选时按条件计数
+    has_filter = len(where) > 1
+    if has_filter:
+        total = c.db.conn.execute(f"SELECT COUNT(*) FROM memories WHERE {where_sql}", params).fetchone()[0]
+    else:
+        total = c.db.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
 
     items = [
         {"id": r[0], "content": r[1], "sender_id": r[2], "sender_name": r[3],
-         "group_id": r[4], "source": r[5], "timestamp": r[6]}
+         "group_id": r[4], "source": r[5], "timestamp": r[6], "has_vector": bool(r[7])}
         for r in rows
     ]
     return jsonify({"items": items, "total": total, "limit": limit, "offset": offset})
+
+
+@memories_bp.route("/memories/senders", methods=["GET"])
+@require_auth
+async def list_senders():
+    """发送者列表（按记忆数排序，供筛选下拉）。"""
+    c = get_container()
+    limit = max(1, min(500, int(request.args.get("limit", 100))))
+    rows = c.db.conn.execute(
+        """SELECT sender_name, COUNT(*) AS cnt FROM memories
+           WHERE sender_name IS NOT NULL AND sender_name != ''
+           GROUP BY sender_name ORDER BY cnt DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    return jsonify({"senders": [{"name": r[0], "count": r[1]} for r in rows]})
+
+
+@memories_bp.route("/memories/<int:memory_id>", methods=["GET"])
+@require_auth
+async def get_memory(memory_id: int):
+    """记忆详情。"""
+    c = get_container()
+    detail = c.db.get_memory_detail(memory_id)
+    if not detail:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(detail)
+
+
+@memories_bp.route("/memories/<int:memory_id>", methods=["PUT"])
+@require_auth
+async def update_memory(memory_id: int):
+    """更新记忆 content / importance。"""
+    c = get_container()
+    body = await request.get_json(silent=True) or {}
+    content = body.get("content")
+    importance = body.get("importance")
+    c.db.update_memory(memory_id, content=content, importance=importance)
+    return jsonify({"ok": True, "memory_id": memory_id})
+
+
+@memories_bp.route("/memories/<int:memory_id>", methods=["DELETE"])
+@require_auth
+async def delete_memory(memory_id: int):
+    """删除单条记忆。"""
+    c = get_container()
+    c.db.delete_memory(memory_id)
+    return jsonify({"ok": True, "deleted": memory_id})
+
+
+@memories_bp.route("/memories/<int:memory_id>/re-embed", methods=["POST"])
+@require_auth
+async def re_embed_memory(memory_id: int):
+    """重新向量化单条记忆。"""
+    c = get_container()
+    detail = c.db.get_memory_detail(memory_id)
+    if not detail:
+        return jsonify({"error": "not found"}), 404
+    vec = await c.embedding_service.get_embedding(detail["content"] or "")
+    if vec is None:
+        return jsonify({"ok": False, "error": "embedding failed"}), 500
+    c.db.update_memory_vector(memory_id, vec)
+    try:
+        if c.memory_index:
+            c.memory_index.add([memory_id], [vec])
+    except Exception:
+        pass
+    return jsonify({"ok": True, "memory_id": memory_id})
+
+
+@memories_bp.route("/memories/batch/delete", methods=["POST"])
+@require_auth
+async def batch_delete_memories():
+    """批量删除记忆。"""
+    c = get_container()
+    body = await request.get_json(silent=True) or {}
+    ids = [int(x) for x in (body.get("ids") or [])]
+    if not ids:
+        return jsonify({"error": "ids required"}), 400
+    placeholders = ",".join("?" * len(ids))
+    c.db.conn.execute(f"DELETE FROM memory_tags WHERE memory_id IN ({placeholders})", ids)
+    c.db.conn.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", ids)
+    c.db.conn.commit()
+    return jsonify({"ok": True, "deleted": len(ids)})
+
+
+@memories_bp.route("/memories/batch/re-embed", methods=["POST"])
+@require_auth
+async def batch_re_embed():
+    """批量重新向量化（SSE 流）。"""
+    c = get_container()
+    body = await request.get_json(silent=True) or {}
+    ids = [int(x) for x in (body.get("ids") or [])]
+
+    async def stream():
+        total = len(ids)
+        yield f"data: {json.dumps({'progress': 0, 'total': total})}\n\n"
+        done = errors = 0
+        for mid in ids:
+            try:
+                detail = c.db.get_memory_detail(mid)
+                if detail and detail.get("content"):
+                    vec = await c.embedding_service.get_embedding(detail["content"])
+                    if vec is not None:
+                        c.db.update_memory_vector(mid, vec)
+                        if c.memory_index:
+                            c.memory_index.add([mid], [vec])
+            except Exception:
+                errors += 1
+            done += 1
+            yield f"data: {json.dumps({'progress': round(done/total, 3) if total else 1, 'processed': done, 'total': total, 'errors': errors})}\n\n"
+        yield f"data: {json.dumps({'progress': 1.0, 'processed': done, 'total': total, 'errors': errors, 'done': True})}\n\n"
+
+    return Response(stream(), content_type="text/event-stream")
+
+
+@memories_bp.route("/memories/batch/extract-tags", methods=["POST"])
+@require_auth
+async def batch_extract_tags_for_ids():
+    """对选中记忆批量提取 Tag（SSE 流）。"""
+    c = get_container()
+    body = await request.get_json(silent=True) or {}
+    ids = [int(x) for x in (body.get("ids") or [])]
+
+    async def stream():
+        total = len(ids)
+        if not c.tag_extractor:
+            yield f"data: {json.dumps({'error': 'Tag extractor 未配置'})}\n\n"
+            return
+        yield f"data: {json.dumps({'progress': 0, 'total': total})}\n\n"
+        done = tagged = errors = 0
+        for mid in ids:
+            try:
+                row = c.db.conn.execute("SELECT content, sender_name FROM memories WHERE id=?", (mid,)).fetchone()
+                if row and row[0] and len(row[0]) >= 4:
+                    tags = await c.tag_extractor.extract_tags(row[0][:800], sender=row[1] or "")
+                    if tags:
+                        names = [t["name"] for t in tags]
+                        vecs = await c.embedding_service.get_embeddings(names)
+                        for tag_info, tv in zip(tags, vecs):
+                            tid = c.db.add_tag_extended(name=tag_info["name"], tag_type=tag_info.get("type", "keyword"), vector=tv, confidence=tag_info.get("confidence", 0.8))
+                            c.db.conn.execute("INSERT OR IGNORE INTO memory_tags (memory_id, tag_id, position, relevance) VALUES (?, ?, ?, ?)", (mid, tid, 1, tag_info.get("confidence", 0.8)))
+                        c.db.conn.commit()
+                        tagged += 1
+            except Exception:
+                errors += 1
+            done += 1
+            yield f"data: {json.dumps({'progress': round(done/total, 3) if total else 1, 'processed': done, 'total': total, 'tagged': tagged, 'errors': errors})}\n\n"
+        yield f"data: {json.dumps({'progress': 1.0, 'processed': done, 'total': total, 'tagged': tagged, 'errors': errors, 'done': True})}\n\n"
+
+    return Response(stream(), content_type="text/event-stream")
+
 
 
 @memories_bp.route("/memories/stats", methods=["GET"])
