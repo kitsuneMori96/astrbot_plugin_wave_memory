@@ -39,7 +39,7 @@ async def mood_trajectory():
     group_id = request.args.get("group_id")
     limit = int(request.args.get("limit", 100))
 
-    sql = "SELECT group_id, mood_type, intensity, description, start_time, end_time, is_active FROM bot_mood WHERE 1=1"
+    sql = "SELECT group_id, mood_type, intensity, description, start_time, end_time, is_active FROM bot_mood WHERE typeof(start_time) IN ('real', 'integer')"
     params = []
     if group_id:
         sql += " AND group_id = ?"

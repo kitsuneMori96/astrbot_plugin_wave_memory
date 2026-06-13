@@ -36,7 +36,7 @@ async def system_status():
 
     facts_count = c.db.conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
     active_moods = c.db.conn.execute(
-        "SELECT group_id, mood_type, intensity, description FROM bot_mood WHERE is_active = 1"
+        "SELECT group_id, mood_type, intensity, description FROM bot_mood WHERE is_active = 1 AND typeof(start_time) IN ('real', 'integer')"
     ).fetchall()
     person_count = c.db.conn.execute("SELECT COUNT(*) FROM person_registry").fetchone()[0]
     user_profiles_count = c.db.conn.execute("SELECT COUNT(*) FROM user_profiles").fetchone()[0]
