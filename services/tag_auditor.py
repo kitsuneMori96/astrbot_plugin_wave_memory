@@ -43,12 +43,38 @@ class TagAuditor:
         self.context = context
         self.provider_id = provider_id
 
+    def _resolve_provider(self):
+        """获取 LLM provider。
+
+        WebUI 跑在独立线程的独立事件循环里，context.get_provider_by_id() 在
+        非主循环线程可能返回 None；而 get_all_providers() 跨线程可用。
+        故先 get_provider_by_id，失败再遍历 get_all_providers 按 meta.id 匹配。
+        """
+        if not self.context:
+            return None
+        try:
+            prov = self.context.get_provider_by_id(self.provider_id)
+            if prov:
+                return prov
+        except Exception:
+            pass
+        try:
+            for p in self.context.get_all_providers():
+                try:
+                    if p.meta().id == self.provider_id:
+                        return p
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return None
+
     async def audit_batch(self, tags: list[dict]) -> list[dict]:
         """对一批 tag 调 LLM 做质量审计，返回建议列表。"""
         if not self.provider_id or not self.context:
             return []
 
-        provider = self.context.get_provider_by_id(self.provider_id)
+        provider = self._resolve_provider()
         if not provider:
             logger.warning(f"[WaveMemory] Audit: provider '{self.provider_id}' not found")
             return []

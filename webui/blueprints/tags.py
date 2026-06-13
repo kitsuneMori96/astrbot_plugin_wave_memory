@@ -154,10 +154,20 @@ async def trigger_audit():
         if not provider_id or not context:
             yield f"data: {json.dumps({'error': '未配置 Tag LLM Provider，无法审计', 'done': True}, ensure_ascii=False)}\n\n"
             return
-        # 校验 provider 是否真实可用（避免配置失效时静默跑空）
+        # 校验 provider 是否真实可用（WebUI 独立线程：get_provider_by_id 可能失效，
+        # 改用 get_all_providers 遍历 meta.id 兜底）
         try:
-            prov = context.get_provider_by_id(provider_id) if hasattr(context, "get_provider_by_id") else None
-            if prov is None:
+            def _has_provider():
+                try:
+                    if context.get_provider_by_id(provider_id):
+                        return True
+                except Exception:
+                    pass
+                try:
+                    return any(p.meta().id == provider_id for p in context.get_all_providers())
+                except Exception:
+                    return False
+            if not _has_provider():
                 avail = []
                 try:
                     avail = [p.meta().id for p in context.get_all_providers()][:8]
