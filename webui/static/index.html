@@ -322,7 +322,7 @@
             </select>
             <button @click="searchMemories()" class="btn btn-ghost">搜索</button>
             <button @click="resetFilters()" class="btn btn-muted text-xs">重置</button>
-            <div class="ml-auto text-xs" style="color:var(--muted-fg)">共 <span class="font-mono" x-text="memTotal"></span> 条</div>
+            <div class="ml-auto text-xs" style="color:var(--muted-fg)">共 <span class="font-mono" x-text="memTotal !== null ? memTotal : '若干'"></span> 条</div>
         </div>
 
         <!-- 批量操作栏 -->
@@ -384,8 +384,8 @@
         <!-- Pagination -->
         <div class="flex justify-center items-center gap-3 mt-4">
             <button @click="memPrev()" class="btn btn-muted" :disabled="memPage<=1">← 上一页</button>
-            <span class="text-xs font-mono" style="color:var(--muted-fg)" x-text="`${memPage} / ${memTotalPages}`"></span>
-            <button @click="memNext()" class="btn btn-muted" :disabled="memPage>=memTotalPages">下一页 →</button>
+            <span class="text-xs font-mono" style="color:var(--muted-fg)" x-text="memTotal !== null ? `${memPage} / ${memTotalPages}` : `第 ${memPage} 页`"></span>
+            <button @click="memNext()" class="btn btn-muted" :disabled="!memHasMore">下一页 →</button>
         </div>
 
         <!-- 详情弹窗 -->
@@ -931,6 +931,9 @@ function dashboard() {
         memSearch: '',
         memPage: 1,
         memTotal: 0,
+        memHasMore: false,
+        memCursor: null,
+        memCursorStack: [],
         memPageSize: 30,
         memFilterSender: '',
         memFilterTags: '',
@@ -1319,7 +1322,9 @@ function dashboard() {
 
         async loadMemories() {
             try {
-                const params = new URLSearchParams({ page: this.memPage, size: this.memPageSize });
+                const params = new URLSearchParams({ size: this.memPageSize });
+                // keyset 游标：第 2 页起用上一页最后一条 id 做 before_id（深翻 O(1)，避免大 OFFSET）
+                if (this.memCursor) params.set('before_id', this.memCursor);
                 if (this.memSearch) params.set('search', this.memSearch);
                 if (this.memFilterSender) params.set('sender', this.memFilterSender);
                 if (this.memFilterTags === 'yes') params.set('has_tags', 'true');
@@ -1329,22 +1334,34 @@ function dashboard() {
                 const r = await fetch('/api/memories?' + params);
                 const d = await r.json();
                 this.memories = d.items || [];
-                this.memTotal = d.total || 0;
+                this.memTotal = (d.total === undefined ? 0 : d.total);
+                this.memHasMore = d.has_more !== undefined ? d.has_more : (this.memories.length >= this.memPageSize);
             } catch(e) { console.error(e); }
         },
 
         get memTotalPages() {
-            return Math.ceil(this.memTotal / this.memPageSize) || 1;
+            return this.memTotal ? (Math.ceil(this.memTotal / this.memPageSize) || 1) : 1;
         },
 
         async memPrev() {
-            if (this.memPage > 1) { this.memPage--; await this.loadMemories(); }
+            if (this.memPage <= 1) return;
+            this.memPage--;
+            this.memCursorStack.pop();                       // 移除当前页游标
+            this.memCursor = this.memCursorStack[this.memCursorStack.length - 1] || null;
+            await this.loadMemories();
         },
         async memNext() {
-            if (this.memPage < this.memTotalPages) { this.memPage++; await this.loadMemories(); }
+            if (!this.memHasMore || !this.memories.length) return;
+            const lastId = this.memories[this.memories.length - 1].id;  // 本页最后一条 id 作下一页游标
+            this.memCursorStack.push(lastId);
+            this.memCursor = lastId;
+            this.memPage++;
+            await this.loadMemories();
         },
         async searchMemories() {
             this.memPage = 1;
+            this.memCursor = null;
+            this.memCursorStack = [];
             this.selectedIds = [];
             await this.loadMemories();
         },

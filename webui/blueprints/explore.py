@@ -11,15 +11,25 @@ from ..middleware.auth import require_auth
 
 explore_bp = Blueprint("explore", __name__, url_prefix="/api/explore")
 
+# galaxy 结果缓存：社区检测在十万 tag 上耗时数秒，按 cooccurrence 边数版本缓存
+_galaxy_cache: dict = {"version": None, "data": None}
+
 
 @explore_bp.route("/galaxy")
 @require_auth
 async def galaxy():
-    """全局星图：社区聚类 + 核心节点。"""
+    """全局星图：社区聚类 + 核心节点（带版本缓存）。"""
     c = get_container()
     if not c.cooccurrence:
         return jsonify({"nodes": [], "edges": [], "communities": []})
-    return jsonify(c.cooccurrence.get_galaxy_data(max_nodes=300, max_edges=800))
+    # 版本键：边数变化即失效（图谱重建后自动刷新）
+    version = c.cooccurrence.edge_count
+    if _galaxy_cache["version"] == version and _galaxy_cache["data"] is not None:
+        return jsonify(_galaxy_cache["data"])
+    data = c.cooccurrence.get_galaxy_data(max_nodes=300, max_edges=800)
+    _galaxy_cache["version"] = version
+    _galaxy_cache["data"] = data
+    return jsonify(data)
 
 
 @explore_bp.route("/community/<int:community_id>")

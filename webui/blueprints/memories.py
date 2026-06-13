@@ -15,6 +15,10 @@ memories_bp = Blueprint("memories", __name__, url_prefix="/api")
 
 _import_lock = asyncio.Lock()
 
+# 无过滤全表计数缓存（COUNT(*) 在十万行约 110ms，过滤计数则更慢，故仅缓存全表）
+_total_cache: dict = {"value": None, "ts": 0.0}
+_TOTAL_TTL = 30.0
+
 
 @memories_bp.route("/memories", methods=["GET"])
 @require_auth
@@ -41,48 +45,62 @@ async def list_memories():
     search = (request.args.get("search") or "").strip()
     has_tags = request.args.get("has_tags")      # 'true'/'false'
     has_vector = request.args.get("has_vector")  # 'true'/'false'
+    before_id = request.args.get("before_id")    # keyset 游标：取 id < before_id（深翻页 O(1)）
 
     where = ["1=1"]
     params = []
+    real_filter = False  # before_id 是游标翻页，不算"过滤"（无过滤时仍可用 total 缓存）
+    if before_id:
+        where.append("id < ?"); params.append(int(before_id))
+        offset = 0  # keyset 模式忽略 offset
     if source:
-        where.append("source = ?"); params.append(source)
+        where.append("source = ?"); params.append(source); real_filter = True
     if sender_id:
-        where.append("sender_id = ?"); params.append(sender_id)
+        where.append("sender_id = ?"); params.append(sender_id); real_filter = True
     if sender:
-        where.append("sender_name = ?"); params.append(sender)
+        where.append("sender_name = ?"); params.append(sender); real_filter = True
     if group_id:
-        where.append("group_id = ?"); params.append(group_id)
+        where.append("group_id = ?"); params.append(group_id); real_filter = True
     if search:
-        where.append("content LIKE ?"); params.append(f"%{search}%")
+        where.append("content LIKE ?"); params.append(f"%{search}%"); real_filter = True
     if has_vector == "true":
-        where.append("vector IS NOT NULL")
+        where.append("vector IS NOT NULL"); real_filter = True
     elif has_vector == "false":
-        where.append("vector IS NULL")
+        where.append("vector IS NULL"); real_filter = True
     if has_tags == "true":
-        where.append("EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = memories.id)")
+        where.append("EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = memories.id)"); real_filter = True
     elif has_tags == "false":
-        where.append("NOT EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = memories.id)")
+        where.append("NOT EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = memories.id)"); real_filter = True
 
     where_sql = " AND ".join(where)
+    # 多取 1 条用于判断是否还有下一页（避免昂贵的过滤 COUNT）
     sql = (
         f"SELECT id, content, sender_id, sender_name, group_id, source, timestamp, "
         f"vector IS NOT NULL FROM memories WHERE {where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
     )
-    rows = c.db.conn.execute(sql, params + [limit, offset]).fetchall()
+    rows = c.db.conn.execute(sql, params + [limit + 1, offset]).fetchall()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
 
-    # total：无筛选时用快速全表计数，有筛选时按条件计数
-    has_filter = len(where) > 1
-    if has_filter:
-        total = c.db.conn.execute(f"SELECT COUNT(*) FROM memories WHERE {where_sql}", params).fetchone()[0]
+    # total：无筛选时用带缓存的全表计数（~110ms）；有筛选时跳过精确 COUNT
+    # （LIKE / vector IS NULL 全表扫描需 ~2.7s），返回 null + has_more 供前端游标翻页
+    if real_filter:
+        total = None
     else:
-        total = c.db.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+        now = time.time()
+        if _total_cache["value"] is not None and (now - _total_cache["ts"]) < _TOTAL_TTL:
+            total = _total_cache["value"]
+        else:
+            total = c.db.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+            _total_cache["value"] = total
+            _total_cache["ts"] = now
 
     items = [
         {"id": r[0], "content": r[1], "sender_id": r[2], "sender_name": r[3],
          "group_id": r[4], "source": r[5], "timestamp": r[6], "has_vector": bool(r[7])}
         for r in rows
     ]
-    return jsonify({"items": items, "total": total, "limit": limit, "offset": offset})
+    return jsonify({"items": items, "total": total, "has_more": has_more, "limit": limit, "offset": offset})
 
 
 @memories_bp.route("/memories/senders", methods=["GET"])
