@@ -389,7 +389,7 @@ function initGraph() {
                 const srcType = graph.getNodeAttribute(src, 'nodeType');
                 const tgtType = graph.getNodeAttribute(tgt, 'nodeType');
                 if (srcType !== activeFilter && tgtType !== activeFilter) {
-                    res.color = 'rgba(100, 116, 139, 0.01)';
+                    res.hidden = true;  // 两端都不匹配则隐藏，避免连到隐藏节点的悬空边
                 }
             }
             return res;
@@ -412,9 +412,7 @@ function initGraph() {
             if (activeFilter) {
                 const nodeType = graph.getNodeAttribute(node, 'nodeType');
                 if (nodeType !== activeFilter) {
-                    res.color = '#1e293b';
-                    res.size = Math.max(2, (res.size || 4) * 0.4);
-                    res.label = '';
+                    res.hidden = true;   // 真正隐藏，避免不匹配节点占位堆叠
                 }
             }
             return res;

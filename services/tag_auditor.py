@@ -128,45 +128,40 @@ class TagAuditor:
         }
 
     def _get_audit_candidates(self, strategy: str, limit: int = 500) -> list[dict]:
-        """按策略获取待审计 tag。"""
+        """按策略获取待审计 tag。
+
+        性能：直接用 tags.frequency 列（写入时维护的计数），避免
+        LEFT JOIN memory_tags + GROUP BY 在十万级 tag 上全聚合（实测 ~19s）。
+        """
         if strategy == "low_quality":
             rows = self.db.conn.execute("""
-                SELECT t.id, t.name, t.tag_type, COUNT(mt.memory_id) as freq
-                FROM tags t
-                LEFT JOIN memory_tags mt ON t.id = mt.tag_id
-                WHERE t.confidence < 0.7 OR t.frequency <= 2
-                GROUP BY t.id
-                ORDER BY freq ASC, t.confidence ASC
+                SELECT id, name, tag_type, frequency
+                FROM tags
+                WHERE confidence < 0.7 OR frequency <= 2
+                ORDER BY frequency ASC, confidence ASC
                 LIMIT ?
             """, (limit,)).fetchall()
         elif strategy == "high_freq":
             rows = self.db.conn.execute("""
-                SELECT t.id, t.name, t.tag_type, COUNT(mt.memory_id) as freq
-                FROM tags t
-                LEFT JOIN memory_tags mt ON t.id = mt.tag_id
-                GROUP BY t.id
-                HAVING freq >= 3
-                ORDER BY freq DESC
+                SELECT id, name, tag_type, frequency
+                FROM tags
+                WHERE frequency >= 3
+                ORDER BY frequency DESC
                 LIMIT ?
             """, (limit,)).fetchall()
-        else:  # mixed
-            # 50% 低质量 + 50% 高频
+        else:  # mixed：50% 低质量 + 50% 高频
             half = limit // 2
             low = self.db.conn.execute("""
-                SELECT t.id, t.name, t.tag_type, COUNT(mt.memory_id) as freq
-                FROM tags t
-                LEFT JOIN memory_tags mt ON t.id = mt.tag_id
-                WHERE t.confidence < 0.7 OR t.frequency <= 2
-                GROUP BY t.id
+                SELECT id, name, tag_type, frequency
+                FROM tags
+                WHERE confidence < 0.7 OR frequency <= 2
                 ORDER BY RANDOM()
                 LIMIT ?
             """, (half,)).fetchall()
             high = self.db.conn.execute("""
-                SELECT t.id, t.name, t.tag_type, COUNT(mt.memory_id) as freq
-                FROM tags t
-                LEFT JOIN memory_tags mt ON t.id = mt.tag_id
-                GROUP BY t.id
-                HAVING freq >= 3
+                SELECT id, name, tag_type, frequency
+                FROM tags
+                WHERE frequency >= 3
                 ORDER BY RANDOM()
                 LIMIT ?
             """, (half,)).fetchall()

@@ -87,8 +87,16 @@ async def person(qq_id: str):
         "SELECT qq_id, display_name, message_count FROM person_registry WHERE qq_id = ?",
         (qq_id,),
     ).fetchone()
+    # person_registry 可能陈旧/缺失（如发言最多的人不在其中）：回退用 memories 聚合
     if not person_row:
-        return jsonify({"person": None, "nodes": [], "edges": []})
+        agg = c.db.conn.execute(
+            "SELECT MAX(sender_name), COUNT(*) FROM memories WHERE sender_id = ?",
+            (qq_id,),
+        ).fetchone()
+        if agg and agg[1]:
+            person_row = (qq_id, agg[0] or qq_id, agg[1])
+        else:
+            return jsonify({"person": None, "nodes": [], "edges": []})
 
     rows = c.db.conn.execute(
         """SELECT m.id, m.content, m.sender_name, m.timestamp
@@ -148,12 +156,15 @@ async def person(qq_id: str):
 @explore_bp.route("/persons")
 @require_auth
 async def persons():
-    """人物列表。"""
+    """人物列表 — 直接从 memories 聚合真实发言量（不再用陈旧的 person_registry）。"""
     c = get_container()
     limit = int(request.args.get("limit", 30))
     limit = max(5, min(100, limit))
     rows = c.db.conn.execute(
-        "SELECT qq_id, display_name, message_count FROM person_registry ORDER BY message_count DESC LIMIT ?",
+        """SELECT sender_id, sender_name, COUNT(*) AS cnt
+           FROM memories
+           WHERE sender_id IS NOT NULL AND sender_id != '' AND sender_name IS NOT NULL AND sender_name != ''
+           GROUP BY sender_id ORDER BY cnt DESC LIMIT ?""",
         (limit,),
     ).fetchall()
     return jsonify([{"id": r[0], "name": r[1], "count": r[2]} for r in rows])

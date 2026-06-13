@@ -111,6 +111,78 @@ async def batch_delete_tags():
     return jsonify({"deleted": len(tag_ids)})
 
 
+@tags_bp.route("/quality", methods=["GET"])
+@require_auth
+async def tag_quality():
+    """Tag 质量概览：总数 + 覆盖率（有 tag 的记忆占比）。"""
+    c = get_container()
+    total_tags = c.db.conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0]
+    total_mem = c.db.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+    tagged_mem = c.db.conn.execute(
+        "SELECT COUNT(DISTINCT memory_id) FROM memory_tags"
+    ).fetchone()[0]
+    coverage = (tagged_mem / total_mem) if total_mem else 0.0
+    return jsonify({
+        "total_tags": total_tags,
+        "total_memories": total_mem,
+        "tagged_memories": tagged_mem,
+        "coverage": round(coverage, 4),
+    })
+
+
+@tags_bp.route("/audit/trigger", methods=["GET"])
+@require_auth
+async def trigger_audit():
+    """触发 Tag 审计（SSE 流）。strategy: mixed/lowconf/orphan/duplicate；total_count 上限。"""
+    c = get_container()
+    strategy = request.args.get("strategy", "mixed")
+    total_count = int(request.args.get("total_count", 500))
+    total_count = max(10, min(2000, total_count))
+
+    # TagAuditor 审计需 LLM：从 container 取 context + provider_id
+    context = None
+    provider_id = ""
+    try:
+        context = c.embedding_service.context if c.embedding_service else None
+        provider_id = (c.plugin_config or {}).get("tag_llm_provider_id", "")
+    except Exception:
+        pass
+
+    async def stream():
+        from ...services.tag_auditor import TagAuditor
+        yield f"data: {json.dumps({'progress': 0, 'message': '正在准备审计...'}, ensure_ascii=False)}\n\n"
+        if not provider_id or not context:
+            yield f"data: {json.dumps({'error': '未配置 Tag LLM Provider，无法审计', 'done': True}, ensure_ascii=False)}\n\n"
+            return
+        # 校验 provider 是否真实可用（避免配置失效时静默跑空）
+        try:
+            prov = context.get_provider_by_id(provider_id) if hasattr(context, "get_provider_by_id") else None
+            if prov is None:
+                avail = []
+                try:
+                    avail = [p.meta().id for p in context.get_all_providers()][:8]
+                except Exception:
+                    pass
+                yield f"data: {json.dumps({'error': f'Provider \"{provider_id}\" 不存在，请在配置中重新选择。可用: {avail}', 'done': True}, ensure_ascii=False)}\n\n"
+                return
+        except Exception:
+            pass
+        if _import_lock.locked():
+            yield f"data: {json.dumps({'error': '另一个任务正在运行', 'done': True}, ensure_ascii=False)}\n\n"
+            return
+        auditor = TagAuditor(db=c.db, context=context, provider_id=provider_id)
+        async with _import_lock:
+            try:
+                async for event in auditor.run_audit(strategy=strategy, total_count=total_count):
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'error': str(e), 'done': True}, ensure_ascii=False)}\n\n"
+                return
+        yield f"data: {json.dumps({'progress': 100, 'done': True, 'message': '审计完成'}, ensure_ascii=False)}\n\n"
+
+    return Response(stream(), content_type="text/event-stream")
+
+
 @tags_bp.route("/audit/suggestions", methods=["GET"])
 @require_auth
 async def get_audit_suggestions():
