@@ -253,7 +253,8 @@
             <div class="card">
                 <h3 class="text-sm font-medium mb-3">引擎状态</h3>
                 <div class="space-y-2.5 text-xs">
-                    <div class="flex justify-between"><span style="color:var(--muted-fg)">EPA 基底</span><span :style="`color:var(${sys.epa?.initialized ? '--success' : '--danger'})`" x-text="sys.epa?.initialized ? '✓ 已初始化' : '✗ 未就绪'"></span></div>
+                    <div class="flex justify-between items-start gap-2"><span style="color:var(--muted-fg)">EPA 基底</span><span :style="`color:var(${sys.epa?.initialized ? '--success' : '--danger'})`" x-text="sys.epa?.initialized ? '✓ 已初始化' : '✗ 未就绪'"></span></div>
+                    <div x-show="sys.epa?.reason" class="text-xs mt-0.5 pl-2" style="color:var(--warning); opacity:0.8" x-text="sys.epa?.reason"></div>
                     <div class="flex justify-between"><span style="color:var(--muted-fg)">脉冲传播</span><span style="color:var(--success)">✓ 就绪</span></div>
                     <div class="flex justify-between"><span style="color:var(--muted-fg)">残差金字塔</span><span style="color:var(--success)">✓ 就绪</span></div>
                     <div class="flex justify-between"><span style="color:var(--muted-fg)">测地线重排</span><span style="color:var(--success)">✓ 就绪</span></div>

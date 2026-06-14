@@ -49,7 +49,12 @@ async def system_status():
             "tag_pct": round(tagged_memories / total_mem * 100, 1) if total_mem > 0 else 0,
         },
         "cooccurrence": {"nodes": cooc_nodes, "edges": cooc_edges},
-        "epa": {"initialized": c.epa.initialized if c.epa else False},
+        "epa": {
+            "initialized": c.epa.initialized if c.epa else False,
+            "reason": "" if (c.epa and c.epa.initialized) else (
+                f"需要至少 {c.epa.min_tags} 个带向量的 tag（当前数据不足，持续聊天自动积累后就绪）" if c.epa else "EPA 模块未加载"
+            ),
+        },
         "lifecycle": {
             "facts": facts_count,
             "persons": person_count,
