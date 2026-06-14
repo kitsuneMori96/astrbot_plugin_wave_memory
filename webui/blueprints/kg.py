@@ -24,13 +24,46 @@ _CACHE_TTL = 120  # 2 分钟
 @kg_bp.route("/overview")
 @require_auth
 async def overview():
-    """全景知识图谱：从 facts + tag_relations 聚合 top 实体和语义边。
+    """全景知识图谱（可配置）。
 
-    返回 {nodes: [{id, name, type, degree}], edges: [{source, target, label, weight}]}
+    参数：
+    - max_nodes: 最大节点数(50-500, default 150)
+    - min_weight: 最小边权重阈值(0-5, default 0.5)
+    - relation_types: 逗号分隔的关系类型筛选(空=全部)
+    - node_types: 逗号分隔的节点类型(空=全部)
+    - days: 时间范围(7/30/90/0=全部, default 0)
     """
     c = get_container()
     max_nodes = int(request.args.get("max_nodes", 150))
-    max_nodes = max(50, min(500, max_nodes))
+    max_nodes = max(30, min(500, max_nodes))
+    min_weight = float(request.args.get("min_weight", 0.5))
+    relation_types_raw = request.args.get("relation_types", "")
+    node_types_raw = request.args.get("node_types", "")
+    days = int(request.args.get("days", 0))
+
+    relation_filter = set(relation_types_raw.split(",")) - {""} if relation_types_raw else None
+    node_filter = set(node_types_raw.split(",")) - {""} if node_types_raw else None
+
+    # 版本缓存 key 包含参数
+    now = time.time()
+    cache_key = f"{max_nodes}:{min_weight}:{relation_types_raw}:{node_types_raw}:{days}"
+    try:
+        version = c.db.conn.execute(
+            "SELECT (SELECT COUNT(*) FROM facts) + (SELECT COUNT(*) FROM tag_relations)"
+        ).fetchone()[0]
+    except Exception:
+        version = 0
+    full_version = f"{version}:{cache_key}"
+    if _overview_cache["version"] == full_version and _overview_cache["data"] and (now - _overview_cache["ts"]) < _CACHE_TTL:
+        return jsonify(_overview_cache["data"])
+
+    # 时间过滤
+    time_cond = ""
+    time_param: list = []
+    if days > 0:
+        cutoff = now - days * 86400
+        time_cond = " AND created_at >= ?"
+        time_param = [cutoff]
 
     # 版本缓存
     now = time.time()
@@ -45,18 +78,19 @@ async def overview():
 
     # Step 1: 从 facts 提取实体和边
     fact_rows = c.db.conn.execute(
-        """SELECT subject, predicate, object, confidence
-           FROM facts ORDER BY confidence DESC LIMIT 2000"""
+        f"SELECT subject, predicate, object, confidence FROM facts WHERE 1=1{time_cond} ORDER BY confidence DESC LIMIT 3000",
+        time_param,
     ).fetchall()
 
     # Step 2: 从 tag_relations 提取实体和边
+    rel_weight_cond = f" AND tr.weight >= {min_weight}" if min_weight > 0 else ""
     rel_rows = c.db.conn.execute(
-        """SELECT t1.name, tr.relation_type, t2.name, tr.weight, t1.tag_type, t2.tag_type
+        f"""SELECT t1.name, tr.relation_type, t2.name, tr.weight, t1.tag_type, t2.tag_type
            FROM tag_relations tr
            JOIN tags t1 ON tr.source_tag_id = t1.id
            JOIN tags t2 ON tr.target_tag_id = t2.id
-           WHERE tr.weight >= 1.0
-           ORDER BY tr.weight DESC LIMIT 2000"""
+           WHERE 1=1{rel_weight_cond}
+           ORDER BY tr.weight DESC LIMIT 3000"""
     ).fetchall()
 
     # Step 3: 构建实体度数表
@@ -69,22 +103,28 @@ async def overview():
             continue
         subj = subj.strip()[:30]
         obj = obj.strip()[:30]
+        label = pred.strip()[:20] if pred else "relates"
+        if relation_filter and label not in relation_filter and "fact" not in relation_filter:
+            continue
         entity_degree[subj] = entity_degree.get(subj, 0) + 1
         entity_degree[obj] = entity_degree.get(obj, 0) + 1
         entity_type.setdefault(subj, "entity")
         entity_type.setdefault(obj, "entity")
-        edges_raw.append((subj, obj, pred.strip()[:20] if pred else "relates", float(conf or 1)))
+        edges_raw.append((subj, obj, label, float(conf or 1)))
 
     for src_name, rel_type, tgt_name, weight, src_type, tgt_type in rel_rows:
         if not src_name or not tgt_name:
             continue
         src_name = src_name.strip()[:30]
         tgt_name = tgt_name.strip()[:30]
+        label = rel_type or "relates"
+        if relation_filter and label not in relation_filter:
+            continue
         entity_degree[src_name] = entity_degree.get(src_name, 0) + 1
         entity_degree[tgt_name] = entity_degree.get(tgt_name, 0) + 1
         entity_type.setdefault(src_name, src_type or "topic")
         entity_type.setdefault(tgt_name, tgt_type or "topic")
-        edges_raw.append((src_name, tgt_name, rel_type or "relates", float(weight or 1)))
+        edges_raw.append((src_name, tgt_name, label, float(weight or 1)))
 
     # ═══ 以边为中心构图（修复稀疏图"一坨"问题）═══
     # 先选 top 边 → 再从边端点建节点 → 保证每个节点至少有一条边 → 图有结构
@@ -153,13 +193,15 @@ async def overview():
     else:
         top_set = set(node_degree.keys())
 
-    # Step 7: 构建节点
+    # Step 7: 构建节点（按 node_filter 筛选）
     nodes = []
     name_to_id: dict[str, int] = {}
     for idx, (name, degree) in enumerate(sorted(node_degree.items(), key=lambda x: x[1], reverse=True)):
+        etype = "person" if name in name_to_qq else entity_type.get(name, "entity")
+        if node_filter and etype not in node_filter:
+            continue
         nid = idx + 1
         name_to_id[name] = nid
-        etype = "person" if name in name_to_qq else entity_type.get(name, "entity")
         nodes.append({"id": nid, "name": name, "type": etype, "degree": degree})
 
     # Step 8: 构建边（映射到 node id）
@@ -280,6 +322,103 @@ async def kg_stats():
         "jargon": c.db.conn.execute("SELECT COUNT(*) FROM jargon WHERE is_jargon=1").fetchone()[0],
         "persons": c.db.conn.execute("SELECT COUNT(DISTINCT sender_id) FROM memories WHERE sender_id!=''").fetchone()[0],
     })
+
+
+@kg_bp.route("/config")
+@require_auth
+async def kg_config():
+    """图谱可用的筛选选项(供前端配置面板)。"""
+    c = get_container()
+    rel_types = [r[0] for r in c.db.conn.execute(
+        "SELECT DISTINCT relation_type FROM tag_relations WHERE relation_type IS NOT NULL ORDER BY relation_type"
+    ).fetchall()]
+    rel_types += ["fact"]
+    node_types = ["person", "topic", "entity", "event", "emotion", "fact", "location", "time"]
+    return jsonify({
+        "relation_types": rel_types,
+        "node_types": node_types,
+        "defaults": {"max_nodes": 150, "min_weight": 0.5, "days": 0},
+    })
+
+
+@kg_bp.route("/full")
+@require_auth
+async def kg_full():
+    """全量知识图谱数据（一次性加载到前端内存，供本地即时过滤）。
+
+    返回所有 facts+tag_relations 消歧后的边列表(~5000条/~320KB)。
+    前端存内存后，配置面板调参零延迟（纯 JS 过滤+重绘）。
+    """
+    c = get_container()
+
+    # 缓存(数据变化不频繁，缓存 5 分钟)
+    now = time.time()
+    if _overview_cache.get("full_data") and (now - _overview_cache.get("full_ts", 0)) < 300:
+        return jsonify(_overview_cache["full_data"])
+
+    # 构建 name→QQ 消歧映射
+    name_to_qq: dict[str, str] = {}
+    qq_to_main: dict[str, str] = {}
+    try:
+        rows = c.db.conn.execute(
+            "SELECT sender_name, sender_id, COUNT(*) FROM memories WHERE sender_id!='' AND sender_name!='' GROUP BY sender_name, sender_id ORDER BY 3 DESC"
+        ).fetchall()
+        for sname, sid, _ in rows:
+            key = sname.strip()[:25]
+            name_to_qq[key] = sid
+            if sid not in qq_to_main:
+                qq_to_main[sid] = key
+    except Exception:
+        pass
+
+    def resolve(n: str) -> str:
+        qq = name_to_qq.get(n)
+        return qq_to_main.get(qq, n) if qq else n
+
+    # 提取全量边
+    edges = []
+    seen = set()
+
+    # tag_relations
+    for r in c.db.conn.execute(
+        "SELECT t1.name, tr.relation_type, t2.name, tr.weight, t1.tag_type, t2.tag_type, tr.created_at FROM tag_relations tr JOIN tags t1 ON tr.source_tag_id=t1.id JOIN tags t2 ON tr.target_tag_id=t2.id"
+    ).fetchall():
+        s = resolve(r[0].strip()[:25]) if r[0] else ""
+        t = resolve(r[2].strip()[:25]) if r[2] else ""
+        if not s or not t or s == t:
+            continue
+        key = (s, t, r[1])
+        if key in seen:
+            continue
+        seen.add(key)
+        edges.append({"s": s, "t": t, "l": r[1] or "relates", "w": round(r[3] or 1, 2), "st": r[4] or "topic", "tt": r[5] or "topic", "ts": r[6] or 0})
+
+    # facts
+    for r in c.db.conn.execute("SELECT subject, predicate, object, confidence, created_at FROM facts"):
+        if not r[0] or not r[2]:
+            continue
+        s = resolve(r[0].strip()[:25])
+        t = resolve(r[2].strip()[:25])
+        if not s or not t or s == t:
+            continue
+        label = (r[1] or "relates").strip()[:15]
+        key = (s, t, label)
+        if key in seen:
+            continue
+        seen.add(key)
+        edges.append({"s": s, "t": t, "l": label, "w": round(r[3] or 1, 2), "st": "entity", "tt": "entity", "ts": r[4] or 0})
+
+    # 标记人物
+    for e in edges:
+        if e["s"] in name_to_qq:
+            e["st"] = "person"
+        if e["t"] in name_to_qq:
+            e["tt"] = "person"
+
+    data = {"edges": edges, "total": len(edges)}
+    _overview_cache["full_data"] = data
+    _overview_cache["full_ts"] = now
+    return jsonify(data)
 
 
 @kg_bp.route("/entity/<entity_name>/timeline")
