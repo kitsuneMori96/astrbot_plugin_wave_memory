@@ -27,18 +27,19 @@ CONSOLIDATION_PROMPT = """从以下群聊消息中提取结构化知识。
   "topics": ["话题1", "话题2"],
   "facts": [
     {{"subject": "人名或事物", "predicate": "动作或关系", "object": "对象或属性"}},
-    {{"subject": "人名", "predicate": "是/喜欢/说了", "object": "具体内容"}}
+    {{"subject": "人名", "predicate": "是/喜欢/说了/使用/计划/纠正/反对", "object": "具体内容"}}
   ],
   "relations": [
-    {{"source": "话题或人物名", "target": "事实或话题", "type": "discusses|mentions|decides"}}
+    {{"source": "人物或话题", "target": "人物/话题/事物", "type": "关系类型"}}
   ]
 }}
 
 规则：
 - topics 最多 3 个，用简短名词短语
 - facts 最多 5 个，必须是三元组格式，subject 必须包含具体人名
-- relations 描述 topics/人物 之间的关联
-- type 只能是 discusses（讨论）、mentions（提及）、decides（决策）
+- predicate 尽量用动词短语（说了/认为/使用/计划/纠正/反对/创作/持有/发现/决定）
+- relations 描述 topics/人物 之间的关联，最多 4 条
+- type 从以下选择：discusses（讨论）、mentions（提及）、decides（决策）、supports（支持/认同）、opposes（反对/不认同）、reacts_to（情绪反应）、creates（创作/制作）、uses（使用/采用）、knows（了解/知道）、relates_to（关联-兜底）
 - 如果对话是无意义灌水，summary 写"日常灌水"，其他字段留空数组
 - 直接输出 JSON，不要 markdown 代码块"""
 

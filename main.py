@@ -880,6 +880,13 @@ class WaveMemoryPlugin(Star):
             topic = concern_update[3:].strip()
             if topic and hasattr(self, 'concern_tracker'):
                 self.concern_tracker.add(topic)
+                # M4: 关切变动自动写 facts（图谱自增长）
+                try:
+                    bot_profile = self._get_bot(bot_id)
+                    bot_name = bot_profile.name if bot_profile else "bot"
+                    self.db.insert_fact(bot_name, "关注", topic, group_id=group_id, confidence=0.6)
+                except Exception:
+                    pass
 
         mood_impact = result.get("mood_impact")
         if mood_impact is not None and abs(mood_impact) > 0.2 and hasattr(self, 'mood_trajectory') and self.mood_trajectory:
@@ -889,12 +896,20 @@ class WaveMemoryPlugin(Star):
                 arousal=min(1.0, abs(mood_impact) * 1.5),
                 cause=cause,
             )
-            # 强情绪事件沉淀为时间锚点（修复 add_anchor 无调用点）
-            if abs(mood_impact) > 0.5 and getattr(self, 'subjective_time', None):
+            # 强情绪事件沉淀为时间锚点 + 写 facts
+            if abs(mood_impact) > 0.5:
+                event_desc = (f"{nickname or sender_id}: {inner}" if inner else cause)[:80]
+                if getattr(self, 'subjective_time', None) and event_desc:
+                    try:
+                        self.subjective_time.add_anchor(event_desc, emotional_weight=min(1.0, abs(mood_impact)))
+                    except Exception:
+                        pass
+                # M4: 情绪事件写 facts（图谱自增长）
                 try:
-                    summary = (f"{nickname or sender_id}: {inner}" if inner else cause)[:80]
-                    if summary:
-                        self.subjective_time.add_anchor(summary, emotional_weight=min(1.0, abs(mood_impact)))
+                    bot_profile = self._get_bot(bot_id)
+                    bot_name = bot_profile.name if bot_profile else "bot"
+                    mood_label = "正面情绪" if mood_impact > 0 else "负面情绪"
+                    self.db.insert_fact(bot_name, mood_label, event_desc or "未知触发", group_id=group_id, confidence=0.5)
                 except Exception:
                     pass
 
