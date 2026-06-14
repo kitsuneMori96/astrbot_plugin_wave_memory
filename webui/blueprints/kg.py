@@ -86,84 +86,89 @@ async def overview():
         entity_type.setdefault(tgt_name, tgt_type or "topic")
         edges_raw.append((src_name, tgt_name, rel_type or "relates", float(weight or 1)))
 
-    # Step 4: 实体消歧 — 同 QQ 不同名合并(斯扎拉克=山东把妹王=苦海天尊 → 一个节点)
-    # 构建 name→QQ 映射(从 top 发言者)
+    # ═══ 以边为中心构图（修复稀疏图"一坨"问题）═══
+    # 先选 top 边 → 再从边端点建节点 → 保证每个节点至少有一条边 → 图有结构
+
+    # Step 4: 实体消歧（name→QQ 合并）
     name_to_qq: dict[str, str] = {}
+    qq_to_main: dict[str, str] = {}  # qq → 主名
     try:
         sender_rows = c.db.conn.execute(
-            """SELECT sender_name, sender_id FROM memories
+            """SELECT sender_name, sender_id, COUNT(*) as cnt FROM memories
                WHERE sender_id != '' AND sender_name != ''
-               GROUP BY sender_name, sender_id"""
+               GROUP BY sender_name, sender_id ORDER BY cnt DESC"""
         ).fetchall()
-        for sname, sid in sender_rows:
-            name_to_qq[sname.strip()[:30]] = sid
+        for sname, sid, cnt in sender_rows:
+            key = sname.strip()[:30]
+            name_to_qq[key] = sid
+            if sid not in qq_to_main:
+                qq_to_main[sid] = key  # 第一个（最高频）作为主名
     except Exception:
         pass
 
-    # 合并同 QQ 的实体度数
-    qq_merged: dict[str, dict] = {}  # qq → {name: 主名, degree: 合并度数, type, aliases}
-    standalone_entities: dict[str, tuple] = {}  # name → (degree, type)
-
-    for name, degree in entity_degree.items():
-        qq = name_to_qq.get(name)
+    def resolve_name(n: str) -> str:
+        """消歧：同 QQ 的名字合并到主名。"""
+        qq = name_to_qq.get(n)
         if qq:
-            if qq not in qq_merged:
-                qq_merged[qq] = {"name": name, "degree": degree, "type": "person", "aliases": []}
-            else:
-                qq_merged[qq]["degree"] += degree
-                qq_merged[qq]["aliases"].append(name)
-                # 保留度数最高的名字做主名
-                if degree > entity_degree.get(qq_merged[qq]["name"], 0):
-                    qq_merged[qq]["aliases"].append(qq_merged[qq]["name"])
-                    qq_merged[qq]["name"] = name
-        else:
-            standalone_entities[name] = (degree, entity_type.get(name, "entity"))
+            return qq_to_main.get(qq, n)
+        return n
 
-    # 合并后的实体列表
-    merged_list: list[tuple[str, int, str]] = []  # (name, degree, type)
-    for qq_data in qq_merged.values():
-        merged_list.append((qq_data["name"], qq_data["degree"], "person"))
-    for name, (degree, etype) in standalone_entities.items():
-        merged_list.append((name, degree, etype))
+    # Step 5: 构建边（消歧后），按权重排序取 top
+    max_edges = max_nodes * 2
+    edge_list: list[tuple[str, str, str, float]] = []  # (src, tgt, label, weight)
+    seen_pairs: set = set()
 
-    # 取 top N
-    merged_list.sort(key=lambda x: x[1], reverse=True)
-    top_entities = merged_list[:max_nodes]
-    top_set = {name for name, _, _ in top_entities}
+    for src, tgt, label, weight in edges_raw:
+        src_r = resolve_name(src)
+        tgt_r = resolve_name(tgt)
+        if src_r == tgt_r:
+            continue  # 自环（消歧后同一实体）
+        pair = (src_r, tgt_r, label)
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        edge_list.append((src_r, tgt_r, label, weight))
 
-    # Step 5: 构建节点
+    # 按权重排序取 top
+    edge_list.sort(key=lambda x: x[3], reverse=True)
+    edge_list = edge_list[:max_edges]
+
+    # Step 6: 从边端点构建节点集
+    node_degree: dict[str, int] = {}
+    for src, tgt, _, _ in edge_list:
+        node_degree[src] = node_degree.get(src, 0) + 1
+        node_degree[tgt] = node_degree.get(tgt, 0) + 1
+
+    # 限制节点数（优先保留高度数）
+    if len(node_degree) > max_nodes:
+        sorted_nd = sorted(node_degree.items(), key=lambda x: x[1], reverse=True)[:max_nodes]
+        top_set = {n for n, _ in sorted_nd}
+        # 过滤边：只保留两端都在 top 里的
+        edge_list = [(s, t, l, w) for s, t, l, w in edge_list if s in top_set and t in top_set]
+        # 重算度数
+        node_degree = {}
+        for src, tgt, _, _ in edge_list:
+            node_degree[src] = node_degree.get(src, 0) + 1
+            node_degree[tgt] = node_degree.get(tgt, 0) + 1
+    else:
+        top_set = set(node_degree.keys())
+
+    # Step 7: 构建节点
     nodes = []
     name_to_id: dict[str, int] = {}
-    for idx, (name, degree, etype) in enumerate(top_entities):
+    for idx, (name, degree) in enumerate(sorted(node_degree.items(), key=lambda x: x[1], reverse=True)):
         nid = idx + 1
         name_to_id[name] = nid
+        etype = "person" if name in name_to_qq else entity_type.get(name, "entity")
         nodes.append({"id": nid, "name": name, "type": etype, "degree": degree})
 
-    # 把消歧别名也映射到同一 id（让边能正确连接）
-    for qq_data in qq_merged.values():
-        main_name = qq_data["name"]
-        if main_name in name_to_id:
-            nid = name_to_id[main_name]
-            for alias in qq_data["aliases"]:
-                name_to_id[alias] = nid
-                top_set.add(alias)  # 别名也算在 top_set 里,让边能通过
-
-    # Step 6: 筛选边（两端都在 top N 里）+ 去重
+    # Step 8: 构建边（映射到 node id）
     edges = []
-    seen_edges: set = set()
-    for src, tgt, label, weight in edges_raw:
-        if src not in top_set or tgt not in top_set:
-            continue
-        src_id = name_to_id[src]
-        tgt_id = name_to_id[tgt]
-        edge_key = (src_id, tgt_id, label)
-        if edge_key in seen_edges:
-            continue
-        seen_edges.add(edge_key)
-        edges.append({"source": src_id, "target": tgt_id, "label": label, "weight": round(weight, 2)})
-
-    # 限制边数避免过密
-    edges = sorted(edges, key=lambda e: e["weight"], reverse=True)[:max_nodes * 3]
+    for src, tgt, label, weight in edge_list:
+        src_id = name_to_id.get(src)
+        tgt_id = name_to_id.get(tgt)
+        if src_id and tgt_id:
+            edges.append({"source": src_id, "target": tgt_id, "label": label, "weight": round(weight, 2)})
 
     data = {"nodes": nodes, "edges": edges}
     _overview_cache.update({"version": version, "data": data, "ts": now})
