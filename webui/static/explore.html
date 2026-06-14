@@ -599,16 +599,16 @@ function applyKgConfig() {
     const cutoff = days > 0 ? (Date.now()/1000 - days * 86400) : 0;
 
     // 前端过滤（减法逻辑：selectedRelTypes/selectedNodeTypes 里有的才显示，取消的隐藏）
-    // 关系类型筛选只对 facts 图层生效，其他图层(beliefs/concerns/jargon/affinity/communities)只要 layer 被勾选就通过
+    // 关系类型/节点类型/时间筛选只对 facts 图层生效，其他图层只要 layer 被勾选就通过
     let filtered = _kgFullEdges;
-    if (minWeight > 0) filtered = filtered.filter(e => e.w >= minWeight);
-    if (cutoff > 0) filtered = filtered.filter(e => e.ts >= cutoff);
+    if (minWeight > 0) filtered = filtered.filter(e => e.layer !== 'facts' || e.w >= minWeight);
+    if (cutoff > 0) filtered = filtered.filter(e => e.layer !== 'facts' || e.ts >= cutoff);
     if (selectedRelTypes.size > 0) {
         filtered = filtered.filter(e => e.layer !== 'facts' || selectedRelTypes.has(e.l));
     }
     if (selectedNodeTypes.size > 0) {
         filtered = filtered.filter(e => {
-            if (e.layer !== 'facts') return true; // 非 facts 图层不按节点类型过滤
+            if (e.layer !== 'facts') return true;
             return selectedNodeTypes.has(e.st) || selectedNodeTypes.has(e.tt);
         });
     }
