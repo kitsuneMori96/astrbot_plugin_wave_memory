@@ -677,20 +677,25 @@ async function doPathFind() {
     if (!from || !to) return;
     showLoading('寻路中...');
     try {
-        const [sid, tid] = await Promise.all([_resolveTagId(from), _resolveTagId(to)]);
-        if (!sid || !tid) {
-            showLoading(`未找到 Tag: ${!sid ? from : to}`);
-            setTimeout(hideLoading, 1500);
-            return;
-        }
-        const res = await fetch('/api/explore/path', {
+        const res = await fetch('/api/kg/path', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ source_id: sid, target_id: tid, max_depth: 6 }),
+            body: JSON.stringify({ from, to, max_depth: 6 }),
         });
         const data = await res.json();
         if (data.nodes && data.nodes.length) {
             renderGraph(data.nodes, data.edges || []);
+            // 在详情面板展示路径语义链
+            const panel = document.getElementById('detail-panel');
+            document.getElementById('detail-title').textContent = `${from} → ${to} 路径`;
+            document.getElementById('detail-meta').innerHTML = `<span class="text-purple-300">${data.path.length} 跳</span>`;
+            document.getElementById('detail-neighbor-list').innerHTML = '';
+            const memList = document.getElementById('detail-memory-list');
+            memList.innerHTML = '<p class="text-slate-500 text-[9px] uppercase tracking-wider mb-1.5">关系链</p>' +
+                data.edges.map(e => `<div class="px-2 py-1.5 rounded bg-white/[.02] text-[10px] text-slate-400 mb-1"><span class="text-purple-300">${e.source}</span> <span class="text-amber-400/70">→${e.label}→</span> <span class="text-blue-300">${e.target}</span></div>`).join('');
+            document.getElementById('btn-expand').style.display = 'none';
+            panel.classList.remove('hidden');
+            if (typeof gsap !== 'undefined') gsap.fromTo(panel, {autoAlpha:0,x:30}, {autoAlpha:1,x:0,duration:0.4,ease:'power3.out'});
         } else {
             showLoading(`${from} → ${to} 之间无连通路径`);
             setTimeout(hideLoading, 1500);

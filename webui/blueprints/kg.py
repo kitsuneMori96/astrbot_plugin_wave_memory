@@ -275,3 +275,129 @@ async def kg_stats():
         "jargon": c.db.conn.execute("SELECT COUNT(*) FROM jargon WHERE is_jargon=1").fetchone()[0],
         "persons": c.db.conn.execute("SELECT COUNT(DISTINCT sender_id) FROM memories WHERE sender_id!=''").fetchone()[0],
     })
+
+
+@kg_bp.route("/entity/<entity_name>/timeline")
+@require_auth
+async def entity_timeline(entity_name: str):
+    """实体时间线：该实体相关的 facts + memories 按时间排列。"""
+    c = get_container()
+    from urllib.parse import unquote
+    name = unquote(entity_name).strip()
+    limit = int(request.args.get("limit", 30))
+
+    # 查该实体所有别名（人物消歧）
+    names = [name]
+    qq_row = c.db.conn.execute(
+        "SELECT sender_id FROM memories WHERE sender_name = ? AND sender_id != '' LIMIT 1", (name,)
+    ).fetchone()
+    if qq_row:
+        aliases = c.db.conn.execute(
+            "SELECT DISTINCT sender_name FROM memories WHERE sender_id = ? AND sender_name != ''", (qq_row[0],)
+        ).fetchall()
+        names = list({name} | {a[0] for a in aliases})
+
+    # Facts 时间线
+    events = []
+    for n in names[:5]:
+        rows = c.db.conn.execute(
+            "SELECT subject, predicate, object, created_at, source_memory_id FROM facts WHERE (subject=? OR object=?) AND created_at IS NOT NULL ORDER BY created_at DESC LIMIT ?",
+            (n, n, limit),
+        ).fetchall()
+        for r in rows:
+            events.append({"type": "fact", "ts": r[3], "subject": r[0], "predicate": r[1], "object": r[2], "source_id": r[4]})
+
+    # 关键记忆（按时间）
+    if qq_row:
+        mem_rows = c.db.conn.execute(
+            "SELECT id, content, sender_name, timestamp FROM memories WHERE sender_id = ? ORDER BY timestamp DESC LIMIT ?",
+            (qq_row[0], limit),
+        ).fetchall()
+    else:
+        mem_rows = c.db.conn.execute(
+            "SELECT m.id, m.content, m.sender_name, m.timestamp FROM memories m JOIN memory_tags mt ON m.id=mt.memory_id JOIN tags t ON mt.tag_id=t.id WHERE t.name=? ORDER BY m.timestamp DESC LIMIT ?",
+            (name, limit),
+        ).fetchall()
+    for r in mem_rows:
+        events.append({"type": "memory", "ts": r[3], "id": r[0], "content": r[1], "sender": r[2] or ""})
+
+    # 按时间排序
+    events.sort(key=lambda e: e.get("ts") or 0, reverse=True)
+    return jsonify({"name": name, "events": events[:limit]})
+
+
+@kg_bp.route("/path", methods=["POST"])
+@require_auth
+async def kg_path():
+    """多跳路径：两个实体间的最短关系链（BFS on tag_relations + facts）。
+
+    每跳返回关系类型 + 两端实体名，用户能看到 A→关系→B→关系→C 的完整语义链。
+    """
+    c = get_container()
+    body = await request.get_json(silent=True) or {}
+    from_name = (body.get("from") or "").strip()
+    to_name = (body.get("to") or "").strip()
+    max_depth = int(body.get("max_depth", 5))
+
+    if not from_name or not to_name:
+        return jsonify({"path": [], "edges": [], "error": "from and to required"})
+
+    # 构建邻接表（name→name，带关系标签）from tag_relations + facts
+    adj: dict[str, list[tuple[str, str]]] = {}  # name → [(neighbor, label)]
+
+    # tag_relations
+    rel_rows = c.db.conn.execute(
+        """SELECT t1.name, tr.relation_type, t2.name FROM tag_relations tr
+           JOIN tags t1 ON tr.source_tag_id=t1.id JOIN tags t2 ON tr.target_tag_id=t2.id"""
+    ).fetchall()
+    for src, rtype, tgt in rel_rows:
+        adj.setdefault(src, []).append((tgt, rtype or "relates"))
+        adj.setdefault(tgt, []).append((src, rtype or "relates"))
+
+    # facts
+    fact_rows = c.db.conn.execute("SELECT subject, predicate, object FROM facts").fetchall()
+    for subj, pred, obj in fact_rows:
+        if subj and obj:
+            adj.setdefault(subj, []).append((obj, pred or "relates"))
+            adj.setdefault(obj, []).append((subj, pred or "relates"))
+
+    # BFS
+    from collections import deque
+    visited: dict[str, tuple] = {from_name: (None, None)}  # name → (parent, edge_label)
+    queue = deque([(from_name, 0)])
+    found = False
+
+    while queue:
+        current, depth = queue.popleft()
+        if depth >= max_depth:
+            continue
+        for neighbor, label in adj.get(current, []):
+            if neighbor not in visited:
+                visited[neighbor] = (current, label)
+                if neighbor == to_name:
+                    found = True
+                    break
+                queue.append((neighbor, depth + 1))
+        if found:
+            break
+
+    if not found:
+        return jsonify({"path": [], "edges": [], "nodes": []})
+
+    # 回溯路径
+    path_names = []
+    path_edges = []
+    node = to_name
+    while node is not None:
+        path_names.append(node)
+        parent, label = visited[node]
+        if parent is not None:
+            path_edges.append({"source": parent, "target": node, "label": label or "relates"})
+        node = parent
+    path_names.reverse()
+    path_edges.reverse()
+
+    # 构建节点（for graph rendering）
+    nodes = [{"id": i+1, "name": n, "type": "entity", "degree": 1} for i, n in enumerate(path_names)]
+
+    return jsonify({"path": path_names, "edges": path_edges, "nodes": nodes})
