@@ -37,7 +37,11 @@ def _coerce(value, type_name: str):
             if isinstance(value, bool):
                 return int(value)
             return int(float(value)) if value != "" and value is not None else 0
-        # string / 其它：保持原样（含可表示小数的 string 字段）
+        # string 类型：强制转为字符串（避免 float/int 值绕过 AstrBot 类型校验）
+        if type_name == "string":
+            if value is None:
+                return ""
+            return str(value)
         return value
     except (ValueError, TypeError):
         return value
