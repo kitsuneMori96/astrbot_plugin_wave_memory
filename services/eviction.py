@@ -73,7 +73,7 @@ class EvictionService:
         evicted = 0
         for mem_id in stale_ids:
             try:
-                self.memory_index.remove(mem_id)
+                self.memory_index.mark_deleted([mem_id])
                 self.db.mark_evicted(mem_id)
                 evicted += 1
             except Exception:

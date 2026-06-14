@@ -132,15 +132,16 @@ class StudyService:
             if self._is_duplicate(mem_vec):
                 continue
 
-            # 6. 写入 bzz_evolution
+            # 6. 写入 bzz_pending（待审查, v1.1.0 #2.1）
+            #    审核通过后 WebUI 会改为 source=bzz_evolution + importance=1.2
             mem_id = self.db.add_memory(
                 group_id="__bzz_evolution__",
                 content=internalized,
                 vector=mem_vec,
                 sender_id=self.bot_qq_id or "bot",
                 sender_name=self.bot_name,
-                importance=1.2,
-                source="bzz_evolution",
+                importance=0.5,
+                source="bzz_pending",
             )
 
             # 7. 加入向量索引

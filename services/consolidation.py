@@ -218,6 +218,7 @@ class ConsolidationService:
         relations_written = self._write_relations(topics, facts, relations)
 
         # 写入人际关系到 facts（关系自动发现）
+        social_written = 0
         for sr in (social or [])[:3]:
             a = sr.get("person_a", "").strip()
             b = sr.get("person_b", "").strip()
@@ -225,8 +226,14 @@ class ConsolidationService:
             if a and b and rel:
                 try:
                     self.db.insert_fact(a, rel, b, group_id=group_id, confidence=0.7)
+                    social_written += 1
                 except Exception:
                     pass
+        if social:
+            logger.info(f"[Consolidation] social 提取: raw={len(social)} written={social_written} | {social}")
+        elif facts:
+            # 有 facts 但没 social → prompt 可能需要调整
+            logger.debug(f"[Consolidation] social 为空（有 {len(facts)} 个 facts），prompt 可能未触发 social 提取")
 
         # 写入 facts 三元组
         facts_written = self._write_facts(facts, group_id, msg_ids[0] if msg_ids else None)

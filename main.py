@@ -480,6 +480,7 @@ class WaveMemoryPlugin(Star):
                 await self.webui.start()
             except Exception as e:
                 logger.warning(f"[WaveMemory] WebUI failed to start: {e}")
+                _record_err("WebUI", e)
                 self.webui = None
         else:
             self.webui = None
@@ -562,6 +563,7 @@ class WaveMemoryPlugin(Star):
                 logger.info("[WaveMemory] Jargon system initialized")
             except Exception as e:
                 logger.warning(f"[WaveMemory] Jargon init failed: {e}")
+                _record_err("Jargon", e)
                 self.jargon_service = None
         else:
             self.jargon_service = None
@@ -583,6 +585,7 @@ class WaveMemoryPlugin(Star):
                 logger.info("[WaveMemory] Few-Shot system initialized")
             except Exception as e:
                 logger.warning(f"[WaveMemory] FewShot init failed: {e}")
+                _record_err("FewShot", e)
                 self.few_shot_service = None
         else:
             self.few_shot_service = None
@@ -614,6 +617,7 @@ class WaveMemoryPlugin(Star):
                 self.meta_thinking._plugin_config = self.config  # 好感度约束需要顶层 config
             except Exception as e:
                 logger.warning(f"[WaveMemory] MetaThinking init failed: {e}")
+                _record_err("MetaThinking", e)
                 self.meta_thinking = None
         else:
             self.meta_thinking = None
@@ -694,11 +698,16 @@ class WaveMemoryPlugin(Star):
                 )
             except Exception as e:
                 logger.warning(f"[WaveMemory] SelfReflectService init failed: {e}")
+                _record_err("SelfReflect", e)
                 self.self_reflect = None
         else:
             self.self_reflect = None
 
         # ─── BDI / 灵魂子系统实例化（修复 06-12 集体停摆：原代码仅有 hasattr 守卫调用，缺实例化）───
+        # ⚠ 顺序约束：belief_engine 必须在 consolidation 之后实例化，
+        #   因为 belief_engine 要挂到已存在的 self.consolidation 上。
+        assert getattr(self, "consolidation", None) is not None or not self.enable_consolidation, \
+            "belief_engine 初始化要求 consolidation 已就绪（检查初始化顺序）"
         soul_bot = experience_bot or reflect_bot
         soul_bot_id = soul_bot.qq_id if soul_bot else ""
         # 信念引擎（提取在 consolidation 内触发，注入在 on_llm_request）
@@ -717,28 +726,33 @@ class WaveMemoryPlugin(Star):
                 self.belief_engine = None
         except Exception as e:
             logger.warning(f"[WaveMemory] BeliefEngine init failed: {e}")
+            _record_err("BeliefEngine", e)
             self.belief_engine = None
         # 关切 / 情绪轨迹 / 时间锚点（纯 DB，无需 LLM）
         try:
             self.concern_tracker = ConcernTracker(db=self.db, bot_id=soul_bot_id)
         except Exception as e:
             logger.warning(f"[WaveMemory] ConcernTracker init failed: {e}")
+            _record_err("ConcernTracker", e)
             self.concern_tracker = None
         try:
             self.mood_trajectory = MoodTrajectory(db=self.db, bot_id=soul_bot_id)
         except Exception as e:
             logger.warning(f"[WaveMemory] MoodTrajectory init failed: {e}")
+            _record_err("MoodTrajectory", e)
             self.mood_trajectory = None
         try:
             self.subjective_time = SubjectiveTime(db=self.db, bot_id=soul_bot_id)
         except Exception as e:
             logger.warning(f"[WaveMemory] SubjectiveTime init failed: {e}")
+            _record_err("SubjectiveTime", e)
             self.subjective_time = None
         # 欲望引擎（依赖信念引擎）
         try:
             self.desire_engine = DesireEngine(belief_engine=self.belief_engine, bot_id=soul_bot_id)
         except Exception as e:
             logger.warning(f"[WaveMemory] DesireEngine init failed: {e}")
+            _record_err("DesireEngine", e)
             self.desire_engine = None
         logger.info(
             f"[WaveMemory] 灵魂子系统就绪: belief={bool(self.belief_engine)} "
@@ -979,6 +993,7 @@ class WaveMemoryPlugin(Star):
                 logger.info(f"[WaveMemory] Jargon mined {len(results)} new in {group_id}")
         except Exception as e:
             logger.debug(f"[WaveMemory] Jargon mine error: {e}")
+            _record_err("JargonMine", e)
 
     # ─── Hook: 自动注入记忆 ───
 
@@ -1047,8 +1062,10 @@ class WaveMemoryPlugin(Star):
                         ), timeout=_CHANNEL_TIMEOUT)
             except asyncio.TimeoutError:
                 logger.warning("[WaveMemory] main_search timed out")
+                _record_err("main_search", "timeout")
             except Exception as e:
                 logger.warning(f"[WaveMemory] main_search error: {e}")
+                _record_err("main_search", e)
             timing["main_search_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
 
         # ─── 通道 2: 经历 ───
@@ -1189,6 +1206,7 @@ class WaveMemoryPlugin(Star):
 
             except Exception as e:
                 logger.warning(f"[WaveMemory] soul channel error: {e}", exc_info=True)
+                _record_err("soul_channel", e)
             timing["soul_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
 
         # ─── 并行执行所有通道 (US-2.1) ───
@@ -1297,6 +1315,7 @@ class WaveMemoryPlugin(Star):
 
         except Exception as e:
             logger.warning(f"[WaveMemory] Injection failed: {e}", exc_info=True)
+            _record_err("inject_memory", e)
 
     # ─── Hook: 捕获消息 ───
 
@@ -1328,6 +1347,9 @@ class WaveMemoryPlugin(Star):
             return
 
         # ─── "记住/忘记" 显式命令（用户主动触发,不依赖 LLM 判断）───
+        sender_name = ""
+        if event.message_obj and event.message_obj.sender:
+            sender_name = event.message_obj.sender.nickname or ""
         _remember_prefixes = ("记住", "记下", "remember")
         _forget_prefixes = ("忘记", "忘掉", "forget", "别记")
         msg_stripped = message.strip()
@@ -1437,6 +1459,7 @@ class WaveMemoryPlugin(Star):
                         await event.send(event.plain_result(reply_text))
             except Exception as e:
                 logger.debug(f"[MetaThinking] Proactive failed: {e}")
+                _record_err("Proactive", e)
 
     @filter.after_message_sent()
     async def on_bot_sent(self, event: AstrMessageEvent):
@@ -1531,6 +1554,7 @@ class WaveMemoryPlugin(Star):
                 self.cooccurrence.residual_map = residuals
         except Exception as e:
             logger.warning(f"[WaveMemory] Intrinsic residual computation failed: {e}")
+            _record_err("IntrinsicResidual", e)
 
     async def _init_epa(self):
         self.epa.initialize()

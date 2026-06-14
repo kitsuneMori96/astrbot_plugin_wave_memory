@@ -4,20 +4,23 @@
     "type": "string",
     "hint": "填写 Embedding 提供商的完整 ID（如 'siliconflow/Qwen3-Embedding-0.6B'）。需要先在 AstrBot 的 Provider 管理中创建 Embedding 类型的提供商，然后将其 ID 填写到此处",
     "obvious_hint": true,
-    "default": ""
+    "default": "",
+    "restart_required": true
   },
   "embedding_dimension": {
     "description": "向量维度",
     "type": "int",
     "hint": "必须与所选 Embedding 模型输出维度一致。Qwen3-Embedding-0.6B 默认 1024",
-    "default": 1024
+    "default": 1024,
+    "restart_required": true
   },
   "tag_llm_provider_id": {
     "description": "Tag 提取 LLM",
     "type": "string",
     "hint": "用于从消息中提取关键标签的 LLM 提供商 ID，需要手动填写完整 ID（如 'provider_xxx'）。留空则禁用 Tag 提取",
     "default": "",
-    "_special": "select_provider"
+    "_special": "select_provider",
+    "restart_required": true
   },
   "WebUI_Settings": {
     "description": "WebUI 管理面板",
@@ -28,19 +31,22 @@
         "description": "启用 WebUI",
         "hint": "开启后可通过浏览器访问记忆管理面板",
         "type": "bool",
-        "default": true
+        "default": true,
+        "restart_required": true
       },
       "webui_host": {
         "description": "监听地址",
         "hint": "127.0.0.1 仅本机访问；0.0.0.0 允许局域网访问",
         "type": "string",
-        "default": "0.0.0.0"
+        "default": "0.0.0.0",
+        "restart_required": true
       },
       "webui_port": {
         "description": "监听端口",
         "hint": "WebUI 服务端口，确保不与其他服务冲突",
         "type": "int",
-        "default": 9876
+        "default": 9876,
+        "restart_required": true
       },
       "webui_password": {
         "description": "访问密码",
@@ -71,7 +77,8 @@
         "description": "最低相似度阈值",
         "hint": "低于此分数的记忆不会被注入（0-1）",
         "type": "string",
-        "default": "0.35"
+        "default": "0.35",
+        "_note": "实际为浮点数,string 是 AstrBot 配置系统限制"
       },
       "injection_format": {
         "description": "注入格式（支持来源追溯）",
@@ -157,7 +164,8 @@
         "description": "情绪持续时间（小时）",
         "hint": "情绪触发后持续多久自动过期",
         "type": "string",
-        "default": "2.0"
+        "default": "2.0",
+        "_note": "实际为浮点数,string 是 AstrBot 配置系统限制"
       },
       "mood_msg_threshold": {
         "description": "活跃情绪消息阈值",
@@ -169,13 +177,15 @@
         "description": "正面情绪触发阈值",
         "hint": "正面情感 tag 占比超过此值触发 cheerful（0-1）",
         "type": "string",
-        "default": "0.6"
+        "default": "0.6",
+        "_note": "实际为浮点数,string 是 AstrBot 配置系统限制"
       },
       "negative_emotion_threshold": {
         "description": "负面情绪触发阈值",
         "hint": "负面情感 tag 占比超过此值触发 concerned（0-1）",
         "type": "string",
-        "default": "0.4"
+        "default": "0.4",
+        "_note": "实际为浮点数,string 是 AstrBot 配置系统限制"
       },
       "enable_dream": {
         "description": "启用做梦系统",
@@ -187,7 +197,8 @@
         "description": "做梦间隔（小时）",
         "hint": "每隔多少小时执行一次做梦（记忆巩固）",
         "type": "string",
-        "default": "6.0"
+        "default": "6.0",
+        "_note": "实际为浮点数,string 是 AstrBot 配置系统限制"
       },
       "dream_recent_seeds": {
         "description": "近期种子数",
@@ -221,7 +232,8 @@
         "description": "整合间隔（小时）",
         "hint": "每隔多少小时执行一次 LLM 摘要整合",
         "type": "string",
-        "default": "4.0"
+        "default": "4.0",
+        "_note": "实际为浮点数,string 是 AstrBot 配置系统限制"
       },
       "consolidation_topic_backfill": {
         "description": "整合话题回写",
@@ -332,13 +344,15 @@
         "description": "每日衰减率",
         "hint": "每天未访问时重要性乘以此系数（0.99=慢衰减，0.95=快衰减）",
         "type": "string",
-        "default": "0.995"
+        "default": "0.995",
+        "_note": "实际为浮点数,string 是 AstrBot 配置系统限制"
       },
       "cleanup_importance_threshold": {
         "description": "清理重要性阈值",
         "hint": "重要性低于此值的记忆会在自动清理时被删除",
         "type": "string",
-        "default": "0.1"
+        "default": "0.1",
+        "_note": "实际为浮点数,string 是 AstrBot 配置系统限制"
       },
       "auto_cleanup_enabled": {
         "description": "启用自动清理",
@@ -609,13 +623,15 @@
         "description": "黄金邻接区中心",
         "hint": "钟形曲线的峰值位置。需要根据 embedding 模型的相似度分布调整（默认 0.65 适用于 OpenAI，Qwen 可能不同）",
         "type": "string",
-        "default": "0.65"
+        "default": "0.65",
+        "_note": "实际为浮点数,string 是 AstrBot 配置系统限制"
       },
       "sigma": {
         "description": "高斯宽度",
         "hint": "钟形曲线的宽度，越大越平缓",
         "type": "string",
-        "default": "0.25"
+        "default": "0.25",
+        "_note": "实际为浮点数,string 是 AstrBot 配置系统限制"
       }
     }
   },
@@ -646,7 +662,8 @@
         "description": "去重阈值",
         "hint": "余弦相似度超过此值视为重复，不再生成。0.85 = 非常相似",
         "type": "string",
-        "default": "0.85"
+        "default": "0.85",
+        "_note": "实际为浮点数,string 是 AstrBot 配置系统限制"
       },
       "self_reflect_enabled": {
         "description": "启用自省（纠正学习）",

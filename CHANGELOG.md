@@ -1,5 +1,46 @@
 # Changelog
 
+## v1.1.0 (2026-06-15)
+
+### 知识图谱交互改进
+
+- **expandNode 改真 KG 邻居**：展开节点改为调 `/api/kg/entity/<name>` 获取语义邻居，不再走旧 cooccurrence 社区
+- **焦点探索模式**：双击节点自动展开其 KG 邻居，支持渐进式图谱探索
+- **标签遮挡动态隐藏**：`labelRenderedSizeThreshold` 调至 12，400 节点时小节点不显示标签
+- **边标签按缩放显隐**：`edgeLabelRenderedSizeThreshold` 设 1.5，缩小时自动隐藏边标签
+- **配置面板首次加载 pills 为空修复**：loadGalaxy 完成后自动调 loadKgConfig()
+
+### 学习/BDI 质量
+
+- **study_service 内化加 pending 审查**：学习系统写入改为 source=bzz_pending + importance=0.5，WebUI 审批后才提升
+- **旧信念批量归档**：信念审核页新增"一键归档全部旧信念"按钮 + 后端 batch-archive 端点
+- **consolidation social 关系验证**：新增诊断日志，输出 social 提取 raw/written 计数 + 内容
+- **黑话含义纠正能力**：黑话表格释义列支持双击 inline edit，不再需要打开弹窗
+
+### 报错可视化
+
+- **全面错误收集**：main.py 12 处关键 except 块补全 `_record_err`（WebUI/Jargon/MetaThinking/SelfReflect/BeliefEngine/BDI 全覆盖）
+- **配置页标注"需重启"参数**：schema 加 `restart_required` 标记；保存时动态检测并提示
+- **概览页错误区域 30s 定时刷新**：系统状态 + 错误列表每 30 秒自动更新
+
+### 稳定性/架构
+
+- **HNSW 死 ID 修复**：eviction 调 `mark_deleted` 替代不存在的 `remove`，修复 AttributeError
+- **tag_relations.created_at NULL 补全**：启动时一次性 migration 填充空 created_at 行
+- **jargon 预热性能**：LIMIT 20000→10000 + 7 天→3 天，启动速度提升 ~50%
+- **DB 体积监控**：/api/system 返回 db_size_mb（含 WAL）；概览页显示体积 + 超 2GB 警告
+- **consolidation 与 belief_engine 初始化顺序保护**：assert + 注释说明顺序约束
+
+### 代码质量
+
+- **explore.html 拆分**：900+ 行单文件拆为 explore.html(308行 HTML) + kg.js(909行 图谱逻辑) + kg-config.js(64行 配置面板)
+- **_conf_schema.json 数值字段 type 注释**：10 个浮点 string 字段加 `_note` 说明 AstrBot 限制
+- **_conf_schema.json restart_required 标记**：embedding/dimension/webui 等 6 个重启参数标记
+
+### Bug 修复
+
+- **"记住"命令 sender_name 未定义**：提前赋值 sender_name，修复 NameError（v1.0.1 引入的潜在 bug）
+
 ## v1.0.2 (2026-06-14)
 
 ### 改进

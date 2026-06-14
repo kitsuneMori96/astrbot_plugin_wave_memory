@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from quart import Blueprint, jsonify
 
 from ..container import get_container
@@ -41,6 +43,19 @@ async def system_status():
     with_vec = c.db.get_memory_count_with_vector()
     total_tags = c.db.get_tag_count()
 
+    # DB 体积监控 (v1.1.0 #4.4)
+    db_size_mb = 0.0
+    try:
+        db_file = getattr(c.db, 'db_path', '')
+        if db_file and os.path.isfile(db_file):
+            db_size_mb = round(os.path.getsize(db_file) / (1024 * 1024), 1)
+            # WAL 文件也加上
+            wal_file = db_file + '-wal'
+            if os.path.isfile(wal_file):
+                db_size_mb += round(os.path.getsize(wal_file) / (1024 * 1024), 1)
+    except Exception:
+        pass
+
     tagged_memories = c.db.conn.execute(
         "SELECT COUNT(DISTINCT memory_id) FROM memory_tags"
     ).fetchone()[0]
@@ -71,6 +86,7 @@ async def system_status():
             "tag_pct": round(tagged_memories / total_mem * 100, 1) if total_mem > 0 else 0,
         },
         "cooccurrence": {"nodes": cooc_nodes, "edges": cooc_edges},
+        "db_size_mb": db_size_mb,
         "epa": {
             "initialized": c.epa.initialized if c.epa else False,
             "reason": "" if (c.epa and c.epa.initialized) else (

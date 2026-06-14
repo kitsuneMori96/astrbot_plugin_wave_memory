@@ -40,6 +40,7 @@ class WaveMemoryDB:
         # FTS5 + 其他迁移
         self._setup_fts5()
         self._setup_audit_table()
+        self._backfill_tag_relations_created_at()
 
     @property
     def conn(self):
@@ -436,6 +437,25 @@ class WaveMemoryDB:
                     created_at REAL,
                     resolved_at REAL
                 )
+            """)
+            self.conn.commit()
+        except Exception:
+            pass
+
+    def _backfill_tag_relations_created_at(self):
+        """一次性补全 tag_relations.created_at NULL 行 (v1.1.0 #4.2)。"""
+        try:
+            null_count = self.conn.execute(
+                "SELECT COUNT(*) FROM tag_relations WHERE created_at IS NULL"
+            ).fetchone()[0]
+            if null_count == 0:
+                return
+            self.conn.execute("""
+                UPDATE tag_relations SET created_at = (
+                    SELECT MIN(m.timestamp) FROM memories m
+                    JOIN memory_tags mt ON m.id = mt.memory_id
+                    WHERE mt.tag_id = tag_relations.source_tag_id
+                ) WHERE created_at IS NULL
             """)
             self.conn.commit()
         except Exception:

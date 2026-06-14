@@ -243,11 +243,31 @@ async def update_config_full():
     if changed and hasattr(cfg, "save_config"):
         cfg.save_config()
 
+    # 检测是否有需要重启的参数被修改
+    restart_required = False
+    for key in changed:
+        meta = schema.get(key)
+        if not isinstance(meta, dict):
+            continue
+        if meta.get("restart_required"):
+            restart_required = True
+            break
+        # 检查 object 类型内部子项
+        if meta.get("type") == "object":
+            sub_schema = meta.get("items", {}) or {}
+            for sub_key, sub_meta in sub_schema.items():
+                if isinstance(sub_meta, dict) and sub_meta.get("restart_required"):
+                    restart_required = True
+                    break
+            if restart_required:
+                break
+
     return jsonify({
         "ok": len(errors) == 0,
         "changed": changed,
         "errors": errors,
-        "message": "配置已保存，部分参数（数据库/端口/维度）需重启插件生效",
+        "restart_required": restart_required,
+        "message": "配置已保存" + ("，部分参数需重启插件生效" if restart_required else ""),
     })
 
 

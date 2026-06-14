@@ -76,3 +76,25 @@ async def delete_belief(belief_id: int):
     c.db.conn.execute("DELETE FROM beliefs WHERE id = ?", (belief_id,))
     c.db.conn.commit()
     return jsonify({"ok": True, "deleted": belief_id})
+
+
+@beliefs_bp.route("/batch-archive", methods=["POST"])
+@require_auth
+async def batch_archive():
+    """批量归档旧信念（v1.1.0 #2.2）。
+    body 可选: {"before_ts": 1718000000} 不传则归档所有 active 信念。
+    """
+    c = get_container()
+    body = await request.get_json(force=True, silent=True) or {}
+    before_ts = body.get("before_ts")
+    if before_ts:
+        cur = c.db.conn.execute(
+            "UPDATE beliefs SET status = 'archived', archived_reason = 'batch_archive' WHERE status = 'active' AND created_at < ?",
+            (int(before_ts),),
+        )
+    else:
+        cur = c.db.conn.execute(
+            "UPDATE beliefs SET status = 'archived', archived_reason = 'batch_archive' WHERE status = 'active'",
+        )
+    c.db.conn.commit()
+    return jsonify({"ok": True, "archived_count": cur.rowcount})

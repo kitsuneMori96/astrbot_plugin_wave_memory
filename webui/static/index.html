@@ -229,9 +229,10 @@
                 <div x-show="sys.memories?.total && sys.memories?.with_tags" class="text-xs mt-1.5" style="color:var(--warning)" x-text="`${sys.memories.total - sys.memories.with_tags} 条待标记`"></div>
             </div>
             <div class="card card-hover stat-card">
-                <div class="text-xs" style="color:var(--muted-fg)">共现图谱</div>
-                <div class="text-2xl font-bold mt-1" x-text="sys.cooccurrence?.nodes || '-'"></div>
-                <div class="text-xs mt-2" style="color:var(--muted-fg)"><span x-text="sys.cooccurrence?.edges || 0"></span> 条边</div>
+                <div class="text-xs" style="color:var(--muted-fg)">数据库体积</div>
+                <div class="text-2xl font-bold mt-1" :style="`color:var(${(sys.db_size_mb||0) > 2048 ? '--danger' : (sys.db_size_mb||0) > 1536 ? '--warning' : '--fg'})`" x-text="sys.db_size_mb ? (sys.db_size_mb > 1024 ? (sys.db_size_mb/1024).toFixed(1) + ' GB' : sys.db_size_mb + ' MB') : '-'"></div>
+                <div class="text-xs mt-2" style="color:var(--muted-fg)">共现 <span x-text="sys.cooccurrence?.nodes || 0"></span> 节点 / <span x-text="sys.cooccurrence?.edges || 0"></span> 边</div>
+                <div x-show="(sys.db_size_mb||0) > 2048" class="text-xs mt-1.5" style="color:var(--danger)">⚠ 超过 2GB，建议清理</div>
             </div>
         </div>
 
@@ -614,6 +615,7 @@
                 <option value="archived">已归档</option>
             </select>
             <button @click="loadBeliefs()" class="btn btn-outline btn-xs">🔄 刷新</button>
+            <button @click="batchArchiveBeliefs()" class="btn btn-outline btn-xs" style="border-color:var(--warning);color:var(--warning)">📦 一键归档全部旧信念</button>
             <div class="ml-auto text-xs" style="color:var(--muted-fg)">
                 待审 <span class="font-mono" style="color:var(--warning)" x-text="beliefPending"></span> ·
                 共 <span class="font-mono" x-text="beliefTotal"></span> 条
@@ -681,7 +683,10 @@
                     <template x-for="j in jargonItems" :key="j.id">
                         <tr class="table-row" style="border-bottom:1px solid var(--border)">
                             <td class="px-3 py-2.5 font-medium" x-text="j.word"></td>
-                            <td class="px-3 py-2.5" style="color:var(--muted-fg); max-width:240px" x-text="j.meaning || '—'"></td>
+                            <td class="px-3 py-2.5" style="color:var(--muted-fg); max-width:240px; cursor:pointer" @dblclick="$el.querySelector('span').style.display='none'; $el.querySelector('input').style.display=''; $el.querySelector('input').focus()" :title="'双击编辑释义'">
+                                <span x-text="j.meaning || '—'"></span>
+                                <input type="text" :value="j.meaning||''" style="display:none; width:100%" class="input text-xs" @blur="quickEditMeaning(j.id, $el.value); $el.style.display='none'; $el.previousElementSibling.style.display=''" @keyup.enter="$el.blur()" @keyup.escape="$el.style.display='none'; $el.previousElementSibling.style.display=''">
+                            </td>
                             <td class="px-3 py-2.5 font-mono" x-text="j.frequency"></td>
                             <td class="px-3 py-2.5">
                                 <span class="pill" :class="j.is_jargon===1?'pill-active':(j.is_jargon===0?'pill-rejected':'pill-pending')"
@@ -1073,6 +1078,8 @@ function dashboard() {
             await this.loadProviders();
             await this.loadSchema();
             await this.loadHotConfig();
+            // 30s 定时刷新系统状态 + 错误（v1.1.0 #3.3）
+            setInterval(() => this.loadSystem(), 30000);
         },
 
         toggleTheme() {
@@ -1216,7 +1223,9 @@ function dashboard() {
                 });
                 const d = await r.json();
                 if (d.ok) {
-                    this.configMsg = '✓ ' + (d.message || '配置已保存');
+                    // 检查是否修改了需要重启的参数
+                    const needRestart = d.restart_required || false;
+                    this.configMsg = '✓ ' + (d.message || '配置已保存') + (needRestart ? ' ⚠️ 部分参数需重启生效' : '');
                     this.configMsgOk = true;
                 } else {
                     this.configMsg = '✗ ' + (d.errors || []).join('; ');
@@ -1248,6 +1257,13 @@ function dashboard() {
         },
         async archiveBelief(id) {
             await fetch(`/api/beliefs/${id}/archive`, { method: 'POST' });
+            await this.loadBeliefs();
+        },
+        async batchArchiveBeliefs() {
+            if (!confirm('确认归档所有 active 信念？此操作不可逆（但可手动恢复状态）。')) return;
+            const r = await fetch('/api/beliefs/batch-archive', { method: 'POST', headers:{'Content-Type':'application/json'}, body: '{}' });
+            const d = await r.json();
+            alert(`已归档 ${d.archived_count} 条信念`);
             await this.loadBeliefs();
         },
         async deleteBelief(id) {
@@ -1289,6 +1305,15 @@ function dashboard() {
                 body: JSON.stringify(this.jargonEditForm),
             });
             this.jargonEdit = null;
+            await this.loadJargon();
+        },
+        async quickEditMeaning(id, newMeaning) {
+            if (!newMeaning && newMeaning !== '') return;
+            await fetch(`/api/jargon/${id}`, {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ meaning: newMeaning.trim() }),
+            });
             await this.loadJargon();
         },
         async toggleJargonGlobal(id) {

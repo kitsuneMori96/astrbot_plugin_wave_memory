@@ -37,7 +37,7 @@ class JargonService:
         # 避免重启清零导致 min_frequency 永远累积不到 → 黑话学不到）
         if self._enabled:
             try:
-                self._warmup_from_memories(days=7, max_rows=20000)
+                self._warmup_from_memories(days=3, max_rows=10000)
             except Exception as e:
                 logger.debug(f"[Jargon] warmup skipped: {e}")
 
