@@ -263,6 +263,7 @@
             <div class="flex gap-2 mt-4 flex-wrap">
                 <button id="btn-expand" onclick="expandNode()" class="px-3 py-1.5 bg-glow-purple/10 border border-glow-dim rounded-lg text-purple-300 text-[11px] hover:bg-glow-purple/20 transition">展开社区</button>
                 <button id="btn-timeline" onclick="loadTimeline()" class="px-3 py-1.5 bg-blue-500/10 border border-blue-500/20 rounded-lg text-blue-300 text-[11px] hover:bg-blue-500/20 transition">📅 时间线</button>
+                <button onclick="editEntity()" class="px-3 py-1.5 bg-amber-500/10 border border-amber-500/20 rounded-lg text-amber-300 text-[11px] hover:bg-amber-500/20 transition">✏️ 编辑</button>
             </div>
         </div>
     </div>
@@ -537,6 +538,33 @@ function initGraph() {
     renderer.on('clickStage', () => {
         selectedNode = null;
         hideDetail();
+    });
+
+    // ─── 节点拖拽（高级交互）───
+    let draggedNode = null;
+    let isDragging = false;
+
+    renderer.on('downNode', ({ node, event }) => {
+        isDragging = true;
+        draggedNode = node;
+        graph.setNodeAttribute(node, 'highlighted', true);
+        renderer.getCamera().disable();
+    });
+
+    renderer.getMouseCaptor().on('mousemovebody', (e) => {
+        if (!isDragging || !draggedNode) return;
+        const pos = renderer.viewportToGraph(e);
+        graph.setNodeAttribute(draggedNode, 'x', pos.x);
+        graph.setNodeAttribute(draggedNode, 'y', pos.y);
+    });
+
+    renderer.getMouseCaptor().on('mouseup', () => {
+        if (draggedNode) {
+            graph.removeNodeAttribute(draggedNode, 'highlighted');
+        }
+        isDragging = false;
+        draggedNode = null;
+        renderer.getCamera().enable();
     });
 }
 
@@ -874,6 +902,60 @@ async function loadTimeline() {
         memList.innerHTML = html;
     } catch(e) {
         memList.innerHTML = '<p class="text-red-400/60 text-[10px]">时间线加载失败</p>';
+    }
+}
+
+// ─── Edit Entity (内容编辑) ───
+function editEntity() {
+    if (!selectedNode) return;
+    const attrs = graph.getNodeAttributes(selectedNode);
+    const name = attrs.label || '';
+    const memList = document.getElementById('detail-memory-list');
+    memList.innerHTML = `
+        <div class="space-y-3">
+            <div>
+                <label class="text-[9px] text-slate-500 uppercase tracking-wider">实体名称</label>
+                <input type="text" id="edit-name" value="${name}" class="w-full px-2 py-1.5 bg-nebula-700 border border-white/10 rounded-md text-[11px] text-slate-200 mt-1">
+            </div>
+            <div>
+                <label class="text-[9px] text-slate-500 uppercase tracking-wider">添加新事实 (subject→predicate→object)</label>
+                <input type="text" id="edit-fact-subj" value="${name}" class="w-full px-2 py-1 bg-nebula-700 border border-white/10 rounded-md text-[10px] text-slate-300 mt-1" placeholder="主语">
+                <input type="text" id="edit-fact-pred" class="w-full px-2 py-1 bg-nebula-700 border border-white/10 rounded-md text-[10px] text-slate-300 mt-1" placeholder="谓语(如:喜欢/认为/使用)">
+                <input type="text" id="edit-fact-obj" class="w-full px-2 py-1 bg-nebula-700 border border-white/10 rounded-md text-[10px] text-slate-300 mt-1" placeholder="宾语">
+            </div>
+            <div class="flex gap-2">
+                <button onclick="saveNewFact()" class="px-3 py-1.5 bg-green-500/80 hover:bg-green-500 rounded-lg text-white text-[10px] transition">保存事实</button>
+                <button onclick="showDetail(selectedNode)" class="px-3 py-1.5 bg-white/5 border border-white/10 rounded-lg text-slate-400 text-[10px] transition">取消</button>
+            </div>
+            <p id="edit-status" class="text-[9px] text-slate-600"></p>
+        </div>`;
+}
+
+async function saveNewFact() {
+    const subj = document.getElementById('edit-fact-subj')?.value?.trim();
+    const pred = document.getElementById('edit-fact-pred')?.value?.trim();
+    const obj = document.getElementById('edit-fact-obj')?.value?.trim();
+    if (!subj || !pred || !obj) {
+        document.getElementById('edit-status').textContent = '请填写完整三元组';
+        return;
+    }
+    try {
+        // 调后端插入 fact
+        const r = await fetch('/api/kg/add-fact', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({subject: subj, predicate: pred, object: obj}),
+        });
+        const d = await r.json();
+        if (d.ok) {
+            document.getElementById('edit-status').textContent = '✓ 已保存，刷新图谱可见';
+            document.getElementById('edit-status').style.color = '#34d399';
+            _kgFullEdges = null; // 清缓存，下次 loadGalaxy 重新拉
+        } else {
+            document.getElementById('edit-status').textContent = '✗ ' + (d.error || '保存失败');
+        }
+    } catch(e) {
+        document.getElementById('edit-status').textContent = '✗ 网络错误';
     }
 }
 

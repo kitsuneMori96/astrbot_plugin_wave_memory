@@ -309,6 +309,24 @@ async def entity_detail(entity_name: str):
     })
 
 
+@kg_bp.route("/add-fact", methods=["POST"])
+@require_auth
+async def add_fact():
+    """手动添加事实三元组到知识图谱。"""
+    c = get_container()
+    body = await request.get_json(silent=True) or {}
+    subject = (body.get("subject") or "").strip()
+    predicate = (body.get("predicate") or "").strip()
+    obj = (body.get("object") or "").strip()
+    if not subject or not predicate or not obj:
+        return jsonify({"ok": False, "error": "subject/predicate/object required"})
+    try:
+        c.db.insert_fact(subject, predicate, obj, confidence=1.0)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
 @kg_bp.route("/stats")
 @require_auth
 async def kg_stats():
