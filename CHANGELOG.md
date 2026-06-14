@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.0.1 (2026-06-14)
+
+### 新功能
+
+- **"记住/忘记"显式命令**：用户说"记住xxx"→即时写入(importance=2.0 source=explicit)；"忘记xxx"→匹配记忆软删除(importance=0.01)。关键词：记住/记下/remember、忘记/忘掉/forget/别记
+- **参与者相关性加权**：inject_memory 五阶段结果后按 sender 关联加权（自己×1.4 / bot×1.2），重排后取 top_k，防止群聊串线
+- **关系自动发现**：consolidation prompt 新增 social 字段，自动推断人际关系（朋友/互怼/师徒/情侣/对立/合作）写入 facts，知识图谱自动丰富
+- **记忆来源追溯**：injection_format 默认改为 `<memory from='{sender}' time='{time}'>` 结构化标签，让 LLM 更容易引用来源
+
+### Bug 修复
+
+- **_bot_registry 崩溃**：防御性 getattr 避免初始化未完成时属性不存在导致插件加载失败
+- **知识图谱图层过滤**：非 facts 图层（信念/关切/黑话/好感度/社区）被关系类型筛选误过滤→0 节点
+- **时间/权重筛选误杀**：非 facts 图层 ts=0 被时间范围过滤掉，统一原则只对 facts 图层生效
+
+### 文档
+
+- README 更新 v1.0（知识图谱/实测 10.4 万数据/WebUI 新功能）
+- CHANGELOG 日期修正（2025→2026）+ v1.0.0 完整变更记录
+
 ## v1.0.0 (2026-06-14)
 
 ### 知识图谱化全面改造
