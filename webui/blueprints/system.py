@@ -10,6 +10,54 @@ from ..middleware.auth import require_auth
 system_bp = Blueprint("system", __name__, url_prefix="/api")
 
 
+def _get_services_health(c) -> list:
+    """汇总所有服务的健康状态+降级原因（供前端可视化）。"""
+    svcs = []
+
+    def _add(name, obj, reason_if_none="未加载"):
+        if obj:
+            svcs.append({"name": name, "status": "ok", "reason": ""})
+        else:
+            svcs.append({"name": name, "status": "off", "reason": reason_if_none})
+
+    # 核心引擎
+    _add("向量索引", c.memory_index, "memory_index 未初始化")
+    _add("Tag 索引", c.tag_index, "tag_index 未初始化")
+    _add("共现矩阵", c.cooccurrence, "cooccurrence 未加载")
+    _add("脉冲传播", c.spike_router, "spike_router 未加载")
+    _add("残差金字塔", c.residual_pyramid, "residual_pyramid 未加载")
+    _add("测地线重排", c.geodesic, "geodesic 未加载")
+    _add("Embedding", c.embedding_service, "embedding_provider_id 未配置")
+    _add("Tag 提取", c.tag_extractor, "tag_llm_provider_id 未配置")
+
+    # EPA 特殊处理
+    if c.epa and c.epa.initialized:
+        svcs.append({"name": "EPA 基底", "status": "ok", "reason": ""})
+    else:
+        svcs.append({"name": "EPA 基底", "status": "degraded", "reason": f"需 ≥{c.epa.min_tags if c.epa else 20} 个 tag 向量"})
+
+    # 灵魂层（从 plugin_config 拿不到实例,改用 db 表行数判断活跃度）
+    try:
+        belief_cnt = c.db.conn.execute("SELECT COUNT(*) FROM beliefs").fetchone()[0]
+        svcs.append({"name": "信念引擎", "status": "ok" if belief_cnt > 0 else "degraded", "reason": "" if belief_cnt else "尚无信念数据（等待 consolidation）"})
+    except Exception:
+        svcs.append({"name": "信念引擎", "status": "off", "reason": "beliefs 表不可用"})
+
+    try:
+        jargon_cnt = c.db.conn.execute("SELECT COUNT(*) FROM jargon WHERE is_jargon=1").fetchone()[0]
+        svcs.append({"name": "黑话系统", "status": "ok" if jargon_cnt > 0 else "degraded", "reason": "" if jargon_cnt else "尚无黑话（需群内累积对话）"})
+    except Exception:
+        svcs.append({"name": "黑话系统", "status": "off", "reason": "jargon 表不可用"})
+
+    try:
+        concern_cnt = c.db.conn.execute("SELECT COUNT(*) FROM concerns").fetchone()[0]
+        svcs.append({"name": "关切追踪", "status": "ok" if concern_cnt > 0 else "degraded", "reason": "" if concern_cnt else "尚无关切（需 MetaThinking 触发）"})
+    except Exception:
+        svcs.append({"name": "关切追踪", "status": "off", "reason": "concerns 表不可用"})
+
+    return svcs
+
+
 @system_bp.route("/system", methods=["GET"])
 @require_auth
 async def system_status():
@@ -55,6 +103,7 @@ async def system_status():
                 f"需要至少 {c.epa.min_tags} 个带向量的 tag（当前数据不足，持续聊天自动积累后就绪）" if c.epa else "EPA 模块未加载"
             ),
         },
+        "services_health": _get_services_health(c),
         "lifecycle": {
             "facts": facts_count,
             "persons": person_count,
