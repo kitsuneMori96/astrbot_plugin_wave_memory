@@ -179,33 +179,33 @@
         <h4 class="text-slate-400 text-[10px] uppercase tracking-widest mb-3">图谱配置</h4>
         <div class="space-y-3">
             <div>
-                <label class="text-[10px] text-slate-500 block mb-1">最大节点数</label>
-                <input type="range" id="cfg-max-nodes" min="30" max="400" value="150" class="w-full" style="accent-color:#8b5cf6">
-                <div class="text-[9px] text-slate-600 text-right" id="cfg-max-nodes-val">150</div>
+                <label class="text-[10px] text-slate-500 block mb-1">显示节点数（可输入任意值）</label>
+                <input type="number" id="cfg-max-nodes" min="10" max="5000" value="150" class="w-full px-2 py-1.5 bg-nebula-700 border border-white/10 rounded-md text-[11px] text-slate-300">
             </div>
             <div>
-                <label class="text-[10px] text-slate-500 block mb-1">最小边权重</label>
-                <input type="range" id="cfg-min-weight" min="0" max="3" step="0.1" value="0.5" class="w-full" style="accent-color:#8b5cf6">
-                <div class="text-[9px] text-slate-600 text-right" id="cfg-min-weight-val">0.5</div>
+                <label class="text-[10px] text-slate-500 block mb-1">最小关联强度（越高只显示强关系）</label>
+                <input type="number" id="cfg-min-weight" min="0" max="10" step="0.1" value="0" class="w-full px-2 py-1.5 bg-nebula-700 border border-white/10 rounded-md text-[11px] text-slate-300">
+                <div class="text-[9px] text-slate-600 mt-0.5">0=显示全部，1=只看至少出现1次以上的关系</div>
             </div>
             <div>
                 <label class="text-[10px] text-slate-500 block mb-1">时间范围</label>
                 <select id="cfg-days" class="w-full px-2 py-1.5 bg-nebula-700 border border-white/10 rounded-md text-[10px] text-slate-300">
-                    <option value="0">全部</option>
+                    <option value="0">全部时间</option>
                     <option value="7">最近 7 天</option>
                     <option value="30">最近 30 天</option>
                     <option value="90">最近 90 天</option>
                 </select>
             </div>
             <div>
-                <label class="text-[10px] text-slate-500 block mb-1">关系类型</label>
+                <label class="text-[10px] text-slate-500 block mb-1">关系类型（点选筛选，不选=全部）</label>
                 <div id="cfg-rel-types" class="flex flex-wrap gap-1"></div>
             </div>
             <div>
-                <label class="text-[10px] text-slate-500 block mb-1">节点类型</label>
+                <label class="text-[10px] text-slate-500 block mb-1">节点类型（点选筛选，不选=全部）</label>
                 <div id="cfg-node-types" class="flex flex-wrap gap-1"></div>
             </div>
             <button onclick="applyKgConfig()" class="w-full px-3 py-2 bg-glow-purple/80 hover:bg-glow-purple rounded-lg text-white text-[11px] font-medium transition mt-2">应用配置</button>
+            <div class="text-[9px] text-slate-600 text-center" id="cfg-status"></div>
         </div>
     </div>
 
@@ -598,7 +598,9 @@ function applyKgConfig() {
     }
 
     renderGraph(nodes, edges);
-    // 更新统计
+    // 状态反馈
+    const status = document.getElementById('cfg-status');
+    if (status) status.textContent = `显示 ${nodes.length} 实体 / ${edges.length} 关系（总 ${_kgFullEdges.length} 条）`;
     const badge = document.getElementById('stats-badge');
     if (badge) badge.innerHTML = `<span class="text-purple-300 font-semibold">${nodes.length}</span> 实体 · <span class="text-blue-300 font-semibold">${edges.length}</span> 关系 · <span class="text-slate-500">总 ${_kgFullEdges.length}</span>`;
 }
@@ -1107,13 +1109,9 @@ async function loadKgConfig() {
 function toggleCfgPill(btn, kind) {
     const t = btn.dataset.type;
     const set = kind === 'rel' ? selectedRelTypes : selectedNodeTypes;
-    if (set.has(t)) { set.delete(t); btn.style.background = ''; }
-    else { set.add(t); btn.style.background = 'rgba(139,92,246,0.2)'; }
+    if (set.has(t)) { set.delete(t); btn.style.background = ''; btn.style.borderColor = ''; }
+    else { set.add(t); btn.style.background = 'rgba(139,92,246,0.25)'; btn.style.borderColor = '#8b5cf6'; }
 }
-
-// Slider value display
-document.getElementById('cfg-max-nodes')?.addEventListener('input', e => { document.getElementById('cfg-max-nodes-val').textContent = e.target.value; });
-document.getElementById('cfg-min-weight')?.addEventListener('input', e => { document.getElementById('cfg-min-weight-val').textContent = e.target.value; });
 
 initLegend();
 initGraph();
