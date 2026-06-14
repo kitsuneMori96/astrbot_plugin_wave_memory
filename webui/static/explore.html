@@ -216,6 +216,7 @@
             </div>
             <div class="flex gap-2 mt-4 flex-wrap">
                 <button id="btn-expand" onclick="expandNode()" class="px-3 py-1.5 bg-glow-purple/10 border border-glow-dim rounded-lg text-purple-300 text-[11px] hover:bg-glow-purple/20 transition">展开社区</button>
+                <button id="btn-timeline" onclick="loadTimeline()" class="px-3 py-1.5 bg-blue-500/10 border border-blue-500/20 rounded-lg text-blue-300 text-[11px] hover:bg-blue-500/20 transition">📅 时间线</button>
             </div>
         </div>
     </div>
@@ -722,6 +723,54 @@ async function expandNode() {
         if (data.nodes && data.nodes.length) appendGraphData(data.nodes, data.edges || []);
     } catch(e) { console.error(e); }
     hideLoading();
+}
+
+// ─── Timeline View ───
+async function loadTimeline() {
+    if (!selectedNode) return;
+    const attrs = graph.getNodeAttributes(selectedNode);
+    const entityName = attrs.label || '';
+    if (!entityName) return;
+    const memList = document.getElementById('detail-memory-list');
+    memList.innerHTML = '<p class="text-slate-600 text-[10px]">加载时间线...</p>';
+    try {
+        const r = await fetch(`/api/kg/entity/${encodeURIComponent(entityName)}/timeline?limit=25`);
+        const d = await r.json();
+        if (!d.events || !d.events.length) {
+            memList.innerHTML = '<p class="text-slate-600 text-[10px]">暂无时间线数据</p>';
+            return;
+        }
+        document.getElementById('detail-title').textContent = `📅 ${entityName} 时间线`;
+        document.getElementById('detail-meta').innerHTML = `<span class="text-blue-300">${d.events.length} 个事件</span>`;
+        // 渲染纵向时间轴
+        let html = '<div class="relative pl-4 border-l-2 border-purple-500/20 space-y-3">';
+        for (const ev of d.events) {
+            const time = ev.ts ? new Date(ev.ts * 1000).toLocaleString('zh-CN', {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '?';
+            const dotColor = ev.type === 'fact' ? '#a78bfa' : '#60a5fa';
+            if (ev.type === 'fact') {
+                html += `<div class="relative">
+                    <div class="absolute -left-[21px] top-1.5 w-2.5 h-2.5 rounded-full" style="background:${dotColor}"></div>
+                    <div class="text-[9px] text-slate-600 mb-0.5">${time}</div>
+                    <div class="px-2 py-1.5 rounded bg-purple-500/[.06] text-[10px] text-slate-300">
+                        <span class="text-purple-300">${ev.subject||''}</span> <span class="text-slate-600">→${ev.predicate||''}→</span> <span class="text-blue-300">${(ev.object||'').slice(0,50)}</span>
+                    </div>
+                </div>`;
+            } else {
+                html += `<div class="relative">
+                    <div class="absolute -left-[21px] top-1.5 w-2.5 h-2.5 rounded-full" style="background:${dotColor}"></div>
+                    <div class="text-[9px] text-slate-600 mb-0.5">${time}</div>
+                    <div class="px-2 py-1.5 rounded bg-blue-500/[.06] text-[10px]">
+                        <span class="text-blue-300 font-medium">${ev.sender||''}</span>
+                        <span class="text-slate-400 ml-1">${(ev.content||'').slice(0,80)}</span>
+                    </div>
+                </div>`;
+            }
+        }
+        html += '</div>';
+        memList.innerHTML = html;
+    } catch(e) {
+        memList.innerHTML = '<p class="text-red-400/60 text-[10px]">时间线加载失败</p>';
+    }
 }
 
 function appendGraphData(newNodes, newEdges) {
