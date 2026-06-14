@@ -627,8 +627,9 @@ class WaveMemoryPlugin(Star):
 
         # 自主学习系统（对有经历通道的 bot 生效）
         # 找到没有 exclude_sources 的 bot（即经历所有者）
+        _registry = getattr(self, '_bot_registry', {})
         experience_bot = next(
-            (p for p in self._bot_registry.values() if not p.exclude_sources),
+            (p for p in _registry.values() if not p.exclude_sources),
             None
         )
         study_cfg = self.config.get("Study_Settings", {})
@@ -659,7 +660,7 @@ class WaveMemoryPlugin(Star):
             self.study_service = None
 
         # 自省系统（检测纠正 → 学习，所有 bot 共用）
-        reflect_bot = experience_bot or (list(self._bot_registry.values())[0] if self._bot_registry else None)
+        reflect_bot = experience_bot or (list(_registry.values())[0] if _registry else None)
         if study_cfg.get("self_reflect_enabled", True) and self.tag_llm_provider_id and reflect_bot:
             try:
                 reflect_llm = LLMFallbackClient(
