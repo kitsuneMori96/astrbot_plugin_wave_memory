@@ -45,6 +45,14 @@ from .services.dream import DreamService
 from .services.study_service import StudyService
 from .services.self_reflect import SelfReflectService
 from .services.llm_fallback import LLMFallbackClient, build_provider_chain
+
+# 运行时错误收集（WebUI 可视化）
+def _record_err(source: str, msg):
+    try:
+        from .utils.health_registry import record_error
+        record_error(source, str(msg))
+    except Exception:
+        pass
 from .services.eviction import EvictionService
 from .services.concern_tracker import ConcernTracker
 from .services.mood_trajectory import MoodTrajectory
@@ -654,7 +662,12 @@ class WaveMemoryPlugin(Star):
                 )
                 self.study_service.start()
             except Exception as e:
-                logger.warning(f"[WaveMemory] StudyService init failed: {e}")
+                logger.warning(f"[WaveMemory] StudyService init failed: {e}"); _record_err("StudyService", e)
+                try:
+                    from .utils.health_registry import record_error
+                    record_error("StudyService", str(e))
+                except Exception:
+                    pass
                 self.study_service = None
         else:
             self.study_service = None
@@ -732,6 +745,29 @@ class WaveMemoryPlugin(Star):
             f"concern={bool(self.concern_tracker)} mood_traj={bool(self.mood_trajectory)} "
             f"time_anchor={bool(self.subjective_time)} desire={bool(self.desire_engine)}"
         )
+
+        # ─── 注册所有服务状态到健康面板（WebUI 可视化）───
+        from .utils.health_registry import register as _reg
+        _reg("向量索引", "ok" if self.memory_index else "off", "" if self.memory_index else "memory_index 未初始化")
+        _reg("Tag 索引", "ok" if self.tag_index else "off", "" if self.tag_index else "tag_index 未初始化")
+        _reg("共现矩阵", "ok" if self.cooccurrence else "off", "" if self.cooccurrence else "cooccurrence 未加载")
+        _reg("脉冲传播", "ok" if self.spike_router else "off", "" if self.spike_router else "依赖共现矩阵")
+        _reg("残差金字塔", "ok" if self.residual_pyramid else "off", "" if self.residual_pyramid else "依赖共现矩阵")
+        _reg("测地线重排", "ok" if self.geodesic else "off", "" if self.geodesic else "依赖共现矩阵")
+        _reg("Embedding", "ok" if self.embedding_service else "off", "" if self.embedding_service else "embedding_provider_id 未配置")
+        _reg("Tag 提取", "ok" if self.tag_extractor else "off", "" if self.tag_extractor else "tag_llm_provider_id 未配置")
+        _reg("EPA 基底", "ok" if (self.epa and self.epa.initialized) else "degraded", "" if (self.epa and self.epa.initialized) else f"需 ≥{self.epa.min_tags if self.epa else 20} 个 tag 向量")
+        _reg("MetaThinking", "ok" if getattr(self, 'meta_thinking', None) else "off", "" if getattr(self, 'meta_thinking', None) else "MetaThinking 配置缺失或初始化失败")
+        _reg("做梦系统", "ok" if getattr(self, 'dream_service', None) else "off", "" if getattr(self, 'dream_service', None) else "enable_dream=false 或初始化失败")
+        _reg("自主学习", "ok" if getattr(self, 'study_service', None) else "off", "" if getattr(self, 'study_service', None) else "StudyService 未启用或 BookLore 不可用")
+        _reg("自省系统", "ok" if getattr(self, 'self_reflect', None) else "off", "" if getattr(self, 'self_reflect', None) else "SelfReflect 未启用")
+        _reg("记忆整合", "ok" if getattr(self, 'consolidation', None) else "off", "" if getattr(self, 'consolidation', None) else "enable_consolidation=false 或 LLM 不可用")
+        _reg("记忆淘汰", "ok" if getattr(self, 'eviction_service', None) else "off", "" if getattr(self, 'eviction_service', None) else "Eviction 未启用")
+        _reg("信念引擎", "ok" if self.belief_engine else "off", "" if self.belief_engine else "belief_engine 未初始化(需 LLM)")
+        _reg("关切追踪", "ok" if self.concern_tracker else "off", "" if self.concern_tracker else "concern_tracker 未初始化")
+        _reg("情绪轨迹", "ok" if self.mood_trajectory else "off", "" if self.mood_trajectory else "mood_trajectory 未初始化")
+        _reg("黑话系统", "ok" if getattr(self, 'jargon_service', None) else "off", "" if getattr(self, 'jargon_service', None) else "Jargon 未启用")
+        _reg("风格学习", "ok" if getattr(self, 'few_shot_service', None) else "off", "" if getattr(self, 'few_shot_service', None) else "FewShot 未启用")
 
         # 高频互动者缓存预热 (US-2.3)
         try:

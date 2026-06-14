@@ -302,6 +302,19 @@
                 </div>
             </div>
         </div>
+
+        <!-- 最近错误 -->
+        <div class="card mt-4" x-show="recentErrors.length > 0">
+            <h3 class="text-sm font-medium mb-3 flex items-center gap-2" style="color:var(--danger)">⚠ 最近错误 <span class="badge badge-entity" x-text="recentErrors.length"></span></h3>
+            <div class="space-y-1.5 max-h-40 overflow-y-auto text-xs">
+                <template x-for="(err, i) in recentErrors" :key="i">
+                    <div class="flex items-start gap-2 p-2 rounded" style="background:var(--muted)">
+                        <span class="shrink-0 badge badge-entity" x-text="err.source"></span>
+                        <span style="color:var(--fg)" x-text="err.message"></span>
+                    </div>
+                </template>
+            </div>
+        </div>
     </div>
 
     <!-- ═══ 记忆管理 Tab ═══ -->
@@ -930,7 +943,8 @@ function dashboard() {
     return {
         tab: 'overview',
         isDark: true,
-        sys: { memories: { total: 0, with_vector: 0, with_tags: 0 }, tags: { total: 0 }, coverage: {}, cooccurrence: {}, epa: {} },
+        sys: { memories: { total: 0, with_vector: 0, with_tags: 0 }, tags: { total: 0 }, coverage: {}, cooccurrence: {}, epa: {}, services_health: [] },
+        recentErrors: [],
         // 记忆管理
         memories: [],
         memSearch: '',
@@ -1072,6 +1086,11 @@ function dashboard() {
                 const r = await fetch('/api/system');
                 this.sys = await r.json();
             } catch(e) { console.error(e); }
+            try {
+                const r = await fetch('/api/errors');
+                const d = await r.json();
+                this.recentErrors = d.errors || [];
+            } catch(e) {}
         },
 
         async loadConfig() {
