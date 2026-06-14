@@ -497,6 +497,18 @@ class UniversalImporter:
             cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
             col_names = [c[1] for c in cols]
 
+            # 快速本地预检：映射的 value（实际列名）是否都存在于表列中
+            # fields 格式: {"content": "actual_col", "sender": "actual_col", ...}
+            # key 是逻辑字段名（我们自定义的），value 才是目标表实际列名
+            col_set = {c.lower() for c in col_names}
+            all_values_valid = all(
+                v.lower() in col_set for v in fields.values()
+                if isinstance(v, str) and v  # 跳过 None 和空值
+            )
+            if all_values_valid:
+                conn.close()
+                return {"valid": True, "skipped_local": True}
+
             # 取 3 条样本
             rows = conn.execute(f"SELECT * FROM {table} LIMIT 3").fetchall()
             samples = []

@@ -86,6 +86,22 @@ class EmbeddingService:
                     results.append(None)
             return results
 
+        except RuntimeError as e:
+            if "Event loop is closed" in str(e):
+                # Provider 的 event loop 已关闭（热重载/重启残留），清缓存重试一次
+                logger.warning(f"[WaveMemory] Embedding provider event loop closed, refreshing...")
+                self._provider = None
+                provider = self._get_provider()
+                if provider:
+                    try:
+                        raw_result = await provider.get_embeddings(texts)
+                        return [np.array(v, dtype=np.float32) if v is not None and len(v) > 0 else None for v in raw_result]
+                    except Exception as e2:
+                        logger.error(f"[WaveMemory] Embedding retry failed: {e2}")
+            else:
+                logger.error(f"[WaveMemory] Embedding failed: {e}")
+            return [None] * len(texts)
+
         except Exception as e:
             logger.error(f"[WaveMemory] Embedding failed: {e}")
             return [None] * len(texts)

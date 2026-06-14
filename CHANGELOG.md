@@ -40,6 +40,8 @@
 ### Bug 修复
 
 - **"记住"命令 sender_name 未定义**：提前赋值 sender_name，修复 NameError（v1.0.1 引入的潜在 bug）
+- **source_discovery 映射预检误报**：LLM 将逻辑字段名（sender/group）与实际列名搞混 → 加本地快速预检，映射 value 都存在于表列中则跳过 LLM 校验
+- **Embedding "Event loop is closed"**：NVIDIA provider 热重载后 event loop 关闭 → 捕获后清缓存重试一次，避免整个 embedding 通道永久失效
 
 ## v1.0.2 (2026-06-14)
 
