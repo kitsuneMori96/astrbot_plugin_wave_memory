@@ -1,6 +1,50 @@
 # Changelog
 
-## v0.6.0 (2025-07-14)
+## v1.0.0 (2026-06-14)
+
+### 知识图谱化全面改造
+
+- **交互式知识图谱**：从 tag 统计共现升级为语义知识图谱(facts+tag_relations)
+  - 全量 5700+ 条关系一次加载到前端,纯 JS 过滤零延迟(132ms)
+  - 6 层数据图层可选：事实/信念/关切/黑话/好感度/社区
+  - 配置面板：节点数/关联强度/时间范围/关系类型/节点类型
+  - 10 种语义边标签(discusses/mentions/decides/supports/opposes/creates/uses/knows/reacts_to/relates_to)
+  - 人物画像卡(QQ/好感度/别名/personality_tags) + 实体消歧(同 QQ 合并)
+  - 时间线视图(纵轴事件流) + 多跳路径(BFS 语义链)
+  - 节点拖拽(Sigma.js) + 内容编辑(手动添加事实)
+  - 语义向量检索(五阶段管线) + GSAP 动效
+
+### WebUI 功能补全
+
+- 配置页 schema 驱动全量生成(20 组配置全部可编辑)
+- 信念审核页 + 黑话审核页 + 灵魂状态页
+- 记忆管理：翻页/搜索/筛选/批量操作 全打通(10.4 万条可管理)
+- 维护页：quality + audit/trigger 端点补全
+
+### 灵魂层修复
+
+- 救活 06-12 集体停摆的 5 个 BDI 服务(belief/concern/desire/mood/time)
+- 信念质量管线：pending 待审 + prompt 语境约束 + strength 阈值过滤
+- 黑话起死回生：修 jieba.dt import 致命 bug + 词频预热(34 条入库)
+- 时间锚点接线(强情绪→add_anchor)
+
+### 性能优化
+
+- galaxy 缓存：3.19s → 0.008s (400×)
+- 搜索跳过 COUNT：2.7s → 0ms
+- keyset 深翻页：1.7s → 0.015s (100×)
+- tag 审计候选查询：18.8s → ms 级
+
+### Bug 修复
+
+- 5 处后端列名错误(beliefs/soul 三端点)
+- bot_mood 历史数据污染(15 行 BookLore KG 误写)清理
+- 神经云图前端 404(全部端点对接)
+- 人物列表陈旧(改从 memories 聚合)
+- 星图筛选堆叠(改 hidden)
+- _bot_registry 防御性 getattr
+
+## v0.6.0 (2026-06-04)
 
 ### 架构重构
 
@@ -32,7 +76,7 @@
 - engine/cooccurrence.py（死代码，被 directed_cooccurrence 替代）
 - services/migration.py（死代码，从未被调用）
 
-## v0.5.0 (2025-07-13)
+## v0.5.0 (2026-05-29)
 
 ### 新功能
 
@@ -52,7 +96,7 @@
 - ConsolidationService topic_backfill 开关 + skip_topics 可配置
 - QueryEngine 跨群过滤受配置控制
 
-## v0.4.3 (2025-07-13)
+## v0.4.3 (2026-05-28)
 
 ### 新功能
 
@@ -64,14 +108,14 @@
 - 空 tag 结果标记 `skipped` 而非 `done`，不阻塞重新处理
 - Consolidation topic 回写过滤泛化词（日常闲聊/灌水等）
 
-## v0.4.1 (2025-07-13)
+## v0.4.1 (2026-05-28)
 
 ### 修复
 
 - **deep_search 工具不可用**：方法名 `execute` → `call`，对齐 AstrBot FunctionTool 接口
 - **memory_search 偶发 TypeError**：timestamp 字段为 ISO 字符串，解析后再计算时间衰减
 
-## v0.4.0 (2025-07-13)
+## v0.4.0 (2026-05-27)
 
 ### 新功能
 
@@ -98,7 +142,7 @@
 
 ---
 
-## v0.3.0 (2025-07-07)
+## v0.3.0 (2026-05-20)
 
 ### 新功能
 
