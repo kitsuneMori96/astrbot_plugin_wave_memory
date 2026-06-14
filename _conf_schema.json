@@ -74,10 +74,10 @@
         "default": "0.35"
       },
       "injection_format": {
-        "description": "注入格式",
-        "hint": "记忆注入到 prompt 的格式模板。可用变量：{content} {sender} {time}",
+        "description": "注入格式（支持来源追溯）",
+        "hint": "记忆注入到 prompt 的格式模板。可用变量：{content} {sender} {time}。建议保留 sender+time 让 bot 能引用来源（'你之前说过...'）",
         "type": "string",
-        "default": "[记忆] {sender}({time}): {content}"
+        "default": "<memory from='{sender}' time='{time}'>{content}</memory>"
       },
       "enable_spike_routing": {
         "description": "启用脉冲传播",

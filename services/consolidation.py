@@ -31,6 +31,9 @@ CONSOLIDATION_PROMPT = """从以下群聊消息中提取结构化知识。
   ],
   "relations": [
     {{"source": "人物或话题", "target": "人物/话题/事物", "type": "关系类型"}}
+  ],
+  "social": [
+    {{"person_a": "人名A", "person_b": "人名B", "relation": "朋友/互怼/师徒/情侣/对立/合作/认识"}}
   ]
 }}
 
@@ -40,6 +43,7 @@ CONSOLIDATION_PROMPT = """从以下群聊消息中提取结构化知识。
 - predicate 尽量用动词短语（说了/认为/使用/计划/纠正/反对/创作/持有/发现/决定）
 - relations 描述 topics/人物 之间的关联，最多 4 条
 - type 从以下选择：discusses（讨论）、mentions（提及）、decides（决策）、supports（支持/认同）、opposes（反对/不认同）、reacts_to（情绪反应）、creates（创作/制作）、uses（使用/采用）、knows（了解/知道）、relates_to（关联-兜底）
+- social 描述对话中体现的人际关系（最多 2 条，没有则留空数组）
 - 如果对话是无意义灌水，summary 写"日常灌水"，其他字段留空数组
 - 直接输出 JSON，不要 markdown 代码块"""
 
@@ -203,15 +207,26 @@ class ConsolidationService:
         topics = structured.get("topics", [])
         facts = structured.get("facts", [])
         relations = structured.get("relations", [])
+        social = structured.get("social", [])
 
         # 跳过灌水
         if summary == "日常灌水" and not facts:
-            # 仍然写 summary 标记
             self._write_summary(msg_ids, summary)
             return {"messages": len(msg_ids), "relations": 0}
 
         # 写入 tag_relations
         relations_written = self._write_relations(topics, facts, relations)
+
+        # 写入人际关系到 facts（关系自动发现）
+        for sr in (social or [])[:3]:
+            a = sr.get("person_a", "").strip()
+            b = sr.get("person_b", "").strip()
+            rel = sr.get("relation", "").strip()
+            if a and b and rel:
+                try:
+                    self.db.insert_fact(a, rel, b, group_id=group_id, confidence=0.7)
+                except Exception:
+                    pass
 
         # 写入 facts 三元组
         facts_written = self._write_facts(facts, group_id, msg_ids[0] if msg_ids else None)

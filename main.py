@@ -1182,6 +1182,18 @@ class WaveMemoryPlugin(Star):
                     memories = []
                 memories = memories + relation_memories
 
+            # ─── 参与者相关性加权（防群聊串线）───
+            if memories and sender_id:
+                for m in memories:
+                    m_sender = m.get("sender_id") or m.get("sender_name", "")
+                    if m_sender == sender_id or m.get("sender_name") == sender_name:
+                        m["score"] = m.get("score", 0.5) * 1.4  # 自己说的更相关
+                    elif m_sender == bot_id:
+                        m["score"] = m.get("score", 0.5) * 1.2  # bot 对该用户说的
+                    # 无关人的不降权（保持原分数）
+                memories.sort(key=lambda x: x.get("score", 0), reverse=True)
+                memories = memories[:self.inject_top_k]
+
             # 组装注入文本
             injection_parts = []
             if memories:
@@ -1278,6 +1290,37 @@ class WaveMemoryPlugin(Star):
             return
         if self.group_blacklist and group_id in self.group_blacklist:
             return
+
+        # ─── "记住/忘记" 显式命令（用户主动触发,不依赖 LLM 判断）───
+        _remember_prefixes = ("记住", "记下", "remember")
+        _forget_prefixes = ("忘记", "忘掉", "forget", "别记")
+        msg_stripped = message.strip()
+        for prefix in _remember_prefixes:
+            if msg_stripped.startswith(prefix):
+                content = msg_stripped[len(prefix):].strip(":： \n")
+                if content and len(content) >= 4:
+                    self.db.add_memory(
+                        group_id=group_id, content=f"[用户要求记住] {content}",
+                        sender_id=sender_id, sender_name=sender_name if sender_name else "",
+                        importance=2.0, source="explicit",
+                    )
+                    logger.info(f"[WaveMemory] 显式记住: {sender_name}: {content[:30]}")
+                return
+        for prefix in _forget_prefixes:
+            if msg_stripped.startswith(prefix):
+                content = msg_stripped[len(prefix):].strip(":： \n")
+                if content and len(content) >= 2:
+                    # 搜索匹配记忆并标记低重要性（软删除）
+                    rows = self.db.conn.execute(
+                        "SELECT id FROM memories WHERE content LIKE ? AND sender_id = ? ORDER BY id DESC LIMIT 5",
+                        (f"%{content}%", sender_id),
+                    ).fetchall()
+                    for row in rows:
+                        self.db.conn.execute("UPDATE memories SET importance = 0.01 WHERE id = ?", (row[0],))
+                    self.db.conn.commit()
+                    if rows:
+                        logger.info(f"[WaveMemory] 显式忘记: {sender_name}: {content[:30]} ({len(rows)} 条降权)")
+                return
 
         if len(message) > self.max_message_length:
             message = message[:self.max_message_length]
