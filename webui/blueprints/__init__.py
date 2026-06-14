@@ -15,6 +15,7 @@ from .system import system_bp
 from .beliefs import beliefs_bp
 from .soul import soul_bp
 from .jargon import jargon_bp
+from .kg import kg_bp
 
 
 def get_blueprints() -> List[Blueprint]:
@@ -30,4 +31,5 @@ def get_blueprints() -> List[Blueprint]:
         beliefs_bp,
         soul_bp,
         jargon_bp,
+        kg_bp,
     ]

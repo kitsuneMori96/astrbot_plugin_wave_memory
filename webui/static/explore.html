@@ -361,8 +361,12 @@ function initGraph() {
     renderer = new Sigma(graph, container, {
         allowInvalidContainer: true,
         renderLabels: true,
+        renderEdgeLabels: true,
         labelFont: 'system-ui, -apple-system, sans-serif',
         labelSize: 11,
+        edgeLabelFont: 'system-ui, sans-serif',
+        edgeLabelSize: 9,
+        edgeLabelColor: { color: '#64748b' },
         labelColor: { color: '#cbd5e1' },
         labelRenderedSizeThreshold: 8,
         defaultNodeColor: '#64748b',
@@ -489,15 +493,21 @@ function initGraph() {
     });
 }
 
-// ─── Load Galaxy ───
+// ─── Load Galaxy (M1: 语义知识图谱) ───
 async function loadGalaxy() {
-    showLoading('正在加载星图...');
+    showLoading('正在加载知识图谱...');
     try {
-        const res = await fetch('/api/explore/galaxy');
+        const res = await fetch('/api/kg/overview?max_nodes=180');
         const data = await res.json();
         renderGraph(data.nodes || [], data.edges || []);
     } catch(e) {
-        console.error('Load galaxy failed:', e);
+        console.error('Load KG failed:', e);
+        // fallback: 旧 cooccurrence
+        try {
+            const res = await fetch('/api/explore/galaxy');
+            const data = await res.json();
+            renderGraph(data.nodes || [], data.edges || []);
+        } catch(e2) { console.error('Fallback also failed:', e2); }
     }
     hideLoading();
 }
@@ -527,10 +537,13 @@ function renderGraph(nodes, edges) {
         if (!graph.hasNode(src) || !graph.hasNode(tgt)) return;
         if (graph.hasEdge(src, tgt) || graph.hasEdge(tgt, src)) return;
         const weight = e.value || e.weight || e.count || 1;
+        const label = e.label || e.relation_type || '';
         const srcColor = graph.getNodeAttribute(src, 'color');
         graph.addEdge(src, tgt, {
-            size: Math.max(0.3, Math.min(3, weight * 3)),
-            color: srcColor + '18',
+            size: Math.max(0.4, Math.min(2.5, weight * 1.5)),
+            color: srcColor + '25',
+            label: label,
+            _label: label,
         });
     });
 
@@ -767,36 +780,47 @@ async function showDetail(nodeId) {
         return `<span class="inline-block px-2 py-0.5 rounded text-[10px] cursor-pointer hover:opacity-80 transition" style="background:${nColor}15; color:${nColor}; border: 1px solid ${nColor}25" onclick="selectedNode='${n}'; showDetail('${n}')">${nAttrs.label || n}</span>`;
     }).join('') + (neighbors.length > 12 ? `<span class="text-slate-600 text-[10px] ml-1">+${neighbors.length - 12}</span>` : '');
 
-    // 加载关联记忆（核心价值：展示真实消息内容）
+    // 加载关联记忆 + facts（核心价值：展示真实内容和知识关系）
     const memList = document.getElementById('detail-memory-list');
-    const tagId = parseInt(nodeId, 10);
-    if (!isNaN(tagId)) {
-        memList.innerHTML = '<p class="text-slate-600 text-[10px]">加载记忆...</p>';
+    const entityName = attrs.label || '';
+    if (entityName) {
+        memList.innerHTML = '<p class="text-slate-600 text-[10px]">加载知识...</p>';
         try {
-            const r = await fetch(`/api/explore/tag/${tagId}/memories?limit=15`);
+            const r = await fetch(`/api/kg/entity/${encodeURIComponent(entityName)}?limit=12`);
             const d = await r.json();
+            let html = '';
+            // Facts 三元组
+            if (d.facts && d.facts.length) {
+                html += '<p class="text-slate-500 text-[9px] uppercase tracking-wider mb-1.5">事实</p>';
+                html += d.facts.slice(0, 6).map(f =>
+                    `<div class="px-2 py-1.5 rounded bg-white/[.02] text-[10px] text-slate-400 mb-1"><span class="text-purple-300">${f.subject}</span> <span class="text-slate-600">→${f.predicate}→</span> <span class="text-blue-300">${f.object}</span></div>`
+                ).join('');
+            }
+            // Relations
+            if (d.relations && d.relations.length) {
+                html += '<p class="text-slate-500 text-[9px] uppercase tracking-wider mb-1.5 mt-2">关系</p>';
+                html += d.relations.slice(0, 6).map(r =>
+                    `<div class="px-2 py-1.5 rounded bg-white/[.02] text-[10px] text-slate-400 mb-1"><span class="text-purple-300">${r.source}</span> <span class="text-amber-400/70">${r.type}</span> <span class="text-blue-300">${r.target}</span></div>`
+                ).join('');
+            }
+            // Memories
             if (d.memories && d.memories.length) {
-                memList.innerHTML = d.memories.map(m => {
+                html += '<p class="text-slate-500 text-[9px] uppercase tracking-wider mb-1.5 mt-2">记忆</p>';
+                html += d.memories.map(m => {
                     const time = m.ts ? new Date(m.ts * 1000).toLocaleString('zh-CN', {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
-                    return `<div class="p-2.5 rounded-lg bg-white/[.03] border border-white/5 hover:border-purple-500/20 transition">
-                        <div class="flex items-center gap-2 mb-1">
-                            <span class="text-purple-300 text-[10px] font-medium">${m.sender || '未知'}</span>
-                            <span class="text-slate-600 text-[9px] ml-auto">${time}</span>
-                        </div>
+                    return `<div class="p-2.5 rounded-lg bg-white/[.03] border border-white/5 mb-1.5">
+                        <div class="flex items-center gap-2 mb-1"><span class="text-purple-300 text-[10px] font-medium">${m.sender||'未知'}</span><span class="text-slate-600 text-[9px] ml-auto">${time}</span></div>
                         <p class="text-slate-300 text-[11px] leading-relaxed">${(m.content||'').slice(0,150)}${(m.content||'').length>150?'...':''}</p>
                     </div>`;
                 }).join('');
-            } else {
-                memList.innerHTML = '<p class="text-slate-600 text-[10px]">暂无关联记忆</p>';
             }
+            if (!html) html = '<p class="text-slate-600 text-[10px]">暂无关联知识</p>';
+            memList.innerHTML = html;
         } catch(e) {
             memList.innerHTML = '<p class="text-red-400/60 text-[10px]">加载失败</p>';
         }
     } else {
-        // 非 tag 节点（如人物记忆网络的 memory 节点）
-        memList.innerHTML = data.content
-            ? `<div class="p-2.5 rounded-lg bg-white/[.03]"><p class="text-slate-300 text-[11px] leading-relaxed">${data.content.slice(0,200)}</p></div>`
-            : '<p class="text-slate-600 text-[10px]">-</p>';
+        memList.innerHTML = '<p class="text-slate-600 text-[10px]">-</p>';
     }
 
     panel.classList.remove('hidden');
