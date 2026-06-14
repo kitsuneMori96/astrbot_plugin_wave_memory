@@ -706,8 +706,9 @@ class WaveMemoryPlugin(Star):
         # ─── BDI / 灵魂子系统实例化（修复 06-12 集体停摆：原代码仅有 hasattr 守卫调用，缺实例化）───
         # ⚠ 顺序约束：belief_engine 必须在 consolidation 之后实例化，
         #   因为 belief_engine 要挂到已存在的 self.consolidation 上。
-        assert getattr(self, "consolidation", None) is not None or not self.enable_consolidation, \
-            "belief_engine 初始化要求 consolidation 已就绪（检查初始化顺序）"
+        #   如果 consolidation 未就绪（LLM 缺失等），belief_engine 仍可独立运行，只是不会被 consolidation 调用。
+        if self.enable_consolidation and not getattr(self, "consolidation", None):
+            logger.warning("[WaveMemory] consolidation 未就绪（LLM 不可用？），belief_engine 将独立运行")
         soul_bot = experience_bot or reflect_bot
         soul_bot_id = soul_bot.qq_id if soul_bot else ""
         # 信念引擎（提取在 consolidation 内触发，注入在 on_llm_request）
