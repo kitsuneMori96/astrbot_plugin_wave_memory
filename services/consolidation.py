@@ -226,9 +226,12 @@ class ConsolidationService:
         if self.belief_engine and summary and summary != "日常灌水":
             try:
                 full_text = f"{summary}\n事实: {json.dumps(facts, ensure_ascii=False)}" if facts else summary
-                await self.belief_engine.extract_from_summary(full_text, source_memory_ids=msg_ids[:5])
+                new_b = await self.belief_engine.extract_from_summary(full_text, source_memory_ids=msg_ids[:5])
+                logger.info(f"[Consolidation] 信念提取: summary={summary[:30]!r} → {len(new_b or [])} 条新信念")
             except Exception as e:
-                logger.debug(f"[Consolidation] Belief extraction failed: {e}")
+                logger.warning(f"[Consolidation] Belief extraction failed: {e}")
+        else:
+            logger.info(f"[Consolidation] 跳过信念提取: belief_engine={bool(self.belief_engine)} summary={summary[:20]!r}")
 
         return {"messages": len(msg_ids), "relations": relations_written, "facts": facts_written}
 
