@@ -175,17 +175,16 @@
     </div>
 
     <!-- KG Config Panel -->
-    <div id="kg-config" class="fixed top-12 left-4 z-20 glass glass-accent rounded-xl p-4 w-64 hidden" style="max-height:calc(100vh - 80px); overflow-y:auto">
+    <div id="kg-config" class="fixed top-12 left-4 z-20 glass glass-accent rounded-xl p-4 w-72 hidden" style="max-height:calc(100vh - 80px); overflow-y:auto">
         <h4 class="text-slate-400 text-[10px] uppercase tracking-widest mb-3">图谱配置</h4>
         <div class="space-y-3">
             <div>
-                <label class="text-[10px] text-slate-500 block mb-1">显示节点数（可输入任意值）</label>
-                <input type="number" id="cfg-max-nodes" min="10" max="5000" value="150" class="w-full px-2 py-1.5 bg-nebula-700 border border-white/10 rounded-md text-[11px] text-slate-300">
+                <label class="text-[10px] text-slate-500 block mb-1">显示节点数</label>
+                <input type="number" id="cfg-max-nodes" min="10" max="5000" value="200" class="w-full px-2 py-1.5 bg-nebula-700 border border-white/10 rounded-md text-[11px] text-slate-300">
             </div>
             <div>
-                <label class="text-[10px] text-slate-500 block mb-1">最小关联强度（越高只显示强关系）</label>
+                <label class="text-[10px] text-slate-500 block mb-1">最小关联强度</label>
                 <input type="number" id="cfg-min-weight" min="0" max="10" step="0.1" value="0" class="w-full px-2 py-1.5 bg-nebula-700 border border-white/10 rounded-md text-[11px] text-slate-300">
-                <div class="text-[9px] text-slate-600 mt-0.5">0=显示全部，1=只看至少出现1次以上的关系</div>
             </div>
             <div>
                 <label class="text-[10px] text-slate-500 block mb-1">时间范围</label>
@@ -197,14 +196,25 @@
                 </select>
             </div>
             <div>
-                <label class="text-[10px] text-slate-500 block mb-1">关系类型（点选筛选，不选=全部）</label>
+                <label class="text-[10px] text-slate-500 block mb-2">数据图层（勾选加载到图谱）</label>
+                <div class="space-y-1.5" id="cfg-layers">
+                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" checked data-layer="facts" class="accent-purple-500"> <span class="text-[10px] text-slate-300">事实关系</span> <span class="text-[9px] text-slate-600">facts+tag_relations</span></label>
+                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" data-layer="beliefs" class="accent-purple-500"> <span class="text-[10px] text-slate-300">信念</span> <span class="text-[9px] text-slate-600">bot 的判断/认知</span></label>
+                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" data-layer="concerns" class="accent-purple-500"> <span class="text-[10px] text-slate-300">关切</span> <span class="text-[9px] text-slate-600">bot 当前关注焦点</span></label>
+                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" data-layer="jargon" class="accent-purple-500"> <span class="text-[10px] text-slate-300">黑话</span> <span class="text-[9px] text-slate-600">群内暗语/梗</span></label>
+                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" data-layer="affinity" class="accent-purple-500"> <span class="text-[10px] text-slate-300">好感度</span> <span class="text-[9px] text-slate-600">bot→人物 好感关系</span></label>
+                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" data-layer="communities" class="accent-purple-500"> <span class="text-[10px] text-slate-300">社区</span> <span class="text-[9px] text-slate-600">tag 共现聚类</span></label>
+                </div>
+            </div>
+            <div>
+                <label class="text-[10px] text-slate-500 block mb-1">关系类型（点击取消=隐藏该类）</label>
                 <div id="cfg-rel-types" class="flex flex-wrap gap-1"></div>
             </div>
             <div>
-                <label class="text-[10px] text-slate-500 block mb-1">节点类型（点选筛选，不选=全部）</label>
+                <label class="text-[10px] text-slate-500 block mb-1">节点类型（点击取消=隐藏该类）</label>
                 <div id="cfg-node-types" class="flex flex-wrap gap-1"></div>
             </div>
-            <button onclick="applyKgConfig()" class="w-full px-3 py-2 bg-glow-purple/80 hover:bg-glow-purple rounded-lg text-white text-[11px] font-medium transition mt-2">应用配置</button>
+            <button onclick="loadGalaxy()" class="w-full px-3 py-2 bg-glow-purple/80 hover:bg-glow-purple rounded-lg text-white text-[11px] font-medium transition mt-2">应用配置</button>
             <div class="text-[9px] text-slate-600 text-center" id="cfg-status"></div>
         </div>
     </div>
@@ -536,13 +546,17 @@ let _kgFullEdges = null; // 全量边数据(内存缓存)
 async function loadGalaxy() {
     showLoading('正在加载知识图谱...');
     try {
-        if (!_kgFullEdges) {
-            const res = await fetch('/api/kg/full');
-            const data = await res.json();
-            _kgFullEdges = data.edges || [];
-            showLoading(`已加载 ${_kgFullEdges.length} 条关系，渲染中...`);
-        }
-        applyKgConfig(); // 用当前配置过滤+渲染
+        // 读取勾选的图层
+        const layers = [];
+        document.querySelectorAll('#cfg-layers input[type=checkbox]').forEach(cb => {
+            if (cb.checked) layers.push(cb.dataset.layer);
+        });
+        const layerParam = layers.length ? layers.join(',') : 'facts';
+        const res = await fetch(`/api/kg/full?layers=${layerParam}`);
+        const data = await res.json();
+        _kgFullEdges = data.edges || [];
+        showLoading(`已加载 ${_kgFullEdges.length} 条关系（图层: ${data.layers?.join(', ')}），渲染中...`);
+        applyKgConfig();
     } catch(e) {
         console.error('Load KG failed:', e);
     }
@@ -554,16 +568,14 @@ function applyKgConfig() {
     const maxNodes = parseInt(document.getElementById('cfg-max-nodes')?.value || '150');
     const minWeight = parseFloat(document.getElementById('cfg-min-weight')?.value || '0');
     const days = parseInt(document.getElementById('cfg-days')?.value || '0');
-    const relFilter = selectedRelTypes.size > 0 ? selectedRelTypes : null;
-    const nodeFilter = selectedNodeTypes.size > 0 ? selectedNodeTypes : null;
     const cutoff = days > 0 ? (Date.now()/1000 - days * 86400) : 0;
 
-    // 前端过滤
+    // 前端过滤（减法逻辑：selectedRelTypes/selectedNodeTypes 里有的才显示，取消的隐藏）
     let filtered = _kgFullEdges;
     if (minWeight > 0) filtered = filtered.filter(e => e.w >= minWeight);
-    if (relFilter) filtered = filtered.filter(e => relFilter.has(e.l));
+    if (selectedRelTypes.size > 0) filtered = filtered.filter(e => selectedRelTypes.has(e.l));
     if (cutoff > 0) filtered = filtered.filter(e => e.ts >= cutoff);
-    if (nodeFilter) filtered = filtered.filter(e => nodeFilter.has(e.st) || nodeFilter.has(e.tt));
+    if (selectedNodeTypes.size > 0) filtered = filtered.filter(e => selectedNodeTypes.has(e.st) || selectedNodeTypes.has(e.tt));
 
     // 按权重排序取 top(以边为中心)
     filtered.sort((a, b) => b.w - a.w);
@@ -1091,16 +1103,20 @@ async function loadKgConfig() {
     try {
         const r = await fetch('/api/kg/config');
         const d = await r.json();
-        // 关系类型 pills
+        // 关系类型 pills（默认全选=全部显示，用户取消某个=那类消失）
+        const relTypes = d.relation_types || [];
+        selectedRelTypes = new Set(relTypes); // 默认全选
         const relDiv = document.getElementById('cfg-rel-types');
-        relDiv.innerHTML = (d.relation_types||[]).map(t =>
-            `<button class="px-2 py-0.5 rounded text-[9px] border border-white/10 text-slate-400 hover:border-purple-500/30 hover:text-purple-300 transition cfg-pill" data-type="${t}" onclick="toggleCfgPill(this,'rel')">${t}</button>`
+        relDiv.innerHTML = relTypes.map(t =>
+            `<button class="px-2 py-0.5 rounded text-[9px] border transition cfg-pill" data-type="${t}" onclick="toggleCfgPill(this,'rel')" style="background:rgba(139,92,246,0.25); border-color:#8b5cf6; color:#c4b5fd">${t}</button>`
         ).join('');
-        // 节点类型 pills
+        // 节点类型 pills（默认全选）
+        const nodeTypes = d.node_types || [];
+        selectedNodeTypes = new Set(nodeTypes); // 默认全选
         const nodeDiv = document.getElementById('cfg-node-types');
-        nodeDiv.innerHTML = (d.node_types||[]).map(t => {
+        nodeDiv.innerHTML = nodeTypes.map(t => {
             const color = TYPE_COLORS[t] || '#94a3b8';
-            return `<button class="px-2 py-0.5 rounded text-[9px] border transition cfg-pill" style="border-color:${color}30; color:${color}" data-type="${t}" onclick="toggleCfgPill(this,'node')">${TYPE_LABELS[t]||t}</button>`;
+            return `<button class="px-2 py-0.5 rounded text-[9px] border transition cfg-pill" style="border-color:${color}; color:${color}; background:${color}20" data-type="${t}" onclick="toggleCfgPill(this,'node')">${TYPE_LABELS[t]||t}</button>`;
         }).join('');
         kgConfigLoaded = true;
     } catch(e) { console.error('loadKgConfig:', e); }
@@ -1109,8 +1125,28 @@ async function loadKgConfig() {
 function toggleCfgPill(btn, kind) {
     const t = btn.dataset.type;
     const set = kind === 'rel' ? selectedRelTypes : selectedNodeTypes;
-    if (set.has(t)) { set.delete(t); btn.style.background = ''; btn.style.borderColor = ''; }
-    else { set.add(t); btn.style.background = 'rgba(139,92,246,0.25)'; btn.style.borderColor = '#8b5cf6'; }
+    if (set.has(t)) {
+        // 取消选中（该类型将被隐藏）
+        set.delete(t);
+        btn.style.background = '';
+        btn.style.borderColor = 'rgba(255,255,255,0.1)';
+        btn.style.color = '#64748b';
+        btn.style.opacity = '0.5';
+    } else {
+        // 恢复选中
+        set.add(t);
+        if (kind === 'rel') {
+            btn.style.background = 'rgba(139,92,246,0.25)';
+            btn.style.borderColor = '#8b5cf6';
+            btn.style.color = '#c4b5fd';
+        } else {
+            const color = TYPE_COLORS[t] || '#94a3b8';
+            btn.style.background = color + '20';
+            btn.style.borderColor = color;
+            btn.style.color = color;
+        }
+        btn.style.opacity = '1';
+    }
 }
 
 initLegend();

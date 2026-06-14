@@ -344,19 +344,21 @@ async def kg_config():
 @kg_bp.route("/full")
 @require_auth
 async def kg_full():
-    """全量知识图谱数据（一次性加载到前端内存，供本地即时过滤）。
+    """全量知识图谱数据（按图层返回）。
 
-    返回所有 facts+tag_relations 消歧后的边列表(~5000条/~320KB)。
-    前端存内存后，配置面板调参零延迟（纯 JS 过滤+重绘）。
+    参数 layers: 逗号分隔(facts,beliefs,concerns,jargon,affinity,communities)
+    默认只返回 facts 图层。前端可勾选多图层叠加。
     """
     c = get_container()
+    layers_raw = request.args.get("layers", "facts")
+    layers = set(layers_raw.split(",")) - {""}
 
-    # 缓存(数据变化不频繁，缓存 5 分钟)
     now = time.time()
-    if _overview_cache.get("full_data") and (now - _overview_cache.get("full_ts", 0)) < 300:
-        return jsonify(_overview_cache["full_data"])
+    cache_key = f"full:{layers_raw}"
+    if _overview_cache.get(cache_key) and (now - _overview_cache.get(f"{cache_key}_ts", 0)) < 300:
+        return jsonify(_overview_cache[cache_key])
 
-    # 构建 name→QQ 消歧映射
+    # 消歧映射
     name_to_qq: dict[str, str] = {}
     qq_to_main: dict[str, str] = {}
     try:
@@ -375,38 +377,83 @@ async def kg_full():
         qq = name_to_qq.get(n)
         return qq_to_main.get(qq, n) if qq else n
 
-    # 提取全量边
     edges = []
     seen = set()
 
-    # tag_relations
-    for r in c.db.conn.execute(
-        "SELECT t1.name, tr.relation_type, t2.name, tr.weight, t1.tag_type, t2.tag_type, tr.created_at FROM tag_relations tr JOIN tags t1 ON tr.source_tag_id=t1.id JOIN tags t2 ON tr.target_tag_id=t2.id"
-    ).fetchall():
-        s = resolve(r[0].strip()[:25]) if r[0] else ""
-        t = resolve(r[2].strip()[:25]) if r[2] else ""
-        if not s or not t or s == t:
-            continue
-        key = (s, t, r[1])
-        if key in seen:
-            continue
-        seen.add(key)
-        edges.append({"s": s, "t": t, "l": r[1] or "relates", "w": round(r[3] or 1, 2), "st": r[4] or "topic", "tt": r[5] or "topic", "ts": r[6] or 0})
+    # ─── 图层: facts (facts + tag_relations) ───
+    if "facts" in layers:
+        for r in c.db.conn.execute(
+            "SELECT t1.name, tr.relation_type, t2.name, tr.weight, t1.tag_type, t2.tag_type, tr.created_at FROM tag_relations tr JOIN tags t1 ON tr.source_tag_id=t1.id JOIN tags t2 ON tr.target_tag_id=t2.id"
+        ).fetchall():
+            s, t = resolve((r[0] or "").strip()[:25]), resolve((r[2] or "").strip()[:25])
+            if not s or not t or s == t:
+                continue
+            key = (s, t, r[1])
+            if key not in seen:
+                seen.add(key)
+                edges.append({"s": s, "t": t, "l": r[1] or "relates", "w": round(r[3] or 1, 2), "st": r[4] or "topic", "tt": r[5] or "topic", "ts": r[6] or 0, "layer": "facts"})
 
-    # facts
-    for r in c.db.conn.execute("SELECT subject, predicate, object, confidence, created_at FROM facts"):
-        if not r[0] or not r[2]:
-            continue
-        s = resolve(r[0].strip()[:25])
-        t = resolve(r[2].strip()[:25])
-        if not s or not t or s == t:
-            continue
-        label = (r[1] or "relates").strip()[:15]
-        key = (s, t, label)
-        if key in seen:
-            continue
-        seen.add(key)
-        edges.append({"s": s, "t": t, "l": label, "w": round(r[3] or 1, 2), "st": "entity", "tt": "entity", "ts": r[4] or 0})
+        for r in c.db.conn.execute("SELECT subject, predicate, object, confidence, created_at FROM facts"):
+            if not r[0] or not r[2]:
+                continue
+            s, t = resolve(r[0].strip()[:25]), resolve(r[2].strip()[:25])
+            if not s or not t or s == t:
+                continue
+            label = (r[1] or "relates").strip()[:15]
+            key = (s, t, label)
+            if key not in seen:
+                seen.add(key)
+                edges.append({"s": s, "t": t, "l": label, "w": round(r[3] or 1, 2), "st": "entity", "tt": "entity", "ts": r[4] or 0, "layer": "facts"})
+
+    # ─── 图层: beliefs ───
+    if "beliefs" in layers:
+        for r in c.db.conn.execute("SELECT content, type, strength, bot_id FROM beliefs WHERE status='active'"):
+            bot = qq_to_main.get("bot", "bot") if r[3] == "bot" else resolve(r[3] or "bot")
+            edges.append({"s": bot, "t": r[0][:25], "l": "believes", "w": round(r[2] or 0.5, 2), "st": "person", "tt": "belief", "ts": 0, "layer": "beliefs"})
+
+    # ─── 图层: concerns ───
+    if "concerns" in layers:
+        for r in c.db.conn.execute("SELECT topic, intensity, bot_id FROM concerns"):
+            bot = resolve(r[2] or "bot")
+            edges.append({"s": bot, "t": (r[0] or "")[:25], "l": "关注", "w": round(r[1] or 0.5, 2), "st": "person", "tt": "concern", "ts": 0, "layer": "concerns"})
+
+    # ─── 图层: jargon ───
+    if "jargon" in layers:
+        for r in c.db.conn.execute("SELECT word, meaning, frequency, group_id FROM jargon WHERE is_jargon=1"):
+            edges.append({"s": f"群{r[3]}" if r[3] else "全局", "t": r[0], "l": "黑话", "w": min(r[2] or 1, 10), "st": "entity", "tt": "jargon", "ts": 0, "layer": "jargon"})
+
+    # ─── 图层: affinity (好感度) ───
+    if "affinity" in layers:
+        try:
+            for r in c.db.conn.execute("SELECT user_id, nickname, affection, bot_id FROM user_profiles WHERE affection != 0 LIMIT 200"):
+                person = resolve(r[1] or r[0])
+                bot = resolve(r[3] or "bot")
+                label = f"好感{r[2]}"
+                edges.append({"s": bot, "t": person, "l": label, "w": abs(r[2]) / 20.0, "st": "person", "tt": "person", "ts": 0, "layer": "affinity"})
+        except Exception:
+            pass
+
+    # ─── 图层: communities ───
+    if "communities" in layers and c.cooccurrence:
+        try:
+            communities = c.cooccurrence.detect_communities(min_community_size=5)
+            for cid, members in list(communities.items())[:20]:
+                hub = members[0] if members else f"社区{cid}"
+                hub_name = ""
+                try:
+                    row = c.db.conn.execute("SELECT name FROM tags WHERE id=?", (hub,)).fetchone()
+                    hub_name = row[0] if row else f"tag#{hub}"
+                except Exception:
+                    hub_name = f"tag#{hub}"
+                for mid in members[1:5]:
+                    try:
+                        row = c.db.conn.execute("SELECT name FROM tags WHERE id=?", (mid,)).fetchone()
+                        member_name = row[0] if row else f"tag#{mid}"
+                    except Exception:
+                        member_name = f"tag#{mid}"
+                    edges.append({"s": hub_name, "t": member_name, "l": "同社区", "w": 1.0, "st": "topic", "tt": "topic", "ts": 0, "layer": "communities"})
+        except Exception:
+            pass
 
     # 标记人物
     for e in edges:
@@ -415,9 +462,9 @@ async def kg_full():
         if e["t"] in name_to_qq:
             e["tt"] = "person"
 
-    data = {"edges": edges, "total": len(edges)}
-    _overview_cache["full_data"] = data
-    _overview_cache["full_ts"] = now
+    data = {"edges": edges, "total": len(edges), "layers": list(layers)}
+    _overview_cache[cache_key] = data
+    _overview_cache[f"{cache_key}_ts"] = now
     return jsonify(data)
 
 
