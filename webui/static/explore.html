@@ -197,7 +197,7 @@
     </div>
 
     <!-- Detail Panel -->
-    <div id="detail-panel" class="fixed right-4 top-16 bottom-4 w-80 z-20 glass rounded-2xl overflow-hidden hidden detail-panel">
+    <div id="detail-panel" class="fixed right-4 top-16 bottom-4 w-96 z-20 glass glass-accent rounded-2xl overflow-hidden hidden detail-panel">
         <div class="p-5 h-full overflow-y-auto">
             <div class="flex items-start justify-between mb-3">
                 <div>
@@ -206,14 +206,16 @@
                 </div>
                 <button onclick="hideDetail()" class="w-7 h-7 flex items-center justify-center rounded-lg bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white text-xs transition">✕</button>
             </div>
-            <div id="detail-tags" class="flex flex-wrap gap-1.5 mb-3"></div>
-            <div id="detail-content" class="text-slate-400 text-xs leading-relaxed whitespace-pre-wrap max-h-48 overflow-y-auto border-t border-white/5 pt-3"></div>
-            <div id="detail-neighbors" class="mt-3 border-t border-white/5 pt-3">
+            <div id="detail-neighbors" class="mb-3">
                 <p class="text-slate-500 text-[10px] uppercase tracking-wider mb-2">关联节点</p>
                 <div id="detail-neighbor-list" class="flex flex-wrap gap-1"></div>
             </div>
+            <div id="detail-memories" class="border-t border-white/5 pt-3">
+                <p class="text-slate-500 text-[10px] uppercase tracking-wider mb-2">关联记忆</p>
+                <div id="detail-memory-list" class="space-y-2.5 max-h-[60vh] overflow-y-auto"></div>
+            </div>
             <div class="flex gap-2 mt-4 flex-wrap">
-                <button id="btn-expand" onclick="expandNode()" class="px-3 py-1.5 bg-glow-purple/10 border border-glow-dim rounded-lg text-purple-300 text-[11px] hover:bg-glow-purple/20 transition">展开邻居</button>
+                <button id="btn-expand" onclick="expandNode()" class="px-3 py-1.5 bg-glow-purple/10 border border-glow-dim rounded-lg text-purple-300 text-[11px] hover:bg-glow-purple/20 transition">展开社区</button>
             </div>
         </div>
     </div>
@@ -555,41 +557,49 @@ function renderGraph(nodes, edges) {
     }, 150);
 }
 
-// ─── Query (图内搜索聚焦) ───
+// ─── Query (语义向量检索 — 搜任意词返回相关记忆) ───
 async function doQuery() {
     const q = document.getElementById('search-input').value.trim();
     if (!q) return;
-    if (graph.order === 0) {
-        showLoading('请先加载星图...');
-        await loadGalaxy();
-    }
-    // 在已加载图中查找匹配节点（名称包含关键词）
-    const matches = [];
-    graph.forEachNode((nid, attrs) => {
-        if ((attrs.label || '').toLowerCase().includes(q.toLowerCase())) matches.push(nid);
-    });
-    if (matches.length === 0) {
-        showLoading(`星图中无 "${q}"，试试展开节点或人物视图`);
-        setTimeout(hideLoading, 1500);
-        return;
-    }
-    // 高亮匹配 + 邻居，淡化其余，聚焦相机
-    const keep = new Set(matches);
-    matches.forEach(nid => graph.forEachNeighbor(nid, nb => keep.add(nb)));
-    graph.forEachNode((nid, attrs) => {
-        const hit = matches.includes(nid);
-        const near = keep.has(nid);
-        const baseColor = TYPE_COLORS[attrs.nodeType] || TYPE_COLORS.keyword;
-        graph.setNodeAttribute(nid, 'highlighted', hit);
-        graph.setNodeAttribute(nid, 'color', hit ? TYPE_COLORS.source : (near ? baseColor : '#33415533'));
-    });
-    // 聚焦第一个匹配节点
-    const target = matches[0];
-    const x = graph.getNodeAttribute(target, 'x'), y = graph.getNodeAttribute(target, 'y');
-    const camera = renderer.getCamera();
-    camera.animate({ x, y, ratio: 0.4 }, { duration: 500 });
-    selectedNode = target;
-    showDetail(target);
+    showLoading('正在语义检索...');
+    try {
+        const res = await fetch('/api/query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: q, top_k: 12, enable_spike: true, enable_pyramid: false, enable_epa: false, enable_geodesic: false }),
+        });
+        const data = await res.json();
+        if (data.results && data.results.length) {
+            // 把语义检索结果渲染为记忆列表（比图更直观）
+            const panel = document.getElementById('detail-panel');
+            document.getElementById('detail-title').textContent = `「${q}」语义检索`;
+            document.getElementById('detail-meta').innerHTML = `<span class="text-purple-300">${data.results.length} 条相关记忆</span> · ${data.timing?.total_ms || '?'}ms`;
+            document.getElementById('detail-neighbor-list').innerHTML = '';
+            const memList = document.getElementById('detail-memory-list');
+            memList.innerHTML = data.results.map(m => {
+                const time = m.timestamp ? new Date(m.timestamp * 1000).toLocaleString('zh-CN', {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
+                const score = m.score ? `<span class="text-purple-400/70 text-[9px]">${(m.score*100).toFixed(0)}%</span>` : '';
+                return `<div class="p-2.5 rounded-lg bg-white/[.03] border border-white/5">
+                    <div class="flex items-center gap-2 mb-1">
+                        <span class="text-purple-300 text-[10px] font-medium">${m.sender_name || '未知'}</span>
+                        ${score}
+                        <span class="text-slate-600 text-[9px] ml-auto">${time}</span>
+                    </div>
+                    <p class="text-slate-300 text-[11px] leading-relaxed">${(m.content||'').slice(0,180)}${(m.content||'').length>180?'...':''}</p>
+                </div>`;
+            }).join('');
+            document.getElementById('btn-expand').style.display = 'none';
+            panel.classList.remove('hidden');
+            if (typeof gsap !== 'undefined') {
+                gsap.fromTo(panel, { autoAlpha: 0, x: 30 }, { autoAlpha: 1, x: 0, duration: 0.4, ease: 'power3.out' });
+            }
+        } else {
+            showLoading(`「${q}」无相关记忆`);
+            setTimeout(hideLoading, 1500);
+            return;
+        }
+    } catch(e) { console.error('Query failed:', e); }
+    hideLoading();
 }
 
 // ─── Person View ───
@@ -732,23 +742,19 @@ function appendGraphData(newNodes, newEdges) {
     updateStats();
 }
 
-// ─── Detail Panel ───
-function showDetail(nodeId) {
+// ─── Detail Panel (展示关联记忆) ───
+async function showDetail(nodeId) {
     const attrs = graph.getNodeAttributes(nodeId);
     const data = attrs._data || {};
     const panel = document.getElementById('detail-panel');
     const color = TYPE_COLORS[data.type] || '#94a3b8';
 
     document.getElementById('detail-title').textContent = attrs.label || nodeId;
-
     let meta = '';
     if (data.type) meta += `<span style="color:${color}">${TYPE_LABELS[data.type] || data.type}</span>`;
     if (data.degree) meta += ` · 度数 ${data.degree}`;
-    if (data.score) meta += ` · 相似度 ${data.score.toFixed(3)}`;
     if (data.community !== undefined) meta += ` · 社区 #${data.community}`;
     document.getElementById('detail-meta').innerHTML = meta;
-
-    document.getElementById('detail-content').textContent = data.content || '';
     document.getElementById('btn-expand').style.display = data.isSource ? 'none' : '';
 
     // Neighbor list
@@ -761,11 +767,41 @@ function showDetail(nodeId) {
         return `<span class="inline-block px-2 py-0.5 rounded text-[10px] cursor-pointer hover:opacity-80 transition" style="background:${nColor}15; color:${nColor}; border: 1px solid ${nColor}25" onclick="selectedNode='${n}'; showDetail('${n}')">${nAttrs.label || n}</span>`;
     }).join('') + (neighbors.length > 12 ? `<span class="text-slate-600 text-[10px] ml-1">+${neighbors.length - 12}</span>` : '');
 
+    // 加载关联记忆（核心价值：展示真实消息内容）
+    const memList = document.getElementById('detail-memory-list');
+    const tagId = parseInt(nodeId, 10);
+    if (!isNaN(tagId)) {
+        memList.innerHTML = '<p class="text-slate-600 text-[10px]">加载记忆...</p>';
+        try {
+            const r = await fetch(`/api/explore/tag/${tagId}/memories?limit=15`);
+            const d = await r.json();
+            if (d.memories && d.memories.length) {
+                memList.innerHTML = d.memories.map(m => {
+                    const time = m.ts ? new Date(m.ts * 1000).toLocaleString('zh-CN', {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
+                    return `<div class="p-2.5 rounded-lg bg-white/[.03] border border-white/5 hover:border-purple-500/20 transition">
+                        <div class="flex items-center gap-2 mb-1">
+                            <span class="text-purple-300 text-[10px] font-medium">${m.sender || '未知'}</span>
+                            <span class="text-slate-600 text-[9px] ml-auto">${time}</span>
+                        </div>
+                        <p class="text-slate-300 text-[11px] leading-relaxed">${(m.content||'').slice(0,150)}${(m.content||'').length>150?'...':''}</p>
+                    </div>`;
+                }).join('');
+            } else {
+                memList.innerHTML = '<p class="text-slate-600 text-[10px]">暂无关联记忆</p>';
+            }
+        } catch(e) {
+            memList.innerHTML = '<p class="text-red-400/60 text-[10px]">加载失败</p>';
+        }
+    } else {
+        // 非 tag 节点（如人物记忆网络的 memory 节点）
+        memList.innerHTML = data.content
+            ? `<div class="p-2.5 rounded-lg bg-white/[.03]"><p class="text-slate-300 text-[11px] leading-relaxed">${data.content.slice(0,200)}</p></div>`
+            : '<p class="text-slate-600 text-[10px]">-</p>';
+    }
+
     panel.classList.remove('hidden');
     if (typeof gsap !== 'undefined') {
         gsap.fromTo(panel, { autoAlpha: 0, x: 30 }, { autoAlpha: 1, x: 0, duration: 0.4, ease: 'power3.out' });
-        gsap.fromTo('#detail-tags > *, #detail-neighbor-list > *',
-            { autoAlpha: 0, y: 6 }, { autoAlpha: 1, y: 0, duration: 0.3, stagger: 0.02, ease: 'power2.out', delay: 0.12 });
     }
 }
 
@@ -808,15 +844,6 @@ function hideLoading() {
     } else {
         el.classList.add('hidden'); el.classList.remove('flex');
     }
-}
-function showLoading(text) {
-    document.getElementById('loading-text').textContent = text;
-    document.getElementById('loading').classList.remove('hidden');
-    document.getElementById('loading').classList.add('flex');
-}
-function hideLoading() {
-    document.getElementById('loading').classList.add('hidden');
-    document.getElementById('loading').classList.remove('flex');
 }
 
 // ─── View Switching ───

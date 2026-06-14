@@ -153,6 +153,32 @@ async def person(qq_id: str):
     })
 
 
+@explore_bp.route("/tag/<int:tag_id>/memories")
+@require_auth
+async def tag_memories(tag_id: int):
+    """查看某 tag 关联的真实记忆消息（含原文/发送者/时间）。"""
+    c = get_container()
+    limit = int(request.args.get("limit", 20))
+    limit = max(1, min(50, limit))
+    rows = c.db.conn.execute(
+        """SELECT m.id, m.content, m.sender_name, m.group_id, m.timestamp
+           FROM memories m
+           JOIN memory_tags mt ON m.id = mt.memory_id
+           WHERE mt.tag_id = ?
+           ORDER BY m.timestamp DESC
+           LIMIT ?""",
+        (tag_id, limit),
+    ).fetchall()
+    tag_row = c.db.conn.execute("SELECT name, tag_type, frequency FROM tags WHERE id=?", (tag_id,)).fetchone()
+    return jsonify({
+        "tag": {"id": tag_id, "name": tag_row[0] if tag_row else "", "type": tag_row[1] if tag_row else "", "frequency": tag_row[2] if tag_row else 0},
+        "memories": [
+            {"id": r[0], "content": r[1], "sender": r[2] or "", "group_id": r[3] or "", "ts": r[4]}
+            for r in rows
+        ],
+    })
+
+
 @explore_bp.route("/persons")
 @require_auth
 async def persons():
