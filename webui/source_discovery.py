@@ -403,7 +403,8 @@ class SourceDiscovery:
                 adapter = source["adapter"]
                 table = adapter["table"]
                 fields = adapter.get("fields", {})
-                content_field = fields.get("content", "content")
+                target_type = adapter.get("target", "memories")
+                content_field = fields.get("word", "word") if target_type == "jargon" else fields.get("content", "content")
                 extra_field = fields.get("extra")
                 where = adapter.get("filter", "1=1")
                 if extra_field:
@@ -437,13 +438,22 @@ class SourceDiscovery:
 
             existing = 0
             chunk_size = 400
+            target_type = source.get("adapter", {}).get("target", "memories") if source.get("type") == "known" else "memories"
             for i in range(0, total, chunk_size):
                 chunk = distinct_contents[i:i + chunk_size]
                 placeholders = ",".join(["?"] * len(chunk))
-                existing += wave_db.conn.execute(
-                    f"SELECT COUNT(DISTINCT content) FROM memories WHERE content IN ({placeholders})",
-                    chunk,
-                ).fetchone()[0]
+                if target_type == "jargon":
+                    existing += wave_db.conn.execute(
+                        f"SELECT COUNT(*) FROM jargon WHERE word IN ({placeholders})", chunk
+                    ).fetchone()[0]
+                elif target_type == "facts":
+                    existing += wave_db.conn.execute(
+                        f"SELECT COUNT(*) FROM facts WHERE object IN ({placeholders})", chunk
+                    ).fetchone()[0]
+                else:
+                    existing += wave_db.conn.execute(
+                        f"SELECT COUNT(DISTINCT content) FROM memories WHERE content IN ({placeholders})", chunk
+                    ).fetchone()[0]
 
             pct = min(existing / total, 1.0)
             estimated_remaining = max(0, total - existing)
