@@ -249,12 +249,34 @@ class AffinityEngine:
             affection = _compute_affection(dims)
             attitude = _get_attitude_level(affection)
 
-            # 构建 metadata
-            meta = {
-                "dimensions": {k: round(v, 2) for k, v in dims.items()},
-                "last_decay_at": now,
-                "attitude_level": attitude,
-            }
+            # 构建 metadata（合并现有，不覆盖 MetaThinking 写入的 impression/tags）
+            existing_meta = {}
+            existing_row = self.db.conn.execute(
+                "SELECT metadata FROM user_profiles WHERE user_id=? AND group_id=? AND bot_id=?",
+                (user_id, group_id, self.bot_db_id),
+            ).fetchone()
+            if existing_row and existing_row[0]:
+                try:
+                    existing_meta = json.loads(existing_row[0])
+                except Exception:
+                    pass
+
+            # 只更新 dimensions 相关字段，保留 MetaThinking 的 impression/tags/meta_updated
+            existing_meta["dimensions"] = {k: round(v, 2) for k, v in dims.items()}
+            existing_meta["last_decay_at"] = now
+            existing_meta["attitude_level"] = attitude
+            meta = existing_meta
+
+            # 写入（affection 取 MetaThinking 和 dimensions 的较高者，避免被行为积累降级）
+            meta_affection = None
+            if "meta_updated" in existing_meta:
+                # MetaThinking 有过写入，用 LLM 给的分数为准
+                meta_affection = self.db.conn.execute(
+                    "SELECT affection FROM user_profiles WHERE user_id=? AND group_id=? AND bot_id=?",
+                    (user_id, group_id, self.bot_db_id),
+                ).fetchone()
+                if meta_affection:
+                    affection = max(affection, meta_affection[0])
 
             # 写入
             self.db.conn.execute(
