@@ -1254,6 +1254,42 @@ class WaveMemoryPlugin(Star):
                 pass
             timing["facts_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
 
+        # ─── 通道 7: FTS5 精确召回（人名/专有名词关键词匹配） ───
+        fts5_memories = None
+
+        async def _ch_fts5():
+            nonlocal fts5_memories
+            t0 = _time.perf_counter()
+            try:
+                import jieba
+                words = [w for w in jieba.cut(message) if len(w) >= 2][:6]
+                if not words:
+                    return
+                # 构建 FTS5 MATCH 表达式（OR 连接）
+                match_expr = " OR ".join(words)
+                rows = self.db.conn.execute(
+                    """SELECT rowid, content, sender_name, group_id FROM fts_memories
+                       WHERE fts_memories MATCH ? LIMIT 10""",
+                    (match_expr,),
+                ).fetchall()
+                if rows:
+                    fts5_memories = []
+                    for row in rows:
+                        # 读取完整记忆信息
+                        mem = self.db.conn.execute(
+                            "SELECT id, content, sender_id, sender_name, timestamp, importance, source FROM memories WHERE id=?",
+                            (row[0],),
+                        ).fetchone()
+                        if mem:
+                            fts5_memories.append({
+                                "id": mem[0], "content": mem[1], "sender_id": mem[2],
+                                "sender_name": mem[3], "timestamp": mem[4],
+                                "importance": mem[5], "source": mem[6], "score": 0.5,
+                            })
+            except Exception:
+                pass
+            timing["fts5_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
+
         # ─── 并行执行所有通道 (US-2.1) ───
         try:
             await asyncio.gather(
@@ -1263,9 +1299,18 @@ class WaveMemoryPlugin(Star):
                 _ch_book_lore(),
                 _ch_soul(),
                 _ch_facts(),
+                _ch_fts5(),
             )
 
             # ─── 合并结果 ───
+            # FTS5 结果合并（去重后追加）
+            if fts5_memories and memories is not None:
+                existing_ids = {m.get("id") for m in memories}
+                fts5_new = [m for m in fts5_memories if m.get("id") not in existing_ids]
+                memories = memories + fts5_new
+            elif fts5_memories:
+                memories = fts5_memories
+
             # 经历去重后合并
             if exp_memories and memories is not None:
                 existing_ids = {m.get("id") for m in memories}
@@ -1331,6 +1376,8 @@ class WaveMemoryPlugin(Star):
             parts_detail = []
             if memories:
                 parts_detail.append(f"memories={len(memories)}")
+            if fts5_memories:
+                parts_detail.append(f"fts5={len(fts5_memories)}")
             if facts_text:
                 parts_detail.append("facts")
             if persona_text:

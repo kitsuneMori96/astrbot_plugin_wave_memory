@@ -195,17 +195,28 @@ class SelfReflectService:
             if dist <= 0.12:
                 return False
 
-        # 4. 写入 bzz_evolution
+        # 4. 写入 bzz_evolution（高权重，确保下次检索能召回）
         mem_id = self.db.add_memory(
             group_id="__bzz_evolution__",
             content=text,
             vector=mem_vec,
             sender_id=self.bot_qq_id or "bot",
             sender_name=self.bot_name,
-            importance=1.5,  # 纠正学习的重要度更高
+            importance=3.0,  # 纠正学习必须突出（v1.3.0 REQ-2）
             source="bzz_evolution",
         )
         self.memory_index.add([mem_id], mem_vec.reshape(1, -1))
+
+        # 5. 同时写入 facts 表作为结构化知识
+        try:
+            self.db.insert_fact(
+                self.bot_name, "纠正学习",
+                text[:200],
+                confidence=0.95,
+            )
+        except Exception:
+            pass
+
         return True
 
     def cleanup_cooldown(self):
