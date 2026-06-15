@@ -291,6 +291,39 @@ class AffinityEngine:
             )
             updated += 1
 
+        # 顺便更新 person_registry（别名自动发现）
+        for (user_id, group_id) in list(self._buffer.keys())[:50]:
+            try:
+                names = self.db.conn.execute(
+                    "SELECT DISTINCT sender_name FROM memories WHERE sender_id=? AND sender_name != '' LIMIT 10",
+                    (user_id,),
+                ).fetchall()
+                if not names:
+                    continue
+                all_names = [n[0] for n in names]
+                display_name = all_names[0]
+                # 取最近使用的名字作为 display_name
+                recent_name = self.db.conn.execute(
+                    "SELECT sender_name FROM memories WHERE sender_id=? AND sender_name != '' ORDER BY timestamp DESC LIMIT 1",
+                    (user_id,),
+                ).fetchone()
+                if recent_name:
+                    display_name = recent_name[0]
+                aliases_json = json.dumps(all_names, ensure_ascii=False)
+                msg_count = self.db.conn.execute("SELECT COUNT(*) FROM memories WHERE sender_id=?", (user_id,)).fetchone()[0]
+                self.db.conn.execute(
+                    """INSERT INTO person_registry (qq_id, display_name, aliases, message_count, first_seen, last_seen)
+                       VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(qq_id) DO UPDATE SET
+                       display_name = excluded.display_name,
+                       aliases = excluded.aliases,
+                       message_count = excluded.message_count,
+                       last_seen = excluded.last_seen""",
+                    (user_id, display_name, aliases_json, msg_count, now, now),
+                )
+            except Exception:
+                pass
+
         self.db.conn.commit()
         self._buffer.clear()
         return updated
