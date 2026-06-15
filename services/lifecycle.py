@@ -301,7 +301,18 @@ class AffinityEngine:
                 if not names:
                     continue
                 all_names = [n[0] for n in names]
-                display_name = all_names[0]
+                # 从 facts 中补充绰号/别名（群友互相起的名字）
+                alias_facts = self.db.conn.execute(
+                    """SELECT object FROM facts WHERE subject LIKE ? 
+                       AND (predicate LIKE '%称%' OR predicate LIKE '%叫%' OR predicate LIKE '%绰号%' OR predicate LIKE '%代称%' OR predicate LIKE '%别名%')
+                       LIMIT 5""",
+                    (f"%{user_id}%",),
+                ).fetchall()
+                for af in alias_facts:
+                    # 提取括号前的名字部分
+                    alias_name = af[0].split('（')[0].split('(')[0].strip()
+                    if alias_name and alias_name not in all_names and len(alias_name) <= 20:
+                        all_names.append(alias_name)
                 # 取最近使用的名字作为 display_name
                 recent_name = self.db.conn.execute(
                     "SELECT sender_name FROM memories WHERE sender_id=? AND sender_name != '' ORDER BY timestamp DESC LIMIT 1",
