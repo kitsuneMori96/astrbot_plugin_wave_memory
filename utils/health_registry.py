@@ -15,9 +15,9 @@ from typing import Optional
 _services: dict[str, dict] = {}
 
 
-def register(name: str, status: str = "ok", reason: str = ""):
+def register(name: str, status: str = "ok", reason: str = "", dependency: str = ""):
     """注册/更新服务状态。status: ok / degraded / off / error"""
-    _services[name] = {"name": name, "status": status, "reason": reason, "ts": time.time()}
+    _services[name] = {"name": name, "status": status, "reason": reason, "dependency": dependency, "ts": time.time()}
 
 
 def get_all_services() -> list[dict]:

@@ -81,7 +81,7 @@ asyncio.gather（每通道 3s 独立超时）：
 
 | 模块 | 说明 |
 |------|------|
-| MetaThinking | 回复前先"想一下" — 决定是否回复、语气、好感度变化 |
+| MetaThinking | 规则前置过滤 + 态度注入 + 后置异步好感度更新（v1.3.0 不再独立调 LLM） |
 | BeliefEngine | 从对话摘要提取稳定判断，维护强化/动摇生命周期 |
 | DesireEngine | 事件→冲动→与信念博弈→行为输出 |
 | ConcernTracker | 维护当前在意的事，影响主动插话决策 |
@@ -117,7 +117,7 @@ asyncio.gather（每通道 3s 独立超时）：
 |------|------|
 | 统计预筛 | jieba 分词 + IDF/Burst/Concentration 复合评分 |
 | LLM 三步推断 | 带上下文推断 → 仅词条推断 → 对比判断是否为黑话 |
-| 自动注入 | 消息含已知黑话时注入 `<jargon>` 解释（最多 3 条） |
+| 自动注入 | 消息含已知黑话时注入可用词汇列表（最多 3 条），鼓励 bot 主动使用 |
 | 跨群全局化 | 同词在 >= 3 群确认 → 自动升级为全局黑话 |
 
 ### Few-Shot 风格学习 (v1.0)
@@ -184,6 +184,36 @@ Quart + Hypercorn 守护线程，纯 HTML + JS（无需 npm build）。
 | GSAP 动效 | 入场/面板/计数器/星云漂移 |
 
 API 端点：记忆 CRUD、Tag 管理、信念审核、情绪轨迹、黑话管理、知识图谱(全量/实体/时间线/路径/图层)、系统指标。
+
+---
+
+## 功能地图 — 启用条件与配置位置
+
+> 所有子系统分两层配置：AstrBot 6185 端口控制开关，WaveMemory 9876 端口调参。
+
+| 子系统 | 启用条件 | 配置位置 | 说明 |
+|--------|----------|----------|------|
+| 向量索引 | Embedding Provider 已配置 | 6185: embedding_provider_id | 核心，必须开启 |
+| Tag 提取 | Tag LLM Provider 已配置 | 6185: tag_llm_provider_id | 为记忆打标签 |
+| 共现矩阵 | Tag 覆盖率 > 20% | 自动 | 持续聊天自动积累 |
+| 脉冲传播 | 共现矩阵就绪 | 6185: enable_spike_routing | 间接联想能力 |
+| 残差金字塔 | Embedding + 共现矩阵 | 6185: enable_residual_pyramid | 复杂问题召回 |
+| EPA 分析 | Tag 覆盖率 > 20% | 6185: enable_epa | 聚焦度自适应 |
+| 测地线重排 | 共现矩阵节点 > 1000 | 6185: enable_geodesic_rerank | 距离偏差修正 |
+| FTS5 召回 | 自动（v1.3.0） | 无需配置 | 精确人名/专有名词 |
+| MetaThinking | MetaThinking_Settings.enabled | 6185: MetaThinking_Settings | 态度+好感度 |
+| 好感度系统 | MetaThinking 开启 | 9876: 好感度约束参数 | 多维度追踪 |
+| 人格进化 | 好感度系统就绪 | 自动 | 态度等级动态注入 |
+| 记忆整合 | LLM Provider 可用 | 6185: enable_consolidation | 碎片→结构化知识 |
+| 信念引擎 | 记忆整合就绪 | 自动 | 从摘要提取稳定判断 |
+| 做梦系统 | enable_dream=true | 6185: enable_dream | 离线联想强化 |
+| 自主学习 | LLM + 记忆 > 100 条 | 自动 | 从 BookLore 学习 |
+| 自省系统 | LLM Provider 可用 | 自动 | 纠正信号检测 |
+| 黑话系统 | LLM + 聊天积累 | 6185: Jargon_Settings | 自动挖掘+注入 |
+| 风格学习 | LLM + bot 回复积累 | 6185: FewShot_Settings | 范例提取+注入 |
+| 关切追踪 | 自动 | 无需配置 | 维护在意的事 |
+| 情绪轨迹 | 自动 | 无需配置 | 二维情绪记录 |
+| 记忆淘汰 | 自动 | 9876: 淘汰天数参数 | noise 7天 / chat 30天 |
 
 ---
 
