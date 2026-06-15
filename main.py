@@ -510,6 +510,7 @@ class WaveMemoryPlugin(Star):
                 positive_emotion_threshold=self.positive_emotion_threshold,
                 negative_emotion_threshold=self.negative_emotion_threshold,
             )
+            self.lifecycle.start()
             # LLM 摘要整合
             if self.enable_consolidation and self.tag_llm_provider_id:
                 self.consolidation = ConsolidationService(
