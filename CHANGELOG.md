@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.3.0 (2026-06-16)
+
+### 记忆召回质量提升
+
+- **FTS5 精确召回通道**：inject_memory 新增第 7 通道，jieba 分词 → FTS5 MATCH → 与向量结果去重合并。精确人名/专有名词不再被语义漂移淹没
+- **SelfReflect 纠正提权**：被群友纠正后学到的知识 importance 提升到 3.0 + 同步写入 facts 表
+- **facts 1-跳关联扩展**：facts 通道命中实体后自动沿三元组走 1 跳，关联知识一起注入
+
+### MetaThinking 架构改造（省 LLM 调用）
+
+- **消灭独立 LLM 判断**：删除 priority=1 的 `meta_thinking_check` 独立 LLM 调用（原来每条 @bot 消息先"想一下"再回复），态度判断改由 PersonaEvolution 通道统一注入
+- **规则链前置过滤 `_should_engage()`**：@bot/引用/私聊→must_reply | 30s内回复过/兴趣词→may_reply | 其他→skip。skip 时不消耗任何 token
+- **好感度更新后置异步**：好感度/印象/标签评估移到 `after_message_sent` 后台执行，不阻塞主回复
+- **ABA 连续对话追踪**：新增 `_reply_tracker` 记录 bot 最近回复了谁，支持自然连续对话
+
+### 自然度提升
+
+- **黑话注入格式改造**：从 `<jargon>"xxx"在这个群的意思是"yyy"</jargon>` 改为 `[群内词汇（你可以自然使用）]\n- "xxx" → yyy`，鼓励 bot 主动使用而非只是理解
+- **consolidation 绰号提取**：prompt 新增 nicknames 字段，自动从对话中识别"A 被叫做 B"类型绰号，写入 facts + person_registry aliases
+
+### 性能 + 可发现性
+
+- **Tag Worker 提速**：默认 batch 50→100 + source=noise 消息跳过打标签，减少无效 LLM 调用
+- **配置页功能说明**：schema 顶部新增只读说明块，引导用户区分 6185（基础开关）和 9876（高级调参）
+- **高级检索依赖提示**：spike/pyramid/epa/geodesic 开关的 hint 写明前置依赖条件
+
 ## v1.1.0 (2026-06-15)
 
 ### 知识图谱交互改进

@@ -24,7 +24,7 @@ class TagWorker:
         self.tag_index = tag_index
         cfg = config or {}
         self.wake_interval = int(cfg.get("interval_seconds", 300))
-        self.batch_size = int(cfg.get("max_batch_per_cycle", cfg.get("tag_worker_batch_size", 50)))
+        self.batch_size = int(cfg.get("max_batch_per_cycle", cfg.get("tag_worker_batch_size", 100)))
         self.bot_keywords = bot_keywords or set()
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -62,7 +62,7 @@ class TagWorker:
         logger.info("[WaveMemory] TagWorker stopped")
 
     def _fetch_untagged_batch(self) -> list:
-        """获取标签不足(< 2个)的记忆。"""
+        """获取标签不足(< 2个)的记忆。跳过 source=noise（低价值消息不打标签）。"""
         return self.db.conn.execute("""
             SELECT m.id, m.content, m.sender_name
             FROM memories m
@@ -76,6 +76,7 @@ class TagWorker:
                 WHERE status IN ('failed', 'skipped')
             )
             AND LENGTH(m.content) >= 10
+            AND COALESCE(m.source, '') != 'noise'
             ORDER BY m.id DESC
             LIMIT ?
         """, (self.batch_size,)).fetchall()

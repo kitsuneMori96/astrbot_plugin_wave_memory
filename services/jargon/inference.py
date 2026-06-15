@@ -144,9 +144,9 @@ class JargonInjector:
         if not matched:
             return ""
 
-        lines = []
+        lines = ["[群内词汇（你可以自然使用）]"]
         for j in matched:
-            lines.append(f'<jargon>"{j["word"]}"在这个群的意思是"{j["meaning"]}"</jargon>')
+            lines.append(f'- "{j["word"]}" → {j["meaning"]}')
         return "\n".join(lines)
 
     def _get_group_jargons(self, group_id: str) -> List[Dict]:

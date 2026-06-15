@@ -34,6 +34,9 @@ CONSOLIDATION_PROMPT = """从以下群聊消息中提取结构化知识。
   ],
   "social": [
     {{"person_a": "人名A", "person_b": "人名B", "relation": "朋友/互怼/师徒/情侣/对立/合作/认识"}}
+  ],
+  "nicknames": [
+    {{"person": "QQ号或当前昵称", "called": "群友给的绰号或别称"}}
   ]
 }}
 
@@ -44,6 +47,7 @@ CONSOLIDATION_PROMPT = """从以下群聊消息中提取结构化知识。
 - relations 描述 topics/人物 之间的关联，最多 4 条
 - type 从以下选择：discusses（讨论）、mentions（提及）、decides（决策）、supports（支持/认同）、opposes（反对/不认同）、reacts_to（情绪反应）、creates（创作/制作）、uses（使用/采用）、knows（了解/知道）、relates_to（关联-兜底）
 - social 描述对话中体现的人际关系（最多 2 条，没有则留空数组）
+- nicknames 提取对话中出现的绰号/别称（如"以后叫他北老师"、"xxx就是yyy"），最多 3 条，没有则留空数组
 - 如果对话是无意义灌水，summary 写"日常灌水"，其他字段留空数组
 - 直接输出 JSON，不要 markdown 代码块"""
 
@@ -235,6 +239,24 @@ class ConsolidationService:
             # 有 facts 但没 social → prompt 可能需要调整
             logger.debug(f"[Consolidation] social 为空（有 {len(facts)} 个 facts），prompt 可能未触发 social 提取")
 
+        # v1.3.0: 绰号/别称提取 (D-7)
+        nicknames = structured.get("nicknames", [])
+        nicknames_written = 0
+        for nn in (nicknames or [])[:3]:
+            person = nn.get("person", "").strip()
+            called = nn.get("called", "").strip()
+            if person and called and len(called) >= 2:
+                try:
+                    # 写入 facts：person 被称为 called
+                    self.db.insert_fact(person, "被称为", called, group_id=group_id, confidence=0.8)
+                    # 更新 person_registry aliases
+                    self._add_alias(person, called)
+                    nicknames_written += 1
+                except Exception:
+                    pass
+        if nicknames_written:
+            logger.info(f"[Consolidation] 绰号提取: {nicknames_written} 条 | {nicknames}")
+
         # 写入 facts 三元组
         facts_written = self._write_facts(facts, group_id, msg_ids[0] if msg_ids else None)
 
@@ -389,6 +411,42 @@ class ConsolidationService:
             "SELECT id FROM tags WHERE name LIKE ? LIMIT 1", (f"{name}%",)
         ).fetchone()
         return row[0] if row else None
+
+    def _add_alias(self, person: str, alias: str):
+        """将绰号添加到 person_registry 的 aliases 字段。
+        
+        person 可以是 QQ 号或昵称。如果是昵称则尝试在 person_registry 中匹配。
+        """
+        try:
+            # 先尝试用 QQ 号精确匹配
+            row = self.db.conn.execute(
+                "SELECT qq_id, aliases FROM person_registry WHERE qq_id = ?",
+                (person,),
+            ).fetchone()
+
+            # 如果没匹配到，尝试用昵称匹配（aliases 或 display_name 包含 person）
+            if not row:
+                row = self.db.conn.execute(
+                    "SELECT qq_id, aliases FROM person_registry WHERE display_name = ? OR aliases LIKE ?",
+                    (person, f'%"{person}"%'),
+                ).fetchone()
+
+            if not row:
+                # 没找到对应的人，跳过
+                return
+
+            qq_id = row[0]
+            existing_aliases = json.loads(row[1]) if row[1] else []
+            if alias not in existing_aliases:
+                existing_aliases.append(alias)
+                self.db.conn.execute(
+                    "UPDATE person_registry SET aliases = ? WHERE qq_id = ?",
+                    (json.dumps(existing_aliases, ensure_ascii=False), qq_id),
+                )
+                self.db.conn.commit()
+                logger.debug(f"[Consolidation] 绰号写入 person_registry: {qq_id} += '{alias}'")
+        except Exception as e:
+            logger.debug(f"[Consolidation] _add_alias error: {e}")
 
     def _write_facts(self, facts: list, group_id: str, source_memory_id: int = None) -> int:
         """将 facts 写入 facts 三元组表。

@@ -899,12 +899,57 @@ class WaveMemoryPlugin(Star):
 
         logger.info("[WaveMemory] Shutdown complete")
 
-    # ─── Hook: MetaThinking 元思考 ───
+    # ─── Hook: MetaThinking 元思考（v1.3.0 改造：纯规则 + 态度注入，不调 LLM）───
+
+    # 追踪 bot 最近回复了谁（用于 ABA 连续对话判断）
+    _reply_tracker: dict = {}  # {f"{sender_id}:{group_id}": timestamp}
+
+    def _should_engage(self, event: AstrMessageEvent) -> str:
+        """规则链前置过滤：判断消息是否与 bot 相关。
+        
+        返回: 'must_reply' / 'may_reply' / 'skip'
+        """
+        is_at_bot = getattr(event, "is_at_or_wake_command", False)
+
+        # 1. @bot 或唤醒词 → must_reply
+        if is_at_bot:
+            return "must_reply"
+
+        message = event.get_message_str() or ""
+        sender_id = event.get_sender_id() or ""
+        group_id = event.get_group_id() or ""
+
+        # 2. 私聊 → must_reply
+        if not group_id or group_id.startswith("private:"):
+            return "must_reply"
+
+        # 3. 引用了 bot 消息 → must_reply
+        if "[引用消息" in message:
+            for bid in self._bot_qq_ids:
+                if bid and bid in message:
+                    return "must_reply"
+
+        # 4. bot 30s 内回复过此人 → may_reply（ABA 连续对话）
+        reply_key = f"{sender_id}:{group_id}"
+        last_reply_ts = self._reply_tracker.get(reply_key, 0)
+        if time.time() - last_reply_ts < 30:
+            return "may_reply"
+
+        # 5. 包含兴趣关键词 → may_reply
+        if self.meta_thinking and self.meta_thinking.is_interesting(message):
+            return "may_reply"
+
+        # 6. 其他 → skip
+        return "skip"
 
     @filter.on_llm_request(priority=1)
     async def meta_thinking_check(self, event: AstrMessageEvent, req=None):
-        """在 LLM 请求前，羽书先'想一下'再决定怎么做。"""
-        if not req or not self.meta_thinking:
+        """v1.3.0: 纯规则判断 + 态度注入，不独立调 LLM。
+        
+        - skip 的消息：直接 return（由 AstrBot 决定是否调 LLM）
+        - must/may：保留硬规则（极端攻击/刷屏），态度由 persona_text 注入（inject_memory 通道 5）
+        """
+        if not req:
             return
 
         message = event.get_message_str() or ""
@@ -912,90 +957,52 @@ class WaveMemoryPlugin(Star):
         group_id = event.get_group_id() or ""
         bot_id = event.get_self_id() or ""
         is_at_bot = getattr(event, "is_at_or_wake_command", False)
-        nickname = ""
-        if event.message_obj and event.message_obj.sender:
-            nickname = event.message_obj.sender.nickname or ""
 
-        # 获取最近群聊上下文
-        context_messages = self._get_recent_messages(event, max_messages=5)
-
-        # MetaThinking 判断（内部会自动更新好感度/印象/标签）
-        result = await self.meta_thinking.should_respond(
-            sender_id=sender_id,
-            group_id=group_id,
-            nickname=nickname,
-            message=message,
-            is_at_bot=is_at_bot,
-            context_messages=context_messages,
-            bot_id=bot_id,
-        )
-
-        action = result.get("action", "reply")
-        tone = result.get("tone", "正常")
-        inner = result.get("inner_thought", "")
-
-        if inner:
-            logger.info(f"[MetaThinking] {nickname or sender_id}: {inner} → {action}")
-
-        # 处理扩展输出：关切 + 情绪
-        concern_update = result.get("concern_update", "")
-        if concern_update and concern_update.startswith("关注:"):
-            topic = concern_update[3:].strip()
-            if topic and getattr(self, 'concern_tracker', None):
-                self.concern_tracker.add(topic)
-                # M4: 关切变动自动写 facts（图谱自增长）
-                try:
-                    bot_profile = self._get_bot(bot_id)
-                    bot_name = bot_profile.name if bot_profile else "bot"
-                    self.db.insert_fact(bot_name, "关注", topic, group_id=group_id, confidence=0.6)
-                except Exception:
-                    pass
-
-        mood_impact = result.get("mood_impact")
-        if mood_impact is not None and abs(mood_impact) > 0.2 and hasattr(self, 'mood_trajectory') and self.mood_trajectory:
-            cause = f"{nickname or sender_id}: {inner[:30]}" if inner else ""
-            self.mood_trajectory.record(
-                valence=mood_impact,
-                arousal=min(1.0, abs(mood_impact) * 1.5),
-                cause=cause,
-            )
-            # 强情绪事件沉淀为时间锚点 + 写 facts
-            if abs(mood_impact) > 0.5:
-                event_desc = (f"{nickname or sender_id}: {inner}" if inner else cause)[:80]
-                if getattr(self, 'subjective_time', None) and event_desc:
-                    try:
-                        self.subjective_time.add_anchor(event_desc, emotional_weight=min(1.0, abs(mood_impact)))
-                    except Exception:
-                        pass
-                # M4: 情绪事件写 facts（图谱自增长）
-                try:
-                    bot_profile = self._get_bot(bot_id)
-                    bot_name = bot_profile.name if bot_profile else "bot"
-                    mood_label = "正面情绪" if mood_impact > 0 else "负面情绪"
-                    self.db.insert_fact(bot_name, mood_label, event_desc or "未知触发", group_id=group_id, confidence=0.5)
-                except Exception:
-                    pass
-
-        # 根据行动决策
-        if action == "ignore":
-            event.should_call_llm(False)
+        # ─── 规则链前置过滤 ───
+        engage = self._should_engage(event)
+        if engage == "skip":
+            # 不相关消息，不做任何处理（AstrBot 不会调 LLM 因为没 @）
             return
 
-        if action == "attack_back":
-            from astrbot.core.agent.message import TextPart
-            tone_inject = f"[语气指令] 这个人在骂你/惹你不爽。用{tone}的语气怼回去，不要客气。"
-            req.extra_user_content_parts.append(TextPart(text=tone_inject))
-            return
+        # ─── 硬规则：极端攻击 ───
+        from .services.meta_thinking import EXTREME_ATTACK
+        if is_at_bot and EXTREME_ATTACK.search(message):
+            import re
+            bot_qq_id = self._bot_qq_ids[0] if self._bot_qq_ids else ""
+            other_at = re.search(r'At[:：]?\d+', message.replace(bot_qq_id, ''))
+            if not other_at:
+                from astrbot.core.agent.message import TextPart
+                req.extra_user_content_parts.append(TextPart(
+                    text="[语气指令] 这个人在骂你/惹你不爽。用愤怒的语气怼回去，不要客气。"
+                ))
+                logger.info(f"[MetaThinking] 极端攻击检测: {sender_id}")
+                return
 
-        if action == "short_reply":
-            from astrbot.core.agent.message import TextPart
-            req.extra_user_content_parts.append(TextPart(text="[语气指令] 简短回复，一句话，不要展开。"))
-            return
+        # ─── 硬规则：刷屏检测 ───
+        if is_at_bot and self.meta_thinking:
+            now = time.time()
+            if sender_id not in self.meta_thinking._at_timestamps:
+                self.meta_thinking._at_timestamps[sender_id] = []
+            ts_list = self.meta_thinking._at_timestamps[sender_id]
+            window = self.meta_thinking.spam_window_seconds
+            self.meta_thinking._at_timestamps[sender_id] = [t for t in ts_list if now - t < window]
+            self.meta_thinking._at_timestamps[sender_id].append(now)
+            if (self.meta_thinking.spam_threshold > 0
+                    and len(self.meta_thinking._at_timestamps[sender_id]) >= self.meta_thinking.spam_threshold):
+                event.should_call_llm(False)
+                logger.info(f"[MetaThinking] 刷屏拦截: {sender_id}")
+                return
 
-        # action == "reply" → 正常继续
-        if tone and tone != "正常":
-            from astrbot.core.agent.message import TextPart
-            req.extra_user_content_parts.append(TextPart(text=f"[语气指令] 用{tone}的语气回复。"))
+        # ─── 态度注入已由 inject_memory 通道 5 (PersonaEvolution) 完成 ───
+        # v1.3.0: 不再独立调 LLM，persona_text 包含好感度+态度指令+维度提示
+        # MetaThinking 的好感度/印象/标签更新移到 after_message_sent 异步执行
+
+        # may_reply 时记录日志
+        if engage == "may_reply":
+            nickname = ""
+            if event.message_obj and event.message_obj.sender:
+                nickname = event.message_obj.sender.nickname or ""
+            logger.debug(f"[MetaThinking] may_reply: {nickname or sender_id} (兴趣/ABA)")
 
     async def _jargon_mine_task(self, group_id: str) -> None:
         """后台黑话挖掘任务。"""
@@ -1244,11 +1251,33 @@ class WaveMemoryPlugin(Star):
                 for kw in keywords:
                     params.extend([f"%{kw}%", f"%{kw}%"])
                 rows = self.db.conn.execute(
-                    f"SELECT subject, predicate, object FROM facts WHERE {conditions} ORDER BY confidence DESC LIMIT 5",
+                    f"SELECT rowid, subject, predicate, object FROM facts WHERE {conditions} ORDER BY confidence DESC LIMIT 5",
                     params,
                 ).fetchall()
                 if rows:
-                    lines = [f"{r[0]} {r[1]} {r[2]}" for r in rows]
+                    lines = [f"{r[1]} {r[2]} {r[3]}" for r in rows]
+                    hit_rowids = {r[0] for r in rows}
+
+                    # v1.3.0: 1-跳关联扩展 (D-5)
+                    hit_entities = set()
+                    for r in rows:
+                        if r[1]:
+                            hit_entities.add(r[1])
+                        if r[3]:
+                            hit_entities.add(r[3])
+                    # 对前 3 个实体做 1 跳扩展
+                    for entity in list(hit_entities)[:3]:
+                        extra_rows = self.db.conn.execute(
+                            "SELECT rowid, subject, predicate, object FROM facts WHERE (subject=? OR object=?) AND rowid NOT IN ({}) ORDER BY confidence DESC LIMIT 3".format(
+                                ",".join("?" * len(hit_rowids))
+                            ),
+                            [entity, entity] + list(hit_rowids),
+                        ).fetchall()
+                        for er in extra_rows:
+                            if er[0] not in hit_rowids:
+                                lines.append(f"{er[1]} {er[2]} {er[3]}")
+                                hit_rowids.add(er[0])
+
                     facts_text = "<known_facts>\n" + "\n".join(lines) + "\n</known_facts>"
             except Exception:
                 pass
@@ -1567,7 +1596,7 @@ class WaveMemoryPlugin(Star):
 
     @filter.after_message_sent()
     async def on_bot_sent(self, event: AstrMessageEvent):
-        """捕获 bot 回复，写入记忆。"""
+        """捕获 bot 回复，写入记忆 + 异步更新好感度。"""
         if self.ignore_bot_messages:
             return
 
@@ -1584,8 +1613,17 @@ class WaveMemoryPlugin(Star):
         if not bot_text or len(bot_text) < 4:
             return
 
-        group_id = event.get_group_id() or f"private:{event.get_sender_id()}"
+        sender_id = event.get_sender_id() or ""
+        group_id = event.get_group_id() or f"private:{sender_id}"
         bot_id = event.get_self_id() or ""
+
+        # 记录 reply_tracker（供 _should_engage ABA 判断）
+        if sender_id and group_id:
+            self._reply_tracker[f"{sender_id}:{group_id}"] = time.time()
+            # 清理 60s 前的旧记录（防止内存泄漏）
+            now = time.time()
+            if len(self._reply_tracker) > 200:
+                self._reply_tracker = {k: v for k, v in self._reply_tracker.items() if now - v < 60}
 
         await self.writer.enqueue({
             "group_id": group_id,
@@ -1599,6 +1637,100 @@ class WaveMemoryPlugin(Star):
         bot_profile = self._get_bot(bot_id)
         if bot_profile and self.self_reflect:
             self.self_reflect.record_reply(bot_text, group_id)
+
+        # v1.3.0: 异步好感度/印象/标签更新（后台任务，不阻塞回复）
+        # bot 回复了 = 有交互 → 异步评估好感度变化
+        if self.meta_thinking and sender_id and sender_id != "bot":
+            message = event.get_message_str() or ""
+            nickname = ""
+            if event.message_obj and event.message_obj.sender:
+                nickname = event.message_obj.sender.nickname or ""
+            is_at_bot = getattr(event, "is_at_or_wake_command", False)
+
+            asyncio.ensure_future(
+                self._async_affinity_update(
+                    sender_id=sender_id,
+                    group_id=group_id,
+                    nickname=nickname,
+                    message=message,
+                    bot_text=bot_text,
+                    is_at_bot=is_at_bot,
+                    bot_id=bot_id,
+                )
+            )
+
+    # ─── 异步好感度更新（v1.3.0：从 meta_thinking_check 移到 after_message_sent）───
+
+    async def _async_affinity_update(
+        self,
+        sender_id: str,
+        group_id: str,
+        nickname: str,
+        message: str,
+        bot_text: str,
+        is_at_bot: bool,
+        bot_id: str,
+    ):
+        """后台异步更新好感度/印象/标签，不阻塞主对话。
+        
+        用 MetaThinking LLM 评估对话，但在 bot 已回复之后执行。
+        """
+        try:
+            context_messages = [f"{nickname or sender_id}: {message}"]
+
+            result = await self.meta_thinking.should_respond(
+                sender_id=sender_id,
+                group_id=group_id,
+                nickname=nickname,
+                message=message,
+                is_at_bot=is_at_bot,
+                context_messages=context_messages,
+                bot_id=bot_id,
+            )
+
+            # 处理关切更新
+            concern_update = result.get("concern_update", "")
+            if concern_update and concern_update.startswith("关注:"):
+                topic = concern_update[3:].strip()
+                if topic and getattr(self, 'concern_tracker', None):
+                    self.concern_tracker.add(topic)
+                    try:
+                        bot_profile = self._get_bot(bot_id)
+                        bot_name = bot_profile.name if bot_profile else "bot"
+                        self.db.insert_fact(bot_name, "关注", topic, group_id=group_id, confidence=0.6)
+                    except Exception:
+                        pass
+
+            # 处理情绪影响
+            mood_impact = result.get("mood_impact")
+            if mood_impact is not None and abs(mood_impact) > 0.2 and hasattr(self, 'mood_trajectory') and self.mood_trajectory:
+                cause = f"{nickname or sender_id}: {result.get('inner_thought', '')[:30]}"
+                self.mood_trajectory.record(
+                    valence=mood_impact,
+                    arousal=min(1.0, abs(mood_impact) * 1.5),
+                    cause=cause,
+                )
+                if abs(mood_impact) > 0.5:
+                    event_desc = cause[:80]
+                    if getattr(self, 'subjective_time', None) and event_desc:
+                        try:
+                            self.subjective_time.add_anchor(event_desc, emotional_weight=min(1.0, abs(mood_impact)))
+                        except Exception:
+                            pass
+                    try:
+                        bot_profile = self._get_bot(bot_id)
+                        bot_name = bot_profile.name if bot_profile else "bot"
+                        mood_label = "正面情绪" if mood_impact > 0 else "负面情绪"
+                        self.db.insert_fact(bot_name, mood_label, event_desc or "未知触发", group_id=group_id, confidence=0.5)
+                    except Exception:
+                        pass
+
+            inner = result.get("inner_thought", "")
+            if inner:
+                logger.debug(f"[MetaThinking] async update: {nickname or sender_id} → {inner[:40]}")
+
+        except Exception as e:
+            logger.debug(f"[MetaThinking] async affinity update failed: {e}")
 
     # ─── 后台任务 ───
 

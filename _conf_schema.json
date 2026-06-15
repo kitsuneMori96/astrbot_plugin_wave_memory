@@ -1,4 +1,12 @@
 {
+  "_system_status": {
+    "description": "⚡ WaveMemory 系统说明",
+    "type": "string",
+    "hint": "本页配置基础开关和模型选择。高级调参（spike阈值/EPA参数/记忆清理策略）请访问 WaveMemory 管理面板 http://your-host:9876。功能状态：自动注入=开启时bot有记忆 | 高级检索=Tag覆盖率>20%后自动生效 | 好感度=MetaThinking开启时自动积累",
+    "obvious_hint": true,
+    "default": "仅供说明，无需修改",
+    "_readonly": true
+  },
   "embedding_provider_id": {
     "description": "Embedding 提供商 ID",
     "type": "string",
@@ -89,25 +97,25 @@
       },
       "enable_spike_routing": {
         "description": "启用脉冲传播",
-        "hint": "通过 Tag 共现图发现间接关联记忆，提升联想能力",
+        "hint": "依赖条件：Tag 覆盖率 > 20% + 共现矩阵已构建。通过 Tag 共现图发现间接关联记忆，提升联想能力",
         "type": "bool",
         "default": true
       },
       "enable_residual_pyramid": {
         "description": "启用残差金字塔",
-        "hint": "多层语义分解，提升复杂问题的召回精度",
+        "hint": "依赖条件：Embedding Provider 正常。多层语义分解，提升复杂问题的召回精度",
         "type": "bool",
         "default": true
       },
       "enable_epa": {
         "description": "启用 EPA 分析",
-        "hint": "嵌入投影分析，根据问题聚焦度动态调整检索策略",
+        "hint": "依赖条件：Tag 覆盖率 > 20% + EPA 初始化完成。嵌入投影分析，根据问题聚焦度动态调整检索策略",
         "type": "bool",
         "default": true
       },
       "enable_geodesic_rerank": {
         "description": "启用测地线重排",
-        "hint": "基于共现拓扑修正向量距离偏差",
+        "hint": "依赖条件：共现矩阵节点 > 1000。基于共现拓扑修正向量距离偏差",
         "type": "bool",
         "default": true
       },
