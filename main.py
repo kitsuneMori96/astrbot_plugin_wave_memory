@@ -613,6 +613,7 @@ class WaveMemoryPlugin(Star):
                     bot_qq_ids=self._bot_qq_ids,
                     bot_prompts=bot_prompts,
                     bot_names={p.qq_id: p.name for p in self._bot_registry.values()},
+                    bot_db_ids={p.qq_id: p.db_id for p in self._bot_registry.values()},
                     admin_ids=self._get_admin_ids(),
                     config=meta_cfg,
                     global_fallback_ids=self.config.get("meta_thinking_fallback_ids", ""),

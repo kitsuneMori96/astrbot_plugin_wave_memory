@@ -81,8 +81,8 @@ class WaveMemoryDB:
     def get_memories_by_ids(self, ids):
         return self._memory_repo.get_memories_by_ids(ids)
 
-    def touch_memories(self, ids):
-        return self._memory_repo.touch_memories(ids)
+    def touch_memories(self, ids, importance_boost: float = 0.01):
+        return self._memory_repo.touch_memories(ids, importance_boost=importance_boost)
 
     def get_memory_count(self, group_id=None):
         return self._memory_repo.get_memory_count(group_id)

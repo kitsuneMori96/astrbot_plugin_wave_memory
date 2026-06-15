@@ -95,6 +95,7 @@ class MetaThinking:
         bot_qq_ids: list[str] = None,
         bot_prompts: dict[str, str] = None,
         bot_names: dict[str, str] = None,
+        bot_db_ids: dict[str, str] = None,
         admin_ids: list[str] = None,
         config: dict | None = None,
         global_fallback_ids: str | list[str] | None = None,
@@ -108,9 +109,8 @@ class MetaThinking:
         self.bot_prompts = bot_prompts or {}
         # bot_id → 显示名映射（用于生成回复时的身份选择）
         self.bot_names = bot_names or {}
-        # bot_id → db_id 映射（用于数据库写入时的标识）
-        # 默认用 bot_name 小写作为 db_id
-        self.bot_db_ids = {bid: name.lower() for bid, name in self.bot_names.items()}
+        # bot_qq_id → db_id 映射（用于数据库 user_profiles.bot_id 写入）
+        self.bot_db_ids = bot_db_ids or {bid: name.lower() for bid, name in self.bot_names.items()}
         self.admin_ids = set(admin_ids or [])
         self.config = config or {}
         self.enabled = bool(self.config.get("enabled", True))

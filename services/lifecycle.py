@@ -161,7 +161,7 @@ class AffinityEngine:
             buf["trust"] += 1.5
             buf["depth"] += 1.0
 
-        # 情感标签
+        # 情感标签（tag 或 关键词 fallback）
         if emotion_tag_ids:
             classification = self._get_emotion_classification()
             for tid in emotion_tag_ids:
@@ -170,6 +170,13 @@ class AffinityEngine:
                     buf["trust"] += 0.5
                 elif cls == 'fun':
                     buf["fun"] += 2.0
+        else:
+            # Fallback: 消息内容关键词匹配情感（tag 异步提取尚未完成时）
+            msg_sample = content[:200]
+            if any(kw in msg_sample for kw in POSITIVE_EMOTION_KW):
+                buf["trust"] += 0.3
+            if any(kw in msg_sample for kw in FUN_EMOTION_KW):
+                buf["fun"] += 1.0
 
         # 对bot正面评价
         if BOT_PRAISE_KW.search(content) and (
@@ -566,62 +573,59 @@ class LifecycleService:
             if existing:
                 continue
 
-            # 统计该群最近消息的情感 tag
-            rows = self.db.conn.execute(
-                """SELECT mt.tag_id FROM memory_tags mt
-                   JOIN memories m ON m.id = mt.memory_id
-                   WHERE m.group_id = ? AND m.timestamp > ?
-                     AND m.sender_id != 'bot_self'""",
-                (group_id, window),
-            ).fetchall()
-
-            if len(rows) < 5:
-                continue
-
-            positive = 0
-            negative = 0
-            fun = 0
-            total = len(rows)
-
-            for (tag_id,) in rows:
-                emo_type = emotion_cache.get(tag_id)
-                if emo_type == "positive":
-                    positive += 1
-                elif emo_type == "negative":
-                    negative += 1
-                elif emo_type == "fun":
-                    fun += 1
-
-            # 统计消息密度
+            # 先检查消息密度（不依赖 tag，解决 TagWorker 积压时 energetic 不触发的问题）
             msg_count = self.db.conn.execute(
                 "SELECT COUNT(*) FROM memories WHERE group_id = ? AND timestamp > ? AND memory_type = 'message'",
                 (group_id, window),
             ).fetchone()[0]
 
-            # 判断情绪
-            pos_ratio = (positive + fun) / total if total > 0 else 0
-            neg_ratio = negative / total if total > 0 else 0
-
             mood_type = None
             intensity = 0.5
             description = ""
-
-            # 情感 tag 匹配数
-            emotion_matched = positive + negative + fun
 
             if msg_count > self.mood_msg_threshold:
                 # 高密度互动 → energetic（不依赖情感分类）
                 mood_type = "energetic"
                 intensity = min(0.5 + msg_count / 100, 0.9)
                 description = "群里很热闹，大家聊得起劲"
-            elif emotion_matched > 0 and pos_ratio > self.positive_emotion_threshold:
-                mood_type = "cheerful"
-                intensity = 0.5 + pos_ratio * 0.3
-                description = "氛围不错，心情愉快"
-            elif emotion_matched > 0 and neg_ratio > self.negative_emotion_threshold:
-                mood_type = "concerned"
-                intensity = 0.4 + neg_ratio * 0.3
-                description = "感觉到一些负面情绪"
+            else:
+                # 消息密度不够，尝试情感分析（需要 tag 数据）
+                rows = self.db.conn.execute(
+                    """SELECT mt.tag_id FROM memory_tags mt
+                       JOIN memories m ON m.id = mt.memory_id
+                       WHERE m.group_id = ? AND m.timestamp > ?
+                         AND m.sender_id != 'bot_self'""",
+                    (group_id, window),
+                ).fetchall()
+
+                if len(rows) >= 5:
+                    positive = 0
+                    negative = 0
+                    fun = 0
+
+                    for (tag_id,) in rows:
+                        emo_type = emotion_cache.get(tag_id)
+                        if emo_type == "positive":
+                            positive += 1
+                        elif emo_type == "negative":
+                            negative += 1
+                        elif emo_type == "fun":
+                            fun += 1
+
+                    emotion_matched = positive + negative + fun
+                    if emotion_matched > 0:
+                        total_emo = emotion_matched  # 用情感 tag 数作为分母
+                        pos_ratio = (positive + fun) / total_emo
+                        neg_ratio = negative / total_emo
+
+                        if pos_ratio > self.positive_emotion_threshold:
+                            mood_type = "cheerful"
+                            intensity = 0.5 + pos_ratio * 0.3
+                            description = "氛围不错，心情愉快"
+                        elif neg_ratio > self.negative_emotion_threshold:
+                            mood_type = "concerned"
+                            intensity = 0.4 + neg_ratio * 0.3
+                            description = "感觉到一些负面情绪"
 
             if mood_type:
                 self.db.set_mood(group_id, mood_type, intensity, description, duration_hours=self.mood_duration_hours)
