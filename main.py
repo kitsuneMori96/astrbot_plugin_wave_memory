@@ -158,6 +158,12 @@ class WaveMemoryPlugin(Star):
         self.enable_epa = query_cfg.get("enable_epa", True)
         self.enable_geodesic = query_cfg.get("enable_geodesic_rerank", True)
         self.enable_shotgun = query_cfg.get("enable_shotgun", False)
+
+        # 防御性校验：关键开关如果被错误关闭（如旧配置迁移问题），打印警告
+        if not self.enable_auto_inject:
+            logger.warning("[WaveMemory] ⚠️ enable_auto_inject=False，记忆注入已关闭！如非刻意请在 AstrBot 配置中开启")
+        if not any([self.enable_spike, self.enable_pyramid, self.enable_epa, self.enable_geodesic]):
+            logger.warning("[WaveMemory] ⚠️ 所有高级检索模块均关闭，仅使用基础向量检索。如非刻意请在配置中开启")
         self.max_memories = int(storage_cfg.get("max_memories", 100000))
 
         # WebUI 配置

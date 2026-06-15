@@ -63,9 +63,10 @@
     "items": {
       "enable_auto_inject": {
         "description": "自动注入记忆",
-        "hint": "每次 LLM 请求前自动检索并注入相关记忆到 prompt",
+        "hint": "每次 LLM 请求前自动检索并注入相关记忆到 prompt。关闭后 bot 将完全没有记忆能力！",
         "type": "bool",
-        "default": true
+        "default": true,
+        "obvious_hint": true
       },
       "inject_top_k": {
         "description": "注入记忆条数",
