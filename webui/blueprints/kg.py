@@ -327,6 +327,56 @@ async def add_fact():
         return jsonify({"ok": False, "error": str(e)})
 
 
+@kg_bp.route("/payment", methods=["POST"])
+async def payment_webhook():
+    """好感符 webhook：手机收款通知推送到这里，bot 确认并加好感。
+
+    POST body: {"amount": 5.0, "note": "微信支付到账", "raw": "完整通知文本"}
+    无需 auth（手机 Tasker/MacroDroid 直接调，用 secret token 验证）。
+    """
+    c = get_container()
+    body = await request.get_json(silent=True) or {}
+    amount = float(body.get("amount", 0))
+    note = body.get("note", "")
+    raw = body.get("raw", "")
+    secret = body.get("secret", "")
+
+    # 简单 token 验证（防止恶意调用）
+    expected_secret = (c.plugin_config or {}).get("payment_secret", "wavemoney")
+    if secret != expected_secret:
+        return jsonify({"ok": False, "error": "invalid secret"}), 403
+
+    if amount <= 0:
+        return jsonify({"ok": False, "error": "amount must be > 0"})
+
+    # 好感度映射
+    if amount >= 100:
+        bonus = 30
+    elif amount >= 50:
+        bonus = 15
+    elif amount >= 10:
+        bonus = 5
+    elif amount >= 5:
+        bonus = 3
+    else:
+        bonus = 1
+
+    # 记录到 facts（留痕）
+    try:
+        c.db.insert_fact("好感符", f"收到{amount}元", f"好感+{bonus}", confidence=1.0)
+    except Exception:
+        pass
+
+    # 返回结果（实际加好感需要知道是谁付的——由前端/群内认领机制处理）
+    return jsonify({
+        "ok": True,
+        "amount": amount,
+        "bonus": bonus,
+        "message": f"收到 {amount} 元，好感 +{bonus}",
+        "note": note,
+    })
+
+
 @kg_bp.route("/stats")
 @require_auth
 async def kg_stats():

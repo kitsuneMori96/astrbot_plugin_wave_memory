@@ -444,7 +444,11 @@ class LifecycleService:
         self._running = False
         if self._task:
             self._task.cancel()
-        # affinity.flush() 已废弃，不再写入
+        # 停止前持久化残余缓冲
+        try:
+            self.affinity.flush()
+        except Exception:
+            pass
 
     async def _loop(self):
         """主循环：每 30 分钟执行一次。"""
@@ -459,13 +463,14 @@ class LifecycleService:
                 await asyncio.sleep(60)
 
     def _tick(self):
-        """一次 tick：模式更新 + 衰减 + 情绪。（好感度写入已由 MetaThinking 接管）"""
+        """一次 tick：好感度持久化 + 模式更新 + 衰减 + 情绪。"""
         now = time.time()
 
-        # 1. 好感度 flush 已废弃 —— 由 MetaThinking 直接写 user_profiles
-        # flushed = self.affinity.flush()
-        # if flushed > 0:
-        #     logger.info(f"[WaveMemory] Affinity flushed: {flushed} users")
+        # 1. 好感度 flush（将消息缓冲的维度增量持久化到 DB）
+        #    MetaThinking 只在@bot 时更新好感度，日常聊天的 familiarity/depth 靠这里
+        flushed = self.affinity.flush()
+        if flushed > 0:
+            logger.info(f"[WaveMemory] Affinity flushed: {flushed} users")
 
         # 2. 表达模式聚合（每 6 小时）
         if now - self._last_pattern_update > 21600:

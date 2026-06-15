@@ -415,6 +415,9 @@ class MetaThinking:
             "tags_update": None,
         }
 
+        if not text:
+            return result
+
         def _field(line: str, *keys: str):
             """若行（去除 markdown 修饰后）以某个 key 开头，返回冒号后的值，否则 None。"""
             # 去掉常见 markdown 前缀：-、*、#、空格、加粗星号
@@ -548,6 +551,7 @@ class MetaThinking:
         if result.get("affection_update") is not None:
             # 好感度约束 (Affinity_Constraints)
             new_aff = result["affection_update"]
+            logger.info(f"[MetaThinking] 好感度更新: {sender_id} → {new_aff} (before constraint)")
             new_aff = self._constrain_affection(sender_id, group_id, db_bot_id, new_aff)
             result["affection_update"] = new_aff
             updates.append(("affection", new_aff))
