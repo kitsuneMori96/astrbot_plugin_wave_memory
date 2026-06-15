@@ -94,9 +94,10 @@ def _get_attitude_level(affection: int) -> str:
 class AffinityEngine:
     """多维好感度引擎。内存缓冲 + 定时持久化。"""
 
-    def __init__(self, db: WaveMemoryDB, bot_qq_id: str = ""):
+    def __init__(self, db: WaveMemoryDB, bot_qq_id: str = "", bot_db_id: str = "yushu"):
         self.db = db
         self.bot_qq_id = bot_qq_id
+        self.bot_db_id = bot_db_id  # 写 user_profiles 时用的 bot_id 值
         self._buffer: dict[tuple[str, str], dict[str, float]] = defaultdict(
             lambda: defaultdict(float)
         )
@@ -250,14 +251,14 @@ class AffinityEngine:
 
             # 写入
             self.db.conn.execute(
-                """INSERT INTO user_profiles (user_id, group_id, nickname, affection, interaction_count, first_seen, last_seen, personality_tags, notes, metadata)
-                   VALUES (?, ?, ?, ?, 0, ?, ?, '', '', ?)
-                   ON CONFLICT(user_id, group_id) DO UPDATE SET
+                """INSERT INTO user_profiles (user_id, group_id, nickname, affection, interaction_count, first_seen, last_seen, personality_tags, notes, metadata, bot_id)
+                   VALUES (?, ?, ?, ?, 0, ?, ?, '', '', ?, ?)
+                   ON CONFLICT(user_id, group_id, bot_id) DO UPDATE SET
                    affection = excluded.affection,
                    last_seen = excluded.last_seen,
                    metadata = excluded.metadata,
                    interaction_count = interaction_count + 1""",
-                (user_id, group_id, "", affection, now, now, json.dumps(meta, ensure_ascii=False)),
+                (user_id, group_id, "", affection, now, now, json.dumps(meta, ensure_ascii=False), self.bot_db_id),
             )
             updated += 1
 
@@ -417,13 +418,14 @@ class LifecycleService:
         self,
         db: WaveMemoryDB,
         bot_qq_id: str = "",
+        bot_db_id: str = "yushu",
         mood_duration_hours: float = 2.0,
         mood_msg_threshold: int = 30,
         positive_emotion_threshold: float = 0.6,
         negative_emotion_threshold: float = 0.4,
     ):
         self.db = db
-        self.affinity = AffinityEngine(db, bot_qq_id=bot_qq_id)
+        self.affinity = AffinityEngine(db, bot_qq_id=bot_qq_id, bot_db_id=bot_db_id)
         self.patterns = PatternAggregator(db)
         self._task: Optional[asyncio.Task] = None
         self._running = False

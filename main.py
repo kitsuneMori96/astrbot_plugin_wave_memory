@@ -502,9 +502,12 @@ class WaveMemoryPlugin(Star):
 
         # 启动生命周期服务
         if self.enable_affinity:
+            # 取第一个 bot 的 QQ ID 和 db_id 用于好感度系统
+            _first_bot = list(self._bot_registry.values())[0] if self._bot_registry else None
             self.lifecycle = LifecycleService(
                 db=self.db,
-                bot_qq_id=self._bot_qq_ids[0] if self._bot_qq_ids else "",
+                bot_qq_id=_first_bot.qq_id if _first_bot else "",
+                bot_db_id=_first_bot.db_id if _first_bot else "yushu",
                 mood_duration_hours=self.mood_duration_hours,
                 mood_msg_threshold=self.mood_msg_threshold,
                 positive_emotion_threshold=self.positive_emotion_threshold,
@@ -1014,6 +1017,9 @@ class WaveMemoryPlugin(Star):
         group_id = event.get_group_id()
         bot_id = event.get_self_id() or ""
         sender_id = event.get_sender_id() or ""
+        sender_name = ""
+        if event.message_obj and event.message_obj.sender:
+            sender_name = event.message_obj.sender.nickname or ""
 
         bot_profile = self._get_bot(bot_id)
         exclude_sources = bot_profile.exclude_sources if bot_profile and bot_profile.exclude_sources else None
@@ -1450,12 +1456,19 @@ class WaveMemoryPlugin(Star):
         if hasattr(self, 'lifecycle') and self.lifecycle:
             bot_ids = self._bot_qq_ids
             is_at_bot = any(bid in (event.message_str or '') for bid in bot_ids)
+            # 检测是否回复 bot（引用消息的发送者是 bot）
+            is_reply_to_bot = False
+            if hasattr(event, 'message_obj') and event.message_obj:
+                raw = event.message_str or ""
+                if "[引用消息" in raw and any(bid in raw for bid in bot_ids):
+                    is_reply_to_bot = True
             hour = int(time.strftime('%H', time.localtime()))
             self.lifecycle.affinity.process_message(
                 sender_id=sender_id,
                 group_id=group_id,
                 content=message,
                 is_at_bot=is_at_bot,
+                is_reply_to_bot=is_reply_to_bot,
                 hour=hour,
             )
 
