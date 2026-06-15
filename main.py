@@ -1211,6 +1211,36 @@ class WaveMemoryPlugin(Star):
                 _record_err("soul_channel", e)
             timing["soul_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
 
+        # ─── 通道 6: Facts 关键词召回（轻量级，纯 DB 查询） ───
+        facts_text = ""
+
+        async def _ch_facts():
+            nonlocal facts_text
+            t0 = _time.perf_counter()
+            try:
+                # 从消息中提取关键词（简单分词，取长度 >=2 的片段）
+                import jieba
+                keywords = [w for w in jieba.cut(message) if len(w) >= 2][:8]
+                if not keywords:
+                    return
+                # 搜索 facts 表：subject 或 object 包含关键词
+                conditions = " OR ".join(
+                    ["subject LIKE ? OR object LIKE ?"] * len(keywords)
+                )
+                params = []
+                for kw in keywords:
+                    params.extend([f"%{kw}%", f"%{kw}%"])
+                rows = self.db.conn.execute(
+                    f"SELECT subject, predicate, object FROM facts WHERE {conditions} ORDER BY confidence DESC LIMIT 5",
+                    params,
+                ).fetchall()
+                if rows:
+                    lines = [f"{r[0]} {r[1]} {r[2]}" for r in rows]
+                    facts_text = "<known_facts>\n" + "\n".join(lines) + "\n</known_facts>"
+            except Exception:
+                pass
+            timing["facts_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
+
         # ─── 并行执行所有通道 (US-2.1) ───
         try:
             await asyncio.gather(
@@ -1219,6 +1249,7 @@ class WaveMemoryPlugin(Star):
                 _ch_relation(),
                 _ch_book_lore(),
                 _ch_soul(),
+                _ch_facts(),
             )
 
             # ─── 合并结果 ───
@@ -1254,6 +1285,8 @@ class WaveMemoryPlugin(Star):
             injection_parts = []
             if memories:
                 injection_parts.append(self.query_engine.format_injection(memories))
+            if facts_text:
+                injection_parts.append(facts_text)
             if lore_text:
                 injection_parts.append(lore_text)
             if persona_text:
@@ -1285,6 +1318,8 @@ class WaveMemoryPlugin(Star):
             parts_detail = []
             if memories:
                 parts_detail.append(f"memories={len(memories)}")
+            if facts_text:
+                parts_detail.append("facts")
             if persona_text:
                 parts_detail.append("persona")
             if belief_text:
