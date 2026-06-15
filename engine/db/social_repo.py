@@ -30,7 +30,8 @@ class SocialRepo:
                 personality_tags TEXT,
                 notes TEXT,
                 metadata TEXT,
-                UNIQUE(user_id, group_id)
+                bot_id TEXT DEFAULT 'yushu',
+                UNIQUE(user_id, group_id, bot_id)
             );
 
             CREATE TABLE IF NOT EXISTS bot_mood (
@@ -79,6 +80,20 @@ class SocialRepo:
             CREATE INDEX IF NOT EXISTS idx_expression_patterns_group ON expression_patterns(group_id);
         """)
         self.cm.commit()
+        # 迁移：旧表可能没有 bot_id 列
+        try:
+            cols = [c[1] for c in self.cm.execute("PRAGMA table_info(user_profiles)").fetchall()]
+            if "bot_id" not in cols:
+                self.cm.execute("ALTER TABLE user_profiles ADD COLUMN bot_id TEXT DEFAULT 'yushu'")
+                self.cm.commit()
+        except Exception:
+            pass
+        # 确保索引存在
+        try:
+            self.cm.execute("CREATE INDEX IF NOT EXISTS idx_user_profiles_bot ON user_profiles(bot_id)")
+            self.cm.commit()
+        except Exception:
+            pass
 
     # ─── Bot Mood ───
 

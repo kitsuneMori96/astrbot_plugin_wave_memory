@@ -935,7 +935,7 @@ class WaveMemoryPlugin(Star):
         concern_update = result.get("concern_update", "")
         if concern_update and concern_update.startswith("关注:"):
             topic = concern_update[3:].strip()
-            if topic and hasattr(self, 'concern_tracker'):
+            if topic and getattr(self, 'concern_tracker', None):
                 self.concern_tracker.add(topic)
                 # M4: 关切变动自动写 facts（图谱自增长）
                 try:
@@ -1160,7 +1160,7 @@ class WaveMemoryPlugin(Star):
 
         # ─── 通道 5: Persona + 信念 + 关切 + 情绪（轻量级，共享通道） ───
         async def _ch_soul():
-            nonlocal persona_text, belief_text, concern_summary, mood_text, mood_traj_text
+            nonlocal persona_text, belief_text, concern_summary, mood_text, mood_traj_text, jargon_text, fewshot_text
             t0 = _time.perf_counter()
             try:
                 # Persona 注入 (带缓存 US-2.2)
@@ -1445,7 +1445,7 @@ class WaveMemoryPlugin(Star):
         if self.jargon_service:
             self.jargon_service.feed_message(message, group_id, sender_id)
             if self.jargon_service.should_mine(group_id):
-                asyncio.create_task(self._jargon_mine_task(group_id))
+                self._spawn(self._jargon_mine_task(group_id))
 
         # 白真真自省：检测群友对白真真的纠正
         if self.self_reflect and group_id:
@@ -1489,7 +1489,7 @@ class WaveMemoryPlugin(Star):
         bot_id = event.get_self_id() or ""
         bot_profile = self._get_bot(bot_id)
         proactive_ok = bot_profile.proactive_enabled if bot_profile else self.meta_thinking.proactive_enabled if self.meta_thinking else False
-        concern_score = self.concern_tracker.match(message) if hasattr(self, 'concern_tracker') else 0.0
+        concern_score = self.concern_tracker.match(message) if getattr(self, 'concern_tracker', None) else 0.0
         is_interesting = self.meta_thinking.is_interesting(message) if self.meta_thinking else False
         if (self.meta_thinking
             and proactive_ok
