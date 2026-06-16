@@ -455,8 +455,8 @@ class WaveMemoryPlugin(Star):
         if self.tag_index.count == 0 and self.db.get_tag_count() > 0:
             self._spawn(self._rebuild_tag_index())
 
-        # 刷新 pair similarity（从 DB 加载缓存，通常 <1s）
-        self.pair_sim_service.refresh_if_needed()
+        # PairSimilarity：延迟到首次查询时再 refresh（避免 __init__ 阻塞 16s）
+        # self.pair_sim_service.refresh_if_needed() — 移除启动时同步调用
 
         # 构建共现矩阵（仅在内存中为空时才 rebuild）
         if self.enable_spike and self.db.get_tag_count() > 10 and not self.cooccurrence.forward:
