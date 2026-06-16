@@ -95,8 +95,13 @@ async def edit_jargon(jargon_id: int):
     sets.append("updated_at = ?")
     params.append(int(time.time()))
     params.append(jargon_id)
-    c.db.conn.execute(f"UPDATE jargon SET {', '.join(sets)} WHERE id = ?", params)
-    c.db.conn.commit()
+    try:
+        c.db.conn.execute(f"UPDATE jargon SET {', '.join(sets)} WHERE id = ?", params)
+        c.db.conn.commit()
+    except Exception as e:
+        if "UNIQUE constraint" in str(e):
+            return jsonify({"error": "该群已存在同名词条，请使用其他名称"}), 409
+        raise
     return jsonify({"ok": True, "jargon_id": jargon_id})
 
 
