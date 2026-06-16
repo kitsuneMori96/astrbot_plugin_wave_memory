@@ -1769,26 +1769,42 @@ class WaveMemoryPlugin(Star):
     # ─── 后台任务 ───
 
     async def _rebuild_memory_index(self):
+        """重建 HNSW 内存索引（在线程池中执行，避免阻塞事件循环）。"""
         logger.info("[WaveMemory] Rebuilding memory index...")
         import numpy as np
-        all_vecs = self.db.get_all_memory_vectors()
-        if all_vecs:
-            ids = [v[0] for v in all_vecs]
-            vectors = np.array([v[1] for v in all_vecs], dtype=np.float32)
-            self.memory_index.add(ids, vectors)
-            self.memory_index.save()
-            logger.info(f"[WaveMemory] Memory index rebuilt: {len(ids)} vectors")
+
+        def _sync_rebuild():
+            all_vecs = self.db.get_all_memory_vectors()
+            if all_vecs:
+                ids = [v[0] for v in all_vecs]
+                vectors = np.array([v[1] for v in all_vecs], dtype=np.float32)
+                self.memory_index.add(ids, vectors)
+                self.memory_index.save()
+                return len(ids)
+            return 0
+
+        count = await asyncio.to_thread(_sync_rebuild)
+        if count:
+            logger.info(f"[WaveMemory] Memory index rebuilt: {count} vectors")
 
     async def _rebuild_tag_index(self):
+        """重建 Tag 向量索引（在线程池中执行）。"""
         logger.info("[WaveMemory] Rebuilding tag index...")
         import numpy as np
-        tag_data = self.db.get_all_tag_vectors()
-        if tag_data:
-            ids = [t[0] for t in tag_data]
-            vectors = np.array([t[2] for t in tag_data], dtype=np.float32)
-            self.tag_index.add(ids, vectors)
-            self.tag_index.save()
-            logger.info(f"[WaveMemory] Tag index rebuilt: {len(ids)} vectors")
+
+        def _sync_rebuild():
+            tag_data = self.db.get_all_tag_vectors()
+            if tag_data:
+                ids = [t[0] for t in tag_data]
+                vectors = np.array([t[2] for t in tag_data], dtype=np.float32)
+                self.tag_index.add(ids, vectors)
+                self.tag_index.save()
+                return len(ids)
+            return 0
+
+        count = await asyncio.to_thread(_sync_rebuild)
+        if count:
+            logger.info(f"[WaveMemory] Tag index rebuilt: {count} vectors")
 
     def _get_recent_messages(self, event, max_messages: int = 8) -> list[str]:
         try:
@@ -1804,7 +1820,8 @@ class WaveMemoryPlugin(Star):
             return []
 
     async def _rebuild_cooccurrence(self):
-        self.cooccurrence.rebuild()
+        """重建共现矩阵（在线程池中执行，避免阻塞事件循环）。"""
+        await asyncio.to_thread(self.cooccurrence.rebuild)
 
     async def _on_cooccurrence_rebuilt(self):
         """共现矩阵重建完成后，重算内生残差（30分钟最小间隔）。"""
@@ -1816,7 +1833,7 @@ class WaveMemoryPlugin(Star):
         self._last_residual_compute_ts = now
 
         try:
-            residuals = self.intrinsic_residual.compute_all()
+            residuals = await asyncio.to_thread(self.intrinsic_residual.compute_all)
             if residuals:
                 self.intrinsic_residual.persist(residuals)
                 if self.spike_router:
@@ -1827,4 +1844,5 @@ class WaveMemoryPlugin(Star):
             _record_err("IntrinsicResidual", e)
 
     async def _init_epa(self):
-        self.epa.initialize()
+        """EPA 初始化（在线程池中执行，避免阻塞事件循环）。"""
+        await asyncio.to_thread(self.epa.initialize)
