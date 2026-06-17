@@ -546,9 +546,12 @@ class TagExtractor:
         stop_words = {"东西", "事情", "问题", "情况", "感觉", "觉得", "可能", "应该", "这个", "那个", "什么"}
         if name in stop_words:
             return False
-        # 过滤碎片句子（超过 4 个字且包含动词结构的可能是句子而非标签）
-        if len(name) > 8 and any(c in name for c in "的了吗呢吧啊呀"):
+        # 过滤碎片句子（看起来像消息片段而非标签）
+        if len(name) > 4 and any(c in name for c in "的了吗呢吧啊呀就说说到去给你我他"):
             return False
+        # 过滤超过4字且没有实体/名词特征的（纯动词短语/对话碎片）
+        if len(name) > 5 and tag_type == "keyword":
+            return False  # keyword 类型超过5字几乎都是垃圾
         return True
 
     def _parse_plain_tags(self, text: str) -> list[dict]:
