@@ -227,6 +227,7 @@ class MetaThinking:
         is_at_bot: bool,
         context_messages: list[str],
         bot_id: str = None,
+        system_prompt: str = None,
     ) -> dict:
         """
         核心判断：要不要回、怎么回。
@@ -274,21 +275,57 @@ class MetaThinking:
         # 读取发送者资料
         profile = self._get_profile(sender_id, group_id)
 
-        # 构建 prompt（按 bot_id 选对应模板，没有则用默认）
-        prompt_template = self.bot_prompts.get(bot_id or self.bot_qq_id, META_THINKING_PROMPT)
+        # 构建 prompt
         bot_name = self.bot_names.get(bot_id or self.bot_qq_id, "bot")
-        prompt = prompt_template.format(
-            bot_name=bot_name,
-            nickname=nickname or sender_id,
-            qq=sender_id,
-            affection=profile.get("affection", 0),
-            tags=json.dumps(profile.get("tags", {}), ensure_ascii=False) or "无",
-            impression=profile.get("impression", "初次见面，没有印象"),
-            sender_name=nickname or sender_id,
-            message=message,
-            is_at="是" if is_at_bot else "否",
-            context="\n".join(context_messages[-5:]) if context_messages else "（无）",
-        )
+
+        if system_prompt:
+            # v1.3.2: 用 bot 自己的系统人格做思考（不再硬编码"你是羽书"）
+            prompt = f"""{system_prompt}
+
+---
+
+看到下面这条消息，在心里想一下，然后决定怎么做。
+
+【这个人的资料】
+昵称：{nickname or sender_id}
+QQ：{sender_id}
+你上次给他的好感度：{profile.get("affection", 0)}分
+你给他的标签：{json.dumps(profile.get("tags", {}), ensure_ascii=False) or "无"}
+你对他的印象：{profile.get("impression", "初次见面，没有印象")}
+
+【当前消息】
+{nickname or sender_id}: {message}
+
+【是否@你】{"是" if is_at_bot else "否"}
+
+【最近群聊（5条）】
+{chr(10).join(context_messages[-5:]) if context_messages else "（无）"}
+
+---
+
+请输出（每行一个，每个字段都必须填写）：
+
+内心：<你此刻的真实想法，一两句话>
+行动：<回复 / 不理 / 怼回去 / 简短回>
+语气：<正常 / 热情 / 冷淡 / 讽刺 / 愤怒>
+好感度：<你现在觉得这个人应该是多少分，-100到100的整数>
+印象：<你对这个人的一句话印象>
+情绪：<这件事对你情绪的影响，-1到1的小数，0表示无影响>"""
+        else:
+            # fallback: 用硬编码模板（没有系统人格时）
+            prompt_template = self.bot_prompts.get(bot_id or self.bot_qq_id, META_THINKING_PROMPT)
+            prompt = prompt_template.format(
+                bot_name=bot_name,
+                nickname=nickname or sender_id,
+                qq=sender_id,
+                affection=profile.get("affection", 0),
+                tags=json.dumps(profile.get("tags", {}), ensure_ascii=False) or "无",
+                impression=profile.get("impression", "初次见面，没有印象"),
+                sender_name=nickname or sender_id,
+                message=message,
+                is_at="是" if is_at_bot else "否",
+                context="\n".join(context_messages[-5:]) if context_messages else "（无）",
+            )
 
         # 调用 LLM
         try:
