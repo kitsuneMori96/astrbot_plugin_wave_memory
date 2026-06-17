@@ -1,5 +1,36 @@
 # Changelog
 
+## v1.4.0 (2026-06-17)
+
+### 架构重构：MetaThinking 合并到主对话
+
+- **彻底删除独立 LLM 调用**：MetaThinking 不再有 priority=1 的前置 LLM "想一下"。态度判断完全由 PersonaEvolution 在 inject_memory 中注入，bot 在主对话里用自己的系统人格自然思考
+- **一次调用完成一切**：记忆+关系+态度+好感度+信念+情绪 → 一次 LLM 调用 → 自然回复
+- **好感度靠规则驱动**：LifecycleService 互动频率 + 极端事件硬规则，不再每条消息调 LLM 精算
+
+### 检索增强
+
+- **群隔离精确化**：主搜索当前群 ×1.5 权重、跨群 ×0.8；FTS5 按群权重排序取 top 10
+- **时间感知检索**：检测"昨天/上周/之前"等时间词，自动加时间范围过滤（如"昨天" → 最近 48h）
+- **好感度阈值调整**：intimate≥80, friendly≥50, neutral≥20（50=friendly 起步，向上空间合理）
+
+### 性能修复
+
+- **事件循环阻塞修复**：_rebuild_memory_index / cooccurrence / EPA 改为 asyncio.to_thread（不再卡 bot 3-6 分钟无响应）
+- **PairSimilarity 延迟加载**：启动时不同步计算 200 万对相似度（省 16s 阻塞）
+- **配置自愈**：检测到全部开关被 AstrBot 配置页误写为 False 时，自动恢复 + 写回 config
+
+### 数据清理
+
+- 删除 26021 个低质量 keyword 标签（使用次数<2 的噪声）
+- 好感度全部重置为 50（2189 用户），metadata 清空重新积累印象
+- 共现矩阵/EPA 重启后自动重建
+
+### Bug 修复
+
+- **schema float 类型**：12 个浮点字段从 type:string 改为 type:float，修复 AstrBot 配置页保存报错
+- **jargon 编辑 UNIQUE 约束**：PUT /api/jargon 捕获唯一键冲突返回 409 而非 500
+
 ## v1.3.1 (2026-06-16)
 
 ### 功能可发现性
