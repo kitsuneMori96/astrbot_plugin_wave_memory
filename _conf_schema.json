@@ -85,9 +85,8 @@
       "min_similarity": {
         "description": "最低相似度阈值",
         "hint": "低于此分数的记忆不会被注入（0-1）",
-        "type": "string",
-        "default": "0.35",
-        "_note": "实际为浮点数,string 是 AstrBot 配置系统限制"
+        "type": "float",
+        "default": 0.35
       },
       "injection_format": {
         "description": "注入格式（支持来源追溯）",
@@ -172,9 +171,8 @@
       "mood_duration_hours": {
         "description": "情绪持续时间（小时）",
         "hint": "情绪触发后持续多久自动过期",
-        "type": "string",
-        "default": "2.0",
-        "_note": "实际为浮点数,string 是 AstrBot 配置系统限制"
+        "type": "float",
+        "default": 2.0
       },
       "mood_msg_threshold": {
         "description": "活跃情绪消息阈值",
@@ -185,16 +183,14 @@
       "positive_emotion_threshold": {
         "description": "正面情绪触发阈值",
         "hint": "正面情感 tag 占比超过此值触发 cheerful（0-1）",
-        "type": "string",
-        "default": "0.6",
-        "_note": "实际为浮点数,string 是 AstrBot 配置系统限制"
+        "type": "float",
+        "default": 0.6
       },
       "negative_emotion_threshold": {
         "description": "负面情绪触发阈值",
         "hint": "负面情感 tag 占比超过此值触发 concerned（0-1）",
-        "type": "string",
-        "default": "0.4",
-        "_note": "实际为浮点数,string 是 AstrBot 配置系统限制"
+        "type": "float",
+        "default": 0.4
       },
       "enable_dream": {
         "description": "启用做梦系统",
@@ -205,9 +201,8 @@
       "dream_interval_hours": {
         "description": "做梦间隔（小时）",
         "hint": "每隔多少小时执行一次做梦（记忆巩固）",
-        "type": "string",
-        "default": "6.0",
-        "_note": "实际为浮点数,string 是 AstrBot 配置系统限制"
+        "type": "float",
+        "default": 6.0
       },
       "dream_recent_seeds": {
         "description": "近期种子数",
@@ -240,9 +235,8 @@
       "consolidation_interval_hours": {
         "description": "整合间隔（小时）",
         "hint": "每隔多少小时执行一次 LLM 摘要整合",
-        "type": "string",
-        "default": "4.0",
-        "_note": "实际为浮点数,string 是 AstrBot 配置系统限制"
+        "type": "float",
+        "default": 4.0
       },
       "consolidation_topic_backfill": {
         "description": "整合话题回写",
@@ -670,9 +664,8 @@
       "dedup_threshold": {
         "description": "去重阈值",
         "hint": "余弦相似度超过此值视为重复，不再生成。0.85 = 非常相似",
-        "type": "string",
-        "default": "0.85",
-        "_note": "实际为浮点数,string 是 AstrBot 配置系统限制"
+        "type": "float",
+        "default": 0.85
       },
       "self_reflect_enabled": {
         "description": "启用自省（纠正学习）",
@@ -727,8 +720,8 @@
       "min_score": {
         "description": "最低风格代表性评分",
         "hint": "LLM 评估的风格代表性 >= 此值的回复才入库（0-1）",
-        "type": "string",
-        "default": "0.7"
+        "type": "float",
+        "default": 0.7
       },
       "max_inject": {
         "description": "每次注入范例数",
@@ -739,8 +732,8 @@
       "drift_threshold": {
         "description": "漂移告警阈值",
         "hint": "最新回复与范例库相似度低于此值时告警（0-1）",
-        "type": "string",
-        "default": "0.5"
+        "type": "float",
+        "default": 0.5
       }
     }
   },

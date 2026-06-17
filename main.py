@@ -1411,7 +1411,18 @@ class WaveMemoryPlugin(Star):
             if lore_text:
                 injection_parts.append(lore_text)
             if persona_text:
-                injection_parts.append(persona_text)
+                # v1.3.2: 在 persona_text 后追加好感度思考指令
+                # 让 bot 在主对话中自己思考好感度变化（不再独立调 LLM）
+                affinity_instruction = (
+                    "\n\n[内部感受输出（必须放在回复最末尾，用户看不到这行）]\n"
+                    "在你的回复最后一行，用这个格式输出你对这次对话的真实感受：\n"
+                    "<!--感受:好感度变化(整数-5到+5)|一句话印象-->\n"
+                    "例如：<!--感受:+2|挺有意思的人，聊天很舒服-->\n"
+                    "例如：<!--感受:-3|又来烦我，没礼貌-->\n"
+                    "例如：<!--感受:0|普通对话，没什么特别感觉-->\n"
+                    "这行对用户不可见，是你自己的内心记录。必须诚实。"
+                )
+                injection_parts.append(persona_text + affinity_instruction)
             if belief_text:
                 injection_parts.append(belief_text)
             if concern_summary:
@@ -1673,98 +1684,38 @@ class WaveMemoryPlugin(Star):
             self.self_reflect.record_reply(bot_text, group_id)
 
         # v1.3.0: 异步好感度/印象/标签更新（后台任务，不阻塞回复）
-        # bot 回复了 = 有交互 → 异步评估好感度变化
-        if self.meta_thinking and sender_id and sender_id != "bot":
-            message = event.get_message_str() or ""
-            nickname = ""
-            if event.message_obj and event.message_obj.sender:
-                nickname = event.message_obj.sender.nickname or ""
-            is_at_bot = getattr(event, "is_at_or_wake_command", False)
-
-            asyncio.ensure_future(
-                self._async_affinity_update(
-                    sender_id=sender_id,
-                    group_id=group_id,
-                    nickname=nickname,
-                    message=message,
-                    bot_text=bot_text,
-                    is_at_bot=is_at_bot,
-                    bot_id=bot_id,
-                )
-            )
-
-    # ─── 异步好感度更新（v1.3.0：从 meta_thinking_check 移到 after_message_sent）───
-
-    async def _async_affinity_update(
-        self,
-        sender_id: str,
-        group_id: str,
-        nickname: str,
-        message: str,
-        bot_text: str,
-        is_at_bot: bool,
-        bot_id: str,
-    ):
-        """后台异步更新好感度/印象/标签，不阻塞主对话。
-        
-        用 MetaThinking LLM 评估对话，但在 bot 已回复之后执行。
-        """
-        try:
-            context_messages = [f"{nickname or sender_id}: {message}"]
-
-            result = await self.meta_thinking.should_respond(
-                sender_id=sender_id,
-                group_id=group_id,
-                nickname=nickname,
-                message=message,
-                is_at_bot=is_at_bot,
-                context_messages=context_messages,
-                bot_id=bot_id,
-            )
-
-            # 处理关切更新
-            concern_update = result.get("concern_update", "")
-            if concern_update and concern_update.startswith("关注:"):
-                topic = concern_update[3:].strip()
-                if topic and getattr(self, 'concern_tracker', None):
-                    self.concern_tracker.add(topic)
-                    try:
-                        bot_profile = self._get_bot(bot_id)
-                        bot_name = bot_profile.name if bot_profile else "bot"
-                        self.db.insert_fact(bot_name, "关注", topic, group_id=group_id, confidence=0.6)
-                    except Exception:
-                        pass
-
-            # 处理情绪影响
-            mood_impact = result.get("mood_impact")
-            if mood_impact is not None and abs(mood_impact) > 0.2 and hasattr(self, 'mood_trajectory') and self.mood_trajectory:
-                cause = f"{nickname or sender_id}: {result.get('inner_thought', '')[:30]}"
-                self.mood_trajectory.record(
-                    valence=mood_impact,
-                    arousal=min(1.0, abs(mood_impact) * 1.5),
-                    cause=cause,
-                )
-                if abs(mood_impact) > 0.5:
-                    event_desc = cause[:80]
-                    if getattr(self, 'subjective_time', None) and event_desc:
-                        try:
-                            self.subjective_time.add_anchor(event_desc, emotional_weight=min(1.0, abs(mood_impact)))
-                        except Exception:
-                            pass
-                    try:
-                        bot_profile = self._get_bot(bot_id)
-                        bot_name = bot_profile.name if bot_profile else "bot"
-                        mood_label = "正面情绪" if mood_impact > 0 else "负面情绪"
-                        self.db.insert_fact(bot_name, mood_label, event_desc or "未知触发", group_id=group_id, confidence=0.5)
-                    except Exception:
-                        pass
-
-            inner = result.get("inner_thought", "")
-            if inner:
-                logger.debug(f"[MetaThinking] async update: {nickname or sender_id} → {inner[:40]}")
-
-        except Exception as e:
-            logger.debug(f"[MetaThinking] async affinity update failed: {e}")
+        # v1.3.2: 改为从 bot 回复中解析好感度标记（bot 主对话自己思考，不再独立调 LLM）
+        if sender_id and sender_id != "bot" and self.meta_thinking:
+            import re as _re
+            aff_match = _re.search(r'<!--感受:([-+]?\d+)\|(.+?)-->', bot_text)
+            if aff_match:
+                try:
+                    delta = int(aff_match.group(1))
+                    impression = aff_match.group(2).strip()
+                    delta = max(-5, min(5, delta))  # 约束范围
+                    if delta != 0 or impression:
+                        db_bot_id = ""
+                        if bot_profile:
+                            db_bot_id = bot_profile.db_id
+                        else:
+                            db_bot_id = self.meta_thinking.bot_db_ids.get(bot_id, "bot")
+                        # 更新好感度
+                        if delta != 0:
+                            self.meta_thinking._apply_updates(
+                                sender_id, group_id,
+                                {"affection_update": self.meta_thinking._get_affection(sender_id, group_id) + delta,
+                                 "impression_update": impression if impression else None},
+                                bot_id=bot_id,
+                            )
+                            logger.debug(f"[MetaThinking] 主对话感受: {sender_id} delta={delta:+d} 印象={impression[:30]}")
+                        elif impression:
+                            self.meta_thinking._apply_updates(
+                                sender_id, group_id,
+                                {"impression_update": impression},
+                                bot_id=bot_id,
+                            )
+                except Exception as e:
+                    logger.debug(f"[MetaThinking] 感受解析失败: {e}")
 
     # ─── 后台任务 ───
 
