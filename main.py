@@ -1027,73 +1027,9 @@ class WaveMemoryPlugin(Star):
                 logger.info(f"[MetaThinking] 刷屏拦截: {sender_id}")
                 return
 
-        # ─── 前置思考：用系统人格做态度判断 ───
-        if not self.meta_thinking:
-            return
-
-        nickname = ""
-        if event.message_obj and event.message_obj.sender:
-            nickname = event.message_obj.sender.nickname or ""
-
-        # 获取上下文
-        context_messages = self._get_recent_messages(event, max_messages=5)
-
-        # 用 bot 自己的系统人格做思考（不用硬编码 META_THINKING_PROMPT）
-        result = await self.meta_thinking.should_respond(
-            sender_id=sender_id,
-            group_id=group_id,
-            nickname=nickname,
-            message=message,
-            is_at_bot=is_at_bot,
-            context_messages=context_messages,
-            bot_id=bot_id,
-            system_prompt=getattr(req, 'system_prompt', None),  # 传入系统人格
-        )
-
-        action = result.get("action", "reply")
-        tone = result.get("tone", "正常")
-        inner = result.get("inner_thought", "")
-
-        if inner:
-            logger.info(f"[MetaThinking] {nickname or sender_id}: {inner} → {action}")
-
-        # 好感度/印象/标签直接写入（前置同步，不再后置）
-        # _apply_updates 已在 should_respond 内部执行
-
-        # 情绪影响
-        mood_impact = result.get("mood_impact")
-        if mood_impact is not None and abs(mood_impact) > 0.2 and hasattr(self, 'mood_trajectory') and self.mood_trajectory:
-            cause = f"{nickname or sender_id}: {inner[:30]}" if inner else ""
-            self.mood_trajectory.record(valence=mood_impact, arousal=min(1.0, abs(mood_impact) * 1.5), cause=cause)
-
-        # 关切
-        concern_update = result.get("concern_update", "")
-        if concern_update and concern_update.startswith("关注:"):
-            topic = concern_update[3:].strip()
-            if topic and getattr(self, 'concern_tracker', None):
-                self.concern_tracker.add(topic)
-
-        # 根据行动决策
-        if action == "ignore":
-            event.should_call_llm(False)
-            return
-
-        if action == "attack_back":
-            from astrbot.core.agent.message import TextPart
-            req.extra_user_content_parts.append(TextPart(
-                text=f"[语气指令] 这个人在骂你/惹你不爽。用{tone}的语气怼回去，不要客气。"
-            ))
-            return
-
-        if action == "short_reply":
-            from astrbot.core.agent.message import TextPart
-            req.extra_user_content_parts.append(TextPart(text="[语气指令] 简短回复，一句话，不要展开。"))
-            return
-
-        # action == "reply" → 正常继续，注入语气
-        if tone and tone != "正常":
-            from astrbot.core.agent.message import TextPart
-            req.extra_user_content_parts.append(TextPart(text=f"[语气指令] 用{tone}的语气回复。"))
+        # ─── 态度判断由 inject_memory 的 PersonaEvolution 通道统一完成 ───
+        # 不再有独立 LLM 调用。bot 在主对话中用自己的人格自然思考态度。
+        # 好感度变化靠 LifecycleService 互动频率 + 极端事件规则驱动。
 
     async def _jargon_mine_task(self, group_id: str) -> None:
         """后台黑话挖掘任务。"""
@@ -1149,7 +1085,21 @@ class WaveMemoryPlugin(Star):
         # ─── 计时容器 ───
         timing = {}
         import time as _time
+        import re as _re
         t_start = _time.perf_counter()
+
+        # ─── 时间感知检索：检测时间词，设置时间过滤 ───
+        _time_filter_ts = 0  # 0 = 不过滤
+        _time_patterns = [
+            (r'昨天|昨晚', 2 * 86400),
+            (r'前天', 3 * 86400),
+            (r'上周|前几天|这几天', 7 * 86400),
+            (r'之前|以前|那次|上次', 30 * 86400),
+        ]
+        for pattern, seconds in _time_patterns:
+            if _re.search(pattern, message[:50]):
+                _time_filter_ts = _time.time() - seconds
+                break
 
         # ─── 通道 1: 主搜索 ───
         async def _ch_main_search():
@@ -1389,23 +1339,28 @@ class WaveMemoryPlugin(Star):
                 match_expr = " OR ".join(words)
                 rows = self.db.conn.execute(
                     """SELECT rowid, content, sender_name, group_id FROM fts_memories
-                       WHERE fts_memories MATCH ? LIMIT 10""",
+                       WHERE fts_memories MATCH ? LIMIT 20""",
                     (match_expr,),
                 ).fetchall()
                 if rows:
                     fts5_memories = []
                     for row in rows:
-                        # 读取完整记忆信息
                         mem = self.db.conn.execute(
-                            "SELECT id, content, sender_id, sender_name, timestamp, importance, source FROM memories WHERE id=?",
+                            "SELECT id, content, sender_id, sender_name, timestamp, importance, source, group_id FROM memories WHERE id=?",
                             (row[0],),
                         ).fetchone()
                         if mem:
+                            # 当前群权重 1.0，跨群 0.5
+                            score = 1.0 if mem[7] == group_id else 0.5
                             fts5_memories.append({
                                 "id": mem[0], "content": mem[1], "sender_id": mem[2],
                                 "sender_name": mem[3], "timestamp": mem[4],
-                                "importance": mem[5], "source": mem[6], "score": 0.5,
+                                "importance": mem[5], "source": mem[6],
+                                "group_id": mem[7], "score": score,
                             })
+                    # 按 score 排序取 top 10
+                    fts5_memories.sort(key=lambda x: x["score"], reverse=True)
+                    fts5_memories = fts5_memories[:10]
             except Exception:
                 pass
             timing["fts5_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
@@ -1447,15 +1402,30 @@ class WaveMemoryPlugin(Star):
                     memories = []
                 memories = memories + relation_memories
 
-            # ─── 参与者相关性加权（防群聊串线）───
+            # ─── 参与者相关性加权 + 群隔离 + 时间过滤 ───
             if memories and sender_id:
                 for m in memories:
                     m_sender = m.get("sender_id") or m.get("sender_name", "")
+                    base_score = m.get("score", 0.5)
+                    # 参与者加权
                     if m_sender == sender_id or m.get("sender_name") == sender_name:
-                        m["score"] = m.get("score", 0.5) * 1.4  # 自己说的更相关
+                        base_score *= 1.4  # 自己说的更相关
                     elif m_sender == bot_id:
-                        m["score"] = m.get("score", 0.5) * 1.2  # bot 对该用户说的
-                    # 无关人的不降权（保持原分数）
+                        base_score *= 1.2  # bot 对该用户说的
+                    # 群隔离加权：当前群 ×1.5，跨群 ×0.8
+                    m_group = m.get("group_id", "")
+                    if m_group == group_id:
+                        base_score *= 1.5
+                    elif m_group and m_group != group_id:
+                        base_score *= 0.8
+                    m["score"] = base_score
+
+                # 时间过滤（有时间词时）
+                if _time_filter_ts > 0:
+                    time_filtered = [m for m in memories if m.get("timestamp", 0) >= _time_filter_ts]
+                    if time_filtered:  # 有结果才用过滤后的，否则保持原结果
+                        memories = time_filtered
+
                 memories.sort(key=lambda x: x.get("score", 0), reverse=True)
                 memories = memories[:self.inject_top_k]
 

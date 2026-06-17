@@ -180,7 +180,8 @@ class PersonaEvolution:
         else:
             instructions = ATTITUDE_INSTRUCTIONS
         instruction = instructions.get(attitude, instructions["neutral"])
-        parts.append(f"- 态度指令: {instruction}")
+        parts.append(f"- 态度: {instruction}")
+        parts.append(f"- 自然地用这种态度回应，不要刻意表演情绪，像真人一样。")
 
         # 维度细化提示
         hints = []
@@ -253,9 +254,9 @@ class PersonaEvolution:
 
     def _affection_to_attitude(self, affection: int) -> str:
         """好感度 → 态度等级。"""
-        intimate_th = int(self.affinity_cfg.get("intimate_threshold", 60))
-        friendly_th = int(self.affinity_cfg.get("friendly_threshold", 30))
-        neutral_th = int(self.affinity_cfg.get("neutral_threshold", 10))
+        intimate_th = int(self.affinity_cfg.get("intimate_threshold", 80))
+        friendly_th = int(self.affinity_cfg.get("friendly_threshold", 50))
+        neutral_th = int(self.affinity_cfg.get("neutral_threshold", 20))
 
         if affection >= intimate_th:
             return "intimate"
