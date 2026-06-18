@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.4.1 (2026-06-17)
+
+- **README 重写**：按 LightRAG/Mem0/NovelFork 风格重构，检索引擎与灵魂系统独立描述，加 Highlights、版本表格、emoji 标题
+- **标签质量过滤加严**：keyword 类型超过 5 字直接拒绝，过滤 mimo 模型产出的句子碎片
+
 ## v1.4.0 (2026-06-17)
 
 ### 架构重构：MetaThinking 合并到主对话

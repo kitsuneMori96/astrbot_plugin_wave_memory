@@ -2,6 +2,7 @@
 
 # Wave Memory
 
+[![Version](https://img.shields.io/badge/version-v1.4.1-blue.svg)](https://github.com/vivy1024/astrbot_plugin_wave_memory/releases)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-≥4.14-green.svg)](https://github.com/AstrBotDevs/AstrBot)
@@ -10,13 +11,47 @@
 
 *SQLite + HNSW + 纯数学 — 不需要 Neo4j、不需要 Elasticsearch、不需要向量数据库*
 
-[快速开始](#快速开始) · [检索引擎](#检索引擎) · [灵魂系统](#灵魂系统) · [WebUI](#webui-管理面板)
+[快速开始](#快速开始) · [检索引擎](#-检索引擎) · [灵魂系统](#-灵魂系统) · [WebUI](#-webui-管理面板) · [Releases](https://github.com/vivy1024/astrbot_plugin_wave_memory/releases)
 
 </div>
 
 ---
 
-## 检索引擎
+### Highlights
+
+- 🧠 **五阶段零 LLM 检索** — EPA → 残差金字塔 → 脉冲传播 → 向量融合 → 测地线重排，查询 < 50ms
+- 🌐 **有向共现矩阵** — 替代 Neo4j 的图关联能力，13 万节点 / 44 万有向边
+- 💬 **灵魂人格系统** — 信念涌现、情绪轨迹、好感度进化、做梦巩固、自省纠错
+- 🗣️ **文化融入** — 自动挖掘群内黑话 + 风格范例注入 + 绰号识别
+- ⏰ **记忆生命周期** — 时间衰减 + 重要性分级 + 自动淘汰，像人一样遗忘
+- 🔍 **时间感知检索** — 说"昨天/上周"自动加时间过滤，群隔离精确加权
+- 📊 **交互式知识图谱** — Sigma.js WebGL 渲染，六层数据图层，多跳路径探索
+- 🔧 **零配置启动** — 填 2 个 Provider ID 即跑，所有子系统自动按条件就绪
+
+---
+
+### Recent Releases
+
+| 版本 | 日期 | 重点 |
+|------|------|------|
+| **v1.4.1** | 2026-06-17 | 标签质量过滤加严 + README 重写 |
+| **v1.4.0** | 2026-06-17 | MetaThinking 合并主对话 · 检索群隔离+时间感知 · 事件循环阻塞修复 · 配置自愈 · 数据清理 |
+| **v1.3.0** | 2026-06-16 | FTS5 精确召回 · 脉冲传播 · facts 1-跳扩展 · 黑话格式改造 · 绰号提取 |
+
+<details>
+<summary>更早版本</summary>
+
+| 版本 | 日期 | 重点 |
+|------|------|------|
+| v1.1.0 | 2026-06-15 | 知识图谱交互 · 学习系统审查 · 报错可视化 · HNSW 修复 |
+| v1.0.1 | 2026-06-14 | 显式记住/忘记 · 参与者加权 · 关系自动发现 · 来源追溯 |
+| v1.0.0 | 2026-06-13 | 首版发布 |
+
+</details>
+
+---
+
+## 🧠 检索引擎
 
 查询路径零 LLM 调用。五阶段纯计算管线，用算法替代外部基础设施。
 
@@ -90,7 +125,7 @@
 
 ---
 
-## 灵魂系统
+## 💬 灵魂系统
 
 独立于检索引擎的人格模拟层。让 bot 不只是"能记住"，而是"像人一样成长"。
 
@@ -144,7 +179,7 @@
 
 ---
 
-## WebUI 管理面板
+## 📊 WebUI 管理面板
 
 Quart + Hypercorn 守护线程，纯 HTML + Alpine.js（无需 npm build）。
 
@@ -160,7 +195,7 @@ Quart + Hypercorn 守护线程，纯 HTML + Alpine.js（无需 npm build）。
 
 ---
 
-## Agent 工具
+## 🔧 Agent 工具
 
 LLM 可直接调用的 9 个工具函数：
 
@@ -178,7 +213,7 @@ LLM 可直接调用的 9 个工具函数：
 
 ---
 
-## 快速开始
+## 🚀 快速开始
 
 ### 安装
 
