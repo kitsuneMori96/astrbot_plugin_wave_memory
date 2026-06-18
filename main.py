@@ -1438,6 +1438,13 @@ class WaveMemoryPlugin(Star):
             if lore_text:
                 injection_parts.append(lore_text)
             if persona_text:
+                # v1.4.1: 让 bot 在回复末尾输出好感度变化（on_decorating_result 会解析并隐藏）
+                persona_text += (
+                    "\n\n[内部记录] 回复完成后，在最后单独一行写下你对这个人此刻的真实感受，格式："
+                    "\n[好感:+N或-N|一句话印象]"
+                    "\n例如 [好感:+1|有意思的人] 或 [好感:-2|没礼貌] 或 [好感:0|普通]"
+                    "\n这行是你的内心笔记，不会显示给对方。必须写。"
+                )
                 injection_parts.append(persona_text)
             if belief_text:
                 injection_parts.append(belief_text)
@@ -1654,6 +1661,47 @@ class WaveMemoryPlugin(Star):
             except Exception as e:
                 logger.debug(f"[MetaThinking] Proactive failed: {e}")
                 _record_err("Proactive", e)
+
+    # ─── Hook: 发送前拦截 — 解析好感度标记并隐藏 ───
+
+    @filter.on_decorating_result()
+    async def parse_affinity_mark(self, event: AstrMessageEvent):
+        """在 bot 回复发送给用户之前，解析 [好感:±N|印象] 标记并从文本中移除。"""
+        result = event.get_result()
+        if not result or not result.chain:
+            return
+
+        import re as _re
+        from astrbot.core.message.components import Plain
+
+        for comp in result.chain:
+            if isinstance(comp, Plain) and comp.text:
+                match = _re.search(r'\[好感:([-+]?\d+)\|(.+?)\]\s*$', comp.text)
+                if match:
+                    delta = max(-5, min(5, int(match.group(1))))
+                    impression = match.group(2).strip()
+                    # 从文本中移除标记
+                    comp.text = comp.text[:match.start()].rstrip()
+
+                    # 写入好感度
+                    if delta != 0 or impression:
+                        sender_id = event.get_sender_id() or ""
+                        group_id = event.get_group_id() or ""
+                        bot_id = event.get_self_id() or ""
+                        if sender_id and self.meta_thinking:
+                            try:
+                                current = self.meta_thinking._get_affection(sender_id, group_id)
+                                self.meta_thinking._apply_updates(
+                                    sender_id, group_id,
+                                    {"affection_update": current + delta if delta else None,
+                                     "impression_update": impression if impression else None},
+                                    bot_id=bot_id,
+                                )
+                                if delta:
+                                    logger.debug(f"[MetaThinking] 好感度: {sender_id} {current}→{current+delta} ({impression[:20]})")
+                            except Exception:
+                                pass
+                    break  # 只处理第一个匹配
 
     @filter.after_message_sent()
     async def on_bot_sent(self, event: AstrMessageEvent):
