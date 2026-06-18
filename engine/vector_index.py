@@ -54,7 +54,13 @@ class VectorIndex:
             labels, distances = self.index.knn_query(
                 query.astype(np.float32).reshape(1, -1), k=k
             )
-        return list(zip(labels[0].tolist(), distances[0].tolist()))
+        # 过滤无效 label（hnswlib 可能返回超大值或负值用于已删除节点）
+        max_valid_id = 2**53  # SQLite INTEGER 安全范围
+        results = []
+        for label, dist in zip(labels[0].tolist(), distances[0].tolist()):
+            if 0 < label < max_valid_id:
+                results.append((label, dist))
+        return results
 
     def mark_deleted(self, ids: list[int]):
         """标记向量为已删除（hnswlib 软删除）。"""
