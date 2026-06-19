@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.5.1 (2026-06-18)
+
+### 社交认知优化
+
+- **persona 注入改为 facts 驱动**：不再用 LLM 生成印象，直接从 facts 表零 LLM 组装"关于他"（如"纠正 xxx / 计划 300小时学AI"）
+- **认知+互动双维度**：区分"bot 看到过他多少条消息"（认知）和"直接对话过几次"（互动），更准确反映关系
+- **删除 `_update_user_impressions`**：不再额外调 LLM 生成印象
+
+### 配置化
+
+- **Social_Settings 加入 AstrBot 6185 配置页**：群权重/辱骂阈值/ABA窗口 都可在配置页修改
+- **9876 热调参持久化**：修改后自动写回 config.json，重启不丢失
+- **两个入口统一**：6185 改→重启生效，9876 改→实时生效+自动持久化
+
+### WebUI
+
+- **概览面板改为"社交认知"**：显示有互动用户数 + 互动 TOP 5 + facts 数
+- **AstrBot 配置页说明更新**：反映 v1.5 体系
+
+### Bug 修复
+
+- `_update_user_impressions` prompt 未定义（NameError）
+- `_abuse_tracker` 冷却过期后 count 衰减 + 清理（防内存泄漏）
+- `provider.text_chat` 参数修正
+
 ## v1.5.0 (2026-06-18)
 
 ### 好感度系统重设计
