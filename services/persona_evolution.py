@@ -173,10 +173,10 @@ class PersonaEvolution:
             return 0
 
     def _get_facts_about(self, sender_id: str, nickname: str = "") -> list[str]:
-        """从 facts 表提取关于此人的关键信息（按 QQ 号精确匹配，零 LLM）。"""
+        """从 facts 表提取关于此人的关键信息（按 QQ 号精确匹配，fallback 昵称）。"""
         results = []
         try:
-            # v2.0: 按 QQ 号精确查询（facts.subject 已迁移为 QQ 号）
+            # v2.0: 先按 QQ 号精确查询
             rows = self.db.conn.execute(
                 "SELECT predicate, object FROM facts WHERE subject = ? ORDER BY confidence DESC LIMIT 5",
                 (sender_id,),
@@ -185,6 +185,16 @@ class PersonaEvolution:
                 fact_str = f"{r[0]} {r[1][:30]}"
                 if fact_str not in results:
                     results.append(fact_str)
+            # fallback: 如果 QQ 号查不到，再按昵称查（兼容未迁移的旧 facts）
+            if not results and nickname:
+                rows = self.db.conn.execute(
+                    "SELECT predicate, object FROM facts WHERE subject = ? ORDER BY confidence DESC LIMIT 5",
+                    (nickname,),
+                ).fetchall()
+                for r in rows:
+                    fact_str = f"{r[0]} {r[1][:30]}"
+                    if fact_str not in results:
+                        results.append(fact_str)
         except Exception:
             pass
         return results[:5]

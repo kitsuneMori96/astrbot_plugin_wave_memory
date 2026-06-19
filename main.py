@@ -1344,6 +1344,8 @@ class WaveMemoryPlugin(Star):
 
         async def _ch_facts():
             nonlocal facts_text
+            if self.facts_max <= 0:
+                return
             t0 = _time.perf_counter()
             try:
                 # 从消息中提取关键词（简单分词，取长度 >=2 的片段）
@@ -1359,8 +1361,8 @@ class WaveMemoryPlugin(Star):
                 for kw in keywords:
                     params.extend([f"%{kw}%", f"%{kw}%"])
                 rows = self.db.conn.execute(
-                    f"SELECT rowid, subject, predicate, object FROM facts WHERE {conditions} ORDER BY confidence DESC LIMIT 5",
-                    params,
+                    f"SELECT rowid, subject, predicate, object FROM facts WHERE {conditions} ORDER BY confidence DESC LIMIT ?",
+                    params + [self.facts_max],
                 ).fetchall()
                 if rows:
                     lines = [f"{r[1]} {r[2]} {r[3]}" for r in rows]
@@ -1525,7 +1527,10 @@ class WaveMemoryPlugin(Star):
                         memories = time_filtered
 
                 # v2.0 去重：跳过最近 N 分钟的记忆（AstrBot 对话历史已覆盖）
-                memories = [m for m in memories if m.get("timestamp", 0) < _skip_before_ts]
+                filtered = [m for m in memories if m.get("timestamp", 0) < _skip_before_ts]
+                if filtered:
+                    memories = filtered
+                # else: 保留原 memories 不过滤（避免全部记忆都太新时"失忆"）
 
                 memories.sort(key=lambda x: x.get("score", 0), reverse=True)
                 memories = memories[:self.inject_top_k]
