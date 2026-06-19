@@ -278,10 +278,6 @@ class ConsolidationService:
         else:
             logger.info(f"[Consolidation] 跳过信念提取: belief_engine={bool(self.belief_engine)} summary={summary[:20]!r}")
 
-        # v1.5.0: 印象更新（对本批活跃用户生成自然语言印象）
-        if summary and summary != "日常灌水":
-            await self._update_user_impressions(msg_ids, group_id)
-
         return {"messages": len(msg_ids), "relations": relations_written, "facts": facts_written}
 
     def _parse_response(self, text: str) -> Optional[dict]:
@@ -415,76 +411,6 @@ class ConsolidationService:
             "SELECT id FROM tags WHERE name LIKE ? LIMIT 1", (f"{name}%",)
         ).fetchone()
         return row[0] if row else None
-
-    async def _update_user_impressions(self, msg_ids: list[int], group_id: str):
-        """v1.5.0: 对本批活跃用户生成/更新自然语言印象。"""
-        try:
-            # 找出本批中活跃的发送者（interaction_count > 5）
-            placeholders = ",".join("?" * min(len(msg_ids), 50))
-            senders = self.db.conn.execute(
-                f"""SELECT DISTINCT m.sender_id, m.sender_name FROM memories m
-                    JOIN user_profiles up ON up.user_id = m.sender_id AND up.group_id = ?
-                    WHERE m.id IN ({placeholders})
-                    AND m.sender_id != 'bot'
-                    AND COALESCE(up.interaction_count, 0) > 5""",
-                [group_id] + msg_ids[:50],
-            ).fetchall()
-
-            if not senders:
-                return
-
-            for sender_id, sender_name in senders[:3]:  # 每批最多更新 3 个人
-                # 取该用户最近 5 条消息
-                recent = self.db.conn.execute(
-                    "SELECT content FROM memories WHERE sender_id = ? AND group_id = ? ORDER BY timestamp DESC LIMIT 5",
-                    (sender_id, group_id),
-                ).fetchall()
-                if not recent:
-                    continue
-
-                recent_text = "\n".join([r[0][:80] for r in recent])
-
-                # 读取当前印象
-                row = self.db.conn.execute(
-                    "SELECT metadata FROM user_profiles WHERE user_id = ? AND group_id = ? LIMIT 1",
-                    (sender_id, group_id),
-                ).fetchone()
-                current_impression = ""
-                if row and row[0]:
-                    try:
-                        current_impression = json.loads(row[0]).get("impression", "")
-                    except Exception:
-                        pass
-
-                # LLM 生成新印象（复用 consolidation 的 provider）
-                prompt = f"""用一句话描述你对"{sender_name or sender_id}"这个人的印象。
-
-这个人最近说的话：
-{recent_text}
-
-你之前对他的印象：{current_impression or "没什么印象"}
-
-直接输出一句话新印象（15-40字），不要解释，不要引号。"""
-
-                provider = self.context.get_provider_by_id(self.provider_id)
-                if not provider:
-                    return
-                resp = await provider.text_chat(prompt=prompt)
-                new_impression = resp.completion_text.strip()[:100]
-
-                if new_impression and len(new_impression) >= 5:
-                    # 写入 metadata.impression
-                    meta = json.loads(row[0]) if row and row[0] else {}
-                    meta["impression"] = new_impression
-                    self.db.conn.execute(
-                        "UPDATE user_profiles SET metadata = ? WHERE user_id = ? AND group_id = ?",
-                        (json.dumps(meta, ensure_ascii=False), sender_id, group_id),
-                    )
-                    self.db.conn.commit()
-                    logger.debug(f"[Consolidation] 印象更新: {sender_name or sender_id} → {new_impression[:30]}")
-
-        except Exception as e:
-            logger.debug(f"[Consolidation] 印象更新失败: {e}")
 
     def _add_alias(self, person: str, alias: str):
         """将绰号添加到 person_registry 的 aliases 字段。

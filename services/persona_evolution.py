@@ -158,35 +158,30 @@ class PersonaEvolution:
             if other_names:
                 parts.append(f"- 别名: {', '.join(other_names)}")
 
-        # 互动等级
+        # 认知度：bot 在群里看到过他多少条消息
+        msg_count = self._get_message_count(sender_id)
         interaction_count = merged["total_interactions"]
-        if interaction_count >= 51:
-            level = "老熟人"
-        elif interaction_count >= 11:
-            level = "熟人"
-        elif interaction_count >= 3:
-            level = "见过几次"
-        else:
-            level = "陌生人"
-        parts.append(f"- 互动: {interaction_count} 次（{level}）")
+        if msg_count > 0:
+            parts.append(f"- 出现: {msg_count} 条消息{'（群里常客）' if msg_count > 200 else ''}")
+        if interaction_count > 0:
+            parts.append(f"- 互动: {interaction_count} 次直接对话")
 
-        # 自然语言印象（核心：替代旧的态度模板）
-        impression = merged.get("impression", "")
-        if impression:
-            parts.append(f"- 印象: {impression}")
+        # 关于他：从 facts 表提取（零 LLM，实时）
+        about_lines = self._get_facts_about(sender_id, nickname)
+        if about_lines:
+            parts.append(f"- 关于他: {' / '.join(about_lines)}")
 
-        # 表达模式摘要（当前群优先，fallback 到其他群）
+        # 表达模式摘要
         traits = self._get_expression_traits(sender_id, group_id, other_profiles)
         if traits:
             parts.append(f"- 特征: {', '.join(traits)}")
 
-        # personality_tags（合并去重）
+        # personality_tags
         all_tags = merged["personality_tags"]
         if all_tags:
             parts.append(f"- 个性标签: {', '.join(all_tags[:8])}")
 
-        # 态度引导（简洁，让 LLM 自己理解）
-        parts.append("- 自然地根据你对这个人的了解来回应，不要刻意表演情绪。")
+        parts.append("- 自然地根据你对这个人的了解来回应。")
 
         return "\n".join(parts)
 
@@ -266,6 +261,40 @@ class PersonaEvolution:
         except Exception:
             pass
         return []
+
+    def _get_message_count(self, sender_id: str) -> int:
+        """获取 bot 看到过该用户的消息总数（认知度）。"""
+        try:
+            row = self.db.conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE sender_id = ?",
+                (sender_id,),
+            ).fetchone()
+            return row[0] if row else 0
+        except Exception:
+            return 0
+
+    def _get_facts_about(self, sender_id: str, nickname: str = "") -> list[str]:
+        """从 facts 表提取关于此人的关键信息（零 LLM）。"""
+        results = []
+        try:
+            # 用 sender_id 或昵称搜 facts
+            search_terms = [sender_id]
+            if nickname:
+                search_terms.append(nickname)
+            for term in search_terms:
+                rows = self.db.conn.execute(
+                    "SELECT predicate, object FROM facts WHERE subject LIKE ? ORDER BY confidence DESC LIMIT 5",
+                    (f"%{term}%",),
+                ).fetchall()
+                for r in rows:
+                    fact_str = f"{r[0]} {r[1][:30]}"
+                    if fact_str not in results:
+                        results.append(fact_str)
+                if len(results) >= 5:
+                    break
+        except Exception:
+            pass
+        return results[:5]
 
     def _get_expression_traits(self, sender_id: str, group_id: str, other_profiles: list[dict]) -> list[str]:
         """获取表达模式特征，当前群优先，fallback 到其他群。"""
