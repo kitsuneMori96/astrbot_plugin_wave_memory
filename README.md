@@ -2,7 +2,7 @@
 
 # Wave Memory
 
-[![Version](https://img.shields.io/badge/version-v1.4.1-blue.svg)](https://github.com/vivy1024/astrbot_plugin_wave_memory/releases)
+[![Version](https://img.shields.io/badge/version-v1.5.1-blue.svg)](https://github.com/vivy1024/astrbot_plugin_wave_memory/releases)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-≥4.14-green.svg)](https://github.com/AstrBotDevs/AstrBot)
@@ -34,6 +34,8 @@
 
 | 版本 | 日期 | 重点 |
 |------|------|------|
+| **v1.5.1** | 2026-06-18 | 社交认知重构 · PersonaEvolution 自然语言画像注入 · 配置兼容修复 |
+| **v1.5.0** | 2026-06-18 | 认知+互动+facts 驱动画像 · 去好感度分级 · 跨群合并优化 |
 | **v1.4.1** | 2026-06-17 | 标签质量过滤加严 + README 重写 |
 | **v1.4.0** | 2026-06-17 | MetaThinking 合并主对话 · 检索群隔离+时间感知 · 事件循环阻塞修复 · 配置自愈 · 数据清理 |
 | **v1.3.0** | 2026-06-16 | FTS5 精确召回 · 脉冲传播 · facts 1-跳扩展 · 黑话格式改造 · 绰号提取 |
@@ -133,21 +135,23 @@
 
 | 模块 | 功能 |
 |------|------|
-| PersonaEvolution | 好感度驱动态度分级 → intimate / friendly / neutral / cold / hostile |
+| PersonaEvolution | 认知+互动+facts 驱动的自然语言画像注入 |
 | BeliefEngine | 从对话中涌现稳定判断（信念），可被强化或动摇 |
 | DesireEngine | 事件触发冲动 → 与信念博弈 → 决定行为 |
 | MoodTrajectory | valence/arousal 二维情绪轨迹，走势摘要注入对话 |
 | SubjectiveTime | 用重要事件锚定时间感，替代机械时间戳 |
 
-### 社交理解
+### 社交认知（v1.5）
 
 | 功能 | 说明 |
 |------|------|
-| 多维好感度 | familiarity / trust / fun / depth / hostility，独立半衰期 |
+| 认知度 | bot 在群里看到过此人多少条消息（被动认知） |
+| 互动度 | bot 直接和此人对话过几次（主动互动） |
+| Facts 画像 | 从 facts 表零 LLM 组装"关于他"（如"纠正 xxx / 计划 300小时学AI"） |
 | 跨群画像合并 | 同一用户在不同群的数据自动聚合 |
-| 人格进化 | 好感度等级 → 态度指令自然注入主对话 |
-| 绰号识别 | Consolidation 自动提取"A 被叫做 B" |
-| 多 Bot 支持 | 2+ Bot 共存，独立好感度和经历 |
+| 绰号识别 | Consolidation 自动提取"A 被叫做 B"写入 facts + person_registry |
+| 多 Bot 支持 | 2+ Bot 共存，独立互动数据 |
+| 防骚扰 | 辱骂 N 次 → 自动冷却静默（翻倍机制，上限 1 小时） |
 
 ### 自主学习
 
@@ -228,6 +232,117 @@ LLM 可直接调用的 9 个工具函数：
 | `embedding_dimension` | 向量维度 | `1024` |
 
 AstrBot >= 4.14.0 · Python 3.10+ · WebUI 默认端口 9876
+
+---
+
+## 📋 配置参考
+
+所有参数可在 AstrBot 6185 配置页调整，部分也可在 9876 WebUI 实时修改。
+
+### 基础配置
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| embedding_provider_id | （必填） | Embedding 模型 Provider ID |
+| tag_llm_provider_id | （必填） | Tag/黑话/风格用 LLM |
+| embedding_dimension | 1024 | 向量维度 |
+
+### 记忆召回 (Query_Settings)
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| enable_auto_inject | true | 自动注入记忆到 prompt |
+| inject_top_k | 5 | 注入记忆条数 |
+| min_similarity | 0.35 | 最低相似度 |
+| enable_spike_routing | true | 脉冲传播（联想能力） |
+| enable_residual_pyramid | true | 残差金字塔 |
+| enable_epa | true | EPA 嵌入投影分析 |
+| enable_geodesic_rerank | true | 测地线重排 |
+
+### 社交认知 (Social_Settings)
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| group_weight_current | 1.5 | 当前群记忆权重 |
+| group_weight_cross | 0.8 | 跨群记忆权重 |
+| abuse_trigger_count | 3 | 辱骂触发冷却次数 |
+| abuse_cooldown_base | 600 | 冷却起步秒数 |
+| abuse_cooldown_max | 3600 | 冷却上限秒数 |
+| aba_window_seconds | 30 | 连续对话窗口 |
+
+### 黑话系统 (Jargon_Settings)
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| enabled | true | 启用黑话系统 |
+| min_frequency | 5 | 最低频率阈值 |
+| max_inject | 3 | 单次最多注入数 |
+| global_threshold | 3 | 跨群全局化阈值 |
+
+### 风格学习 (FewShot_Settings)
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| enabled | true | 启用风格学习 |
+| min_score | 0.7 | 最低风格评分 |
+| max_inject | 3 | 每次注入范例数 |
+| drift_threshold | 0.5 | 漂移告警阈值 |
+
+### 人格与情绪 (Lifecycle_Settings)
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| enable_persona_evolution | true | 人格进化 |
+| enable_mood | true | Bot 情绪 |
+| enable_dream | true | 做梦系统 |
+| dream_interval_hours | 6.0 | 做梦间隔 |
+| enable_consolidation | true | LLM 摘要整合 |
+| consolidation_interval_hours | 4.0 | 整合间隔 |
+
+### 记忆淘汰 (Eviction_Settings)
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| enabled | true | 启用淘汰 |
+| noise_ttl_days | 7 | noise 保留天数 |
+| chat_stale_days | 30 | chat 闲置天数 |
+
+---
+
+## ⚙️ 后台服务
+
+| 服务 | 周期 | 功能 |
+|------|------|------|
+| TagWorker | 持续 | 新消息自动 Tag 提取（batch 100） |
+| ConsolidationService | 4h | LLM 摘要整合 → facts + relations + social + nicknames |
+| DreamService | 6h | 记忆巩固（三层时间线涟漪浪潮） |
+| LifecycleService | 30min | 互动统计 + 记忆衰减 |
+| EvictionService | 6h | noise/chat 过期清理 |
+| StudyService | 6h | 从 BookLore 主动学习 |
+| JargonMining | 每 10 条消息 | 黑话候选挖掘 |
+| FewShot Extract | 每天 | 风格范例提取 |
+
+---
+
+## 🗺️ 功能地图
+
+| 子系统 | 启用条件 | 配置位置 |
+|--------|----------|----------|
+| 向量索引 | Embedding Provider 已配置 | 6185: embedding_provider_id |
+| Tag 提取 | Tag LLM Provider 已配置 | 6185: tag_llm_provider_id |
+| 共现矩阵 | Tag 覆盖率 > 20% | 自动 |
+| 脉冲传播 | 共现矩阵就绪 | 6185: enable_spike_routing |
+| 残差金字塔 | Embedding + 共现矩阵 | 6185: enable_residual_pyramid |
+| EPA 分析 | Tag 覆盖率 > 20% | 6185: enable_epa |
+| 测地线重排 | 共现矩阵节点 > 1000 | 6185: enable_geodesic_rerank |
+| FTS5 召回 | 自动 | 无需配置 |
+| 记忆整合 | LLM Provider 可用 | 6185: enable_consolidation |
+| 信念引擎 | 记忆整合就绪 | 自动 |
+| 做梦系统 | enable_dream=true | 6185: enable_dream |
+| 黑话系统 | LLM + 聊天积累 | 6185: Jargon_Settings |
+| 风格学习 | LLM + bot 回复积累 | 6185: FewShot_Settings |
+| 防骚扰 | 自动 | 6185/9876: Social_Settings |
+| 记忆淘汰 | 自动 | 9876: 淘汰天数参数 |
 
 ---
 
