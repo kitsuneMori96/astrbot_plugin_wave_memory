@@ -78,6 +78,14 @@ async def system_status():
     person_count = c.db.conn.execute("SELECT COUNT(*) FROM person_registry").fetchone()[0]
     user_profiles_count = c.db.conn.execute("SELECT COUNT(*) FROM user_profiles").fetchone()[0]
 
+    # v1.5.0: 认知体系统计
+    active_users = c.db.conn.execute(
+        "SELECT COUNT(*) FROM user_profiles WHERE interaction_count > 0"
+    ).fetchone()[0]
+    top_users = c.db.conn.execute(
+        "SELECT nickname, interaction_count FROM user_profiles WHERE interaction_count > 0 ORDER BY interaction_count DESC LIMIT 5"
+    ).fetchall()
+
     return jsonify({
         "memories": {"total": total_mem, "with_vector": with_vec, "with_tags": tagged_memories},
         "tags": {"total": total_tags, "structured": structured_tags, "type_distribution": {r[0]: r[1] for r in type_dist}},
@@ -98,6 +106,8 @@ async def system_status():
             "facts": facts_count,
             "persons": person_count,
             "user_profiles": user_profiles_count,
+            "active_users": active_users,
+            "top_users": [{"name": r[0] or "?", "interactions": r[1]} for r in top_users],
             "active_moods": [{"group_id": m[0], "type": m[1], "intensity": m[2], "desc": m[3]} for m in active_moods],
         },
     })
