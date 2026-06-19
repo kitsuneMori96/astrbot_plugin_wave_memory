@@ -146,19 +146,13 @@
     }
   },
   "Lifecycle_Settings": {
-    "description": "人格与情绪",
-    "hint": "好感度引擎、人格进化、Bot 情绪、做梦系统",
+    "description": "灵魂系统",
+    "hint": "信念引擎、情绪、做梦、记忆整合等子系统",
     "type": "object",
     "items": {
-      "enable_affinity": {
-        "description": "启用好感度系统",
-        "hint": "追踪每个用户的多维好感度，影响 Bot 态度",
-        "type": "bool",
-        "default": true
-      },
       "enable_persona_evolution": {
-        "description": "启用人格进化",
-        "hint": "根据好感度等级动态调整 Bot 对不同用户的态度和语气",
+        "description": "启用社交认知注入",
+        "hint": "将用户互动次数+认知度+facts画像注入主对话，让bot自然了解每个人",
         "type": "bool",
         "default": true
       },
@@ -391,8 +385,8 @@
     }
   },
   "MetaThinking_Settings": {
-    "description": "元思考（MetaThinking）",
-    "hint": "Bot 回复前先'想一下'的判断层。支持多 Bot 独立配置。",
+    "description": "对话规则过滤与防骚扰",
+    "hint": "纯规则判断（不独立调 LLM）：@bot/引用/ABA连续对话 → 允许回复；极端攻击/刷屏 → 拦截；辱骂冷却由 Social_Settings 配置",
     "type": "object",
     "items": {
       "enabled": {
@@ -734,37 +728,6 @@
         "hint": "最新回复与范例库相似度低于此值时告警（0-1）",
         "type": "float",
         "default": 0.5
-      }
-    }
-  },
-  "Affinity_Constraints": {
-    "description": "好感度约束",
-    "hint": "限制 LLM 好感度判断的变化幅度，防止单次交互造成好感度剧烈波动",
-    "type": "object",
-    "items": {
-      "max_change_per_message": {
-        "description": "单次消息最大变化量",
-        "hint": "MetaThinking 单次输出的好感度变化不超过此值（绝对值）",
-        "type": "int",
-        "default": 5
-      },
-      "max_change_per_day": {
-        "description": "每日最大累计变化量",
-        "hint": "同一用户每日好感度变化总量上限",
-        "type": "int",
-        "default": 15
-      },
-      "min_value": {
-        "description": "好感度下限",
-        "hint": "好感度不会低于此值（防止极端负面）",
-        "type": "int",
-        "default": -50
-      },
-      "max_value": {
-        "description": "好感度上限",
-        "hint": "好感度不会高于此值",
-        "type": "int",
-        "default": 100
       }
     }
   },
