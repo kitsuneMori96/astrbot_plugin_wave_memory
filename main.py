@@ -1005,9 +1005,16 @@ class WaveMemoryPlugin(Star):
         if not hasattr(self, '_abuse_tracker'):
             self._abuse_tracker = {}  # {sender_id: {"count": N, "cooldown_until": ts}}
         if sender_id in self._abuse_tracker:
-            if time.time() < self._abuse_tracker[sender_id].get("cooldown_until", 0):
+            tracker = self._abuse_tracker[sender_id]
+            if time.time() < tracker.get("cooldown_until", 0):
                 event.should_call_llm(False)
                 return  # 冷却期间完全不回复
+            # 冷却已过期：count 衰减（每过一次冷却期 -1，最低归 0）
+            elif tracker.get("cooldown_until", 0) > 0:
+                tracker["count"] = max(0, tracker["count"] - 1)
+                tracker["cooldown_until"] = 0
+                if tracker["count"] == 0:
+                    del self._abuse_tracker[sender_id]
 
         if is_at_bot and EXTREME_ATTACK.search(message):
             import re

@@ -446,7 +446,7 @@ class ConsolidationService:
 
                 # 读取当前印象
                 row = self.db.conn.execute(
-                    "SELECT metadata FROM user_profiles WHERE user_id = ? AND group_id = ?",
+                    "SELECT metadata FROM user_profiles WHERE user_id = ? AND group_id = ? LIMIT 1",
                     (sender_id, group_id),
                 ).fetchone()
                 current_impression = ""
@@ -457,10 +457,19 @@ class ConsolidationService:
                         pass
 
                 # LLM 生成新印象（复用 consolidation 的 provider）
+                prompt = f"""用一句话描述你对"{sender_name or sender_id}"这个人的印象。
+
+这个人最近说的话：
+{recent_text}
+
+你之前对他的印象：{current_impression or "没什么印象"}
+
+直接输出一句话新印象（15-40字），不要解释，不要引号。"""
+
                 provider = self.context.get_provider_by_id(self.provider_id)
                 if not provider:
                     return
-                resp = await provider.text_chat(prompt=prompt, contexts=[])
+                resp = await provider.text_chat(prompt=prompt)
                 new_impression = resp.completion_text.strip()[:100]
 
                 if new_impression and len(new_impression) >= 5:
