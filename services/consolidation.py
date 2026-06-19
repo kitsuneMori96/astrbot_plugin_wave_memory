@@ -448,6 +448,28 @@ class ConsolidationService:
         except Exception as e:
             logger.debug(f"[Consolidation] _add_alias error: {e}")
 
+    def _resolve_to_qq(self, name: str) -> str:
+        """将昵称/别名解析为 QQ 号。解析不到则返回原值。"""
+        import re as _re
+        # 已经是纯 QQ 号
+        if _re.match(r'^\d{5,12}$', name.strip()):
+            return name.strip()
+        # 格式 "昵称(QQ号)"
+        m = _re.search(r'\((\d{5,12})\)', name)
+        if m:
+            return m.group(1)
+        # 从 person_registry 匹配
+        try:
+            row = self.db.conn.execute(
+                "SELECT qq_id FROM person_registry WHERE display_name = ? OR aliases LIKE ?",
+                (name.strip(), f'%"{name.strip()}"%'),
+            ).fetchone()
+            if row:
+                return row[0]
+        except Exception:
+            pass
+        return name
+
     def _write_facts(self, facts: list, group_id: str, source_memory_id: int = None) -> int:
         """将 facts 写入 facts 三元组表。
 
@@ -479,6 +501,9 @@ class ConsolidationService:
                 continue
             if len(subject) > 50 or len(obj) > 200:
                 continue
+
+            # v2.0: subject 映射为 QQ 号（统一身份）
+            subject = self._resolve_to_qq(subject)
 
             try:
                 self.db.insert_fact(

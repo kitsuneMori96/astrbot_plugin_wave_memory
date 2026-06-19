@@ -763,5 +763,42 @@
         "default": 30
       }
     }
+  },
+  "Inject_Settings": {
+    "description": "记忆注入控制",
+    "hint": "控制 WaveMemory 注入到主对话的信息。如果 AstrBot 已配置对话历史（如 300 条），WaveMemory 不会重复注入短期内容，只补充长期记忆和结构化认知。",
+    "type": "object",
+    "items": {
+      "astrbot_context_window": {
+        "description": "AstrBot 对话历史条数",
+        "hint": "你的 AstrBot 配置了多少条消息历史。WaveMemory 会跳过这个时间窗口内的记忆避免重复注入",
+        "type": "int",
+        "default": 300
+      },
+      "skip_recent_minutes": {
+        "description": "跳过最近N分钟的记忆",
+        "hint": "最近这么多分钟内的消息大概率在 AstrBot 对话历史中，不重复注入",
+        "type": "int",
+        "default": 30
+      },
+      "timeline_max": {
+        "description": "时间线注入条数",
+        "hint": "注入最近和此人相关的事件摘要条数（0=关闭）",
+        "type": "int",
+        "default": 5
+      },
+      "facts_max": {
+        "description": "Facts 注入条数",
+        "hint": "注入关于此人的已知事实条数（0=关闭）",
+        "type": "int",
+        "default": 5
+      },
+      "enable_timeline": {
+        "description": "启用时间线记忆",
+        "hint": "注入最近和此人的事件流，让 bot 有时间连续感",
+        "type": "bool",
+        "default": true
+      }
+    }
   }
 }

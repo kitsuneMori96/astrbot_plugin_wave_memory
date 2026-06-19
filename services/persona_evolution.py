@@ -173,24 +173,18 @@ class PersonaEvolution:
             return 0
 
     def _get_facts_about(self, sender_id: str, nickname: str = "") -> list[str]:
-        """从 facts 表提取关于此人的关键信息（零 LLM）。"""
+        """从 facts 表提取关于此人的关键信息（按 QQ 号精确匹配，零 LLM）。"""
         results = []
         try:
-            # 用 sender_id 或昵称搜 facts
-            search_terms = [sender_id]
-            if nickname:
-                search_terms.append(nickname)
-            for term in search_terms:
-                rows = self.db.conn.execute(
-                    "SELECT predicate, object FROM facts WHERE subject LIKE ? ORDER BY confidence DESC LIMIT 5",
-                    (f"%{term}%",),
-                ).fetchall()
-                for r in rows:
-                    fact_str = f"{r[0]} {r[1][:30]}"
-                    if fact_str not in results:
-                        results.append(fact_str)
-                if len(results) >= 5:
-                    break
+            # v2.0: 按 QQ 号精确查询（facts.subject 已迁移为 QQ 号）
+            rows = self.db.conn.execute(
+                "SELECT predicate, object FROM facts WHERE subject = ? ORDER BY confidence DESC LIMIT 5",
+                (sender_id,),
+            ).fetchall()
+            for r in rows:
+                fact_str = f"{r[0]} {r[1][:30]}"
+                if fact_str not in results:
+                    results.append(fact_str)
         except Exception:
             pass
         return results[:5]
