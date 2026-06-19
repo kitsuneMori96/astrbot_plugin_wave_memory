@@ -11,71 +11,8 @@ from astrbot.api import logger
 from ..engine.database import WaveMemoryDB
 
 
-# ═══════════════════════════════════════════════════════════════
-# 态度指令映射
-# ═══════════════════════════════════════════════════════════════
-
-ATTITUDE_INSTRUCTIONS = {
-    "intimate": (
-        "你和这个人很熟悉，关系亲近。可以开玩笑、主动关心、"
-        "记得对方说过的事和喜好，用轻松随意的语气交流。"
-    ),
-    "friendly": (
-        "你和这个人关系不错，友好正常交流。"
-        "偶尔可以调侃，可以记住对方提过的事。"
-    ),
-    "neutral": (
-        "你和这个人不太熟，礼貌但保持适当距离，正常回答问题。"
-    ),
-    "cold": (
-        "你对这个人印象一般，简短回复，不主动延伸话题。"
-    ),
-    "hostile": (
-        "你对这个人有戒备，必要时可以反击，不配合无理要求，"
-        "但不要主动挑衅。"
-    ),
-}
-
-# 白真真专用态度模板（更傲娇、更冷淡）
-ATTITUDE_INSTRUCTIONS_BAIZZ = {
-    "intimate": (
-        "你对这个人还算顺眼，偶尔可以多说两句。"
-        "但不要太热情，保持你的距离感。可以带点傲娇的关心。"
-    ),
-    "friendly": (
-        "这个人还行，不讨厌。正常回应，偶尔吐槽一下。"
-    ),
-    "neutral": (
-        "不认识，不熟。简短回答，不废话。"
-    ),
-    "cold": (
-        "没什么好聊的。一个字能解决的不用两个字。"
-    ),
-    "hostile": (
-        "这个人让你不舒服。冷嘲热讽，但不失态。"
-        "用讽刺而非脏话。"
-    ),
-}
-
-# 态度指令注册表：{db_id: instructions}，用户可通过代码扩展
-# 默认回退到 ATTITUDE_INSTRUCTIONS
-_ATTITUDE_REGISTRY: dict[str, dict] = {
-    "baizz": ATTITUDE_INSTRUCTIONS_BAIZZ,
-    "白真真": ATTITUDE_INSTRUCTIONS_BAIZZ,
-}
-
-# 好感度维度对行为的细化影响
-DIMENSION_HINTS = {
-    "high_fun": "这个人经常和你玩梗整活，你可以用更活泼的方式回应。",
-    "high_depth": "这个人喜欢深入讨论，你可以给出更详细的回答。",
-    "high_trust": "这个人信任你，你可以更坦诚地表达观点。",
-    "high_hostility": "这个人曾经对你不友好，保持警惕但不要记仇。",
-    "low_familiarity": "你们互动不多，不要表现得太熟。",
-}
-
-
 class PersonaEvolution:
-    """人格进化引擎：根据用户好感度生成态度注入文本。"""
+    """社交认知引擎：从互动+facts 组装用户画像注入主对话。"""
 
     def __init__(self, db: WaveMemoryDB, cross_group_merge: bool = True, affinity_cfg: dict = None):
         self.db = db
@@ -187,25 +124,7 @@ class PersonaEvolution:
 
     def _merge_profiles(self, current: dict, others: list[dict]) -> dict:
         """合并当前群和其他群的 profile 数据。"""
-        # 好感度：取最高值（跨群认知应该取最好的印象）
         all_profiles = [current] + others
-        max_affection = max(p["affection"] for p in all_profiles)
-
-        # 维度：加权平均（按 interaction_count 加权）
-        merged_dims = {}
-        total_weight = 0
-        for p in all_profiles:
-            dims = p["metadata"].get("dimensions", {})
-            weight = max(p["interaction_count"], 1)
-            total_weight += weight
-            for k, v in dims.items():
-                merged_dims[k] = merged_dims.get(k, 0) + v * weight
-
-        if total_weight > 0:
-            merged_dims = {k: round(v / total_weight, 2) for k, v in merged_dims.items()}
-
-        # 态度：基于合并后的好感度重新计算
-        attitude = self._affection_to_attitude(max_affection)
 
         # 总互动次数
         total_interactions = sum(p["interaction_count"] for p in all_profiles)
@@ -223,31 +142,11 @@ class PersonaEvolution:
 
         return {
             "nickname": current["nickname"],
-            "affection": max_affection,
-            "dimensions": merged_dims,
-            "attitude": attitude,
             "total_interactions": total_interactions,
             "active_groups": active_groups,
             "personality_tags": sorted(all_tags)[:12],
             "impression": current["metadata"].get("impression", ""),
         }
-
-    def _affection_to_attitude(self, affection: int) -> str:
-        """好感度 → 态度等级。"""
-        intimate_th = int(self.affinity_cfg.get("intimate_threshold", 80))
-        friendly_th = int(self.affinity_cfg.get("friendly_threshold", 50))
-        neutral_th = int(self.affinity_cfg.get("neutral_threshold", 20))
-
-        if affection >= intimate_th:
-            return "intimate"
-        elif affection >= friendly_th:
-            return "friendly"
-        elif affection >= neutral_th:
-            return "neutral"
-        elif affection >= -10:
-            return "cold"
-        else:
-            return "hostile"
 
     def _get_aliases(self, sender_id: str) -> list[str]:
         """从 person_registry 获取别名列表。"""
