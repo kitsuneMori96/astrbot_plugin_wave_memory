@@ -453,11 +453,6 @@
         "type": "string",
         "default": ""
       },
-      "meta_prompt": {
-        "description": "自定义 MetaThinking 完整 prompt（留空用默认模板，模板中 {bot_name} 会自动替换）",
-        "type": "string",
-        "default": ""
-      },
       "exclude_sources": {
         "description": "排除的记忆来源（逗号分隔，如 bzz_experience,bzz_evolution）",
         "type": "string",
@@ -513,11 +508,6 @@
       },
       "aliases": {
         "description": "别名（逗号分隔）",
-        "type": "string",
-        "default": ""
-      },
-      "meta_prompt": {
-        "description": "自定义 MetaThinking 完整 prompt（留空用默认模板）",
         "type": "string",
         "default": ""
       },
