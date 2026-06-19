@@ -998,18 +998,38 @@ class WaveMemoryPlugin(Star):
             # 不相关消息，不做任何处理（AstrBot 不会调 LLM 因为没 @）
             return
 
-        # ─── 硬规则：极端攻击 ───
+        # ─── 硬规则：极端攻击 + 辱骂冷却 ───
         from .services.meta_thinking import EXTREME_ATTACK
+
+        # 先检查冷却期（被辱骂后静默不回）
+        if not hasattr(self, '_abuse_tracker'):
+            self._abuse_tracker = {}  # {sender_id: {"count": N, "cooldown_until": ts}}
+        if sender_id in self._abuse_tracker:
+            if time.time() < self._abuse_tracker[sender_id].get("cooldown_until", 0):
+                event.should_call_llm(False)
+                return  # 冷却期间完全不回复
+
         if is_at_bot and EXTREME_ATTACK.search(message):
             import re
             bot_qq_id = self._bot_qq_ids[0] if self._bot_qq_ids else ""
             other_at = re.search(r'At[:：]?\d+', message.replace(bot_qq_id, ''))
             if not other_at:
+                # 辱骂计数
+                tracker = self._abuse_tracker.setdefault(sender_id, {"count": 0, "cooldown_until": 0})
+                tracker["count"] += 1
+                if tracker["count"] >= 3:
+                    # 触发冷却：10 分钟起步，每次翻倍（上限 1 小时）
+                    cooldown = min(3600, 600 * (2 ** (tracker["count"] - 3)))
+                    tracker["cooldown_until"] = time.time() + cooldown
+                    event.should_call_llm(False)
+                    logger.info(f"[MetaThinking] 辱骂冷却: {sender_id} 冷却 {cooldown}s")
+                    return
+                # 前 2 次还是怼回去
                 from astrbot.core.agent.message import TextPart
                 req.extra_user_content_parts.append(TextPart(
                     text="[语气指令] 这个人在骂你/惹你不爽。用愤怒的语气怼回去，不要客气。"
                 ))
-                logger.info(f"[MetaThinking] 极端攻击检测: {sender_id}")
+                logger.info(f"[MetaThinking] 极端攻击检测: {sender_id} (第{tracker['count']}次)")
                 return
 
         # ─── 硬规则：刷屏检测 ───
@@ -1438,13 +1458,6 @@ class WaveMemoryPlugin(Star):
             if lore_text:
                 injection_parts.append(lore_text)
             if persona_text:
-                # v1.4.1: 让 bot 在回复末尾输出好感度变化（on_decorating_result 会解析并隐藏）
-                persona_text += (
-                    "\n\n[内部记录] 回复完成后，在最后单独一行写下你对这个人此刻的真实感受，格式："
-                    "\n[好感:+N或-N|一句话印象]"
-                    "\n例如 [好感:+1|有意思的人] 或 [好感:-2|没礼貌] 或 [好感:0|普通]"
-                    "\n这行是你的内心笔记，不会显示给对方。必须写。"
-                )
                 injection_parts.append(persona_text)
             if belief_text:
                 injection_parts.append(belief_text)
@@ -1662,47 +1675,6 @@ class WaveMemoryPlugin(Star):
                 logger.debug(f"[MetaThinking] Proactive failed: {e}")
                 _record_err("Proactive", e)
 
-    # ─── Hook: 发送前拦截 — 解析好感度标记并隐藏 ───
-
-    @filter.on_decorating_result()
-    async def parse_affinity_mark(self, event: AstrMessageEvent):
-        """在 bot 回复发送给用户之前，解析 [好感:±N|印象] 标记并从文本中移除。"""
-        result = event.get_result()
-        if not result or not result.chain:
-            return
-
-        import re as _re
-        from astrbot.core.message.components import Plain
-
-        for comp in result.chain:
-            if isinstance(comp, Plain) and comp.text:
-                match = _re.search(r'\[好感:([-+]?\d+)\|(.+?)\]\s*$', comp.text)
-                if match:
-                    delta = max(-5, min(5, int(match.group(1))))
-                    impression = match.group(2).strip()
-                    # 从文本中移除标记
-                    comp.text = comp.text[:match.start()].rstrip()
-
-                    # 写入好感度
-                    if delta != 0 or impression:
-                        sender_id = event.get_sender_id() or ""
-                        group_id = event.get_group_id() or ""
-                        bot_id = event.get_self_id() or ""
-                        if sender_id and self.meta_thinking:
-                            try:
-                                current = self.meta_thinking._get_affection(sender_id, group_id)
-                                self.meta_thinking._apply_updates(
-                                    sender_id, group_id,
-                                    {"affection_update": current + delta if delta else None,
-                                     "impression_update": impression if impression else None},
-                                    bot_id=bot_id,
-                                )
-                                if delta:
-                                    logger.debug(f"[MetaThinking] 好感度: {sender_id} {current}→{current+delta} ({impression[:20]})")
-                            except Exception:
-                                pass
-                    break  # 只处理第一个匹配
-
     @filter.after_message_sent()
     async def on_bot_sent(self, event: AstrMessageEvent):
         """捕获 bot 回复，写入记忆 + 异步更新好感度。"""
@@ -1733,6 +1705,22 @@ class WaveMemoryPlugin(Star):
             now = time.time()
             if len(self._reply_tracker) > 200:
                 self._reply_tracker = {k: v for k, v in self._reply_tracker.items() if now - v < 60}
+
+        # v1.5.0: 互动积累（纯规则，不调 LLM）
+        if sender_id and sender_id != "bot":
+            try:
+                bot_profile = self._get_bot(bot_id)
+                db_bot_id = bot_profile.db_id if bot_profile else "bot"
+                self.db.conn.execute(
+                    """UPDATE user_profiles 
+                       SET interaction_count = COALESCE(interaction_count, 0) + 1,
+                           last_seen = ?
+                       WHERE user_id = ? AND group_id = ? AND bot_id = ?""",
+                    (time.time(), sender_id, group_id, db_bot_id),
+                )
+                self.db.conn.commit()
+            except Exception:
+                pass
 
         await self.writer.enqueue({
             "group_id": group_id,

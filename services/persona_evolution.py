@@ -141,12 +141,9 @@ class PersonaEvolution:
         merged = self._merge_profiles(current_profile, other_profiles)
 
         nickname = merged["nickname"]
-        affection = merged["affection"]
-        dims = merged["dimensions"]
-        attitude = merged["attitude"]
 
-        # 好感度太低（新用户）不注入
-        if affection == 0 and all(v == 0 for v in dims.values()):
+        # 互动次数太少（完全陌生的新用户）不注入
+        if merged["total_interactions"] == 0:
             return ""
 
         # 构建注入文本
@@ -161,48 +158,35 @@ class PersonaEvolution:
             if other_names:
                 parts.append(f"- 别名: {', '.join(other_names)}")
 
-        parts.append(f"- 好感度: {affection}/100 ({attitude})")
+        # 互动等级
+        interaction_count = merged["total_interactions"]
+        if interaction_count >= 51:
+            level = "老熟人"
+        elif interaction_count >= 11:
+            level = "熟人"
+        elif interaction_count >= 3:
+            level = "见过几次"
+        else:
+            level = "陌生人"
+        parts.append(f"- 互动: {interaction_count} 次（{level}）")
 
-        # 跨群活跃信息
-        total_interactions = merged["total_interactions"]
-        active_groups = merged["active_groups"]
-        if active_groups > 1:
-            parts.append(f"- 跨群活跃: {active_groups} 个群, 共 {total_interactions} 次互动")
+        # 自然语言印象（核心：替代旧的态度模板）
+        impression = merged.get("impression", "")
+        if impression:
+            parts.append(f"- 印象: {impression}")
 
         # 表达模式摘要（当前群优先，fallback 到其他群）
         traits = self._get_expression_traits(sender_id, group_id, other_profiles)
         if traits:
             parts.append(f"- 特征: {', '.join(traits)}")
 
-        # 态度指令（根据 bot_id 切换模板，有备用模板就用，否则用默认）
-        if bot_id in _ATTITUDE_REGISTRY:
-            instructions = _ATTITUDE_REGISTRY[bot_id]
-        else:
-            instructions = ATTITUDE_INSTRUCTIONS
-        instruction = instructions.get(attitude, instructions["neutral"])
-        parts.append(f"- 态度: {instruction}")
-        parts.append(f"- 自然地用这种态度回应，不要刻意表演情绪，像真人一样。")
-
-        # 维度细化提示
-        hints = []
-        if dims.get("fun", 0) > 40:
-            hints.append(DIMENSION_HINTS["high_fun"])
-        if dims.get("depth", 0) > 40:
-            hints.append(DIMENSION_HINTS["high_depth"])
-        if dims.get("trust", 0) > 50:
-            hints.append(DIMENSION_HINTS["high_trust"])
-        if dims.get("hostility", 0) > 30:
-            hints.append(DIMENSION_HINTS["high_hostility"])
-        if dims.get("familiarity", 0) < 15:
-            hints.append(DIMENSION_HINTS["low_familiarity"])
-
-        if hints:
-            parts.append(f"- 补充: {' '.join(hints)}")
-
         # personality_tags（合并去重）
         all_tags = merged["personality_tags"]
         if all_tags:
             parts.append(f"- 个性标签: {', '.join(all_tags[:8])}")
+
+        # 态度引导（简洁，让 LLM 自己理解）
+        parts.append("- 自然地根据你对这个人的了解来回应，不要刻意表演情绪。")
 
         return "\n".join(parts)
 
@@ -250,6 +234,7 @@ class PersonaEvolution:
             "total_interactions": total_interactions,
             "active_groups": active_groups,
             "personality_tags": sorted(all_tags)[:12],
+            "impression": current["metadata"].get("impression", ""),
         }
 
     def _affection_to_attitude(self, affection: int) -> str:
