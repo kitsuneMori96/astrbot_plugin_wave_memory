@@ -1165,6 +1165,9 @@ class WaveMemoryPlugin(Star):
                 _time_filter_ts = _time.time() - seconds
                 break
 
+        # ─── v2.0: 去重——跳过最近 N 分钟的记忆（AstrBot 对话历史已覆盖）───
+        _skip_before_ts = _time.time() - self.skip_recent_minutes * 60
+
         # ─── 通道 1: 主搜索 ───
         async def _ch_main_search():
             nonlocal memories
@@ -1429,6 +1432,34 @@ class WaveMemoryPlugin(Star):
                 pass
             timing["fts5_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
 
+        # ─── 通道 8: 时间线记忆（v2.0 核心：连续时间感知）───
+        timeline_text = ""
+
+        async def _ch_timeline():
+            nonlocal timeline_text
+            if not self.enable_timeline or not sender_id:
+                return
+            t0 = _time.perf_counter()
+            try:
+                rows = self.db.conn.execute(
+                    """SELECT DISTINCT summary, DATE(timestamp, 'unixepoch', 'localtime') as day
+                       FROM memories
+                       WHERE summary IS NOT NULL AND summary != '' AND summary != '日常灌水'
+                       AND group_id = ?
+                       AND (sender_id = ? OR content LIKE ?)
+                       AND timestamp > ?
+                       ORDER BY timestamp DESC
+                       LIMIT ?""",
+                    (group_id, sender_id, f"%{sender_name}%" if sender_name else f"%{sender_id}%",
+                     _time.time() - 7 * 86400, self.timeline_max),
+                ).fetchall()
+                if rows:
+                    lines = [f"- {r[1]}: {r[0][:60]}" for r in rows]
+                    timeline_text = "[最近与此人的事件]\n" + "\n".join(lines)
+            except Exception:
+                pass
+            timing["timeline_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
+
         # ─── 并行执行所有通道 (US-2.1) ───
         try:
             await asyncio.gather(
@@ -1439,6 +1470,7 @@ class WaveMemoryPlugin(Star):
                 _ch_soul(),
                 _ch_facts(),
                 _ch_fts5(),
+                _ch_timeline(),
             )
 
             # ─── 合并结果 ───
@@ -1489,8 +1521,11 @@ class WaveMemoryPlugin(Star):
                 # 时间过滤（有时间词时）
                 if _time_filter_ts > 0:
                     time_filtered = [m for m in memories if m.get("timestamp", 0) >= _time_filter_ts]
-                    if time_filtered:  # 有结果才用过滤后的，否则保持原结果
+                    if time_filtered:
                         memories = time_filtered
+
+                # v2.0 去重：跳过最近 N 分钟的记忆（AstrBot 对话历史已覆盖）
+                memories = [m for m in memories if m.get("timestamp", 0) < _skip_before_ts]
 
                 memories.sort(key=lambda x: x.get("score", 0), reverse=True)
                 memories = memories[:self.inject_top_k]
@@ -1505,6 +1540,8 @@ class WaveMemoryPlugin(Star):
                 injection_parts.append(lore_text)
             if persona_text:
                 injection_parts.append(persona_text)
+            if timeline_text:
+                injection_parts.append(timeline_text)
             if belief_text:
                 injection_parts.append(belief_text)
             if concern_summary:
