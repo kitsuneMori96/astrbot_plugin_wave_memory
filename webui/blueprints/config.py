@@ -3,11 +3,51 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from quart import Blueprint, jsonify, request
 
 from ..container import get_container
+
+
+# HotConfig key → config.json section.key 映射
+_HOT_TO_CONFIG_MAP = {
+    "query.group_weight_current": ("Social_Settings", "group_weight_current"),
+    "query.group_weight_cross": ("Social_Settings", "group_weight_cross"),
+    "social.abuse_trigger_count": ("Social_Settings", "abuse_trigger_count"),
+    "social.abuse_cooldown_base": ("Social_Settings", "abuse_cooldown_base"),
+    "social.abuse_cooldown_max": ("Social_Settings", "abuse_cooldown_max"),
+    "social.aba_window_seconds": ("Social_Settings", "aba_window_seconds"),
+    "query.min_similarity": ("Query_Settings", "min_similarity"),
+}
+
+
+def _persist_hot_config_to_file(validated: dict):
+    """将 HotConfig 变更写回 AstrBot config.json（持久化）。"""
+    try:
+        from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+        config_path = os.path.join(get_astrbot_data_path(), "config", "astrbot_plugin_wave_memory_config.json")
+        if not os.path.isfile(config_path):
+            return
+
+        with open(config_path, "r", encoding="utf-8-sig") as f:
+            cfg = json.load(f)
+
+        changed = False
+        for hot_key, value in validated.items():
+            if hot_key in _HOT_TO_CONFIG_MAP:
+                section, field = _HOT_TO_CONFIG_MAP[hot_key]
+                if section not in cfg:
+                    cfg[section] = {}
+                cfg[section][field] = value
+                changed = True
+
+        if changed:
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 from ..middleware.auth import require_auth
 
 config_bp = Blueprint("config", __name__, url_prefix="/api")
@@ -124,7 +164,7 @@ async def get_hot_config():
 @config_bp.route("/config/hot", methods=["POST"])
 @require_auth
 async def update_hot_config():
-    """热更新参数。"""
+    """热更新参数 + 持久化到 config.json。"""
     from ...services.hot_config import HotConfig
     body = await request.get_json(silent=True) or {}
     hot = HotConfig()
@@ -151,6 +191,8 @@ async def update_hot_config():
 
     if validated:
         hot.update(validated)
+        # 持久化到 AstrBot config.json
+        _persist_hot_config_to_file(validated)
     return jsonify({"ok": len(errors) == 0, "updated": list(validated.keys()), "errors": errors})
 
 
