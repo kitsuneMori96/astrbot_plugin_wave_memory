@@ -1,5 +1,26 @@
 # Changelog
 
+## v2.0.0 (2026-06-19)
+
+### 认知架构升级
+
+- **时间线记忆通道**：inject 新增第 8 通道，按时间排序注入最近 7 天与当前用户相关的事件摘要。bot 现在有连续时间感知（"昨天和他跑团""前天他来问设定"）
+- **QQ 号统一身份**：facts.subject 迁移为 QQ 号（3841 条成功映射），换昵称不再断裂。consolidation 写入时自动 resolve 到 QQ 号
+- **inject 与 AstrBot 去重**：跳过最近 30 分钟的记忆（大概率在 AstrBot 300 条对话历史中），避免重复注入浪费 token
+- **短期感知注入**：persona_text 注入"本小时他@你 N 次" + "你上次对他说了什么"，bot 有对话连续感
+- **删除硬编码门控**：不再有"15次/小时上限"，把频率信息告诉 bot 让它自己判断
+
+### 新功能
+
+- **/teach 命令**：管理员灌入知识 → 写 facts 三元组 + 高权重记忆（importance=2.5）
+- **社交工具重做**：wave_memory_affinity 改为查互动排行 / 7天活跃 / 某人信息（不再查废弃的好感度分数）
+- **Tag 质量降级**：启动时检测 keyword 垃圾率，> 50% 自动关闭脉冲传播（防止垃圾 Tag 污染联想）
+
+### 配置
+
+- **新增 Inject_Settings**：astrbot_context_window / skip_recent_minutes / timeline_max / facts_max / enable_timeline
+- **persona 去缓存**：含实时状态需每次重新生成（有索引后 <5ms）
+
 ## v1.5.2 (2026-06-19)
 
 ### 代码清理
