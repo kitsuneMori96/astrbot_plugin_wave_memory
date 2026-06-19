@@ -138,6 +138,7 @@ class WaveMemoryPlugin(Star):
         self.tag_cfg = tag_cfg = self.config.get("Tag_Settings", {})
         storage_cfg = self.config.get("Storage_Settings", {})
         webui_cfg = self.config.get("WebUI_Settings", {})
+        social_cfg = self.config.get("Social_Settings", {})
         filter_cfg = self.config.get("Message_Filter", {})
         perf_cfg = self.config.get("Performance_Settings", {})
         lifecycle_cfg = self.config.get("Lifecycle_Settings", {})
@@ -339,11 +340,16 @@ class WaveMemoryPlugin(Star):
             "spike": {"firing_threshold": 0.10, "base_decay": 0.25, "wormhole_decay": 0.70,
                       "tension_threshold": 1.0, "max_hops": 4},
             "query": {"min_similarity": self.min_similarity, "boost_alpha_base": 0.3,
-                      "group_weight_current": 1.5, "group_weight_cross": 0.8},
+                      "group_weight_current": float(social_cfg.get("group_weight_current", 1.5)),
+                      "group_weight_cross": float(social_cfg.get("group_weight_cross", 0.8))},
             "geodesic": {"energy_weight": 0.3},
             "residual": {"boost_range": 0.6},
-            "social": {"abuse_trigger_count": 3, "abuse_cooldown_base": 600,
-                       "abuse_cooldown_max": 3600, "aba_window_seconds": 30},
+            "social": {
+                "abuse_trigger_count": int(social_cfg.get("abuse_trigger_count", 3)),
+                "abuse_cooldown_base": int(social_cfg.get("abuse_cooldown_base", 600)),
+                "abuse_cooldown_max": int(social_cfg.get("abuse_cooldown_max", 3600)),
+                "aba_window_seconds": int(social_cfg.get("aba_window_seconds", 30)),
+            },
         })
         if self.spike_router:
             self.hot_config.on_change(self.spike_router.on_config_change)

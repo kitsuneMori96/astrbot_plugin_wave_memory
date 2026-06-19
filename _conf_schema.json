@@ -767,5 +767,48 @@
         "default": 100
       }
     }
+  },
+  "Social_Settings": {
+    "description": "社交认知与防骚扰",
+    "hint": "控制 bot 对群友的认知行为和防骚扰策略。这些参数也可在 9876 WebUI 实时调整",
+    "type": "object",
+    "items": {
+      "group_weight_current": {
+        "description": "当前群记忆权重",
+        "hint": "检索时当前群的记忆得分乘以此系数（越高越优先当前群内容，防止串群）",
+        "type": "float",
+        "default": 1.5
+      },
+      "group_weight_cross": {
+        "description": "跨群记忆权重",
+        "hint": "检索时其他群的记忆得分乘以此系数（越低越降权跨群内容）",
+        "type": "float",
+        "default": 0.8
+      },
+      "abuse_trigger_count": {
+        "description": "辱骂触发冷却次数",
+        "hint": "连续辱骂 @bot 达到此次数后触发静默冷却",
+        "type": "int",
+        "default": 3
+      },
+      "abuse_cooldown_base": {
+        "description": "冷却起步秒数",
+        "hint": "第一次触发冷却时静默多少秒（之后每次翻倍）",
+        "type": "int",
+        "default": 600
+      },
+      "abuse_cooldown_max": {
+        "description": "冷却上限秒数",
+        "hint": "冷却时间翻倍的上限",
+        "type": "int",
+        "default": 3600
+      },
+      "aba_window_seconds": {
+        "description": "连续对话窗口（秒）",
+        "hint": "bot 回复某人后，多少秒内该人再发消息视为连续对话（触发 may_reply）",
+        "type": "int",
+        "default": 30
+      }
+    }
   }
 }
