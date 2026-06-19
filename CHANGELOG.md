@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.5.2 (2026-06-19)
+
+### 代码清理
+
+- **删除全部废弃代码**：ATTITUDE_INSTRUCTIONS/BAIZZ/_ATTITUDE_REGISTRY/DIMENSION_HINTS 常量（60行） + `_affection_to_attitude` 方法 + `_merge_profiles` 中的 attitude/dimensions 死计算
+- **性能修复**：`memories.sender_id` 加索引，`_get_message_count` 从全表扫描变为索引查询
+- **@register 版本号同步**：从硬编码 0.8.0 更新为 1.5.2
+
+### 配置清理
+
+- **删除 `Affinity_Constraints`**（好感度约束配置组，已废弃）
+- **删除 `enable_affinity`**（好感度开关，概念已变为互动积累）
+- **删除 Bot 配置中的 `meta_prompt`**（MetaThinking 不再独立调 LLM）
+- **更新 MetaThinking_Settings 描述**："对话规则过滤与防骚扰"
+- **更新 Lifecycle_Settings 描述**："灵魂系统"
+
+### 文档
+
+- **README 全面更新**：恢复配置参考表(6组) + 后台服务列表(8个) + 功能地图(15子系统)
+- **社交系统描述同步**：改为 v1.5 实际行为（认知+互动+facts 驱动）
+
 ## v1.5.1 (2026-06-18)
 
 ### 社交认知优化
