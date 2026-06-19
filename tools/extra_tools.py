@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import field
 from typing import Any
 
@@ -19,28 +20,28 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 @dataclass
 class WaveMemoryAffinityTool(FunctionTool[AstrAgentContext]):
-    """查询多维好感度：某人详情、排行榜、黑名单。"""
+    """查询社交关系：互动排行、活跃用户、某人画像。"""
 
     name: str = "wave_memory_affinity"
     description: str = (
-        "查询好感度信息。可以查某个人的好感度详情，也可以查排行榜或好感度最低的人。"
-        "mode=single 查某人，mode=ranking 查排行榜，mode=blacklist 查最低。"
+        "查询社交信息。mode=ranking 查互动排行（谁和你聊最多），"
+        "mode=active 查最近活跃用户，mode=single 查某人的互动信息。"
     )
     parameters: dict = field(default_factory=lambda: {
         "type": "object",
         "properties": {
             "user_id": {
                 "type": "string",
-                "description": "要查询的群友名字或QQ号（mode=single 时必填）"
+                "description": "要查询的群友名字或QQ号（mode=single 时需要）"
             },
             "mode": {
                 "type": "string",
-                "description": "查询模式：single(查某人)/ranking(排行榜)/blacklist(最低)",
-                "enum": ["single", "ranking", "blacklist"],
-                "default": "single"
+                "description": "查询模式：single(查某人)/ranking(互动排行)/active(最近活跃)",
+                "enum": ["single", "ranking", "active"],
+                "default": "ranking"
             },
         },
-        "required": ["user_id"],
+        "required": [],
     })
 
     db: Any = field(default=None, repr=False)
@@ -61,38 +62,32 @@ class WaveMemoryAffinityTool(FunctionTool[AstrAgentContext]):
 
         if mode == "ranking":
             rows = conn.execute("""
-                SELECT up.user_id, up.group_id, up.affection, up.metadata, pr.display_name
+                SELECT up.user_id, up.nickname, up.interaction_count,
+                       (SELECT COUNT(*) FROM memories WHERE sender_id = up.user_id) as msg_count
                 FROM user_profiles up
-                LEFT JOIN person_registry pr ON up.user_id = pr.qq_id
-                WHERE up.metadata IS NOT NULL AND LENGTH(up.metadata) > 10
-                ORDER BY up.affection DESC LIMIT 15
+                WHERE up.interaction_count > 0
+                ORDER BY up.interaction_count DESC LIMIT 10
             """).fetchall()
 
-            lines = ["【好感度排行 TOP 15】"]
-            for uid, gid, aff, meta_str, dname in rows:
-                display = dname or uid
-                meta = json.loads(meta_str) if meta_str else {}
-                impression = meta.get("impression", "")[:40]
-                gid_short = gid[-4:] if gid else "?"
-                lines.append(f"  {display}(群{gid_short}): {aff} — {impression}")
-            return "\n".join(lines) if len(lines) > 1 else "没有好感度记录"
+            lines = ["【互动排行 TOP 10】"]
+            for uid, nickname, interactions, msg_count in rows:
+                display = nickname or uid
+                lines.append(f"  {display}: 互动{interactions}次, 消息{msg_count}条")
+            return "\n".join(lines) if len(lines) > 1 else "还没有互动记录"
 
-        elif mode == "blacklist":
+        elif mode == "active":
             rows = conn.execute("""
-                SELECT up.user_id, up.group_id, up.affection, up.metadata, pr.display_name
-                FROM user_profiles up
-                LEFT JOIN person_registry pr ON up.user_id = pr.qq_id
-                ORDER BY up.affection ASC LIMIT 10
-            """).fetchall()
+                SELECT sender_name, sender_id, COUNT(*) as cnt
+                FROM memories
+                WHERE timestamp > ? AND sender_id != 'bot' AND sender_name != ''
+                GROUP BY sender_id
+                ORDER BY cnt DESC LIMIT 10
+            """, (time.time() - 7 * 86400,)).fetchall()
 
-            lines = ["【好感度最低 10 人】"]
-            for uid, gid, aff, meta_str, dname in rows:
-                display = dname or uid
-                meta = json.loads(meta_str) if meta_str else {}
-                impression = meta.get("impression", "")[:40]
-                gid_short = gid[-4:] if gid else "?"
-                lines.append(f"  {display}(群{gid_short}): {aff} — {impression}")
-            return "\n".join(lines) if len(lines) > 1 else "没有好感度记录"
+            lines = ["【最近7天活跃 TOP 10】"]
+            for name, uid, cnt in rows:
+                lines.append(f"  {name}: {cnt} 条消息")
+            return "\n".join(lines) if len(lines) > 1 else "最近7天无活跃数据"
 
         else:
             # single 模式

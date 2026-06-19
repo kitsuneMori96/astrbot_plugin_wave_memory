@@ -555,6 +555,16 @@ class WaveMemoryPlugin(Star):
         else:
             logger.info(f"[WaveMemory] Tag coverage {tag_coverage:.1%}, backfill not needed")
 
+        # v2.0: Tag 质量检测——垃圾率 > 50% 时降级关闭脉冲传播
+        try:
+            total_kw = self.db.conn.execute("SELECT COUNT(*) FROM tags WHERE tag_type='keyword'").fetchone()[0]
+            bad_kw = self.db.conn.execute("SELECT COUNT(*) FROM tags WHERE tag_type='keyword' AND LENGTH(name) > 5").fetchone()[0]
+            if total_kw > 100 and bad_kw / total_kw > 0.5:
+                logger.warning(f"[WaveMemory] Tag 质量差（keyword 垃圾率 {bad_kw}/{total_kw} = {bad_kw*100//total_kw}%），自动降级关闭脉冲传播")
+                self.enable_spike = False
+        except Exception:
+            pass
+
         # 启动生命周期服务
         if self.enable_affinity:
             # 取第一个 bot 的 QQ ID 和 db_id 用于好感度系统
