@@ -86,10 +86,22 @@ class HotConfig:
              "description": "最低相似度阈值"},
             {"key": "query.boost_alpha_base", "type": "float", "min": 0.1, "max": 0.6, "default": 0.3,
              "description": "浪潮增强基础因子"},
+            {"key": "query.group_weight_current", "type": "float", "min": 1.0, "max": 3.0, "default": 1.5,
+             "description": "当前群记忆权重（越高越优先当前群）"},
+            {"key": "query.group_weight_cross", "type": "float", "min": 0.1, "max": 1.0, "default": 0.8,
+             "description": "跨群记忆权重（越低越降权跨群内容）"},
             {"key": "geodesic.energy_weight", "type": "float", "min": 0.0, "max": 1.0, "default": 0.3,
              "description": "测地线能量权重"},
             {"key": "residual.boost_range", "type": "float", "min": 0.0, "max": 1.0, "default": 0.6,
              "description": "残差增益范围"},
+            {"key": "social.abuse_trigger_count", "type": "int", "min": 1, "max": 10, "default": 3,
+             "description": "辱骂触发冷却次数"},
+            {"key": "social.abuse_cooldown_base", "type": "int", "min": 60, "max": 3600, "default": 600,
+             "description": "辱骂冷却起步秒数"},
+            {"key": "social.abuse_cooldown_max", "type": "int", "min": 600, "max": 7200, "default": 3600,
+             "description": "辱骂冷却上限秒数"},
+            {"key": "social.aba_window_seconds", "type": "int", "min": 10, "max": 120, "default": 30,
+             "description": "ABA连续对话窗口（秒）"},
         ]
 
     def _set_nested(self, key: str, value: Any):

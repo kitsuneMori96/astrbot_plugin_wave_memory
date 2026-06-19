@@ -1,8 +1,8 @@
 {
   "_system_status": {
-    "description": "⚡ WaveMemory 系统说明",
+    "description": "⚡ WaveMemory v1.5 系统说明",
     "type": "string",
-    "hint": "本页配置基础开关和模型选择。高级调参（spike阈值/EPA参数/记忆清理策略）请访问 WaveMemory 管理面板 http://your-host:9876。功能状态：自动注入=开启时bot有记忆 | 高级检索=Tag覆盖率>20%后自动生效 | 好感度=MetaThinking开启时自动积累",
+    "hint": "本页配置基础开关和模型选择。高级调参请访问 WaveMemory 管理面板 http://your-host:9876。核心机制：记忆注入=开启时bot有记忆+认知 | 高级检索=Tag覆盖率>20%后自动生效 | 社交认知=从 facts+互动次数自动组装用户画像（无独立LLM调用）| 防骚扰=辱骂3次自动冷却",
     "obvious_hint": true,
     "default": "仅供说明，无需修改",
     "_readonly": true

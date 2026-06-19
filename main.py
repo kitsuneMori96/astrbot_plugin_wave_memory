@@ -338,9 +338,12 @@ class WaveMemoryPlugin(Star):
         self.hot_config = HotConfig(initial_config={
             "spike": {"firing_threshold": 0.10, "base_decay": 0.25, "wormhole_decay": 0.70,
                       "tension_threshold": 1.0, "max_hops": 4},
-            "query": {"min_similarity": self.min_similarity, "boost_alpha_base": 0.3},
+            "query": {"min_similarity": self.min_similarity, "boost_alpha_base": 0.3,
+                      "group_weight_current": 1.5, "group_weight_cross": 0.8},
             "geodesic": {"energy_weight": 0.3},
             "residual": {"boost_range": 0.6},
+            "social": {"abuse_trigger_count": 3, "abuse_cooldown_base": 600,
+                       "abuse_cooldown_max": 3600, "aba_window_seconds": 30},
         })
         if self.spike_router:
             self.hot_config.on_change(self.spike_router.on_config_change)
@@ -966,7 +969,8 @@ class WaveMemoryPlugin(Star):
         # 4. bot 30s 内回复过此人 → may_reply（ABA 连续对话）
         reply_key = f"{sender_id}:{group_id}"
         last_reply_ts = self._reply_tracker.get(reply_key, 0)
-        if time.time() - last_reply_ts < 30:
+        aba_window = int(self.hot_config.get("social.aba_window_seconds", 30)) if hasattr(self, 'hot_config') else 30
+        if time.time() - last_reply_ts < aba_window:
             return "may_reply"
 
         # 5. 包含兴趣关键词 → may_reply
@@ -1024,9 +1028,12 @@ class WaveMemoryPlugin(Star):
                 # 辱骂计数
                 tracker = self._abuse_tracker.setdefault(sender_id, {"count": 0, "cooldown_until": 0})
                 tracker["count"] += 1
-                if tracker["count"] >= 3:
-                    # 触发冷却：10 分钟起步，每次翻倍（上限 1 小时）
-                    cooldown = min(3600, 600 * (2 ** (tracker["count"] - 3)))
+                abuse_trigger = int(self.hot_config.get("social.abuse_trigger_count", 3))
+                if tracker["count"] >= abuse_trigger:
+                    # 触发冷却
+                    base = int(self.hot_config.get("social.abuse_cooldown_base", 600))
+                    cap = int(self.hot_config.get("social.abuse_cooldown_max", 3600))
+                    cooldown = min(cap, base * (2 ** (tracker["count"] - abuse_trigger)))
                     tracker["cooldown_until"] = time.time() + cooldown
                     event.should_call_llm(False)
                     logger.info(f"[MetaThinking] 辱骂冷却: {sender_id} 冷却 {cooldown}s")
@@ -1439,12 +1446,14 @@ class WaveMemoryPlugin(Star):
                         base_score *= 1.4  # 自己说的更相关
                     elif m_sender == bot_id:
                         base_score *= 1.2  # bot 对该用户说的
-                    # 群隔离加权：当前群 ×1.5，跨群 ×0.8
+                    # 群隔离加权（从 HotConfig 读取）
+                    _gw_current = float(self.hot_config.get("query.group_weight_current", 1.5))
+                    _gw_cross = float(self.hot_config.get("query.group_weight_cross", 0.8))
                     m_group = m.get("group_id", "")
                     if m_group == group_id:
-                        base_score *= 1.5
+                        base_score *= _gw_current
                     elif m_group and m_group != group_id:
-                        base_score *= 0.8
+                        base_score *= _gw_cross
                     m["score"] = base_score
 
                 # 时间过滤（有时间词时）
