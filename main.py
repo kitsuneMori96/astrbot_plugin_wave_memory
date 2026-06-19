@@ -1650,10 +1650,36 @@ class WaveMemoryPlugin(Star):
         if self.group_blacklist and group_id in self.group_blacklist:
             return
 
-        # ─── "记住/忘记" 显式命令（用户主动触发,不依赖 LLM 判断）───
+        # ─── /teach 命令（管理员灌入知识 → facts + 高权重记忆）───
         sender_name = ""
         if event.message_obj and event.message_obj.sender:
             sender_name = event.message_obj.sender.nickname or ""
+        msg_stripped = message.strip()
+        if msg_stripped.startswith("/teach ") or msg_stripped.startswith("/teach:"):
+            # 只有管理员能用
+            admin_ids = self._get_admin_ids() if hasattr(self, '_get_admin_ids') else set()
+            if sender_id in admin_ids:
+                content = msg_stripped[7:].strip(":： \n")
+                if content and len(content) >= 4:
+                    # 写高权重记忆
+                    self.db.add_memory(
+                        group_id=group_id, content=f"[管理员教导] {content}",
+                        sender_id=sender_id, sender_name=sender_name,
+                        importance=2.5, source="teach",
+                    )
+                    # 尝试解析为 facts（格式：A是B / A的B是C）
+                    import re as _re
+                    fact_match = _re.match(r'^(.+?)(是|的|=|→)(.+)$', content)
+                    if fact_match:
+                        subject = fact_match.group(1).strip()
+                        predicate = fact_match.group(2).strip() or "是"
+                        obj = fact_match.group(3).strip()
+                        if subject and obj:
+                            self.db.insert_fact(subject, predicate, obj, group_id=group_id, confidence=0.95)
+                    logger.info(f"[WaveMemory] /teach: {content[:50]}")
+                return
+
+        # ─── "记住/忘记" 显式命令（用户主动触发,不依赖 LLM 判断）───
         _remember_prefixes = ("记住", "记下", "remember")
         _forget_prefixes = ("忘记", "忘掉", "forget", "别记")
         msg_stripped = message.strip()
