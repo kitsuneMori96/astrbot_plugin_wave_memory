@@ -19,11 +19,15 @@ class PersonaEvolution:
         self.cross_group_merge = cross_group_merge
         self.affinity_cfg = affinity_cfg or {}
 
-    def get_persona_injection(self, sender_id: str, group_id: str, bot_id: str = "") -> str:
+    def get_persona_injection(self, sender_id: str, group_id: str, bot_id: str = "", realtime_ctx: dict = None) -> str:
         """为指定用户生成人格态度注入文本。
 
         跨群画像合并：聚合同一 user_id 在所有群的数据，
         以当前群 profile 为主，其他群数据补充。
+        
+        realtime_ctx: 实时上下文信息（由 main.py 传入）
+            - hourly_at_count: 本小时 @bot 次数
+            - last_bot_reply: bot 上次对此人说的话（截断）
         
         Args:
             bot_id: 当前 bot 的 db_id 标识，用于读取对应的好感度和切换态度模板
@@ -107,6 +111,15 @@ class PersonaEvolution:
         about_lines = self._get_facts_about(sender_id, nickname)
         if about_lines:
             parts.append(f"- 关于他: {' / '.join(about_lines)}")
+
+        # v2.0 短期感知：实时状态注入
+        ctx = realtime_ctx or {}
+        hourly_at = ctx.get("hourly_at_count", 0)
+        if hourly_at > 3:
+            parts.append(f"- 本小时状态: 他已经@你 {hourly_at} 次了")
+        last_reply = ctx.get("last_bot_reply", "")
+        if last_reply:
+            parts.append(f"- 你上次对他说: \"{last_reply[:50]}\"")
 
         # 表达模式摘要
         traits = self._get_expression_traits(sender_id, group_id, other_profiles)

@@ -1073,7 +1073,7 @@ class WaveMemoryPlugin(Star):
                 logger.info(f"[MetaThinking] 刷屏拦截: {sender_id}")
                 return
 
-        # ─── 硬规则：每小时回复上限（防持续骚扰）───
+        # ─── 每小时 @计数器（供 persona 注入实时状态，不做硬拦截）───
         if is_at_bot:
             if not hasattr(self, '_hourly_reply_count'):
                 self._hourly_reply_count = {}  # {sender_id: {"count": N, "hour": H}}
@@ -1084,12 +1084,7 @@ class WaveMemoryPlugin(Star):
                 tracker["count"] = 0
                 tracker["hour"] = current_hour
             tracker["count"] += 1
-            hourly_limit = 15  # 每人每小时最多触发 bot 15 次
-            if tracker["count"] > hourly_limit:
-                event.should_call_llm(False)
-                if tracker["count"] == hourly_limit + 1:  # 只记一次日志
-                    logger.info(f"[MetaThinking] 每小时上限: {sender_id} 已达 {hourly_limit} 次，本小时不再回复")
-                return
+            # v2.0: 不再硬拦截，把频率信息注入 persona 让 bot 自己判断
 
         # ─── 态度判断由 inject_memory 的 PersonaEvolution 通道统一完成 ───
         # 不再有独立 LLM 调用。bot 在主对话中用自己的人格自然思考态度。
@@ -1284,19 +1279,33 @@ class WaveMemoryPlugin(Star):
             nonlocal persona_text, belief_text, concern_summary, mood_text, mood_traj_text, jargon_text, fewshot_text
             t0 = _time.perf_counter()
             try:
-                # Persona 注入 (带缓存 US-2.2)
+                # Persona 注入（v2.0: 不缓存，含实时状态）
                 if self.persona_evolution:
-                    from .utils.cache import get_cache_manager
-                    cache = get_cache_manager()
                     pe_bot_id = bot_profile.db_id if bot_profile else "bot"
-                    persona_key = f"{sender_id}:{group_id}:{pe_bot_id}"
-                    cached_persona = cache.get("persona", persona_key)
-                    if cached_persona is not None:
-                        persona_text = cached_persona
-                    else:
-                        persona_text = self.persona_evolution.get_persona_injection(sender_id, group_id, bot_id=pe_bot_id) or ""
-                        if persona_text:
-                            cache.set("persona", persona_key, persona_text)
+                    # 构建实时上下文
+                    _rt_ctx = {}
+                    # 本小时 @ 次数
+                    if hasattr(self, '_hourly_reply_count') and sender_id in self._hourly_reply_count:
+                        _rt_ctx["hourly_at_count"] = self._hourly_reply_count[sender_id].get("count", 0)
+                    # bot 上次对此人说了什么
+                    try:
+                        last_reply_row = self.db.conn.execute(
+                            "SELECT content FROM memories WHERE sender_id='bot' AND group_id=? AND content LIKE ? ORDER BY timestamp DESC LIMIT 1",
+                            (group_id, f"%{sender_name or sender_id}%"),
+                        ).fetchone()
+                        if not last_reply_row:
+                            # fallback: 该群最近 bot 回复
+                            last_reply_row = self.db.conn.execute(
+                                "SELECT content FROM memories WHERE sender_id='bot' AND group_id=? ORDER BY timestamp DESC LIMIT 1",
+                                (group_id,),
+                            ).fetchone()
+                        if last_reply_row:
+                            _rt_ctx["last_bot_reply"] = last_reply_row[0][:80]
+                    except Exception:
+                        pass
+                    persona_text = self.persona_evolution.get_persona_injection(
+                        sender_id, group_id, bot_id=pe_bot_id, realtime_ctx=_rt_ctx
+                    ) or ""
 
                 # 信念注入 (带缓存 US-2.2)
                 if hasattr(self, 'belief_engine') and self.belief_engine:
