@@ -1067,6 +1067,24 @@ class WaveMemoryPlugin(Star):
                 logger.info(f"[MetaThinking] 刷屏拦截: {sender_id}")
                 return
 
+        # ─── 硬规则：每小时回复上限（防持续骚扰）───
+        if is_at_bot:
+            if not hasattr(self, '_hourly_reply_count'):
+                self._hourly_reply_count = {}  # {sender_id: {"count": N, "hour": H}}
+            now = time.time()
+            current_hour = int(now // 3600)
+            tracker = self._hourly_reply_count.setdefault(sender_id, {"count": 0, "hour": current_hour})
+            if tracker["hour"] != current_hour:
+                tracker["count"] = 0
+                tracker["hour"] = current_hour
+            tracker["count"] += 1
+            hourly_limit = 15  # 每人每小时最多触发 bot 15 次
+            if tracker["count"] > hourly_limit:
+                event.should_call_llm(False)
+                if tracker["count"] == hourly_limit + 1:  # 只记一次日志
+                    logger.info(f"[MetaThinking] 每小时上限: {sender_id} 已达 {hourly_limit} 次，本小时不再回复")
+                return
+
         # ─── 态度判断由 inject_memory 的 PersonaEvolution 通道统一完成 ───
         # 不再有独立 LLM 调用。bot 在主对话中用自己的人格自然思考态度。
         # 好感度变化靠 LifecycleService 互动频率 + 极端事件规则驱动。
