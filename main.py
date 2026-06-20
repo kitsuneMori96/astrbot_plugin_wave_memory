@@ -1599,6 +1599,8 @@ class WaveMemoryPlugin(Star):
                 parts_detail.append("facts")
             if persona_text:
                 parts_detail.append("persona")
+            if timeline_text:
+                parts_detail.append("timeline")
             if belief_text:
                 parts_detail.append("belief")
             if concern_summary:
