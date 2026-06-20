@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, Dict, List, Optional
 
@@ -18,17 +19,44 @@ class JargonService:
         self._db = db
         self._enabled = enabled
         self._config = config or {}
-        self._filter = JargonStatisticalFilter()
-        self._inference = JargonInferenceEngine(llm_client) if llm_client else None
+        self._llm = llm_client
+
+        # 从配置读取参数（改动4：全部参数配置化）
+        self._min_frequency = int(self._config.get("min_frequency", 5))
+        self._global_threshold = int(self._config.get("global_threshold", 3))
+        self._min_messages = int(self._config.get("min_messages", 10))
+        self._mine_cooldown = int(self._config.get("mine_cooldown", 20))
+        self._top_k = int(self._config.get("top_k", 20))
+        self._max_context = int(self._config.get("max_context", 15))
+        self._context_keep = int(self._config.get("context_keep", 10))
+        self._window_days = int(self._config.get("window_days", 7))
+        self._jieba_threshold = int(self._config.get("jieba_threshold", 100))
+        self._llm_validate = bool(self._config.get("llm_validate", False))
+
+        # 递进推断阈值（改动1）
+        thresholds_str = str(self._config.get("inference_thresholds", "3,6,10,20,40,60,100"))
+        self._inference_thresholds = [int(x.strip()) for x in thresholds_str.split(",") if x.strip()]
+
+        # 权重参数
+        self._weight_idf = float(self._config.get("weight_idf", 0.4))
+        self._weight_burst = float(self._config.get("weight_burst", 0.3))
+        self._weight_concentration = float(self._config.get("weight_concentration", 0.3))
+
+        # 构造子组件，传入配置
+        self._filter = JargonStatisticalFilter(
+            context_keep=self._context_keep,
+            window_days=self._window_days,
+            jieba_threshold=self._jieba_threshold,
+            weight_idf=self._weight_idf,
+            weight_burst=self._weight_burst,
+            weight_concentration=self._weight_concentration,
+        )
+        self._inference = JargonInferenceEngine(llm_client, max_context=self._max_context) if llm_client else None
         self._injector = JargonInjector(db, max_inject=int(self._config.get("max_inject", 3)))
         # 挖掘冷却: group_id -> last_mine_ts
         self._last_mine: Dict[str, float] = {}
         # 消息计数: group_id -> count since last mine
         self._msg_count: Dict[str, int] = {}
-
-        # 从配置读取参数
-        self._min_frequency = int(self._config.get("min_frequency", 5))
-        self._global_threshold = int(self._config.get("global_threshold", 3))
 
         # 确保 jargon 表存在
         self._ensure_table()
@@ -92,17 +120,17 @@ class JargonService:
         self._msg_count[group_id] = self._msg_count.get(group_id, 0) + 1
 
     def should_mine(self, group_id: str) -> bool:
-        """判断是否应该触发挖掘（每 10 条消息 + 20s 冷却）。"""
+        """判断是否应该触发挖掘（min_messages 条消息 + mine_cooldown 冷却）。"""
         count = self._msg_count.get(group_id, 0)
-        if count < 10:
+        if count < self._min_messages:
             return False
         last = self._last_mine.get(group_id, 0)
-        if time.time() - last < 20:
+        if time.time() - last < self._mine_cooldown:
             return False
         return True
 
     async def mine(self, group_id: str) -> List[Dict]:
-        """执行一次挖掘：统计筛选 + LLM 推断。返回新发现的黑话列表。"""
+        """执行一次挖掘：统计筛选 + (可选)LLM验证 + LLM 推断。返回新发现的黑话列表。"""
         if not self._enabled:
             return []
 
@@ -110,11 +138,18 @@ class JargonService:
         self._last_mine[group_id] = time.time()
 
         # Step 1: 统计候选
-        candidates = self._filter.get_candidates(group_id, min_freq=self._min_frequency, top_k=10)
+        candidates = self._filter.get_candidates(group_id, min_freq=self._min_frequency, top_k=self._top_k)
         if not candidates:
             return []
 
         logger.info(f"[Jargon] 挖掘 {group_id}: {len(candidates)} 候选")
+
+        # Step 1.5: LLM 批量验证（改动3，开关控制）
+        if self._llm_validate and self._llm and candidates:
+            candidates = await self._llm_validate_candidates(candidates, group_id)
+            if not candidates:
+                return []
+            logger.info(f"[Jargon] LLM 验证通过: {len(candidates)} 候选")
 
         results = []
         now = int(time.time())
@@ -125,16 +160,46 @@ class JargonService:
 
             # 检查是否已存在
             existing = self._db.conn.execute(
-                "SELECT id, frequency, is_jargon FROM jargon WHERE group_id = ? AND word = ?",
+                "SELECT id, frequency, is_jargon, last_infer_freq FROM jargon WHERE group_id = ? AND word = ?",
                 (group_id, word),
             ).fetchone()
 
             if existing:
-                # 已存在：更新频率
-                self._db.conn.execute(
-                    "UPDATE jargon SET frequency = ?, updated_at = ? WHERE id = ?",
-                    (cand["frequency"], now, existing[0]),
-                )
+                row_id, old_freq, old_is_jargon, last_infer_freq = existing
+                current_freq = cand["frequency"]
+                last_infer_freq = last_infer_freq or 0
+
+                # 改动1：递进重推机制
+                if self._should_reinfer(current_freq, last_infer_freq):
+                    logger.debug(f"[Jargon] 重推 '{word}': freq {last_infer_freq} → {current_freq}")
+                    is_jargon = None
+                    meaning = ""
+                    confidence = 0.0
+
+                    if self._inference and contexts:
+                        try:
+                            result = await self._inference.infer(word, contexts)
+                            is_jargon = result.get("is_jargon")
+                            meaning = result.get("meaning", "")
+                            confidence = result.get("confidence", 0.0)
+                        except Exception as e:
+                            logger.debug(f"[Jargon] reinfer error for '{word}': {e}")
+
+                    # 更新 DB：frequency + meaning + is_jargon + last_infer_freq
+                    self._db.conn.execute(
+                        """UPDATE jargon SET frequency = ?, meaning = ?, is_jargon = ?,
+                           confidence = ?, last_infer_freq = ?, updated_at = ? WHERE id = ?""",
+                        (current_freq, meaning, is_jargon, confidence, current_freq, now, row_id),
+                    )
+
+                    if is_jargon:
+                        results.append({"word": word, "meaning": meaning, "confidence": confidence})
+                else:
+                    # 仅更新频率
+                    self._db.conn.execute(
+                        "UPDATE jargon SET frequency = ?, updated_at = ? WHERE id = ?",
+                        (current_freq, now, row_id),
+                    )
                 continue
 
             # 新候选：尝试 LLM 推断
@@ -151,12 +216,13 @@ class JargonService:
                 except Exception as e:
                     logger.debug(f"[Jargon] inference error for '{word}': {e}")
 
-            # 写入 DB
-            import json
+            # 写入 DB（last_infer_freq = 当前频次）
             self._db.conn.execute(
-                """INSERT OR IGNORE INTO jargon (word, meaning, is_jargon, frequency, confidence, group_id, contexts, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (word, meaning, is_jargon, cand["frequency"], confidence, group_id, json.dumps(contexts, ensure_ascii=False), now, now),
+                """INSERT OR IGNORE INTO jargon
+                   (word, meaning, is_jargon, frequency, confidence, group_id, contexts, last_infer_freq, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (word, meaning, is_jargon, cand["frequency"], confidence, group_id,
+                 json.dumps(contexts, ensure_ascii=False), cand["frequency"], now, now),
             )
 
             if is_jargon:
@@ -168,6 +234,57 @@ class JargonService:
         self._check_global_promotion()
 
         return results
+
+    def _should_reinfer(self, current_freq: int, last_infer_freq: int) -> bool:
+        """判断是否需要重新推断（改动1：递进重推机制）。"""
+        for threshold in self._inference_thresholds:
+            if last_infer_freq < threshold <= current_freq:
+                return True
+        return False
+
+    async def _llm_validate_candidates(self, candidates: List[Dict], group_id: str) -> List[Dict]:
+        """改动3：LLM 批量验证候选词是否真是黑话。"""
+        # 构建近期聊天片段
+        all_contexts = []
+        for cand in candidates:
+            all_contexts.extend(cand.get("contexts", []))
+        chat_snippet = "\n".join(f"- {c}" for c in all_contexts[:20])
+
+        term_list = ", ".join(cand["word"] for cand in candidates)
+
+        validate_prompt = f"""**近期聊天片段**
+{chat_snippet}
+
+**候选词列表**
+{term_list}
+
+请判断以上候选词中，哪些是该群组的黑话/俚语/暗语/缩写。
+
+必须同时满足：
+- 脱离该群组语境后普通人无法理解
+- 在近期聊天中有明确上下文支撑
+- 不是普通词、昵称、人名、品牌名
+
+以JSON数组输出确认是黑话的词条：["词1", "词2"]
+如果没有，输出空数组 []"""
+
+        try:
+            import re
+            response = await self._llm.text_chat(prompt=validate_prompt)
+            if not response or not response.completion_text:
+                return candidates  # LLM 失败则不过滤
+            text = response.completion_text.strip()
+            # 提取 JSON 数组
+            text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.MULTILINE)
+            text = re.sub(r'```\s*$', '', text, flags=re.MULTILINE)
+            match = re.search(r'\[[\s\S]*?\]', text)
+            if match:
+                validated_words = set(json.loads(match.group()))
+                return [c for c in candidates if c["word"] in validated_words]
+        except Exception as e:
+            logger.debug(f"[Jargon] LLM validate error: {e}")
+
+        return candidates  # 解析失败则不过滤
 
     def get_injection(self, text: str, group_id: str) -> str:
         """获取黑话注入文本 (US-4.3)。"""

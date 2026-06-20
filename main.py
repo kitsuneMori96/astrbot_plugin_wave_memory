@@ -111,7 +111,7 @@ def _parse_bot_config(cfg: dict, fallback_db_id: str = "") -> BotProfile:
     "astrbot_plugin_wave_memory",
     "vivy1024",
     "高性能记忆 + 灵魂引擎 + 知识图谱插件。五阶段零 LLM 检索管线、BDI 心智架构（信念/欲望/关切）、黑话学习、风格范例注入、交互式知识图谱可视化。",
-    "2.0.0",
+    "2.1.0",
     "https://github.com/vivy1024/astrbot_plugin_wave_memory",
 )
 class WaveMemoryPlugin(Star):
@@ -255,12 +255,35 @@ class WaveMemoryPlugin(Star):
         self.data_dir = os.path.join(data_path, "plugin_data", "astrbot_plugin_wave_memory")
         os.makedirs(self.data_dir, exist_ok=True)
 
+        # 自动备份 DB
+        import shutil
+        from pathlib import Path
+        from datetime import datetime
+
+        _db_file = Path(self.data_dir) / "wave_memory.db"
+        if _db_file.exists():
+            _backup_dir = Path(self.data_dir) / "backups"
+            _backup_dir.mkdir(exist_ok=True)
+            _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            _backup_file = _backup_dir / f"wave_memory_{_ts}.db"
+            shutil.copy2(str(_db_file), str(_backup_file))
+            logger.info(f"[WaveMemory] DB backup created: {_backup_file.name}")
+            # 保留最近 N 个备份
+            _max_backups = self.config.get("backup_max_count", 5)
+            _backups = sorted(_backup_dir.glob("wave_memory_*.db"))
+            for _old in _backups[:-_max_backups]:
+                _old.unlink()
+                logger.debug(f"[WaveMemory] Removed old backup: {_old.name}")
+
         # 初始化核心组件
         db_path = os.path.join(self.data_dir, "wave_memory.db")
         index_path = os.path.join(self.data_dir, "memory.hnsw")
         tag_index_path = os.path.join(self.data_dir, "tags.hnsw")
 
         self.db = WaveMemoryDB(db_path, dimension=self.dimension)
+        # facts 时间衰减配置
+        self._facts_decay_rate = float(storage_cfg.get("facts_decay_rate", "0.005"))
+        self.db.set_facts_decay_rate(self._facts_decay_rate)
 
         self.memory_index = VectorIndex(
             dimension=self.dimension,
@@ -456,6 +479,25 @@ class WaveMemoryPlugin(Star):
 
     async def initialize(self):
         """AstrBot 完成 handler 绑定后调用。"""
+        # ─── 一次性数据迁移（v2.1）───
+        from pathlib import Path
+        migration_marker = Path(self.data_dir) / ".v2_1_migrated"
+        if not migration_marker.exists():
+            try:
+                from .engine.db.migrations.v2_1_cleanup import run_migration
+                db_path = os.path.join(self.data_dir, "wave_memory.db")
+                bot_ids_for_migration = {
+                    "qq_ids": [p.qq_id for p in self._bot_registry.values() if p.qq_id],
+                    "db_ids": [p.db_id for p in self._bot_registry.values() if p.db_id],
+                    "names": [p.name for p in self._bot_registry.values() if p.name],
+                }
+                success = run_migration(str(db_path), bot_ids_for_migration)
+                if success:
+                    migration_marker.touch()
+                    logger.info("[WaveMemory] v2.1 migration completed, marker created")
+            except Exception as e:
+                logger.warning(f"[WaveMemory] v2.1 migration failed (non-fatal): {e}")
+
         # 启动写入器
         self.writer.start()
 
@@ -581,6 +623,17 @@ class WaveMemoryPlugin(Star):
             self.lifecycle.start()
             # LLM 摘要整合
             if self.enable_consolidation and self.tag_llm_provider_id:
+                # 构建 bot 标识集合，用于排除 bot 自己作为 fact subject
+                _bot_ids_set = set()
+                for _bp in self._bot_registry.values():
+                    _bot_ids_set.add(_bp.qq_id)
+                    if _bp.db_id:
+                        _bot_ids_set.add(_bp.db_id)
+                    if _bp.name:
+                        _bot_ids_set.add(_bp.name)
+                    _bot_ids_set.update(_bp.aliases)
+                _bot_ids_set.discard("")
+
                 self.consolidation = ConsolidationService(
                     db=self.db,
                     context=self.context,
@@ -588,6 +641,7 @@ class WaveMemoryPlugin(Star):
                     interval_hours=self.consolidation_interval_hours,
                     topic_backfill=self.consolidation_topic_backfill,
                     skip_topics=self.consolidation_skip_topics,
+                    bot_identifiers=_bot_ids_set,
                 )
                 self.consolidation.start()
             else:
@@ -780,7 +834,7 @@ class WaveMemoryPlugin(Star):
         if self.enable_consolidation and not getattr(self, "consolidation", None):
             logger.warning("[WaveMemory] consolidation 未就绪（LLM 不可用？），belief_engine 将独立运行")
         soul_bot = experience_bot or reflect_bot
-        soul_bot_id = soul_bot.qq_id if soul_bot else ""
+        soul_bot_id = soul_bot.db_id if soul_bot else ""
         # 信念引擎（提取在 consolidation 内触发，注入在 on_llm_request）
         try:
             if self.tag_llm_provider_id and soul_bot_id:
@@ -1379,17 +1433,30 @@ class WaveMemoryPlugin(Star):
                 params = []
                 for kw in keywords:
                     params.extend([f"%{kw}%", f"%{kw}%"])
+                # 多取一些，衰减排序后再截断
+                fetch_limit = self.facts_max * 3
                 rows = self.db.conn.execute(
-                    f"SELECT rowid, subject, predicate, object FROM facts WHERE {conditions} ORDER BY confidence DESC LIMIT ?",
-                    params + [self.facts_max],
+                    f"SELECT rowid, subject, predicate, object, confidence, last_reinforced, created_at FROM facts WHERE {conditions} ORDER BY confidence DESC LIMIT ?",
+                    params + [fetch_limit],
                 ).fetchall()
                 if rows:
-                    lines = [f"{r[1]} {r[2]} {r[3]}" for r in rows]
-                    hit_rowids = {r[0] for r in rows}
+                    # 应用时间衰减排序
+                    _now = _time.time()
+                    _rate = self._facts_decay_rate
+
+                    def _eff_conf(r):
+                        lr = r[5] or r[6] or _now
+                        age = (_now - lr) / 86400
+                        decay = max(0.1, 1.0 - age * _rate) if _rate > 0 else 1.0
+                        return (r[4] or 1.0) * decay
+
+                    sorted_rows = sorted(rows, key=_eff_conf, reverse=True)[:self.facts_max]
+                    lines = [f"{r[1]} {r[2]} {r[3]}" for r in sorted_rows]
+                    hit_rowids = {r[0] for r in sorted_rows}
 
                     # v1.3.0: 1-跳关联扩展 (D-5)
                     hit_entities = set()
-                    for r in rows:
+                    for r in sorted_rows:
                         if r[1]:
                             hit_entities.add(r[1])
                         if r[3]:

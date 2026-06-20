@@ -49,8 +49,9 @@ _COMPARE_INFERENCES = """你是一个语义分析专家。
 class JargonInferenceEngine:
     """黑话三步推断引擎。"""
 
-    def __init__(self, llm_client: Any):
+    def __init__(self, llm_client: Any, max_context: int = 15):
         self._llm = llm_client
+        self._max_context = max_context
 
     async def infer(self, word: str, contexts: List[str]) -> Dict[str, Any]:
         """三步推断法：返回 {"is_jargon": bool, "meaning": str, "confidence": float}。"""
@@ -79,7 +80,7 @@ class JargonInferenceEngine:
 
     async def _step_with_context(self, word: str, contexts: List[str]) -> str:
         """Step 1: 基于上下文推断含义。"""
-        ctx_text = "\n".join(f"- {c}" for c in contexts[:5])
+        ctx_text = "\n".join(f"- {c}" for c in contexts[:self._max_context])
         prompt = _INFER_WITH_CONTEXT.format(word=word, contexts=ctx_text)
         result = await self._call_llm(prompt)
         if result.get("no_info"):

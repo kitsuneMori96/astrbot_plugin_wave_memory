@@ -41,14 +41,23 @@ _COMMON_WORDS: Set[str] = {
 class JargonStatisticalFilter:
     """词频统计器 — 发现高频非常规词作为黑话候选。"""
 
-    def __init__(self):
+    def __init__(self, context_keep: int = 10, window_days: int = 7,
+                 jieba_threshold: int = 100,
+                 weight_idf: float = 0.4, weight_burst: float = 0.3,
+                 weight_concentration: float = 0.3):
+        self._context_keep = context_keep
+        self._window_days = window_days
+        self._jieba_threshold = jieba_threshold
+        self._weight_idf = weight_idf
+        self._weight_burst = weight_burst
+        self._weight_concentration = weight_concentration
         # group_id -> {word: count}
         self._group_freq: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
         # group_id -> {word: first_seen_ts}
         self._first_seen: Dict[str, Dict[str, float]] = defaultdict(dict)
         # group_id -> {word: set(user_ids)}
         self._user_freq: Dict[str, Dict[str, Set[str]]] = defaultdict(lambda: defaultdict(set))
-        # group_id -> {word: [context_snippets]}  最多保留 5 条
+        # group_id -> {word: [context_snippets]}
         self._contexts: Dict[str, Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
 
     def feed(self, text: str, group_id: str, sender_id: str = "") -> None:
@@ -65,11 +74,11 @@ class JargonStatisticalFilter:
                 self._user_freq[group_id][w].add(sender_id)
             # 保留上下文
             ctx_list = self._contexts[group_id][w]
-            if len(ctx_list) < 5:
+            if len(ctx_list) < self._context_keep:
                 ctx_list.append(text[:100])
 
     def get_candidates(self, group_id: str, min_freq: int = 5, top_k: int = 20) -> List[Dict]:
-        """获取候选黑话词（7 天内频率 >= min_freq 的非常规词）。
+        """获取候选黑话词（window_days 天内频率 >= min_freq 的非常规词）。
 
         Returns: [{"word": str, "frequency": int, "score": float, "contexts": [...]}]
         """
@@ -77,7 +86,7 @@ class JargonStatisticalFilter:
             return []
 
         now = time.time()
-        seven_days_ago = now - 7 * 86400
+        window_ago = now - self._window_days * 86400
         freq = self._group_freq.get(group_id, {})
         total_groups = len(self._group_freq) or 1
 
@@ -86,8 +95,8 @@ class JargonStatisticalFilter:
             if count < min_freq:
                 continue
             first_seen = self._first_seen.get(group_id, {}).get(word, now)
-            if first_seen < seven_days_ago:
-                continue  # 太老的词不算
+            if first_seen < window_ago:
+                continue  # 超出窗口的词不算
 
             # 是否为标准词
             if self._is_standard_word(word):
@@ -107,13 +116,15 @@ class JargonStatisticalFilter:
             unique_users = len(self._user_freq.get(group_id, {}).get(word, set())) or 1
             concentration = 1.0 / unique_users
 
-            score = 0.4 * idf + 0.3 * min(burst / 10, 1.0) + 0.3 * concentration
+            score = (self._weight_idf * idf +
+                     self._weight_burst * min(burst / 10, 1.0) +
+                     self._weight_concentration * concentration)
 
             candidates.append({
                 "word": word,
                 "frequency": count,
                 "score": round(score, 3),
-                "contexts": self._contexts.get(group_id, {}).get(word, [])[:3],
+                "contexts": self._contexts.get(group_id, {}).get(word, [])[:self._context_keep],
             })
 
         candidates.sort(key=lambda x: x["score"], reverse=True)
@@ -143,6 +154,6 @@ class JargonStatisticalFilter:
         """检查是否为标准词典词。"""
         if not _HAS_JIEBA:
             return False
-        # jieba 内置词频 > 100 视为常用词
+        # jieba 内置词频 > jieba_threshold 视为常用词
         freq = getattr(jieba.dt, 'FREQ', {}).get(word, 0)
-        return freq > 100
+        return freq > self._jieba_threshold

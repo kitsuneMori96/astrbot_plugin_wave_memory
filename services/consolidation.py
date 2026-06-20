@@ -11,6 +11,7 @@ from typing import Optional
 from astrbot.api import logger
 
 from ..engine.database import WaveMemoryDB
+from ..engine.fact_classifier import classify_fact
 
 
 CONSOLIDATION_PROMPT = """从以下群聊消息中提取结构化知识。
@@ -69,6 +70,7 @@ class ConsolidationService:
         topic_backfill: bool = True,
         skip_topics: list = None,
         belief_engine=None,
+        bot_identifiers: set = None,
     ):
         self.db = db
         self.context = context
@@ -78,6 +80,7 @@ class ConsolidationService:
         self.topic_backfill = topic_backfill
         self.skip_topics = set(skip_topics or ["日常闲聊", "日常灌水", "闲聊", "灌水", "群聊", "聊天", "日常"])
         self.belief_engine = belief_engine
+        self._bot_identifiers: set = bot_identifiers or set()
         self._task: Optional[asyncio.Task] = None
         self._running = False
         self._last_consolidated_ts: float = 0
@@ -505,6 +508,14 @@ class ConsolidationService:
             # v2.0: subject 映射为 QQ 号（统一身份）
             subject = self._resolve_to_qq(subject)
 
+            # 排除 bot 自己作为 subject — bot 说的话不是"关于 bot 的事实"
+            if self._bot_identifiers and subject in self._bot_identifiers:
+                logger.debug(f"[Consolidation] Skip bot self-fact: {subject}")
+                continue
+
+            # 分类 fact 类型（决定衰减速率）
+            fact_type = classify_fact(subject, predicate, obj)
+
             try:
                 self.db.insert_fact(
                     subject=subject,
@@ -512,6 +523,7 @@ class ConsolidationService:
                     obj=obj,
                     group_id=group_id,
                     source_memory_id=source_memory_id,
+                    fact_type=fact_type,
                 )
                 written += 1
             except Exception:

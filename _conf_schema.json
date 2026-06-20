@@ -356,6 +356,19 @@
         "hint": "每日自动清理低重要性记忆",
         "type": "bool",
         "default": false
+      },
+      "facts_decay_rate": {
+        "description": "Facts 时间衰减速率",
+        "hint": "facts 按未强化天数线性衰减。0.005=200天衰减到最低，0.01=100天，0=禁用衰减",
+        "type": "string",
+        "default": "0.005",
+        "_note": "实际为浮点数,string 是 AstrBot 配置系统限制"
+      },
+      "backup_max_count": {
+        "description": "最大备份数",
+        "hint": "启动时自动备份DB，保留最近N个备份文件",
+        "type": "int",
+        "default": 5
       }
     }
   },
@@ -672,9 +685,81 @@
       },
       "min_frequency": {
         "description": "最低频率阈值",
-        "hint": "7 天内出现次数 >= 此值的词才进入候选",
+        "hint": "窗口内出现次数 >= 此值的词才进入候选",
         "type": "int",
         "default": 5
+      },
+      "min_messages": {
+        "description": "触发挖掘消息数",
+        "hint": "累积多少条消息后触发一次挖掘",
+        "type": "int",
+        "default": 10
+      },
+      "mine_cooldown": {
+        "description": "挖掘冷却秒数",
+        "hint": "两次挖掘之间的最小间隔（秒）",
+        "type": "int",
+        "default": 20
+      },
+      "top_k": {
+        "description": "候选词数量",
+        "hint": "每次挖掘取前N个候选",
+        "type": "int",
+        "default": 20
+      },
+      "max_context": {
+        "description": "推断上下文条数",
+        "hint": "推断时给LLM的上下文条数",
+        "type": "int",
+        "default": 15
+      },
+      "context_keep": {
+        "description": "上下文保留数",
+        "hint": "内存中每个词保留的上下文条数",
+        "type": "int",
+        "default": 10
+      },
+      "window_days": {
+        "description": "统计窗口天数",
+        "hint": "只统计窗口天数内的词频",
+        "type": "int",
+        "default": 7
+      },
+      "jieba_threshold": {
+        "description": "常用词排除阈值",
+        "hint": "jieba词频>此值视为常用词排除",
+        "type": "int",
+        "default": 100
+      },
+      "inference_thresholds": {
+        "description": "递进推断阈值",
+        "hint": "递进推断频次阈值（逗号分隔），词频跨过阈值时触发重推",
+        "type": "str",
+        "default": "3,6,10,20,40,60,100"
+      },
+      "llm_validate": {
+        "description": "LLM候选验证",
+        "hint": "开启LLM批量验证候选词（增加token消耗）",
+        "type": "bool",
+        "default": false
+      },
+      "weight_idf": {
+        "description": "IDF权重",
+        "hint": "IDF权重（跨群稀有度）",
+        "type": "float",
+        "default": 0.4
+      },
+      "weight_burst": {
+        "description": "Burst权重",
+        "hint": "Burst权重（短时高频）",
+        "type": "float",
+        "default": 0.3
+      },
+      "weight_concentration": {
+        "description": "集中度权重",
+        "hint": "用户集中度权重",
+        "type": "float",
+        "default": 0.3
       },
       "max_inject": {
         "description": "单次最多注入黑话解释数",

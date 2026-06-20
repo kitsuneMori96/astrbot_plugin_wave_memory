@@ -8,6 +8,7 @@ from typing import Optional
 import numpy as np
 
 from .connection import ConnectionManager
+from ..fact_classifier import get_decay_rate
 
 
 class KnowledgeRepo:
@@ -15,7 +16,12 @@ class KnowledgeRepo:
 
     def __init__(self, cm: ConnectionManager):
         self.cm = cm
+        self._decay_rate: float = 0.005  # 默认衰减速率，可通过 set_decay_rate 修改
         self._create_tables()
+
+    def set_decay_rate(self, rate: float):
+        """设置 facts 时间衰减速率。0=禁用衰减。"""
+        self._decay_rate = max(0.0, rate)
 
     def _create_tables(self):
         self.cm.executescript("""
@@ -67,31 +73,72 @@ class KnowledgeRepo:
         group_id: str = None,
         source_memory_id: int = None,
         confidence: float = 0.8,
+        fact_type: str = None,
     ) -> int:
+        now = time.time()
         existing = self.cm.execute_read(
             "SELECT id FROM facts WHERE subject = ? AND predicate = ? AND object = ?",
             (subject, predicate, obj),
         ).fetchone()
         if existing:
-            self.cm.execute_write(
-                "UPDATE facts SET confidence = MAX(confidence, ?), valid_from = ? WHERE id = ?",
-                (confidence, time.time(), existing[0]),
-            )
+            # 已存在：更新 confidence + last_reinforced；如果传了 fact_type 也更新
+            if fact_type:
+                self.cm.execute_write(
+                    "UPDATE facts SET confidence = MAX(confidence, ?), valid_from = ?, last_reinforced = ?, fact_type = ? WHERE id = ?",
+                    (confidence, now, now, fact_type, existing[0]),
+                )
+            else:
+                self.cm.execute_write(
+                    "UPDATE facts SET confidence = MAX(confidence, ?), valid_from = ?, last_reinforced = ? WHERE id = ?",
+                    (confidence, now, now, existing[0]),
+                )
+            self.cm.commit()
             return existing[0]
         cursor = self.cm.execute_write(
-            """INSERT INTO facts (subject, predicate, object, group_id, source_memory_id, confidence, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (subject, predicate, obj, group_id, source_memory_id, confidence, time.time()),
+            """INSERT INTO facts (subject, predicate, object, group_id, source_memory_id, confidence, created_at, last_reinforced, fact_type)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (subject, predicate, obj, group_id, source_memory_id, confidence, now, now, fact_type or "FACTUAL"),
         )
         self.cm.commit()
         return cursor.lastrowid
 
     def get_facts_by_subject(self, subject: str, limit: int = 20) -> list:
         rows = self.cm.execute_read(
-            "SELECT id, subject, predicate, object, confidence, created_at FROM facts WHERE subject = ? ORDER BY confidence DESC LIMIT ?",
+            "SELECT id, subject, predicate, object, confidence, created_at, last_reinforced, fact_type FROM facts WHERE subject = ? ORDER BY confidence DESC LIMIT ?",
             (subject, limit),
         ).fetchall()
-        return [{"id": r[0], "subject": r[1], "predicate": r[2], "object": r[3], "confidence": r[4], "created_at": r[5]} for r in rows]
+        facts = [
+            {"id": r[0], "subject": r[1], "predicate": r[2], "object": r[3],
+             "confidence": r[4], "created_at": r[5], "last_reinforced": r[6],
+             "fact_type": r[7] or "FACTUAL"}
+            for r in rows
+        ]
+        return self._apply_decay(facts)
+
+    def _apply_decay(self, facts: list, decay_rate: float = None) -> list:
+        """对 facts 应用时间衰减（按 fact_type 选择速率）。
+
+        如果 fact 有 fact_type 字段，使用该类型对应的速率；
+        否则 fallback 到实例 _decay_rate 或参数 decay_rate。
+        衰减只影响排序权重，不删除数据。
+        """
+        base_rate = decay_rate if decay_rate is not None else self._decay_rate
+        if base_rate <= 0 and not any(f.get("fact_type") for f in facts):
+            return facts
+        now = time.time()
+        for fact in facts:
+            last_reinforced = fact.get("last_reinforced") or fact.get("created_at") or now
+            age_days = (now - last_reinforced) / 86400
+            # 按类型选速率，无类型则用 base_rate
+            fact_type = fact.get("fact_type", "FACTUAL")
+            rate = get_decay_rate(fact_type, base_rate)
+            if rate <= 0:
+                fact["effective_confidence"] = fact.get("confidence") or 1.0
+            else:
+                decay = max(0.1, 1.0 - age_days * rate)
+                fact["effective_confidence"] = (fact.get("confidence") or 1.0) * decay
+        facts.sort(key=lambda f: f.get("effective_confidence", 0), reverse=True)
+        return facts
 
     def memory_exists_by_hash(self, content_hash: str) -> bool:
         row = self.cm.execute_read(

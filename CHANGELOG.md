@@ -1,5 +1,35 @@
 # Changelog
 
+## v2.1.0 (2026-06-21)
+
+### 数据治理
+
+- **bot_id 统一为 db_id**：beliefs 表 bot_id 从 QQ 号统一为 db_id（如 "yushu"），修复三重身份混乱
+- **consolidation 排除 bot 自我 facts**：bot 名字不再被当作 subject 写入 facts，清除 328 条历史污染
+- **互动计数清零**：重置早期脏数据（seifer=773 等），v2.0 逻辑重新累积
+- **启动自动备份**：每次启动前自动备份 DB，保留最近 N 个（配置 `backup_max_count`，默认 5）
+
+### 黑话学习升级
+
+- **递进重推机制**：词频跨过阈值 [3,6,10,20,40,60,100] 时重新推断含义，no_info 不再定终身
+- **上下文条数放开**：推断时给 LLM 的上下文从 5 条提升到 15 条（配置 `max_context`）
+- **LLM 候选验证**（可选）：统计候选后用 LLM 批量验证，减少噪声词（配置 `llm_validate`）
+- **全部参数配置化**：新增 12 个 Jargon_Settings 配置项，消灭所有硬编码
+
+### 记忆精细化
+
+- **facts 时间衰减**：facts 加 `last_reinforced` 字段，被反复提到的事实保鲜，长期没人提的降权（配置 `facts_decay_rate`）
+- **facts 原子类型分类**：新增 5 种类型（EPISODIC/FACTUAL/RELATIONAL/PREFERENCE/PLANNED），差异化衰减速率
+  - 事件类 20 天淡出，身份类几乎不衰减，计划类 33 天淡出
+  - 纯规则分类器，零 LLM 调用
+
+### 新增配置项
+
+| 配置组 | 新增项 |
+|--------|--------|
+| Jargon_Settings | min_messages, mine_cooldown, top_k, max_context, context_keep, window_days, jieba_threshold, inference_thresholds, llm_validate, weight_idf, weight_burst, weight_concentration |
+| Storage_Settings | facts_decay_rate, backup_max_count |
+
 ## v2.0.0 (2026-06-19)
 
 ### 认知架构升级
