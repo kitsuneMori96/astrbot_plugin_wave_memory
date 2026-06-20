@@ -166,45 +166,42 @@ class WaveMemoryPlugin(Star):
         self.enable_geodesic = query_cfg.get("enable_geodesic_rerank", True)
         self.enable_shotgun = query_cfg.get("enable_shotgun", False)
 
-        # ─── 配置自愈：检测"全关"损坏状态并自动修复 ───
-        # 触发条件：enable_auto_inject=False 且 4 个高级检索也全 False
-        # 根因：AstrBot 配置页保存会把所有表单字段写入，未勾选的 bool 写 False
-        # 全部同时为 False 几乎不可能是用户故意的，视为配置损坏
-        _all_off = (not self.enable_auto_inject
-                    and not self.enable_spike
-                    and not self.enable_pyramid
-                    and not self.enable_epa
-                    and not self.enable_geodesic)
-        if _all_off:
-            logger.warning("[WaveMemory] 🔧 检测到配置损坏（全部高级检索+自动注入被关闭），执行自愈恢复为 True")
+        # ─── 配置自愈：核心开关被关则强制恢复 ───
+        # 根因：AstrBot 配置页保存是全量覆盖，未渲染的 bool 字段写 False
+        # enable_auto_inject 关了 = 插件完全不工作，不存在合理关闭场景
+        if not self.enable_auto_inject:
+            logger.warning("[WaveMemory] 🔧 enable_auto_inject=False，强制恢复（AstrBot 配置覆盖 bug）")
             self.enable_auto_inject = True
+        # 高级检索全关也视为损坏
+        if not any([self.enable_spike, self.enable_pyramid, self.enable_epa, self.enable_geodesic]):
+            logger.warning("[WaveMemory] 🔧 高级检索全部关闭，强制恢复")
             self.enable_spike = True
             self.enable_pyramid = True
             self.enable_epa = True
             self.enable_geodesic = True
-            # 持久化修复到 config.json，防止下次重启再出问题
-            try:
-                import json as _json
-                config_path = os.path.join(get_astrbot_data_path(), "config", "astrbot_plugin_wave_memory_config.json")
-                if os.path.isfile(config_path):
-                    with open(config_path, "r", encoding="utf-8-sig") as f:
-                        raw_cfg = _json.load(f)
-                    qs = raw_cfg.get("Query_Settings", {})
+        # 持久化修复到 config.json
+        _need_fix = False
+        try:
+            import json as _json
+            config_path = os.path.join(get_astrbot_data_path(), "config", "astrbot_plugin_wave_memory_config.json")
+            if os.path.isfile(config_path):
+                with open(config_path, "r", encoding="utf-8-sig") as f:
+                    raw_cfg = _json.load(f)
+                qs = raw_cfg.get("Query_Settings", {})
+                if qs.get("enable_auto_inject") is False:
                     qs["enable_auto_inject"] = True
-                    qs["enable_spike_routing"] = True
-                    qs["enable_residual_pyramid"] = True
-                    qs["enable_epa"] = True
-                    qs["enable_geodesic_rerank"] = True
+                    _need_fix = True
+                for _k in ["enable_spike_routing", "enable_residual_pyramid", "enable_epa", "enable_geodesic_rerank"]:
+                    if qs.get(_k) is False:
+                        qs[_k] = True
+                        _need_fix = True
+                if _need_fix:
                     raw_cfg["Query_Settings"] = qs
                     with open(config_path, "w", encoding="utf-8") as f:
                         _json.dump(raw_cfg, f, ensure_ascii=False, indent=2)
                     logger.info("[WaveMemory] ✅ 配置自愈完成，已写回 config.json")
-            except Exception as e:
-                logger.warning(f"[WaveMemory] 配置自愈写回失败: {e}")
-        elif not self.enable_auto_inject:
-            logger.warning("[WaveMemory] ⚠️ enable_auto_inject=False，记忆注入已关闭！如非刻意请在 AstrBot 配置中开启")
-        elif not any([self.enable_spike, self.enable_pyramid, self.enable_epa, self.enable_geodesic]):
-            logger.warning("[WaveMemory] ⚠️ 所有高级检索模块均关闭，仅使用基础向量检索。如非刻意请在配置中开启")
+        except Exception as e:
+            logger.debug(f"[WaveMemory] 配置自愈写回跳过: {e}")
         self.max_memories = int(storage_cfg.get("max_memories", 100000))
 
         # WebUI 配置
