@@ -126,12 +126,15 @@ class ConsolidationService:
         since = self._last_consolidated_ts or (now - self.interval)
 
         # 按 group_id 分组
-        groups = self.db.conn.execute(
-            """SELECT DISTINCT group_id FROM memories
-               WHERE timestamp > ? AND memory_type = 'message'
-                 AND sender_id NOT IN ('bot_self', 'angel_memory_import', 'livingmemory_import', 'legacy_import')""",
-            (since,),
-        ).fetchall()
+        def _fetch_groups():
+            return self.db.conn.execute(
+                """SELECT DISTINCT group_id FROM memories
+                   WHERE timestamp > ? AND memory_type = 'message'
+                     AND sender_id NOT IN ('bot_self', 'angel_memory_import', 'livingmemory_import', 'legacy_import')""",
+                (since,),
+            ).fetchall()
+
+        groups = await asyncio.to_thread(_fetch_groups)
 
         total_consolidated = 0
         total_relations = 0
@@ -146,11 +149,13 @@ class ConsolidationService:
 
         # 记录时间
         self._last_consolidated_ts = now
-        self.db.conn.execute(
-            "INSERT OR REPLACE INTO kv_store (key, value) VALUES ('last_consolidation_ts', ?)",
-            (str(now),),
-        )
-        self.db.conn.commit()
+        def _save_ts():
+            self.db.conn.execute(
+                "INSERT OR REPLACE INTO kv_store (key, value) VALUES ('last_consolidation_ts', ?)",
+                (str(now),),
+            )
+            self.db.conn.commit()
+        await asyncio.to_thread(_save_ts)
 
         if total_consolidated > 0:
             logger.info(
@@ -166,15 +171,18 @@ class ConsolidationService:
 
     async def _consolidate_group(self, group_id: str, since: float, until: float) -> dict:
         """整合一个群的消息。"""
-        messages = self.db.conn.execute(
-            """SELECT id, sender_name, sender_id, content, timestamp
-               FROM memories
-               WHERE group_id = ? AND timestamp BETWEEN ? AND ?
-                 AND memory_type = 'message' AND content IS NOT NULL
-               ORDER BY timestamp ASC
-               LIMIT ?""",
-            (group_id, since, until, self.batch_size),
-        ).fetchall()
+        def _fetch_messages():
+            return self.db.conn.execute(
+                """SELECT id, sender_name, sender_id, content, timestamp
+                   FROM memories
+                   WHERE group_id = ? AND timestamp BETWEEN ? AND ?
+                     AND memory_type = 'message' AND content IS NOT NULL
+                   ORDER BY timestamp ASC
+                   LIMIT ?""",
+                (group_id, since, until, self.batch_size),
+            ).fetchall()
+
+        messages = await asyncio.to_thread(_fetch_messages)
 
         if len(messages) < 5:
             return {"messages": 0, "relations": 0}
@@ -218,24 +226,28 @@ class ConsolidationService:
 
         # 跳过灌水
         if summary == "日常灌水" and not facts:
-            self._write_summary(msg_ids, summary)
+            await asyncio.to_thread(self._write_summary, msg_ids, summary)
             return {"messages": len(msg_ids), "relations": 0}
 
-        # 写入 tag_relations
-        relations_written = self._write_relations(topics, facts, relations)
+        # 写入 tag_relations（在线程中执行，不阻塞事件循环）
+        relations_written = await asyncio.to_thread(self._write_relations, topics, facts, relations)
 
         # 写入人际关系到 facts（关系自动发现）
-        social_written = 0
-        for sr in (social or [])[:3]:
-            a = sr.get("person_a", "").strip()
-            b = sr.get("person_b", "").strip()
-            rel = sr.get("relation", "").strip()
-            if a and b and rel:
-                try:
-                    self.db.insert_fact(a, rel, b, group_id=group_id, confidence=0.7)
-                    social_written += 1
-                except Exception:
-                    pass
+        def _write_social():
+            written = 0
+            for sr in (social or [])[:3]:
+                a = sr.get("person_a", "").strip()
+                b = sr.get("person_b", "").strip()
+                rel = sr.get("relation", "").strip()
+                if a and b and rel:
+                    try:
+                        self.db.insert_fact(a, rel, b, group_id=group_id, confidence=0.7)
+                        written += 1
+                    except Exception:
+                        pass
+            return written
+
+        social_written = await asyncio.to_thread(_write_social)
         if social:
             logger.info(f"[Consolidation] social 提取: raw={len(social)} written={social_written} | {social}")
         elif facts:
@@ -244,31 +256,33 @@ class ConsolidationService:
 
         # v1.3.0: 绰号/别称提取 (D-7)
         nicknames = structured.get("nicknames", [])
-        nicknames_written = 0
-        for nn in (nicknames or [])[:3]:
-            person = nn.get("person", "").strip()
-            called = nn.get("called", "").strip()
-            if person and called and len(called) >= 2:
-                try:
-                    # 写入 facts：person 被称为 called
-                    self.db.insert_fact(person, "被称为", called, group_id=group_id, confidence=0.8)
-                    # 更新 person_registry aliases
-                    self._add_alias(person, called)
-                    nicknames_written += 1
-                except Exception:
-                    pass
+        def _write_nicknames():
+            written = 0
+            for nn in (nicknames or [])[:3]:
+                person = nn.get("person", "").strip()
+                called = nn.get("called", "").strip()
+                if person and called and len(called) >= 2:
+                    try:
+                        self.db.insert_fact(person, "被称为", called, group_id=group_id, confidence=0.8)
+                        self._add_alias(person, called)
+                        written += 1
+                    except Exception:
+                        pass
+            return written
+
+        nicknames_written = await asyncio.to_thread(_write_nicknames)
         if nicknames_written:
             logger.info(f"[Consolidation] 绰号提取: {nicknames_written} 条 | {nicknames}")
 
         # 写入 facts 三元组
-        facts_written = self._write_facts(facts, group_id, msg_ids[0] if msg_ids else None)
+        facts_written = await asyncio.to_thread(self._write_facts, facts, group_id, msg_ids[0] if msg_ids else None)
 
         # 写入 summary
-        self._write_summary(msg_ids, summary)
+        await asyncio.to_thread(self._write_summary, msg_ids, summary)
 
         # 回写 topics 到 memory_tags（让每条消息获得段落级话题标签）
         if self.topic_backfill:
-            self._backfill_topic_tags(msg_ids, topics)
+            await asyncio.to_thread(self._backfill_topic_tags, msg_ids, topics)
 
         # 信念提取：从摘要中提取稳定判断
         if self.belief_engine and summary and summary != "日常灌水":

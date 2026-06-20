@@ -255,7 +255,7 @@ class WaveMemoryPlugin(Star):
         self.data_dir = os.path.join(data_path, "plugin_data", "astrbot_plugin_wave_memory")
         os.makedirs(self.data_dir, exist_ok=True)
 
-        # 自动备份 DB
+        # 自动备份 DB（仅距上次备份 > 1 小时才执行，避免热重载重复备份大文件）
         import shutil
         from pathlib import Path
         from datetime import datetime
@@ -264,16 +264,28 @@ class WaveMemoryPlugin(Star):
         if _db_file.exists():
             _backup_dir = Path(self.data_dir) / "backups"
             _backup_dir.mkdir(exist_ok=True)
-            _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            _backup_file = _backup_dir / f"wave_memory_{_ts}.db"
-            shutil.copy2(str(_db_file), str(_backup_file))
-            logger.info(f"[WaveMemory] DB backup created: {_backup_file.name}")
-            # 保留最近 N 个备份
-            _max_backups = self.config.get("backup_max_count", 5)
-            _backups = sorted(_backup_dir.glob("wave_memory_*.db"))
-            for _old in _backups[:-_max_backups]:
-                _old.unlink()
-                logger.debug(f"[WaveMemory] Removed old backup: {_old.name}")
+            # 检查最近一次备份时间
+            _existing_backups = sorted(_backup_dir.glob("wave_memory_*.db"))
+            _skip_backup = False
+            if _existing_backups:
+                _last_backup_mtime = _existing_backups[-1].stat().st_mtime
+                if (time.time() - _last_backup_mtime) < 3600:  # 1 小时内有备份则跳过
+                    _skip_backup = True
+            if not _skip_backup:
+                _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                _backup_file = _backup_dir / f"wave_memory_{_ts}.db"
+                try:
+                    shutil.copy2(str(_db_file), str(_backup_file))
+                    logger.info(f"[WaveMemory] DB backup created: {_backup_file.name}")
+                except Exception as _e:
+                    logger.warning(f"[WaveMemory] DB backup failed (non-fatal): {_e}")
+                # 保留最近 N 个备份
+                _max_backups = self.config.get("backup_max_count", 5)
+                _existing_backups = sorted(_backup_dir.glob("wave_memory_*.db"))
+                for _old in _existing_backups[:-_max_backups]:
+                    _old.unlink()
+            else:
+                logger.debug("[WaveMemory] Backup skipped (recent backup exists)")
 
         # 初始化核心组件
         db_path = os.path.join(self.data_dir, "wave_memory.db")
@@ -440,6 +452,25 @@ class WaveMemoryPlugin(Star):
 
         # 后台任务追踪
         self._bg_tasks: list[asyncio.Task] = []
+
+        # 服务占位（initialize 中实际创建，防止消息先到时 AttributeError）
+        self.jargon_service = None
+        self.few_shot_service = None
+        self.meta_thinking = None
+        self.dream_service = None
+        self.study_service = None
+        self.self_reflect = None
+        self.consolidation = None
+        self.eviction_service = None
+        self.belief_engine = None
+        self.concern_tracker = None
+        self.mood_trajectory = None
+        self.subjective_time = None
+        self.desire_engine = None
+        self.lifecycle = None
+        self.persona_evolution = None
+        self.webui = None
+        self._terminated = False
 
         logger.info(
             f"[WaveMemory] Init: {self.db.get_memory_count()} memories, "
@@ -908,26 +939,8 @@ class WaveMemoryPlugin(Star):
         _reg("黑话系统", "ok" if getattr(self, 'jargon_service', None) else "off", "" if getattr(self, 'jargon_service', None) else "Jargon 未启用", dependency="LLM Provider + 聊天记录积累")
         _reg("风格学习", "ok" if getattr(self, 'few_shot_service', None) else "off", "" if getattr(self, 'few_shot_service', None) else "FewShot 未启用", dependency="LLM Provider + bot 回复积累")
 
-        # 高频互动者缓存预热 (US-2.3)
-        try:
-            from .utils.cache import get_cache_manager
-            cache_mgr = get_cache_manager()
-            top_users = self.db.conn.execute(
-                """SELECT sender_id, sender_name FROM memories
-                   WHERE timestamp > strftime('%s','now') - 604800
-                   GROUP BY sender_id ORDER BY COUNT(*) DESC LIMIT 20"""
-            ).fetchall()
-            preloaded = 0
-            for uid, uname in top_users:
-                if uid and self.persona_evolution:
-                    persona_text = self.persona_evolution.get_persona_injection(uid, None, bot_id="bot")
-                    if persona_text:
-                        cache_mgr.set("persona", f"{uid}:None:bot", persona_text)
-                        preloaded += 1
-            if preloaded:
-                logger.info(f"[WaveMemory] 缓存预热: {preloaded} 个高频互动者 persona")
-        except Exception as e:
-            logger.debug(f"[WaveMemory] 缓存预热跳过: {e}")
+        # 高频互动者缓存预热 (US-2.3) — 异步执行，不阻塞启动
+        self._spawn(self._async_cache_warmup())
 
         logger.info("[WaveMemory] Fully initialized")
 
@@ -1938,6 +1951,29 @@ class WaveMemoryPlugin(Star):
             self.self_reflect.record_reply(bot_text, group_id)
 
     # ─── 后台任务 ───
+
+    async def _async_cache_warmup(self):
+        """高频互动者缓存预热 — 后台执行不阻塞启动。"""
+        try:
+            await asyncio.sleep(2)  # 让其他启动步骤先完成
+            from .utils.cache import get_cache_manager
+            cache_mgr = get_cache_manager()
+            top_users = self.db.conn.execute(
+                """SELECT sender_id, sender_name FROM memories
+                   WHERE timestamp > strftime('%s','now') - 604800
+                   GROUP BY sender_id ORDER BY COUNT(*) DESC LIMIT 20"""
+            ).fetchall()
+            preloaded = 0
+            for uid, uname in top_users:
+                if uid and self.persona_evolution:
+                    persona_text = self.persona_evolution.get_persona_injection(uid, None, bot_id="bot")
+                    if persona_text:
+                        cache_mgr.set("persona", f"{uid}:None:bot", persona_text)
+                        preloaded += 1
+            if preloaded:
+                logger.info(f"[WaveMemory] 缓存预热: {preloaded} 个高频互动者 persona")
+        except Exception as e:
+            logger.debug(f"[WaveMemory] 缓存预热跳过: {e}")
 
     async def _rebuild_memory_index(self):
         """重建 HNSW 内存索引（在线程池中执行，避免阻塞事件循环）。"""

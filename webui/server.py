@@ -73,9 +73,14 @@ class Server:
         )
         self._thread.start()
 
-        # 等待端口就绪（最多 5s）
-        for _ in range(10):
-            await asyncio.sleep(0.5)
+        # 快速检查端口（最多 2s），不阻塞插件加载
+        for _ in range(4):
+            try:
+                await asyncio.sleep(0.5)
+            except asyncio.CancelledError:
+                # AstrBot 加载超时取消 — 线程已启动，不影响功能
+                logger.info("[WaveMemory WebUI] 启动中（后台就绪）")
+                return
             if self._is_port_listening():
                 logger.info(
                     f"[WaveMemory WebUI] 服务启动成功: http://{self.host}:{self.port}"
