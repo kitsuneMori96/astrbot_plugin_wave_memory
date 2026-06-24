@@ -186,6 +186,24 @@
         "type": "float",
         "default": 0.4
       },
+      "relationship_single_delta_cap": {
+        "description": "单次关系事件变化上限",
+        "hint": "wave_memory_affinity_update 单次最多改变某个关系维度的绝对值",
+        "type": "float",
+        "default": 5.0
+      },
+      "relationship_daily_delta_cap": {
+        "description": "每日关系变化累计上限",
+        "hint": "同一 bot/群友/群 每天累计关系变化绝对值上限",
+        "type": "float",
+        "default": 15.0
+      },
+      "relationship_hostility_delta_cap": {
+        "description": "敌意事件单次上限",
+        "hint": "辱骂/攻击等 hostility 正向变化的单次上限",
+        "type": "float",
+        "default": 8.0
+      },
       "enable_dream": {
         "description": "启用做梦系统",
         "hint": "后台定时记忆巩固：三层时间线涟漪浪潮 + 共振桥梁发现",
@@ -739,9 +757,27 @@
       },
       "llm_validate": {
         "description": "LLM候选验证",
-        "hint": "开启LLM批量验证候选词（增加token消耗）",
+        "hint": "开启LLM批量验证候选词；新版本默认开启且失败时不放行，避免脏黑话入库",
         "type": "bool",
-        "default": false
+        "default": true
+      },
+      "confidence_threshold": {
+        "description": "黑话确认置信度阈值",
+        "hint": "只有达到此置信度且 meaning 非空的 confirmed 黑话才会注入（0-1）",
+        "type": "float",
+        "default": 0.5
+      },
+      "holyman_enabled": {
+        "description": "启用 holyman-skills 抽象文化参考",
+        "hint": "用于理解广域互联网抽象黑话，仅作为理解参考，不改变羽书说话风格",
+        "type": "bool",
+        "default": true
+      },
+      "holyman_path": {
+        "description": "holyman-skills 本地路径",
+        "hint": "可选；填写 ykdeso/holyman-skills 克隆目录，留空则只使用内置少量抽象梗参考",
+        "type": "string",
+        "default": ""
       },
       "weight_idf": {
         "description": "IDF权重",

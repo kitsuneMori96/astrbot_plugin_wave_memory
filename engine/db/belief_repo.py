@@ -7,6 +7,10 @@ import time
 from typing import Optional
 
 from .connection import ConnectionManager
+try:
+    from ...services.identity_safety import is_identity_contamination
+except ImportError:  # tests import engine.* as top-level modules
+    from services.identity_safety import is_identity_contamination
 
 
 class BeliefRepo:
@@ -36,6 +40,14 @@ class BeliefRepo:
             CREATE INDEX IF NOT EXISTS idx_beliefs_type ON beliefs(type);
             CREATE INDEX IF NOT EXISTS idx_beliefs_status ON beliefs(status);
         """)
+        columns = {row[1] for row in self.cm.execute_read("PRAGMA table_info(beliefs)").fetchall()}
+        if "conflicts" not in columns:
+            self.cm.execute_write("ALTER TABLE beliefs ADD COLUMN conflicts TEXT DEFAULT '[]'")
+        if "last_reinforced" not in columns:
+            self.cm.execute_write("ALTER TABLE beliefs ADD COLUMN last_reinforced REAL")
+        if "archived_reason" not in columns:
+            self.cm.execute_write("ALTER TABLE beliefs ADD COLUMN archived_reason TEXT")
+        self.cm.execute_write("UPDATE beliefs SET last_reinforced = COALESCE(last_reinforced, created_at) WHERE last_reinforced IS NULL")
         self.cm.commit()
 
     def add_belief(
@@ -49,10 +61,15 @@ class BeliefRepo:
     ) -> int:
         """新增信念，返回 ID。status 默认 active；传 'pending' 进入待审。"""
         now = time.time()
+        archived_reason = None
+        if is_identity_contamination(content):
+            status = "archived"
+            strength = 0.01
+            archived_reason = "identity_roleplay_contamination"
         cursor = self.cm.execute_write(
-            """INSERT INTO beliefs (content, type, strength, bot_id, sources, status, created_at, last_reinforced)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (content, belief_type, strength, bot_id, json.dumps(sources or []), status, now, now),
+            """INSERT INTO beliefs (content, type, strength, bot_id, sources, status, created_at, last_reinforced, archived_reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (content, belief_type, strength, bot_id, json.dumps(sources or []), status, now, now, archived_reason),
         )
         self.cm.commit()
         return cursor.lastrowid
@@ -74,6 +91,7 @@ class BeliefRepo:
         if belief_type:
             conditions.append("type = ?")
             params.append(belief_type)
+        conditions.append("COALESCE(archived_reason, '') != 'identity_roleplay_contamination'")
 
         where = " AND ".join(conditions)
         rows = self.cm.conn.execute(
@@ -82,7 +100,7 @@ class BeliefRepo:
             params + [limit],
         ).fetchall()
 
-        return [self._row_to_dict(r) for r in rows]
+        return [self._row_to_dict(r) for r in rows if not is_identity_contamination(r[1])]
 
     def get_belief_by_id(self, belief_id: int) -> Optional[dict]:
         row = self.cm.conn.execute(
@@ -154,6 +172,7 @@ class BeliefRepo:
 
         if keyword_conds:
             conditions.append(f"({' OR '.join(keyword_conds)})")
+        conditions.append("COALESCE(archived_reason, '') != 'identity_roleplay_contamination'")
 
         where = " AND ".join(conditions)
         rows = self.cm.conn.execute(
@@ -162,7 +181,7 @@ class BeliefRepo:
             params + [limit],
         ).fetchall()
 
-        return [self._row_to_dict(r) for r in rows]
+        return [self._row_to_dict(r) for r in rows if not is_identity_contamination(r[1])]
 
     def count(self, bot_id: str = None, status: str = "active") -> int:
         if bot_id:

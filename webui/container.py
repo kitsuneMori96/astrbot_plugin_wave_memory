@@ -38,6 +38,7 @@ class ServiceContainer:
         self.geodesic: Any = None
         self.tag_extractor: Any = None
         self.writer: Any = None
+        self.jargon_service: Any = None
         self.plugin_config: dict = {}
 
         # ─── 认证 ───
@@ -75,6 +76,7 @@ class ServiceContainer:
         self.geodesic = geodesic
         self.tag_extractor = tag_extractor
         self.writer = writer
+        self.jargon_service = None
         self.password = password
         self.plugin_config = plugin_config or {}
 

@@ -14,9 +14,15 @@
 import sqlite3
 import time
 
+try:
+    from sqlite_runtime_guard import assert_astrbot_stopped
+except ModuleNotFoundError:  # package import from repository root
+    from scripts.sqlite_runtime_guard import assert_astrbot_stopped
+
 
 def migrate(db_path: str = None):
     """将 live 记忆分类为 core/chat/noise。"""
+    assert_astrbot_stopped("migrate memory sources")
     if db_path is None:
         import os
         db_path = os.path.join(

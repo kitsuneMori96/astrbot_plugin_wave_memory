@@ -40,15 +40,47 @@ class WaveMemoryAffinityTool(FunctionTool[AstrAgentContext]):
                 "enum": ["single", "ranking", "active"],
                 "default": "ranking"
             },
+            "scope": {
+                "type": "string",
+                "description": "群范围：current_group(当前群或指定group_id)/global(全部群合并)/all_groups(按群分别展示)",
+                "enum": ["current_group", "global", "all_groups"],
+                "default": "global"
+            },
+            "group_id": {
+                "type": "string",
+                "description": "指定群号；传入后 scope=current_group 会分析这个群，而不是只能依赖当前上下文"
+            },
+            "bot_scope": {
+                "type": "string",
+                "description": "bot 范围：current_bot(当前bot)/all_bots(全部bot)。也可直接传 bot_id 指定某个bot人格",
+                "enum": ["current_bot", "all_bots"],
+                "default": "current_bot"
+            },
+            "bot_id": {
+                "type": "string",
+                "description": "指定 bot 的 db_id，例如 yushu 或 baizz；传入后只查询该 bot 的好感度画像"
+            },
         },
         "required": [],
     })
 
     db: Any = field(default=None, repr=False)
+    bot_db_ids: dict[str, str] = field(default_factory=dict, repr=False)
 
     async def call(self, ctx: ContextWrapper[AstrAgentContext], **kwargs) -> str:
         user_id = kwargs.get("user_id", "")
         mode = kwargs.get("mode", "single")
+        scope = kwargs.get("scope", "global") or "global"
+        requested_group_id = kwargs.get("group_id", "") or ""
+        requested_bot_id = kwargs.get("bot_id", "") or ""
+        bot_scope = kwargs.get("bot_scope", "current_bot") or "current_bot"
+        inner_ctx = getattr(ctx, "context", None)
+        event = getattr(inner_ctx, "event", None)
+        current_group_id = requested_group_id or (event.get_group_id() if event else "")
+        self_id = event.get_self_id() if event else ""
+        current_bot_id = self.bot_db_ids.get(self_id)
+        selected_bot_id = requested_bot_id or current_bot_id
+        include_all_bots = (bot_scope == "all_bots" and not requested_bot_id) or not selected_bot_id
 
         if not self.db:
             return "数据库未初始化"
@@ -61,32 +93,90 @@ class WaveMemoryAffinityTool(FunctionTool[AstrAgentContext]):
         conn = self.db.conn
 
         if mode == "ranking":
-            rows = conn.execute("""
-                SELECT up.user_id, up.nickname, up.interaction_count,
-                       (SELECT COUNT(*) FROM memories WHERE sender_id = up.user_id) as msg_count
+            where = [
+                "up.interaction_count > 0",
+                "COALESCE(up.metadata, '') NOT LIKE '%legacy_neutral%'",
+                "COALESCE(up.metadata, '') NOT LIKE '%legacy_unverified%'",
+            ]
+            params = []
+            if not include_all_bots:
+                where.append("up.bot_id = ?")
+                params.append(selected_bot_id)
+            if scope == "current_group":
+                if not current_group_id:
+                    return "当前不是群聊上下文，无法查询当前群排行"
+                where.append("up.group_id = ?")
+                params.append(current_group_id)
+            group_select = "up.group_id," if scope == "all_groups" else ""
+            bot_select = "up.bot_id," if include_all_bots else ""
+            group_order = "up.group_id ASC," if scope == "all_groups" else ""
+            bot_order = "up.bot_id ASC," if include_all_bots else ""
+            rows = conn.execute(f"""
+                SELECT {group_select} {bot_select} up.user_id, COALESCE(NULLIF(up.nickname, ''), pr.display_name), up.interaction_count, up.metadata,
+                       (SELECT COUNT(*) FROM memories m
+                        WHERE m.sender_id = up.user_id
+                          AND (? != 'current_group' OR m.group_id = up.group_id)) as msg_count
                 FROM user_profiles up
-                WHERE up.interaction_count > 0
-                ORDER BY up.interaction_count DESC LIMIT 10
-            """).fetchall()
+                LEFT JOIN person_registry pr ON up.user_id = pr.qq_id
+                WHERE {' AND '.join(where)}
+                ORDER BY {group_order} {bot_order} up.interaction_count DESC LIMIT 30
+            """, [scope] + params).fetchall()
 
-            lines = ["【互动排行 TOP 10】"]
-            for uid, nickname, interactions, msg_count in rows:
+            title = "当前群" if scope == "current_group" else "全部群" if scope == "global" else "按群"
+            bot_title = "全部bot" if include_all_bots else f"bot={selected_bot_id}"
+            lines = [f"【互动排行 TOP 10｜{title}｜{bot_title}】"]
+            for row in rows[:10] if scope != "all_groups" else rows:
+                idx = 0
+                prefix_parts = []
+                if scope == "all_groups":
+                    gid = row[idx]
+                    idx += 1
+                    prefix_parts.append(f"群{gid}")
+                if include_all_bots:
+                    row_bot_id = row[idx]
+                    idx += 1
+                    prefix_parts.append(f"bot={row_bot_id}")
+                uid, nickname, interactions, meta_str, msg_count = row[idx:idx + 5]
                 display = nickname or uid
-                lines.append(f"  {display}: 互动{interactions}次, 消息{msg_count}条")
+                try:
+                    row_meta = json.loads(meta_str) if meta_str else {}
+                except Exception:
+                    row_meta = {}
+                if row_meta.get("target_type") == "bot":
+                    display = f"{row_meta.get('target_name') or display}(bot)"
+                prefix = (" ".join(prefix_parts) + " ") if prefix_parts else ""
+                lines.append(f"  {prefix}{display}: 互动{interactions}次, 消息{msg_count}条")
             return "\n".join(lines) if len(lines) > 1 else "还没有互动记录"
 
         elif mode == "active":
-            rows = conn.execute("""
-                SELECT sender_name, sender_id, COUNT(*) as cnt
+            where = ["timestamp > ?", "sender_id != 'bot'", "sender_name != ''"]
+            params = [time.time() - 7 * 86400]
+            if scope == "current_group":
+                if not current_group_id:
+                    return "当前不是群聊上下文，无法查询当前群活跃用户"
+                where.append("group_id = ?")
+                params.append(current_group_id)
+            group_select = "group_id," if scope == "all_groups" else ""
+            group_by = "group_id, sender_id" if scope == "all_groups" else "sender_id"
+            group_order = "group_id ASC," if scope == "all_groups" else ""
+            rows = conn.execute(f"""
+                SELECT {group_select} sender_name, sender_id, COUNT(*) as cnt
                 FROM memories
-                WHERE timestamp > ? AND sender_id != 'bot' AND sender_name != ''
-                GROUP BY sender_id
-                ORDER BY cnt DESC LIMIT 10
-            """, (time.time() - 7 * 86400,)).fetchall()
+                WHERE {' AND '.join(where)}
+                GROUP BY {group_by}
+                ORDER BY {group_order} cnt DESC LIMIT 30
+            """, params).fetchall()
 
-            lines = ["【最近7天活跃 TOP 10】"]
-            for name, uid, cnt in rows:
-                lines.append(f"  {name}: {cnt} 条消息")
+            title = "当前群" if scope == "current_group" else "全部群" if scope == "global" else "按群"
+            lines = [f"【最近7天活跃 TOP 10｜{title}】"]
+            for row in rows[:10] if scope != "all_groups" else rows:
+                if scope == "all_groups":
+                    gid, name, uid, cnt = row
+                    prefix = f"群{gid} "
+                else:
+                    name, uid, cnt = row
+                    prefix = ""
+                lines.append(f"  {prefix}{name}: {cnt} 条消息")
             return "\n".join(lines) if len(lines) > 1 else "最近7天无活跃数据"
 
         else:
@@ -94,22 +184,42 @@ class WaveMemoryAffinityTool(FunctionTool[AstrAgentContext]):
             if not user_id:
                 return "请提供群友名字或QQ号，或使用 mode=ranking 查看排行"
 
-            rows = conn.execute("""
-                SELECT up.user_id, up.group_id, up.affection, up.metadata, pr.display_name
+            where = [
+                "(pr.display_name LIKE ? OR up.user_id = ? OR pr.aliases LIKE ?)",
+                "COALESCE(up.metadata, '') NOT LIKE '%legacy_neutral%'",
+                "COALESCE(up.metadata, '') NOT LIKE '%legacy_unverified%'",
+            ]
+            params = [f"%{user_id}%", user_id, f"%{user_id}%"]
+            if not include_all_bots:
+                where.append("up.bot_id = ?")
+                params.append(selected_bot_id)
+            if scope == "current_group":
+                if not current_group_id:
+                    return "当前不是群聊上下文，无法查询当前群用户"
+                where.append("up.group_id = ?")
+                params.append(current_group_id)
+            rows = conn.execute(f"""
+                SELECT up.user_id, up.group_id, up.bot_id, up.affection, up.metadata, pr.display_name
                 FROM user_profiles up
                 LEFT JOIN person_registry pr ON up.user_id = pr.qq_id
-                WHERE pr.display_name LIKE ? OR up.user_id = ? OR pr.aliases LIKE ?
-            """, (f"%{user_id}%", user_id, f"%{user_id}%")).fetchall()
+                WHERE {' AND '.join(where)}
+                ORDER BY CASE WHEN up.group_id = ? THEN 0 ELSE 1 END, up.bot_id ASC, up.last_seen DESC
+            """, params + [current_group_id]).fetchall()
 
             if not rows:
                 return f"没有找到「{user_id}」的好感度记录"
 
             lines = []
-            for uid, gid, aff, meta_str, dname in rows:
+            for uid, gid, row_bot_id, aff, meta_str, dname in rows:
                 display = dname or uid
-                lines.append(f"【{display}】群{gid} 好感度: {aff}")
+                meta = {}
                 if meta_str:
                     meta = json.loads(meta_str)
+                if meta.get("target_type") == "bot":
+                    display = f"{meta.get('target_name') or display}(bot)"
+                prefix = "当前群" if gid == current_group_id else "其他群"
+                lines.append(f"【{display}】{prefix} {gid} bot={row_bot_id} 好感度: {aff}")
+                if meta:
                     if meta.get("impression"):
                         lines.append(f"  印象: {meta['impression']}")
                     if meta.get("tags"):

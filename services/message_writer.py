@@ -13,6 +13,7 @@ from astrbot.api import logger
 from ..engine.database import WaveMemoryDB
 from ..engine.vector_index import VectorIndex
 from ..engine.embedding import EmbeddingService
+from .identity_safety import is_identity_contamination
 
 
 # noise 判定：这些消息不入向量索引
@@ -138,9 +139,12 @@ class MessageWriter:
                     noise_max_length=self.noise_max_length,
                 )
 
-        # noise 不需要 embedding（省 API 调用）
-        need_embed = [item for item in batch if item["source"] != "noise"]
-        noise_items = [item for item in batch if item["source"] == "noise"]
+        contaminated_items = [item for item in batch if is_identity_contamination(item.get("content", ""))]
+        normal_batch = [item for item in batch if item not in contaminated_items]
+
+        # noise 不需要 embedding（省 API 调用）；身份接管污染不入向量索引，写入后归档，仅保留审计。
+        need_embed = [item for item in normal_batch if item["source"] != "noise"]
+        noise_items = [item for item in normal_batch if item["source"] == "noise"]
 
         # embed 非 noise 消息
         if need_embed:
@@ -185,6 +189,28 @@ class MessageWriter:
                     source="noise",
                 )
                 self._stats["noise"] = self._stats.get("noise", 0) + 1
+            except Exception:
+                pass
+
+        # 写入身份接管污染审计，但立即归档/降权，不入向量索引、不参与召回。
+        for item in contaminated_items:
+            try:
+                memory_id = self.db.add_memory(
+                    group_id=item["group_id"],
+                    content=item["content"],
+                    vector=None,
+                    sender_id=item.get("sender_id", ""),
+                    sender_name=item.get("sender_name", ""),
+                    timestamp=item.get("timestamp", time.time()),
+                    importance=0.01,
+                    source="identity_quarantine",
+                )
+                self.db.conn.execute(
+                    "UPDATE memories SET memory_type='archived', summary='quarantined: transient roleplay/identity confusion' WHERE id=?",
+                    (memory_id,),
+                )
+                self.db.conn.commit()
+                self._stats["identity_quarantine"] = self._stats.get("identity_quarantine", 0) + 1
             except Exception:
                 pass
 

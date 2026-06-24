@@ -12,6 +12,7 @@ from astrbot.api import logger
 
 from ..engine.database import WaveMemoryDB
 from ..engine.fact_classifier import classify_fact
+from .identity_safety import is_identity_contamination
 
 
 CONSOLIDATION_PROMPT = """从以下群聊消息中提取结构化知识。
@@ -240,6 +241,8 @@ class ConsolidationService:
                 b = sr.get("person_b", "").strip()
                 rel = sr.get("relation", "").strip()
                 if a and b and rel:
+                    if is_identity_contamination(f"{a} {rel} {b}"):
+                        continue
                     try:
                         self.db.insert_fact(a, rel, b, group_id=group_id, confidence=0.7)
                         written += 1
@@ -262,6 +265,8 @@ class ConsolidationService:
                 person = nn.get("person", "").strip()
                 called = nn.get("called", "").strip()
                 if person and called and len(called) >= 2:
+                    if is_identity_contamination(f"{person} 被称为 {called}"):
+                        continue
                     try:
                         self.db.insert_fact(person, "被称为", called, group_id=group_id, confidence=0.8)
                         self._add_alias(person, called)
@@ -517,6 +522,8 @@ class ConsolidationService:
             if not subject or not predicate or not obj:
                 continue
             if len(subject) > 50 or len(obj) > 200:
+                continue
+            if is_identity_contamination(f"{subject} {predicate} {obj}"):
                 continue
 
             # v2.0: subject 映射为 QQ 号（统一身份）

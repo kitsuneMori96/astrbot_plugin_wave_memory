@@ -10,6 +10,13 @@ function app() {
             { id: 'import', label: '数据导入', icon: '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>' },
         ],
 
+        // Jargon / Holyman State
+        jargonSubTab: 'local',
+        holymanItems: [],
+        holymanSearch: '',
+        holymanUseProxy: true,
+        holymanSyncing: false,
+
         // Stats
         stats: {},
 
@@ -54,6 +61,7 @@ function app() {
             // Watch tab changes
             this.$watch('activeTab', (tab) => {
                 if (tab === 'graph') this.$nextTick(() => this.loadGraph());
+                if (tab === 'jargon') this.loadJargon();
             });
         },
 
@@ -258,6 +266,92 @@ function app() {
                 this.importRunning = false;
                 await this.loadStats();
             }
+        },
+
+        // ─── Jargon & Holyman ───
+        async loadJargon() {
+            try {
+                await this.loadJargonHolyman();
+            } catch (e) {
+                console.error('loadJargon failed:', e);
+            }
+        },
+
+        async loadJargonHolyman() {
+            try {
+                const data = await this.api('/api/jargon/holyman');
+                this.holymanItems = data.items || [];
+            } catch (e) {
+                console.error('Failed to load Holyman items:', e);
+            }
+        },
+
+        async toggleJargonHolyman(h) {
+            try {
+                await this.api('/api/jargon/holyman/toggle', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        word: h.word,
+                        meaning: h.meaning,
+                        activate: h.is_activated
+                    })
+                });
+                await this.loadJargonHolyman();
+            } catch (e) {
+                console.error('Failed to toggle Holyman item:', e);
+            }
+        },
+
+        async quickEditHolyman(h, newMeaning) {
+            try {
+                const payload = {
+                    word: h.word,
+                    meaning: newMeaning.trim(),
+                    activate: true
+                };
+                await this.api('/api/jargon/holyman/toggle', {
+                    method: 'POST',
+                    body: JSON.stringify(payload)
+                });
+                await this.loadJargonHolyman();
+            } catch (e) {
+                console.error('Failed to quick edit Holyman item:', e);
+            }
+        },
+
+        async syncJargonHolyman() {
+            if (this.holymanSyncing) return;
+            this.holymanSyncing = true;
+            try {
+                const data = await this.api('/api/jargon/holyman/sync', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        use_proxy: this.holymanUseProxy
+                    })
+                });
+                if (data.ok) {
+                    alert(`同步完成，加载了 ${data.phrases_count || 0} 条词条，${data.corpus_count || 0} 条语料`);
+                } else {
+                    alert(`同步失败: ${data.error || '未知错误'}`);
+                }
+            } catch (e) {
+                console.error('Failed to sync Holyman items:', e);
+                alert('同步失败: ' + e.message);
+            } finally {
+                this.holymanSyncing = false;
+                await this.loadJargonHolyman();
+            }
+        },
+
+        filteredHolymanItems() {
+            const search = (this.holymanSearch || '').trim().toLowerCase();
+            if (!search) return this.holymanItems;
+            return this.holymanItems.filter(item => {
+                const word = (item.word || '').toLowerCase();
+                const meaning = (item.meaning || '').toLowerCase();
+                const custom_meaning = (item.custom_meaning || '').toLowerCase();
+                return word.includes(search) || meaning.includes(search) || custom_meaning.includes(search);
+            });
         },
     };
 }

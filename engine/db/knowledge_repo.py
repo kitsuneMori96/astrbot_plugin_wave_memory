@@ -9,6 +9,10 @@ import numpy as np
 
 from .connection import ConnectionManager
 from ..fact_classifier import get_decay_rate
+try:
+    from ...services.identity_safety import is_identity_contamination
+except ImportError:  # tests import engine.* as top-level modules
+    from services.identity_safety import is_identity_contamination
 
 
 class KnowledgeRepo:
@@ -48,6 +52,16 @@ class KnowledgeRepo:
             CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject);
             CREATE INDEX IF NOT EXISTS idx_facts_object ON facts(object);
         """)
+        columns = {row[1] for row in self.cm.execute_read("PRAGMA table_info(facts)").fetchall()}
+        if "valid_from" not in columns:
+            self.cm.execute_write("ALTER TABLE facts ADD COLUMN valid_from REAL")
+        if "valid_until" not in columns:
+            self.cm.execute_write("ALTER TABLE facts ADD COLUMN valid_until REAL")
+        if "last_reinforced" not in columns:
+            self.cm.execute_write("ALTER TABLE facts ADD COLUMN last_reinforced REAL")
+        if "fact_type" not in columns:
+            self.cm.execute_write("ALTER TABLE facts ADD COLUMN fact_type TEXT DEFAULT 'FACTUAL'")
+        self.cm.execute_write("UPDATE facts SET last_reinforced = COALESCE(last_reinforced, created_at) WHERE last_reinforced IS NULL")
         self.cm.commit()
 
     def put_kv(self, key: str, value: str, vector: Optional[np.ndarray] = None):
@@ -76,13 +90,25 @@ class KnowledgeRepo:
         fact_type: str = None,
     ) -> int:
         now = time.time()
+        combined = f"{subject} {predicate} {obj}"
+        if is_identity_contamination(combined):
+            confidence = min(float(confidence or 0.8), 0.01)
+            fact_type = "QUARANTINED_ROLEPLAY"
+            valid_until = now
+        else:
+            valid_until = None
         existing = self.cm.execute_read(
             "SELECT id FROM facts WHERE subject = ? AND predicate = ? AND object = ?",
             (subject, predicate, obj),
         ).fetchone()
         if existing:
-            # 已存在：更新 confidence + last_reinforced；如果传了 fact_type 也更新
-            if fact_type:
+            # 已存在：普通事实强化；身份接管污染必须强制降权并过期，不能 MAX 保留高置信度。
+            if valid_until is not None:
+                self.cm.execute_write(
+                    "UPDATE facts SET confidence = ?, valid_from = ?, valid_until = ?, last_reinforced = ?, fact_type = ? WHERE id = ?",
+                    (confidence, now, valid_until, now, fact_type, existing[0]),
+                )
+            elif fact_type:
                 self.cm.execute_write(
                     "UPDATE facts SET confidence = MAX(confidence, ?), valid_from = ?, last_reinforced = ?, fact_type = ? WHERE id = ?",
                     (confidence, now, now, fact_type, existing[0]),
@@ -95,17 +121,22 @@ class KnowledgeRepo:
             self.cm.commit()
             return existing[0]
         cursor = self.cm.execute_write(
-            """INSERT INTO facts (subject, predicate, object, group_id, source_memory_id, confidence, created_at, last_reinforced, fact_type)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (subject, predicate, obj, group_id, source_memory_id, confidence, now, now, fact_type or "FACTUAL"),
+            """INSERT INTO facts (subject, predicate, object, group_id, source_memory_id, confidence, valid_until, created_at, last_reinforced, fact_type)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (subject, predicate, obj, group_id, source_memory_id, confidence, valid_until, now, now, fact_type or "FACTUAL"),
         )
         self.cm.commit()
         return cursor.lastrowid
 
     def get_facts_by_subject(self, subject: str, limit: int = 20) -> list:
         rows = self.cm.execute_read(
-            "SELECT id, subject, predicate, object, confidence, created_at, last_reinforced, fact_type FROM facts WHERE subject = ? ORDER BY confidence DESC LIMIT ?",
-            (subject, limit),
+            """SELECT id, subject, predicate, object, confidence, created_at, last_reinforced, fact_type
+               FROM facts
+               WHERE subject = ?
+                 AND COALESCE(fact_type, '') != 'QUARANTINED_ROLEPLAY'
+                 AND (valid_until IS NULL OR valid_until > ?)
+               ORDER BY confidence DESC LIMIT ?""",
+            (subject, time.time(), limit),
         ).fetchall()
         facts = [
             {"id": r[0], "subject": r[1], "predicate": r[2], "object": r[3],

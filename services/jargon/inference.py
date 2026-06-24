@@ -145,7 +145,7 @@ class JargonInjector:
         if not matched:
             return ""
 
-        lines = ["[群内词汇（你可以自然使用）]"]
+        lines = ["[群内黑话/抽象梗理解参考，仅供理解，不代表回复风格]"]
         for j in matched:
             lines.append(f'- "{j["word"]}" → {j["meaning"]}')
         return "\n".join(lines)
@@ -160,6 +160,7 @@ class JargonInjector:
             rows = self._db.conn.execute(
                 """SELECT word, meaning FROM jargon
                    WHERE group_id = ? AND is_jargon = 1 AND meaning != ''
+                     AND COALESCE(status, 'pending') = 'confirmed'
                    ORDER BY frequency DESC LIMIT 100""",
                 (group_id,),
             ).fetchall()
@@ -169,6 +170,7 @@ class JargonInjector:
             global_rows = self._db.conn.execute(
                 """SELECT word, meaning FROM jargon
                    WHERE is_global = 1 AND is_jargon = 1 AND meaning != ''
+                   AND COALESCE(status, 'pending') = 'confirmed'
                    AND group_id != ?
                    ORDER BY frequency DESC LIMIT 50""",
                 (group_id,),

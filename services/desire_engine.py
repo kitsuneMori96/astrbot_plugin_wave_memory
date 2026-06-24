@@ -12,6 +12,8 @@ from typing import Optional
 
 from astrbot.api import logger
 
+from .identity_safety import is_identity_contamination
+
 
 @dataclass
 class Desire:
@@ -71,6 +73,14 @@ class DesireEngine:
 
     def resolve(self, desire: Desire, beliefs: list[dict] = None) -> DesireResolution:
         """欲望与信念博弈，输出最终行为。"""
+        if is_identity_contamination(desire.trigger) or is_identity_contamination(desire.action) or is_identity_contamination(desire.type):
+            self._resolution_count["suppress"] += 1
+            return DesireResolution(
+                action="suppress",
+                resolution="suppress",
+                inner_thought=f"这个欲望带有身份接管/认爹诱导，不能顺着走。",
+                desire_type=desire.type,
+            )
         if not beliefs:
             # 无信念约束，直接满足
             self._resolution_count["yield"] += 1

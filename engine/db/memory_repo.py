@@ -95,11 +95,11 @@ class MemoryRepo:
     def get_all_memory_vectors(self, group_id: Optional[str] = None) -> list:
         if group_id:
             rows = self.cm.execute_read(
-                "SELECT id, vector FROM memories WHERE group_id=? AND vector IS NOT NULL", (group_id,)
+                "SELECT id, vector FROM memories WHERE group_id=? AND vector IS NOT NULL AND memory_type = 'message'", (group_id,)
             ).fetchall()
         else:
             rows = self.cm.execute_read(
-                "SELECT id, vector FROM memories WHERE vector IS NOT NULL"
+                "SELECT id, vector FROM memories WHERE vector IS NOT NULL AND memory_type = 'message'"
             ).fetchall()
         return [(r[0], np.frombuffer(r[1], dtype=np.float32)) for r in rows]
 
@@ -108,13 +108,14 @@ class MemoryRepo:
             return []
         placeholders = ",".join("?" * len(ids))
         rows = self.cm.execute_read(
-            f"SELECT id, group_id, sender_id, sender_name, content, timestamp, importance, access_count FROM memories WHERE id IN ({placeholders})",
+            f"""SELECT id, group_id, sender_id, sender_name, content, timestamp, importance, access_count, source, memory_type
+                FROM memories WHERE id IN ({placeholders}) AND memory_type = 'message'""",
             ids,
         ).fetchall()
         return [
             {"id": r[0], "group_id": r[1], "sender_id": r[2], "sender_name": r[3],
              "content": r[4], "timestamp": r[5], "importance": r[6],
-             "access_count": r[7] if len(r) > 7 else 0}
+             "access_count": r[7] if len(r) > 7 else 0, "source": r[8], "memory_type": r[9]}
             for r in rows
         ]
 

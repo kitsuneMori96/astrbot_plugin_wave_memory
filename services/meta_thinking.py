@@ -12,6 +12,7 @@ from typing import Optional, Any
 import logging; logger = logging.getLogger("wavememory")
 
 from .llm_fallback import LLMFallbackClient, build_provider_chain, parse_provider_ids, provider_ids_from_config
+from .identity_safety import is_identity_contamination, prepend_identity_safety_system_prompt
 
 
 # 兜底硬规则
@@ -258,7 +259,7 @@ class MetaThinking:
                     "action": "attack_back",
                     "tone": "愤怒",
                     "inner_thought": "这人在骂我，怼回去",
-                    "affection_update": max(self._get_affection(sender_id, group_id) - 10, -100),
+                    "affection_update": max(self._get_affection(sender_id, group_id, bot_id=bot_id) - 10, -100),
                 }
 
         # 刷屏检测
@@ -273,11 +274,12 @@ class MetaThinking:
                 return {"action": "ignore", "tone": "冷淡", "inner_thought": "刷屏了，不理"}
 
         # 读取发送者资料
-        profile = self._get_profile(sender_id, group_id)
+        profile = self._get_profile(sender_id, group_id, bot_id=bot_id)
 
         # 构建 prompt
         bot_name = self.bot_names.get(bot_id or self.bot_qq_id, "bot")
 
+        system_prompt = prepend_identity_safety_system_prompt(system_prompt, message, always=True)
         if system_prompt:
             # v1.3.2: 用 bot 自己的系统人格做思考（不再硬编码"你是羽书"）
             prompt = f"""{system_prompt}
@@ -428,9 +430,10 @@ QQ：{sender_id}
             return start <= hour <= end
         return hour >= start or hour <= end
 
-    async def _call_llm(self, prompt: str) -> str:
+    async def _call_llm(self, prompt: str, system_prompt: str | None = None) -> str:
         """调用 LLM，带配置化 fallback。"""
-        resp = await self.llm.text_chat(prompt=prompt, contexts=[])
+        system_prompt = prepend_identity_safety_system_prompt(system_prompt, always=True)
+        resp = await self.llm.text_chat(prompt=prompt, system_prompt=system_prompt, contexts=[])
         return resp.completion_text
 
     async def generate_proactive_reply(self, context_messages: list[str], inner_thought: str, bot_id: str = None) -> str:
@@ -438,8 +441,12 @@ QQ：{sender_id}
         context_text = "\n".join(context_messages[-5:])
         bot_name = self.bot_names.get(bot_id or self.bot_qq_id, "bot")
         prompt = f"你是{bot_name}，刚才群里在聊：\n{context_text}\n\n你想插一嘴。你的想法：{inner_thought}\n\n直接说你想说的话，简短自然，像群友一样。不要解释为什么要说话。"
-        resp = await self.llm.text_chat(prompt=prompt, contexts=[])
-        return resp.completion_text.strip()
+        resp = await self.llm.text_chat(prompt=prompt, system_prompt=prepend_identity_safety_system_prompt(None, always=True), contexts=[])
+        reply = resp.completion_text.strip()
+        if is_identity_contamination(reply):
+            logger.warning("[MetaThinking] Contaminated proactive reply blocked")
+            return ""
+        return reply
 
     def _parse_response(self, text: str) -> dict:
         """解析 MetaThinking 输出。"""
@@ -548,12 +555,13 @@ QQ：{sender_id}
             tags[match.group(1)] = int(match.group(2))
         return tags if tags else None
 
-    def _get_profile(self, sender_id: str, group_id: str) -> dict:
+    def _get_profile(self, sender_id: str, group_id: str, bot_id: str = None) -> dict:
         """读取用户资料。"""
+        db_bot_id = self.bot_db_ids.get(bot_id or self.bot_qq_id, "bot")
         try:
             row = self.db.conn.execute(
-                "SELECT affection, metadata FROM user_profiles WHERE user_id = ? AND group_id = ?",
-                (sender_id, group_id)
+                "SELECT affection, metadata FROM user_profiles WHERE user_id = ? AND group_id = ? AND bot_id = ?",
+                (sender_id, group_id, db_bot_id)
             ).fetchone()
             if not row:
                 return {"affection": 0, "tags": {}, "impression": "初次见面，没有印象"}
@@ -567,12 +575,13 @@ QQ：{sender_id}
         except Exception:
             return {"affection": 0, "tags": {}, "impression": "初次见面，没有印象"}
 
-    def _get_affection(self, sender_id: str, group_id: str) -> int:
+    def _get_affection(self, sender_id: str, group_id: str, bot_id: str = None) -> int:
         """快速获取好感度数值。"""
+        db_bot_id = self.bot_db_ids.get(bot_id or self.bot_qq_id, "bot")
         try:
             row = self.db.conn.execute(
-                "SELECT affection FROM user_profiles WHERE user_id = ? AND group_id = ?",
-                (sender_id, group_id)
+                "SELECT affection FROM user_profiles WHERE user_id = ? AND group_id = ? AND bot_id = ?",
+                (sender_id, group_id, db_bot_id)
             ).fetchone()
             return int(row[0]) if row else 0
         except Exception:
@@ -605,8 +614,8 @@ QQ：{sender_id}
         try:
             # 读取现有 metadata
             row = self.db.conn.execute(
-                "SELECT metadata FROM user_profiles WHERE user_id = ? AND group_id = ?",
-                (sender_id, group_id)
+                "SELECT metadata FROM user_profiles WHERE user_id = ? AND group_id = ? AND bot_id = ?",
+                (sender_id, group_id, db_bot_id)
             ).fetchone()
 
             if row and row[0]:

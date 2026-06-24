@@ -8,7 +8,24 @@ from typing import Optional
 
 from astrbot.api import logger
 
-from ..engine.database import WaveMemoryDB
+try:
+    from ..engine.database import WaveMemoryDB
+except ImportError:  # tests import services.* as top-level modules
+    from engine.database import WaveMemoryDB
+try:
+    from .identity_safety import (
+        filter_identity_safe_json_list,
+        filter_identity_safe_strings,
+        is_fact_identity_contamination,
+        is_identity_contamination,
+    )
+except ImportError:  # tests import services.* as top-level modules
+    from services.identity_safety import (
+        filter_identity_safe_json_list,
+        filter_identity_safe_strings,
+        is_fact_identity_contamination,
+        is_identity_contamination,
+    )
 
 
 class PersonaEvolution:
@@ -93,7 +110,7 @@ class PersonaEvolution:
         parts.append(f"- 昵称: {nickname or sender_id}")
 
         # person_registry 补充别名
-        aliases = self._get_aliases(sender_id)
+        aliases = filter_identity_safe_strings(self._get_aliases(sender_id))
         if aliases and len(aliases) > 1:
             other_names = [a for a in aliases if a != nickname][:3]
             if other_names:
@@ -107,6 +124,10 @@ class PersonaEvolution:
         if interaction_count > 0:
             parts.append(f"- 互动: {interaction_count} 次直接对话")
 
+        # 真实关系状态：按当前 bot_id 注入，避免模型编造未落库的好感度变化
+        relationship_lines = self._get_relationship_state(sender_id, group_id, bot_id)
+        parts.extend(relationship_lines)
+
         # 关于他：从 facts 表提取（零 LLM，实时）
         about_lines = self._get_facts_about(sender_id, nickname)
         if about_lines:
@@ -118,7 +139,7 @@ class PersonaEvolution:
         if hourly_at > 3:
             parts.append(f"- 本小时状态: 他已经@你 {hourly_at} 次了")
         last_reply = ctx.get("last_bot_reply", "")
-        if last_reply:
+        if last_reply and not is_identity_contamination(last_reply):
             parts.append(f"- 你上次对他说: \"{last_reply[:50]}\"")
 
         # 表达模式摘要
@@ -135,6 +156,46 @@ class PersonaEvolution:
 
         return "\n".join(parts)
 
+    def _get_relationship_state(self, sender_id: str, group_id: str, bot_id: str) -> list[str]:
+        """获取当前 bot 对当前用户的真实关系状态和最近关系事件。"""
+        if not bot_id or not group_id:
+            return []
+        try:
+            row = self.db.conn.execute(
+                "SELECT affection, metadata FROM user_profiles WHERE user_id=? AND group_id=? AND bot_id=?",
+                (sender_id, group_id, bot_id),
+            ).fetchone()
+            if not row:
+                return []
+            meta = json.loads(row[1]) if row[1] else {}
+            if meta.get("legacy_neutral") or meta.get("legacy_unverified"):
+                return []
+            dims = meta.get("dimensions", {})
+            attitude = meta.get("attitude_level", "neutral")
+            lines = [f"- 当前关系: 好感度 {row[0] or 0}/100，态度 {attitude}"]
+            if dims:
+                lines.append(
+                    "- 关系维度: "
+                    f"熟悉 {dims.get('familiarity', 0)} / 信任 {dims.get('trust', 0)} / "
+                    f"趣味 {dims.get('fun', 0)} / 敌意 {dims.get('hostility', 0)} / 深度 {dims.get('depth', 0)}"
+                )
+            events = self.db.conn.execute(
+                """SELECT dimension, delta, reason FROM relationship_events
+                   WHERE bot_id=? AND user_id=? AND group_id=?
+                   ORDER BY created_at DESC LIMIT 3""",
+                (bot_id, sender_id, group_id),
+            ).fetchall()
+            if events:
+                recent = []
+                for dim, delta, reason in events:
+                    sign = "+" if float(delta) >= 0 else ""
+                    recent.append(f"{sign}{delta:g} {dim}: {reason[:30]}")
+                lines.append(f"- 最近关系事件: {' / '.join(recent)}")
+            lines.append("- 不要编造未落库的好感度变化；如这次互动确实改变关系，使用 wave_memory_affinity_update 记录事件。")
+            return lines
+        except Exception:
+            return []
+
     def _merge_profiles(self, current: dict, others: list[dict]) -> dict:
         """合并当前群和其他群的 profile 数据。"""
         all_profiles = [current] + others
@@ -143,15 +204,12 @@ class PersonaEvolution:
         total_interactions = sum(p["interaction_count"] for p in all_profiles)
         active_groups = len([p for p in all_profiles if p["interaction_count"] > 0])
 
-        # personality_tags 合并去重
+        # personality_tags 合并去重；身份接管/亲属契约类标签不允许进入人格画像
         all_tags = set()
         for p in all_profiles:
             if p["personality_tags"]:
-                try:
-                    tags = json.loads(p["personality_tags"])
-                    all_tags.update(tags[:10])
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                tags = filter_identity_safe_json_list(p["personality_tags"])
+                all_tags.update(tags[:10])
 
         return {
             "nickname": current["nickname"],
@@ -193,17 +251,21 @@ class PersonaEvolution:
         results = []
         try:
             # v2.0: 先按 QQ 号精确查询（衰减排序）
-            facts = self.db.get_facts_by_subject(sender_id, limit=5)
+            facts = self.db.get_facts_by_subject(sender_id, limit=8)
             for f in facts:
+                if is_fact_identity_contamination(f):
+                    continue
                 fact_str = f"{f['predicate']} {f['object'][:30]}"
-                if fact_str not in results:
+                if fact_str not in results and not is_identity_contamination(fact_str):
                     results.append(fact_str)
             # fallback: 如果 QQ 号查不到，再按昵称查（兼容未迁移的旧 facts）
             if not results and nickname:
-                facts = self.db.get_facts_by_subject(nickname, limit=5)
+                facts = self.db.get_facts_by_subject(nickname, limit=8)
                 for f in facts:
+                    if is_fact_identity_contamination(f):
+                        continue
                     fact_str = f"{f['predicate']} {f['object'][:30]}"
-                    if fact_str not in results:
+                    if fact_str not in results and not is_identity_contamination(fact_str):
                         results.append(fact_str)
         except Exception:
             pass
