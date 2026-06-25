@@ -1389,12 +1389,14 @@ class WaveMemoryPlugin(Star):
                 if hasattr(self, 'belief_engine') and self.belief_engine:
                     from .utils.cache import get_cache_manager
                     cache = get_cache_manager()
-                    belief_key = f"{sender_id}:{message[:30]}"
+                    active_bot_db_id = bot_profile.db_id if bot_profile else "bot"
+                    belief_key = f"{active_bot_db_id}:{sender_id}:{message[:30]}"
                     cached_belief = cache.get("belief", belief_key)
                     if cached_belief is not None:
                         belief_text = cached_belief
                     else:
                         belief_keywords = [w for w in message.split()[:5] if len(w) > 1]
+                        self.belief_engine.bot_id = active_bot_db_id
                         belief_text = self.belief_engine.get_injection(sender_id=sender_id, keywords=belief_keywords) or ""
                         if belief_text:
                             cache.set("belief", belief_key, belief_text)
@@ -2029,13 +2031,21 @@ class WaveMemoryPlugin(Star):
         if not result or not result.chain:
             return
 
-        from astrbot.core.message.components import Plain
-        text_parts = []
+        from astrbot.core.message.components import Image, Plain
+        parts = []
+        has_image = False
         for comp in result.chain:
             if isinstance(comp, Plain):
-                text_parts.append(comp.text)
-        bot_text = "".join(text_parts).strip()
-        if not bot_text or len(bot_text) < 4:
+                text = (comp.text or "").strip()
+                if text:
+                    parts.append(text)
+            elif isinstance(comp, Image):
+                parts.append("[图片]")
+                has_image = True
+        bot_text = " ".join(parts).strip()
+        if not bot_text:
+            return
+        if not has_image and len(bot_text) < 4:
             return
 
         sender_id = event.get_sender_id() or ""

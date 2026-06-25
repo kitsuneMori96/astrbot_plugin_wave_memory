@@ -346,6 +346,15 @@ async def get_holyman():
         except Exception:
             pass
             
+    # 加载语料库
+    corpus = []
+    corpus_file = local_dir / "corpus.json"
+    if corpus_file.exists():
+        try:
+            corpus = json.loads(corpus_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+            
     # 2. 查询数据库中已激活的条目 (增加 c.db 非空安全卫士防御，防止早期请求崩溃)
     db_items = {}
     if c.db and hasattr(c.db, "conn") and c.db.conn and _table_exists(c.db.conn, "jargon"):
@@ -364,13 +373,23 @@ async def get_holyman():
     for word, meaning in phrases.items():
         if word.startswith("_"):
             continue
+            
+        example = None
+        for text in corpus:
+            if word in text:
+                example = text.strip()
+                if len(example) > 150:
+                    example = example[:147] + "..."
+                break
+                
         if word in db_items:
             items.append({
                 "word": word,
                 "meaning": meaning,
                 "is_activated": True,
                 "db_id": db_items[word]["id"],
-                "custom_meaning": db_items[word]["meaning"]
+                "custom_meaning": db_items[word]["meaning"],
+                "example": example
             })
         else:
             items.append({
@@ -378,7 +397,8 @@ async def get_holyman():
                 "meaning": meaning,
                 "is_activated": False,
                 "db_id": None,
-                "custom_meaning": None
+                "custom_meaning": None,
+                "example": example
             })
             
     # 4. 获取远程最新提交的版本哈希

@@ -48,10 +48,10 @@ class BeliefEmergenceService:
             total = sum(float(e[5] or 0) for e in events)
             if len(events) < 3 and abs(total) < 8:
                 continue
-            content = self._make_belief(user_id, dimension, total, len(events))
+            content = self._make_belief(user_id, dimension, total, len(events), events)
             if not content or self._duplicate(content):
                 continue
-            source_ids = [int(e[0]) for e in events[:10]]
+            source_ids = [int(e[0]) for e in events]
             belief_id = self.db.add_belief(
                 content=content,
                 belief_type="person_judgment",
@@ -64,7 +64,49 @@ class BeliefEmergenceService:
             logger.info("[BeliefEmergence] Pending belief: %s", content[:80])
         return created
 
-    def _make_belief(self, user_id: str, dimension: str, total: float, count: int) -> str:
+    def _make_belief(self, user_id: str, dimension: str, total: float, count: int, events: list) -> str:
+        reasons = []
+        for e in events:
+            r = (e[6] or "").strip()
+            if r and len(r) >= 2:
+                if r not in reasons:
+                    reasons.append(r)
+        
+        # 子串去重，保留长句，去除冗余 token
+        cleaned_reasons = []
+        for r in reasons:
+            is_sub = False
+            for i, existing in enumerate(cleaned_reasons):
+                if r in existing:
+                    is_sub = True
+                    break
+                elif existing in r:
+                    cleaned_reasons[i] = r
+                    is_sub = True
+                    break
+            if not is_sub:
+                cleaned_reasons.append(r)
+        
+        # 限制数量，避免生成的信念内容过长
+        reasons = cleaned_reasons[:10]
+        
+        if reasons:
+            reasons_str = "、".join(reasons)
+            if dimension == "trust" and total > 0:
+                return f"我感觉 {user_id} 对我很友善，因为多次愉快互动，包括：[{reasons_str}] 等经历。"
+            if dimension == "hostility" and total > 0:
+                return f"我对 {user_id} 有所防备，因为有些令人困惑或受挫的经历，包括：[{reasons_str}] 等事件。"
+            if dimension == "fun" and total > 0:
+                return f"我觉得和 {user_id} 互动非常有趣，因为有许多欢乐的时刻，包括：[{reasons_str}] 等经历。"
+            if dimension == "depth" and total > 0:
+                return f"我觉得 {user_id} 愿意和我深入交流，因为我们有许多心灵共鸣的经历，包括：[{reasons_str}] 等事件。"
+            if total < 0:
+                return f"我对 {user_id} 的 {dimension} 感受有所下降，因为经历了一些受挫或困惑的事情，包括：[{reasons_str}] 等经历。"
+            
+            # 兜底
+            return f"我感觉 {user_id} 对我很友善，因为多次愉快互动，包括：[{reasons_str}] 等经历。"
+            
+        # 兜底：没有有效 reasons 时回退到静态描述
         if dimension == "trust" and total > 0:
             return f"我逐渐更信任 {user_id}，因为多次互动让信任维度上升。"
         if dimension == "hostility" and total > 0:
