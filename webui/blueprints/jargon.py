@@ -385,7 +385,6 @@ async def get_holyman():
     remote_version = "Unknown"
     try:
         import urllib.request
-        import json
         req = urllib.request.Request(
             "https://api.github.com/repos/ykdeso/holyman-skills/commits/main",
             headers={"User-Agent": "WaveMemory-WebUI"}

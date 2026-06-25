@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.2.1 (2026-06-25)
+
+### Hotfix
+
+- **Holyman WebUI 修复**：移除 `get_holyman()` 内部重复 `import json`，避免 Python 将 `json` 判定为未初始化局部变量，导致本地 `phrases.json` 加载失败
+- **运行时同步清理**：确认 Holyman API 不再返回调试字段，不再输出 `[DEBUG_HOLYMAN_LOAD_FAILED]`
+
 ## v2.2.0 (2026-06-25)
 
 ### 经历与关系事件重构

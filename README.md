@@ -2,7 +2,7 @@
 
 # Wave Memory
 
-[![Version](https://img.shields.io/badge/version-v2.2.0-blue.svg)](https://github.com/vivy1024/astrbot_plugin_wave_memory/releases)
+[![Version](https://img.shields.io/badge/version-v2.2.1-blue.svg)](https://github.com/vivy1024/astrbot_plugin_wave_memory/releases)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-≥4.14-green.svg)](https://github.com/AstrBotDevs/AstrBot)
