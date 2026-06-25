@@ -4,6 +4,7 @@ AstrBot Wave Memory 插件 — 基于 VCP TagMemo 浪潮算法的高性能记忆
 """
 
 import asyncio
+import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -111,7 +112,7 @@ def _parse_bot_config(cfg: dict, fallback_db_id: str = "") -> BotProfile:
     "astrbot_plugin_wave_memory",
     "vivy1024",
     "高性能记忆 + 灵魂引擎 + 知识图谱插件。五阶段零 LLM 检索管线、BDI 心智架构（信念/欲望/关切）、黑话学习、风格范例注入、交互式知识图谱可视化。",
-    "2.0.1",
+    "2.2.0",
     "https://github.com/vivy1024/astrbot_plugin_wave_memory",
 )
 class WaveMemoryPlugin(Star):
@@ -1718,24 +1719,24 @@ class WaveMemoryPlugin(Star):
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
         """捕获所有消息，异步写入记忆。"""
-        message = event.get_message_str()
-        if not message or len(message.strip()) < self.min_message_length:
+        message = event.get_message_str() or ""
+
+        # 先探测图片，避免纯图片消息被文本长度门槛误杀
+        images = []
+        if hasattr(event, "message_obj") and event.message_obj and event.message_obj.message:
+            for comp in event.message_obj.message:
+                if comp.__class__.__name__ == "Image":
+                    images.append(comp)
+
+        if not message.strip() and images:
+            message = "[图片]"
+
+        if len(message.strip()) < self.min_message_length and not images:
             return
 
         sender_id = event.get_sender_id() or ""
-
-        # 多 bot 去重：同一条群消息会被多个 NapCat 上报，只写一次
-        dedup_key = f"{sender_id}:{message[:50]}"
-        now = time.time()
-        if not hasattr(self, '_msg_dedup_cache'):
-            self._msg_dedup_cache = {}
-        # 清理 10 秒前的旧条目
-        self._msg_dedup_cache = {k: v for k, v in self._msg_dedup_cache.items() if now - v < 10}
-        if dedup_key in self._msg_dedup_cache:
-            return  # 重复消息，跳过
-        self._msg_dedup_cache[dedup_key] = now
-
         group_id = event.get_group_id() or f"private:{sender_id}"
+        bot_id = event.get_self_id() or ""
 
         if self.group_whitelist and group_id not in self.group_whitelist:
             return
@@ -1743,20 +1744,13 @@ class WaveMemoryPlugin(Star):
             return
 
         # ─── 4s 消息合并防抖机制 (Debounce Coalescing) ───
-        from astrbot.core.message.components import Plain
-        
-        # 提取图片组件
-        images = []
-        if hasattr(event, "message_obj") and event.message_obj and event.message_obj.message:
-            for comp in event.message_obj.message:
-                if comp.__class__.__name__ == "Image":
-                    images.append(comp)
-
+        # 不重写 event.message_obj.message：底层组件链由 AstrBot/适配器维护，
+        # 插件越级替换会让后续引用/发送阶段把组件结构当作 Plain 文本嵌套序列化。
         sender_name_val = ""
         if event.message_obj and event.message_obj.sender:
             sender_name_val = event.message_obj.sender.nickname or ""
 
-        debounce_key = f"{group_id}:{sender_id}"
+        debounce_key = f"{bot_id}:{group_id}:{sender_id}"
         if not hasattr(self, "_semantic_message_buffers"):
             self._semantic_message_buffers = {}
 
@@ -1772,7 +1766,8 @@ class WaveMemoryPlugin(Star):
                 "text": message,
                 "images": images
             })
-            # 挂起拦截
+            # 挂起拦截：不再继续 LLM/下游处理，由首条协程合并后统一放行
+            event.should_call_llm(False)
             event.stop_event()
             return
         else:
@@ -1829,19 +1824,11 @@ class WaveMemoryPlugin(Star):
             if not merged_content and all_images:
                 merged_content = "[图片]"
 
-            # 更新当前事件携带的消息内容和组件链
+            # 只更新纯文本视图供 WaveMemory 后续逻辑使用。
+            # 不重写 event.message_obj.message：底层组件链由 AstrBot/适配器维护，
+            # 插件越级替换会让后续引用/发送阶段把组件结构当作 Plain 文本嵌套序列化。
             event.message_str = merged_content
-            new_chain = []
-            if merged_content and merged_content != "[图片]":
-                new_chain.append(Plain(merged_content))
-            elif merged_content == "[图片]" and not all_images:
-                new_chain.append(Plain("[图片]"))
 
-            for img_comp in all_images:
-                new_chain.append(img_comp)
-
-            event.message_obj.message = new_chain
-            
             # 放行给后面的逻辑使用
             message = merged_content
 
@@ -1885,158 +1872,152 @@ class WaveMemoryPlugin(Star):
             self._group_concurrency_locks = {}
         group_lock = self._group_concurrency_locks.setdefault(group_id, asyncio.Lock())
 
-        async def _process_in_lock():
+        async def _process_in_lock(locked_message: str):
             # ─── /teach 命令（管理员灌入知识 → facts + 高权重记忆）───
             sender_name = ""
             if event.message_obj and event.message_obj.sender:
                 sender_name = event.message_obj.sender.nickname or ""
-        msg_stripped = message.strip()
-        if msg_stripped.startswith("/teach ") or msg_stripped.startswith("/teach:"):
-            # 只有管理员能用
-            admin_ids = self._get_admin_ids() if hasattr(self, '_get_admin_ids') else set()
-            if sender_id in admin_ids:
-                content = msg_stripped[7:].strip(":： \n")
-                if content and len(content) >= 4:
-                    # 写高权重记忆
-                    self.db.add_memory(
-                        group_id=group_id, content=f"[管理员教导] {content}",
-                        sender_id=sender_id, sender_name=sender_name,
-                        importance=2.5, source="teach",
-                    )
-                    # 尝试解析为 facts（格式：A是B / A的B是C）
-                    import re as _re
-                    fact_match = _re.match(r'^(.+?)(是|的|=|→)(.+)$', content)
-                    if fact_match:
-                        subject = fact_match.group(1).strip()
-                        predicate = fact_match.group(2).strip() or "是"
-                        obj = fact_match.group(3).strip()
-                        if subject and obj:
-                            self.db.insert_fact(subject, predicate, obj, group_id=group_id, confidence=0.95)
-                    logger.info(f"[WaveMemory] /teach: {content[:50]}")
-                return
+            msg_stripped = locked_message.strip()
+            if msg_stripped.startswith("/teach ") or msg_stripped.startswith("/teach:"):
+                # 只有管理员能用
+                admin_ids = self._get_admin_ids() if hasattr(self, '_get_admin_ids') else set()
+                if sender_id in admin_ids:
+                    content = msg_stripped[7:].strip(":： \n")
+                    if content and len(content) >= 4:
+                        self.db.add_memory(
+                            group_id=group_id, content=f"[管理员教导] {content}",
+                            sender_id=sender_id, sender_name=sender_name,
+                            importance=2.5, source="teach",
+                        )
+                        # 尝试解析为 facts（格式：A是B / A的B是C）
+                        import re as _re
+                        fact_match = _re.match(r'^(.+?)(是|的|=|→)(.+)$', content)
+                        if fact_match:
+                            subject = fact_match.group(1).strip()
+                            predicate = fact_match.group(2).strip() or "是"
+                            obj = fact_match.group(3).strip()
+                            if subject and obj:
+                                self.db.insert_fact(subject, predicate, obj, group_id=group_id, confidence=0.95)
+                        logger.info(f"[WaveMemory] /teach: {content[:50]}")
+                    return
 
-        # ─── "记住/忘记" 显式命令（用户主动触发,不依赖 LLM 判断）───
-        _remember_prefixes = ("记住", "记下", "remember")
-        _forget_prefixes = ("忘记", "忘掉", "forget", "别记")
-        msg_stripped = message.strip()
-        for prefix in _remember_prefixes:
-            if msg_stripped.startswith(prefix):
-                content = msg_stripped[len(prefix):].strip(":： \n")
-                if content and len(content) >= 4:
-                    self.db.add_memory(
-                        group_id=group_id, content=f"[用户要求记住] {content}",
-                        sender_id=sender_id, sender_name=sender_name if sender_name else "",
-                        importance=2.0, source="explicit",
-                    )
-                    logger.info(f"[WaveMemory] 显式记住: {sender_name}: {content[:30]}")
-                return
-        for prefix in _forget_prefixes:
-            if msg_stripped.startswith(prefix):
-                content = msg_stripped[len(prefix):].strip(":： \n")
-                if content and len(content) >= 2:
-                    # 搜索匹配记忆并标记低重要性（软删除）
-                    rows = self.db.conn.execute(
-                        "SELECT id FROM memories WHERE content LIKE ? AND sender_id = ? ORDER BY id DESC LIMIT 5",
-                        (f"%{content}%", sender_id),
-                    ).fetchall()
-                    for row in rows:
-                        self.db.conn.execute("UPDATE memories SET importance = 0.01 WHERE id = ?", (row[0],))
-                    self.db.conn.commit()
-                    if rows:
-                        logger.info(f"[WaveMemory] 显式忘记: {sender_name}: {content[:30]} ({len(rows)} 条降权)")
-                return
+            # ─── "记住/忘记" 显式命令（用户主动触发,不依赖 LLM 判断）───
+            _remember_prefixes = ("记住", "记下", "remember")
+            _forget_prefixes = ("忘记", "忘掉", "forget", "别记")
+            msg_stripped = locked_message.strip()
+            for prefix in _remember_prefixes:
+                if msg_stripped.startswith(prefix):
+                    content = msg_stripped[len(prefix):].strip(":： \n")
+                    if content and len(content) >= 4:
+                        self.db.add_memory(
+                            group_id=group_id, content=f"[用户要求记住] {content}",
+                            sender_id=sender_id, sender_name=sender_name if sender_name else "",
+                            importance=2.0, source="explicit",
+                        )
+                        logger.info(f"[WaveMemory] 显式记住: {sender_name}: {content[:30]}")
+                    return
+            for prefix in _forget_prefixes:
+                if msg_stripped.startswith(prefix):
+                    content = msg_stripped[len(prefix):].strip(":： \n")
+                    if content and len(content) >= 2:
+                        rows = self.db.conn.execute(
+                            "SELECT id FROM memories WHERE content LIKE ? AND sender_id = ? ORDER BY id DESC LIMIT 5",
+                            (f"%{content}%", sender_id),
+                        ).fetchall()
+                        for row in rows:
+                            self.db.conn.execute("UPDATE memories SET importance = 0.01 WHERE id = ?", (row[0],))
+                        self.db.conn.commit()
+                        if rows:
+                            logger.info(f"[WaveMemory] 显式忘记: {sender_name}: {content[:30]} ({len(rows)} 条降权)")
+                    return
 
-        if len(message) > self.max_message_length:
-            message = message[:self.max_message_length]
+            if len(locked_message) > self.max_message_length:
+                locked_message = locked_message[:self.max_message_length]
 
-        sender_id = event.get_sender_id()
-        sender_name = ""
-        if event.message_obj and event.message_obj.sender:
-            sender_name = event.message_obj.sender.nickname or ""
+            await self.writer.enqueue({
+                "group_id": group_id,
+                "sender_id": sender_id,
+                "sender_name": sender_name,
+                "content": locked_message,
+                "timestamp": time.time(),
+                "is_at_bot": getattr(event, "is_at_or_wake_command", False),
+            })
 
-        await self.writer.enqueue({
-            "group_id": group_id,
-            "sender_id": sender_id,
-            "sender_name": sender_name,
-            "content": message,
-            "timestamp": time.time(),
-            "is_at_bot": getattr(event, "is_at_or_wake_command", False),
-        })
+            # 黑话词频统计 + 触发挖掘 (US-4.1)
+            if self.jargon_service:
+                self.jargon_service.feed_message(locked_message, group_id, sender_id)
+                if self.jargon_service.should_mine(group_id):
+                    self._spawn(self._jargon_mine_task(group_id))
 
-        # 黑话词频统计 + 触发挖掘 (US-4.1)
-        if self.jargon_service:
-            self.jargon_service.feed_message(message, group_id, sender_id)
-            if self.jargon_service.should_mine(group_id):
-                self._spawn(self._jargon_mine_task(group_id))
+            # 白真真自省：检测群友对白真真的纠正
+            if self.self_reflect and group_id:
+                try:
+                    await self.self_reflect.check_correction(locked_message, sender_name, group_id)
+                except Exception:
+                    pass
 
-        # 白真真自省：检测群友对白真真的纠正
-        if self.self_reflect and group_id:
-            try:
-                await self.self_reflect.check_correction(message, sender_name, group_id)
-            except Exception:
-                pass
-
-        if hasattr(self, 'lifecycle') and self.lifecycle:
-            bot_ids = self._bot_qq_ids
-            is_at_bot = any(bid in (event.message_str or '') for bid in bot_ids)
-            # 检测是否回复 bot（引用消息的发送者是 bot）
-            is_reply_to_bot = False
-            if hasattr(event, 'message_obj') and event.message_obj:
-                raw = event.message_str or ""
-                if "[引用消息" in raw and any(bid in raw for bid in bot_ids):
-                    is_reply_to_bot = True
-            hour = int(time.strftime('%H', time.localtime()))
-            self.lifecycle.affinity.process_message(
-                sender_id=sender_id,
-                group_id=group_id,
-                content=message,
-                is_at_bot=is_at_bot,
-                is_reply_to_bot=is_reply_to_bot,
-                hour=hour,
-            )
-
-        # 欲望触发：检测红包等特殊事件
-        if hasattr(self, 'desire_engine'):
-            raw_msg = event.message_str or ""
-            if "redbag" in raw_msg or "红包" in message:
-                self.desire_engine.trigger(
-                    desire_type="想抢红包",
-                    trigger_desc=f"{sender_name}发了红包",
-                    intensity=0.6,
-                    action="react_to_hongbao",
-                    ttl=30.0,
+            if hasattr(self, 'lifecycle') and self.lifecycle:
+                bot_ids = self._bot_qq_ids
+                is_at_bot = any(bid in (event.message_str or '') for bid in bot_ids)
+                # 检测是否回复 bot（引用消息的发送者是 bot）
+                is_reply_to_bot = False
+                if hasattr(event, 'message_obj') and event.message_obj:
+                    raw = event.message_str or ""
+                    if "[引用消息" in raw and any(bid in raw for bid in bot_ids):
+                        is_reply_to_bot = True
+                hour = int(time.strftime('%H', time.localtime()))
+                self.lifecycle.affinity.process_message(
+                    sender_id=sender_id,
+                    group_id=group_id,
+                    content=locked_message,
+                    is_at_bot=is_at_bot,
+                    is_reply_to_bot=is_reply_to_bot,
+                    hour=hour,
                 )
 
-        # 主动对话触发：兴趣词匹配 OR 关切命中，才调 LLM 判断
-        bot_id = event.get_self_id() or ""
-        bot_profile = self._get_bot(bot_id)
-        proactive_ok = bot_profile.proactive_enabled if bot_profile else self.meta_thinking.proactive_enabled if self.meta_thinking else False
-        concern_score = self.concern_tracker.match(message) if getattr(self, 'concern_tracker', None) else 0.0
-        is_interesting = self.meta_thinking.is_interesting(message) if self.meta_thinking else False
-        if (self.meta_thinking
-            and proactive_ok
-            and not getattr(event, "is_at_or_wake_command", False)
-            and group_id
-            and (is_interesting or concern_score > 0.3)):
-            try:
-                bot_id = event.get_self_id() or ""
-                context_messages = self._get_recent_messages(event, max_messages=10)
-                result = await self.meta_thinking.should_proactive(group_id, context_messages)
-                if result.get("action") == "主动插话":
-                    inner = result.get("inner_thought", "")
-                    reply_text = await self.meta_thinking.generate_proactive_reply(
-                        context_messages, inner, bot_id=bot_id
+            # 欲望触发：检测红包等特殊事件
+            desire_engine = getattr(self, 'desire_engine', None)
+            if desire_engine:
+                raw_msg = event.message_str or ""
+                if "redbag" in raw_msg or "红包" in locked_message:
+                    desire_engine.trigger(
+                        desire_type="想抢红包",
+                        trigger_desc=f"{sender_name}发了红包",
+                        intensity=0.6,
+                        action="react_to_hongbao",
+                        ttl=30.0,
                     )
-                    if reply_text:
-                        logger.info(f"[MetaThinking] 主动插话: {inner[:50]}")
-                        await event.send(event.plain_result(reply_text))
-            except Exception as e:
-                logger.debug(f"[MetaThinking] Proactive failed: {e}")
-                _record_err("Proactive", e)
+
+            # 主动对话触发：兴趣词匹配 OR 关切命中，才调 LLM 判断
+            bot_id = event.get_self_id() or ""
+            bot_profile = self._get_bot(bot_id)
+            proactive_ok = bot_profile.proactive_enabled if bot_profile else self.meta_thinking.proactive_enabled if self.meta_thinking else False
+            concern_score = self.concern_tracker.match(locked_message) if getattr(self, 'concern_tracker', None) else 0.0
+            is_interesting = self.meta_thinking.is_interesting(locked_message) if self.meta_thinking else False
+            if (self.meta_thinking
+                and proactive_ok
+                and not getattr(event, "is_at_or_wake_command", False)
+                and group_id
+                and (is_interesting or concern_score > 0.3)):
+                try:
+                    bot_id = event.get_self_id() or ""
+                    context_messages = self._get_recent_messages(event, max_messages=10)
+                    result = await self.meta_thinking.should_proactive(group_id, context_messages)
+                    if result.get("action") == "主动插话":
+                        inner = result.get("inner_thought", "")
+                        reply_text = await self.meta_thinking.generate_proactive_reply(
+                            context_messages, inner, bot_id=bot_id
+                        )
+                        if reply_text:
+                            logger.info(f"[MetaThinking] 主动插话: {inner[:50]}")
+                            await event.send(event.plain_result(reply_text))
+                except Exception as e:
+                    logger.debug(f"[MetaThinking] Proactive failed: {e}")
+                    _record_err("Proactive", e)
 
         # 锁保护下唤醒执行整个事件流
         async with group_lock:
-            await _process_in_lock()
+            await _process_in_lock(message)
 
     @filter.after_message_sent()
     async def on_bot_sent(self, event: AstrMessageEvent):

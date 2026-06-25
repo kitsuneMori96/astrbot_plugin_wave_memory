@@ -317,10 +317,28 @@ async def get_holyman():
     """获取 Holyman 预设黑话及其数据库激活状态。"""
     c = get_container()
     from pathlib import Path
+    import os
     
-    # 1. 读取本地 presets json 资产
-    local_dir = Path(__file__).resolve().parent.parent.parent / "assets" / "holyman"
+    # 1. 采用绝对物理隔离寻址，解决在装饰器、闭包或符号链接下 __file__ 盘符漂移的痛点
+    local_dir = None
+    for target_path in [
+        "/AstrBot/data/plugins/astrbot_plugin_wave_memory/assets/holyman",
+        os.path.join(os.getcwd(), "data/plugins/astrbot_plugin_wave_memory/assets/holyman"),
+        os.path.join(os.getcwd(), "astrbot_plugin_wave_memory/assets/holyman"),
+        # 动态自愈 fallback：通过当前 jargon.py 真实的绝对路径计算
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../assets/holyman"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../assets/holyman")
+    ]:
+        if Path(target_path).exists() and (Path(target_path) / "phrases.json").exists():
+            local_dir = Path(target_path)
+            break
+            
+    if not local_dir:
+        # 最后的保底，直接使用相对路径，但不使用可能会导致问题的 resolve() 符号解析
+        local_dir = Path(os.path.dirname(os.path.abspath(__file__))) / ".." / ".." / "assets" / "holyman"
+
     phrases_file = local_dir / "phrases.json"
+                
     phrases = {}
     if phrases_file.exists():
         try:
@@ -328,18 +346,24 @@ async def get_holyman():
         except Exception:
             pass
             
-    # 2. 查询数据库中已激活的条目
+    # 2. 查询数据库中已激活的条目 (增加 c.db 非空安全卫士防御，防止早期请求崩溃)
     db_items = {}
-    if _table_exists(c.db.conn, "jargon"):
-        rows = c.db.conn.execute(
-            "SELECT id, word, meaning, status FROM jargon WHERE scope = 'global' AND source = 'holyman_skills' AND is_jargon = 1 AND status = 'confirmed'"
-        ).fetchall()
-        for r in rows:
-            db_items[r[1]] = {"id": r[0], "meaning": r[2], "status": r[3]}
+    if c.db and hasattr(c.db, "conn") and c.db.conn and _table_exists(c.db.conn, "jargon"):
+        try:
+            rows = c.db.conn.execute(
+                "SELECT id, word, meaning, status FROM jargon WHERE scope = 'global' AND source = 'holyman_skills' AND is_jargon = 1 AND status = 'confirmed'"
+            ).fetchall()
+            for r in rows:
+                db_items[r[1]] = {"id": r[0], "meaning": r[2], "status": r[3]}
+        except Exception:
+            pass
             
     # 3. 构造 items 组合结果
     items = []
+    local_version = phrases.get("_version", "Unknown")
     for word, meaning in phrases.items():
+        if word.startswith("_"):
+            continue
         if word in db_items:
             items.append({
                 "word": word,
@@ -357,7 +381,28 @@ async def get_holyman():
                 "custom_meaning": None
             })
             
-    return jsonify({"items": items})
+    # 4. 获取远程最新提交的版本哈希
+    remote_version = "Unknown"
+    try:
+        import urllib.request
+        import json
+        req = urllib.request.Request(
+            "https://api.github.com/repos/ykdeso/holyman-skills/commits/main",
+            headers={"User-Agent": "WaveMemory-WebUI"}
+        )
+        with urllib.request.urlopen(req, timeout=1.5) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            sha = data.get("sha", "")[:7]
+            date = data.get("commit", {}).get("committer", {}).get("date", "")[:10]
+            remote_version = f"{date}-{sha}"
+    except Exception:
+        pass
+            
+    return jsonify({
+        "items": items,
+        "local_version": local_version,
+        "remote_version": remote_version
+    })
 
 
 @jargon_bp.route("/holyman/toggle", methods=["POST"])

@@ -12,10 +12,30 @@ function app() {
 
         // Jargon / Holyman State
         jargonSubTab: 'local',
+        jargonItems: [],
+        jargonFilter: '',
+        jargonGroup: '',
+        jargonTotal: 0,
+        jargonPending: 0,
+        jargonEdit: null,
+        jargonEditForm: { word: '', meaning: '' },
+        jargonCreate: false,
+        jargonCreateForm: { word: '', meaning: '', group_id: '' },
+
+        selectedJargonIds: [],
+        jargonAllMatching: false,
+        jargonPage: 1,
+        jargonPageSize: 15,
+        jargonSearch: '',
+        jargonHasMore: false,
+        jargonTotalPages: 1,
+
         holymanItems: [],
         holymanSearch: '',
         holymanUseProxy: true,
         holymanSyncing: false,
+        holymanLocalVersion: 'Unknown',
+        holymanRemoteVersion: 'Unknown',
 
         // Stats
         stats: {},
@@ -58,10 +78,13 @@ function app() {
             await this.loadStats();
             await this.loadMemories();
 
-            // Watch tab changes
+                    // Watch tab changes
             this.$watch('activeTab', (tab) => {
                 if (tab === 'graph') this.$nextTick(() => this.loadGraph());
-                if (tab === 'jargon') this.loadJargon();
+                if (tab === 'jargon') {
+                    this.jargonSubTab = 'local';
+                    this.loadJargon();
+                }
             });
         },
 
@@ -271,16 +294,186 @@ function app() {
         // ─── Jargon & Holyman ───
         async loadJargon() {
             try {
-                await this.loadJargonHolyman();
-            } catch (e) {
-                console.error('loadJargon failed:', e);
+                this.selectedJargonIds = []; // 重置批量勾选
+                const params = new URLSearchParams({
+                    limit: this.jargonPageSize,
+                    offset: (this.jargonPage - 1) * this.jargonPageSize
+                });
+                if (this.jargonFilter) params.set('status', this.jargonFilter);
+                if (this.jargonGroup) params.set('group_id', this.jargonGroup.trim());
+                if (this.jargonSearch) params.set('search', this.jargonSearch.trim());
+                
+                const r = await fetch('/api/jargon/?' + params);
+                const d = await r.json();
+                this.jargonItems = d.items || [];
+                this.jargonTotal = d.total || 0;
+                this.jargonPending = this.jargonItems.filter(j => (j.status || 'pending') === 'pending').length;
+                
+                // 重算页数
+                this.jargonTotalPages = Math.ceil(this.jargonTotal / this.jargonPageSize) || 1;
+                this.jargonHasMore = this.jargonItems.length >= this.jargonPageSize;
+            } catch(e) { console.error('loadJargon failed:', e); }
+        },
+
+        async searchJargon() {
+            this.jargonPage = 1;
+            this.clearJargonSelection();
+            await this.loadJargon();
+        },
+
+        async jargonPrev() {
+            if (this.jargonPage <= 1) return;
+            this.jargonPage--;
+            this.clearJargonSelection();
+            await this.loadJargon();
+        },
+
+        async jargonNext() {
+            if (!this.jargonHasMore) return;
+            this.jargonPage++;
+            this.clearJargonSelection();
+            await this.loadJargon();
+        },
+
+        clearJargonSelection() {
+            this.selectedJargonIds = [];
+            this.jargonAllMatching = false;
+        },
+
+        async reviewJargon(id, action) {
+            await fetch(`/api/jargon/${id}/review`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ action }),
+            });
+            await this.loadJargon();
+        },
+
+        toggleSelectAllJargon(e) {
+            if (e.target.checked) {
+                this.selectedJargonIds = this.jargonItems.map(j => j.id);
+            } else {
+                this.selectedJargonIds = [];
             }
+        },
+
+        async batchReviewJargon(action) {
+            if (!this.selectedJargonIds.length) return;
+            try {
+                const r = await fetch('/api/jargon/batch-review', {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({ 
+                        ids: this.selectedJargonIds, 
+                        action: action,
+                        all_matching: this.jargonAllMatching,
+                        group_id: this.jargonGroup || null,
+                        status: this.jargonFilter || null,
+                        search: this.jargonSearch || null
+                    })
+                });
+                const d = await r.json();
+                if (d.ok) {
+                    alert(`✓ 成功批量将 ${d.reviewed_count} 条词条置为 ${action==='approve'?'已确认':'已否决'}`);
+                    this.clearJargonSelection();
+                    await this.loadJargon();
+                } else {
+                    alert('批量流转失败');
+                }
+            } catch(e) { alert('网络错误，批量流转失败'); }
+        },
+
+        async batchDeleteJargon() {
+            if (!this.selectedJargonIds.length) return;
+            if (!confirm(`确定要批量物理删除选中的黑话词条吗？此操作不可逆！`)) return;
+            try {
+                const r = await fetch('/api/jargon/batch-delete', {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({ 
+                        ids: this.selectedJargonIds,
+                        all_matching: this.jargonAllMatching,
+                        group_id: this.jargonGroup || null,
+                        status: this.jargonFilter || null,
+                        search: this.jargonSearch || null
+                    })
+                });
+                const d = await r.json();
+                if (d.ok) {
+                    alert(`✓ 成功批量删除 ${d.deleted_count} 条黑话。`);
+                    this.clearJargonSelection();
+                    await this.loadJargon();
+                } else {
+                    alert('批量删除失败');
+                }
+            } catch(e) { alert('网络错误，批量删除失败'); }
+        },
+
+        openJargonEdit(j) {
+            this.jargonEdit = j;
+            this.jargonEditForm = { word: j.word, meaning: j.meaning || '' };
+        },
+
+        async saveJargonEdit() {
+            if (!this.jargonEdit) return;
+            await fetch(`/api/jargon/${this.jargonEdit.id}`, {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(this.jargonEditForm),
+            });
+            this.jargonEdit = null;
+            await this.loadJargon();
+        },
+
+        async quickEditMeaning(id, newMeaning) {
+            if (!newMeaning && newMeaning !== '') return;
+            await fetch(`/api/jargon/${id}`, {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ meaning: newMeaning.trim() }),
+            });
+            await this.loadJargon();
+        },
+
+        async toggleJargonGlobal(id) {
+            await fetch(`/api/jargon/${id}/toggle_global`, { method: 'POST' });
+            await this.loadJargon();
+        },
+
+        async deleteJargon(id) {
+            if (!confirm('确认删除该黑话词条？')) return;
+            await fetch(`/api/jargon/${id}`, { method: 'DELETE' });
+            await this.loadJargon();
+        },
+
+        openJargonCreate() {
+            this.jargonCreate = true;
+            this.jargonCreateForm = { word: '', meaning: '', group_id: '' };
+        },
+
+        async saveJargonCreate() {
+            if (!this.jargonCreateForm.word.trim()) { alert('词条不能为空'); return; }
+            try {
+                await fetch('/api/jargon/', {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({
+                        word: this.jargonCreateForm.word.trim(),
+                        meaning: this.jargonCreateForm.meaning.trim(),
+                        group_id: this.jargonCreateForm.group_id.trim() || null,
+                    }),
+                });
+                this.jargonCreate = false;
+                await this.loadJargon();
+            } catch(e) { console.error(e); alert('保存失败: '+e.message); }
         },
 
         async loadJargonHolyman() {
             try {
                 const data = await this.api('/api/jargon/holyman');
                 this.holymanItems = data.items || [];
+                this.holymanLocalVersion = data.local_version || 'Unknown';
+                this.holymanRemoteVersion = data.remote_version || 'Unknown';
             } catch (e) {
                 console.error('Failed to load Holyman items:', e);
             }

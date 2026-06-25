@@ -774,9 +774,9 @@
     <!-- ═══ 黑话审核 Tab ═══ -->
     <div x-show="tab==='jargon'" x-cloak>
         <!-- Sub-tabs Toggle -->
-        <div class="flex border-b border-gray-700 mb-4 gap-4 text-xs">
-            <button @click="jargonSubTab='local'; loadJargon()" class="pb-2 font-medium transition" :class="jargonSubTab==='local' ? 'border-b-2 border-primary text-white' : 'text-muted-fg hover:text-white'">群聊本地黑话</button>
-            <button @click="jargonSubTab='global'; loadJargonHolyman()" class="pb-2 font-medium transition" :class="jargonSubTab==='global' ? 'border-b-2 border-primary text-white' : 'text-muted-fg hover:text-white'">广域抽象黑话 (Holyman)</button>
+        <div class="flex border-b mb-4 gap-6 text-xs select-none" style="border-color:var(--border)">
+            <button @click="jargonSubTab='local'; loadJargon()" class="pb-2 font-semibold transition" :class="jargonSubTab==='local' ? 'border-b-2 border-[var(--primary)] text-[var(--primary)]' : 'text-[var(--muted-fg)] hover:text-[var(--fg)]'">群聊本地黑话</button>
+            <button @click="jargonSubTab='global'; loadJargonHolyman()" class="pb-2 font-semibold transition" :class="jargonSubTab==='global' ? 'border-b-2 border-[var(--primary)] text-[var(--primary)]' : 'text-[var(--muted-fg)] hover:text-[var(--fg)]'">广域抽象黑话 (Holyman)</button>
         </div>
 
         <!-- Sub-Tab 1: Local Jargon -->
@@ -820,7 +820,7 @@
 
             <div x-show="jargonItems.length === 0" class="empty-state">暂无黑话记录</div>
 
-            <div class="card !p-0 overflow-hidden" x-show="jargonItems.length > 0">
+            <div class="card !p-0 overflow-hidden max-h-[58vh] overflow-y-auto" style="border:1px solid var(--border)" x-show="jargonItems.length > 0">
                 <table class="w-full text-xs">
                     <thead>
                         <tr style="border-bottom:1px solid var(--border); color:var(--muted-fg)">
@@ -937,28 +937,39 @@
                 <button @click="syncJargonHolyman()" class="btn btn-primary btn-xs">🔄 在线同步 (GitHub)</button>
             </div>
             
-            <div class="text-xs px-1 text-[var(--muted-fg)] leading-relaxed">
-                “开箱即用，点击一键在线同步最新互联网抽象梗。启用/激活后的梗，才会在群聊命中时注入到 AI 的 Prompt 里（免爆 Token）”
+            <div class="text-xs px-1 text-[var(--muted-fg)] leading-relaxed flex flex-wrap items-center gap-3 justify-between">
+                <span>“开箱即用，内置加载 108+ 条核心互联网抽象黑话，支持一键实时拉取同步 GitHub 最新语料库。”</span>
+                <span class="font-mono text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded" x-text="`本地版本: ${holymanLocalVersion}`"></span>
+            </div>
+
+            <!-- Version Update Alert Box -->
+            <div x-show="holymanLocalVersion !== holymanRemoteVersion && holymanRemoteVersion !== 'Unknown'" class="p-3 rounded-lg text-xs flex items-center justify-between border" style="background:rgba(245,158,11,0.08); border-color:rgba(245,158,11,0.2); color:var(--warning)">
+                <div class="flex items-center gap-2">
+                    <span>💡 广域黑话官方库已更新！本地版本：<span class="font-mono" x-text="holymanLocalVersion"></span>，线上最新：<span class="font-mono font-bold" x-text="holymanRemoteVersion"></span>。</span>
+                </div>
+                <button @click="syncJargonHolyman()" class="btn btn-xs !py-1 !px-2.5" style="background:var(--warning); color:black; font-weight:600">一键同步更新</button>
             </div>
 
             <!-- Empty State -->
             <div x-show="holymanItems.length === 0" class="empty-state">未加载到广域黑话，请点击右上角在线同步</div>
 
             <!-- Grid Card List -->
-            <div x-show="holymanItems.length > 0" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mt-3">
+            <div x-show="holymanItems.length > 0" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mt-3 max-h-[58vh] overflow-y-auto pr-1">
                 <template x-for="h in filteredHolymanItems()" :key="h.word">
-                    <div class="card p-3 flex flex-col justify-between border transition duration-200" 
-                         :class="h.is_activated ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-[var(--border)] hover:border-gray-600'">
+                    <div class="card !p-3 flex flex-col justify-between border border-transparent transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-primary/5" 
+                         :class="h.is_activated ? 'border-emerald-500/20 bg-emerald-500/5' : 'bg-white/5 border-white/5 hover:border-white/10'" style="border-radius:10px">
                         
-                        <div class="flex items-start justify-between gap-2 mb-2">
-                            <span class="font-bold text-xs bg-gray-800 px-2 py-0.5 rounded text-white" x-text="h.word"></span>
+                        <div class="flex items-center justify-between gap-2 mb-2">
+                            <span class="badge badge-keyword font-bold text-xs" x-text="h.word" style="border:1px solid var(--border)"></span>
                             
-                            <!-- Activation Switch -->
-                            <input type="checkbox" class="toggle shrink-0" :checked="h.is_activated" x-model="h.is_activated" @change="toggleJargonHolyman(h)" :style="h.is_activated ? 'background: var(--success)' : ''">
+                            <!-- Activation Checkbox -->
+                            <input type="checkbox" class="w-4 h-4 rounded text-[var(--primary)] focus:ring-[var(--primary)]/30 focus:ring-2 bg-[var(--muted)] border-[var(--border)] cursor-pointer transition-colors" 
+                                   :checked="h.is_activated" 
+                                   @change="h.is_activated = $event.target.checked; toggleJargonHolyman(h)">
                         </div>
 
                         <!-- Meaning (Double-clickable edit) -->
-                        <div class="cursor-pointer bg-black/10 hover:bg-black/20 p-2 rounded text-xs mt-1" 
+                        <div class="cursor-pointer bg-black/10 hover:bg-black/20 p-2 rounded text-xs mt-1 transition" style="border:1px solid rgba(255,255,255,0.03)"
                              @dblclick="$el.querySelector('span').style.display='none'; $el.querySelector('input').style.display=''; $el.querySelector('input').focus()" 
                              title="双击自定义释义">
                             <span x-text="h.custom_meaning || h.meaning || '—'"></span>

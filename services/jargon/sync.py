@@ -35,15 +35,36 @@ class HolymanSyncService:
         }
 
         try:
-            # 1. Fetch SKILL.md
-            req_phrases = urllib.request.Request(phrases_url, headers=headers)
-            with urllib.request.urlopen(req_phrases, timeout=15) as response:
-                phrases_data = response.read().decode("utf-8", errors="ignore")
+            phrases_data = None
+            corpus_data = None
 
-            # 2. Fetch 神言.txt
-            req_corpus = urllib.request.Request(corpus_url, headers=headers)
-            with urllib.request.urlopen(req_corpus, timeout=15) as response:
-                corpus_data = response.read().decode("utf-8", errors="ignore")
+            try:
+                # 1. Fetch SKILL.md
+                req_phrases = urllib.request.Request(phrases_url, headers=headers)
+                with urllib.request.urlopen(req_phrases, timeout=15) as response:
+                    phrases_data = response.read().decode("utf-8", errors="ignore")
+
+                # 2. Fetch 神言.txt
+                req_corpus = urllib.request.Request(corpus_url, headers=headers)
+                with urllib.request.urlopen(req_corpus, timeout=15) as response:
+                    corpus_data = response.read().decode("utf-8", errors="ignore")
+            except Exception as e:
+                if use_proxy:
+                    logger.warning(f"[HolymanSync] Proxy sync failed. Falling back to direct raw GitHub download... Error: {e}")
+                    phrases_url = self.PHRASES_URL_DIRECT
+                    corpus_url = self.CORPUS_URL_DIRECT
+                    
+                    # 1. Fetch SKILL.md (direct)
+                    req_phrases = urllib.request.Request(phrases_url, headers=headers)
+                    with urllib.request.urlopen(req_phrases, timeout=15) as response:
+                        phrases_data = response.read().decode("utf-8", errors="ignore")
+
+                    # 2. Fetch 神言.txt (direct)
+                    req_corpus = urllib.request.Request(corpus_url, headers=headers)
+                    with urllib.request.urlopen(req_corpus, timeout=15) as response:
+                        corpus_data = response.read().decode("utf-8", errors="ignore")
+                else:
+                    raise e
 
             # 3. Parse SKILL.md
             # Matches lines like:

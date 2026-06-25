@@ -127,20 +127,50 @@ class JargonInjector:
         self._cache_ts: Dict[str, float] = {}
 
     def get_injection(self, text: str, group_id: str, max_items: int = None) -> str:
-        """检查消息是否含已知黑话，返回注入文本。"""
+        """根据上下文对黑话进行高级语义匹配与相关度排序注入。"""
         if max_items is None:
             max_items = self._max_inject
         jargons = self._get_group_jargons(group_id)
         if not jargons:
             return ""
 
-        matched = []
+        # 执行高级语义/文本重合度相关性检索
+        jargon_scores = []
+        text_lower = (text or "").lower()
+        
+        # 极简分词（将句子中的中文字符和英文单词切分出来进行重合度计算）
+        import re
+        tokens = set(re.findall(r"[\u4e00-\u9fff]|[a-zA-Z0-9]+", text_lower))
+
         for j in jargons:
             word = j["word"]
-            if word in text:
-                matched.append(j)
-                if len(matched) >= max_items:
-                    break
+            word_lower = word.lower()
+            score = 0.0
+
+            # 1. 绝对包含加分
+            if word_lower in text_lower:
+                score += 1.5
+            
+            # 2. 词条名字出现在分词词袋中加分
+            if word_lower in tokens:
+                score += 0.5
+
+            # 3. 释义与当前文本的重合度重叠加分
+            meaning = j.get("meaning", "") or ""
+            meaning_lower = meaning.lower()
+            meaning_tokens = set(re.findall(r"[\u4e00-\u9fff]|[a-zA-Z0-9]+", meaning_lower))
+            overlap = tokens.intersection(meaning_tokens)
+            if overlap:
+                # 排除通用标点/虚词/单个英文字母等噪音，增加检索准确度
+                valid_overlap = {tok for tok in overlap if len(tok) >= 1 and tok not in ("在", "的", "了", "和", "是", "我", "你", "他", "它")}
+                score += 0.15 * len(valid_overlap)
+
+            if score > 0.0:
+                jargon_scores.append((score, j))
+
+        # 按分值从高到低排序，过滤出最相关的几条
+        jargon_scores.sort(key=lambda x: x[0], reverse=True)
+        matched = [item[1] for item in jargon_scores[:max_items]]
 
         if not matched:
             return ""

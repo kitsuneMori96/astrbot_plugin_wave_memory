@@ -45,6 +45,29 @@ class HolymanReference:
         phrases_file = local_dir / "phrases.json"
         corpus_file = local_dir / "corpus.json"
 
+        # 符号链接/软链接绝对路径兜底（Docker/Host 统一路径安全保护）
+        if not phrases_file.exists():
+            import os
+            for alt_path in [
+                "/AstrBot/data/plugins/astrbot_plugin_wave_memory/assets/holyman/phrases.json",
+                os.path.join(os.getcwd(), "data/plugins/astrbot_plugin_wave_memory/assets/holyman/phrases.json"),
+                os.path.join(os.getcwd(), "astrbot_plugin_wave_memory/assets/holyman/phrases.json")
+            ]:
+                if Path(alt_path).exists():
+                    phrases_file = Path(alt_path)
+                    break
+
+        if not corpus_file.exists():
+            import os
+            for alt_path in [
+                "/AstrBot/data/plugins/astrbot_plugin_wave_memory/assets/holyman/corpus.json",
+                os.path.join(os.getcwd(), "data/plugins/astrbot_plugin_wave_memory/assets/holyman/corpus.json"),
+                os.path.join(os.getcwd(), "astrbot_plugin_wave_memory/assets/holyman/corpus.json")
+            ]:
+                if Path(alt_path).exists():
+                    corpus_file = Path(alt_path)
+                    break
+
         if phrases_file.exists():
             try:
                 local_phrases = json.loads(phrases_file.read_text(encoding="utf-8"))

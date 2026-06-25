@@ -1,5 +1,70 @@
 # Changelog
 
+## v2.2.0 (2026-06-25)
+
+### 经历与关系事件重构
+
+- **经历片段服务**：新增 `experience_episodes`，把长期交互从普通消息沉淀为可检索、可注入的经历材料
+- **关系事件服务**：新增 `relationship_events`，记录关系变化、互动事件与长期轨迹
+- **v2.2 迁移脚本**：新增 `engine/db/migrations/v2_2_experience_rework.py`，为经历重构和后续自学习打基础
+- **信念涌现增强**：新增 `belief_emergence`，让信念从摘要/互动中进入可审核的长期认知层
+
+### 身份安全与污染隔离
+
+- **身份安全守卫**：新增 `identity_safety`，降低认爹、主仆、亲属称呼、临时 RP 等群聊梗污染长期身份的风险
+- **角色扮演污染隔离**：新增 `quarantine_roleplay_memory.py`，支持扫描并隔离历史 RP/身份污染记忆
+- **旧社交数据清理**：补齐 `cleanup_legacy_social_data.py`、`full_cleanup_identity.py` 等治理脚本
+
+### 数据治理与运行时工具
+
+- **DB 健康检查**：新增 `db_health_check.py`、`db_inventory.py`，便于盘点运行时 SQLite 状态
+- **运行时导出与修复**：新增 `export_runtime_data.py`、`repair_sqlite_runtime.py`、`sqlite_runtime_guard.py`
+- **测试覆盖**：新增 `test_rework_core.py`、`test_identity_safety.py`、`test_runtime_sqlite_tools.py`
+- **运行时工具安全**：避免误扫备份目录，导出只覆盖 inventory 纳入的 SQLite 文件
+
+### Holyman / 广域黑话语料
+
+- **内置参考语料扩展**：大幅扩充 `assets/holyman/corpus.json` 与 `phrases.json`
+- **高可用同步服务**：新增 Holyman 本地 fallback、在线同步、代理同步与热重载能力
+- **黑话推断增强**：接入广域参考语料，提升群体语感、抽象黑话与网络梗理解
+
+### 关键稳定性修复
+
+- **MessageChain 污染修复**：4 秒防抖不再重写原生消息链，避免历史消息出现 `[{text=..., type=text}]` 嵌套序列化
+- **多 bot 防抖隔离**：撤销跨 bot 文本去重，防抖 key 改为 `bot_id:group_id:sender_id`，避免一个 bot 误杀另一个 bot 的回复链路
+- **主事件回复恢复**：移除正常主事件路径上的 `event.should_call_llm(False)`，避免空回复/不回复
+- **并发锁修复**：修复 `_process_in_lock` 作用域问题，恢复 group lock 实际效果
+- **主链路健壮性**：补齐 `json` 导入，修复 `desire_engine=None` 误调用、纯图片消息长度门槛误杀、去重 key 缺少 `group_id` 等问题
+
+## v2.1.0 (2026-06-25)
+
+### 灵魂系统升级
+
+- **15 天关系半衰衰减**：关系状态不再永久静态累积，会随时间自然淡化
+- **生理节律 / 心境状态**：引入 bot 当天状态、节律与心境注入，让回复更有实时状态感
+- **主动插话增强**：支持主动插话、抢词咽回、4 秒消息合并防抖与群聊并发队列锁
+- **实时 Persona 注入**：将本小时 @ 次数、最近互动状态、上次回复等上下文交给主对话人格判断
+
+### WebUI 管理面板升级
+
+- **灵魂 / 信念 / 黑话 / 图谱管理**：补齐管理页面，不再停留在只读展示
+- **神经云图升级**：新增 GSAP 脑电波扩散、一键斩断连接、图谱交互增强
+- **批量管理**：信念与黑话支持搜索、分页、批量选择、批量激活/删除等操作
+- **全选 2.0**：支持“全选当页”与“跨页全选全部”，并加入 JS 缓存熔断保护
+
+### API 扩展
+
+- **CRUD 端点补齐**：新增/完善 `soul`、`beliefs`、`jargon`、`kg`、`memories` 管理 API
+- **批量操作端点**：为 WebUI 的信念、黑话、图谱和灵魂状态管理提供完整后端能力
+- **信念审核流**：支持 pending → active 审核，旧摘要生成的无证据信念降级为 legacy/pending，避免污染长期认知
+
+### 性能与稳定性
+
+- **AstrBot schema 兼容**：`inference_thresholds` 类型从 `str` 改为 `string`
+- **consolidation 写入线程池化**：减少同步 DB 写入卡住事件循环的风险
+- **DB 读写分离**：inject 查询不再等待 consolidation 写锁
+- **配置自愈独立判断**：`enable_auto_inject` 单独关闭也能触发恢复，降低升级后配置失效风险
+
 ## v2.0.1 (2026-06-21)
 
 ### 数据治理
