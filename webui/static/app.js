@@ -10,6 +10,28 @@ function app() {
             { id: 'import', label: '数据导入', icon: '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>' },
         ],
 
+        selectedBeliefIds: [],
+        beliefAllMatching: false,
+        beliefPage: 1,
+        beliefPageSize: 15,
+        beliefSearch: '',
+        beliefFilterType: '',
+        beliefFilterBot: '',
+        beliefHasMore: false,
+        beliefTotalPages: 1,
+
+        // ─── 信念审核 State ───
+        beliefs: [],
+        beliefFilter: '',
+        beliefTotal: 0,
+        beliefPending: 0,
+        beliefEdit: null,
+        beliefEditIsNew: false,
+        beliefEditForm: { content: '', type: 'self', confidence: 0.7, bot_id: '' },
+        beliefEvidence: null,
+        beliefEvidenceEpisodes: [],
+        beliefEvidenceMemories: [],
+
         // Jargon / Holyman State
         jargonSubTab: 'local',
         jargonItems: [],
@@ -36,6 +58,8 @@ function app() {
         holymanSyncing: false,
         holymanLocalVersion: 'Unknown',
         holymanRemoteVersion: 'Unknown',
+        selectedHolymanWords: [],
+        holymanFilter: '',
 
         // Stats
         stats: {},
@@ -537,14 +561,260 @@ function app() {
         },
 
         filteredHolymanItems() {
+            let items = this.holymanItems || [];
+            
+            // 1. Status Filter
+            if (this.holymanFilter === 'active') {
+                items = items.filter(h => h.is_activated === true);
+            } else if (this.holymanFilter === 'inactive') {
+                items = items.filter(h => h.is_activated === false);
+            }
+
+            // 2. Search Text Filter
             const search = (this.holymanSearch || '').trim().toLowerCase();
-            if (!search) return this.holymanItems;
-            return this.holymanItems.filter(item => {
-                const word = (item.word || '').toLowerCase();
-                const meaning = (item.meaning || '').toLowerCase();
-                const custom_meaning = (item.custom_meaning || '').toLowerCase();
-                return word.includes(search) || meaning.includes(search) || custom_meaning.includes(search);
-            });
+            if (search) {
+                items = items.filter(item => {
+                    const word = (item.word || '').toLowerCase();
+                    const meaning = (item.meaning || '').toLowerCase();
+                    const custom_meaning = (item.custom_meaning || '').toLowerCase();
+                    return word.includes(search) || meaning.includes(search) || custom_meaning.includes(search);
+                });
+            }
+
+            return items;
+        },
+
+        toggleSelectAllHolyman(e) {
+            if (e.target.checked) {
+                this.selectedHolymanWords = this.filteredHolymanItems().map(h => h.word);
+            } else {
+                this.selectedHolymanWords = [];
+            }
+        },
+
+        async batchToggleHolyman(activate) {
+            if (!this.selectedHolymanWords.length) return;
+            try {
+                const promises = this.selectedHolymanWords.map(word => {
+                    const h = this.holymanItems.find(item => item.word === word);
+                    return this.api('/api/jargon/holyman/toggle', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            word: word,
+                            meaning: h ? h.meaning : '',
+                            activate: activate
+                        })
+                    });
+                });
+                await Promise.all(promises);
+                await this.loadJargonHolyman();
+                this.selectedHolymanWords = [];
+            } catch (e) {
+                console.error('Failed to batch toggle Holyman items:', e);
+                alert('批量操作失败: ' + e.message);
+            }
+        },
+
+        // ─── 信念审核 Methods ───
+        async loadBeliefs() {
+            try {
+                this.selectedBeliefIds = []; // 刷新时重置勾选
+                const params = new URLSearchParams({
+                    limit: this.beliefPageSize,
+                    offset: (this.beliefPage - 1) * this.beliefPageSize
+                });
+                if (this.beliefFilter) params.set('status', this.beliefFilter);
+                if (this.beliefFilterType) params.set('type', this.beliefFilterType);
+                if (this.beliefFilterBot) params.set('bot_id', this.beliefFilterBot);
+                if (this.beliefSearch) params.set('search', this.beliefSearch.trim());
+                
+                const r = await fetch('/api/beliefs/?' + params);
+                const d = await r.json();
+                this.beliefs = d.items || [];
+                this.beliefTotal = d.total || 0;
+                this.beliefPending = d.pending_count || 0;
+                
+                // 重算总页数
+                this.beliefTotalPages = Math.ceil(this.beliefTotal / this.beliefPageSize) || 1;
+                this.beliefHasMore = this.beliefs.length >= this.beliefPageSize;
+            } catch(e) { console.error('loadBeliefs:', e); }
+        },
+        toggleSelectAllBeliefs(e) {
+            if (e.target.checked) {
+                this.selectedBeliefIds = this.beliefs.map(b => b.id);
+            } else {
+                this.selectedBeliefIds = [];
+                this.beliefAllMatching = false;
+            }
+        },
+        clearBeliefSelection() {
+            this.selectedBeliefIds = [];
+            this.beliefAllMatching = false;
+        },
+        async searchBeliefs() {
+            this.beliefPage = 1;
+            this.clearBeliefSelection();
+            await this.loadBeliefs();
+        },
+        async beliefPrev() {
+            if (this.beliefPage <= 1) return;
+            this.beliefPage--;
+            this.clearBeliefSelection();
+            await this.loadBeliefs();
+        },
+        async beliefNext() {
+            if (!this.beliefHasMore) return;
+            this.beliefPage++;
+            this.clearBeliefSelection();
+            await this.loadBeliefs();
+        },
+        async approveBelief(id) {
+            await fetch(`/api/beliefs/${id}/approve`, { method: 'POST' });
+            await this.loadBeliefs();
+        },
+        async archiveBelief(id) {
+            await fetch(`/api/beliefs/${id}/archive`, { method: 'POST' });
+            await this.loadBeliefs();
+        },
+        async batchArchiveBeliefs() {
+            if (!confirm('确认归档所有 active 信念？此操作不可逆（但可手动恢复状态）。')) return;
+            const r = await fetch('/api/beliefs/batch-archive', { method: 'POST', headers:{'Content-Type':'application/json'}, body: '{}' });
+            const d = await r.json();
+            alert(`已归档 ${d.archived_count} 条信念`);
+            await this.loadBeliefs();
+        },
+        async deleteBelief(id) {
+            if (!confirm('确认删除该信念？')) return;
+            await fetch(`/api/beliefs/${id}`, { method: 'DELETE' });
+            await this.loadBeliefs();
+        },
+        
+        // 批量信念操作 (Batch Belief Actions 2.0)
+        async batchApproveBeliefs() {
+            if (!this.selectedBeliefIds.length) return;
+            const body = {
+                all_matching: this.beliefAllMatching,
+                ids: this.selectedBeliefIds
+            };
+            if (this.beliefAllMatching) {
+                body.status = this.beliefFilter;
+                body.type = this.beliefFilterType;
+                body.bot_id = this.beliefFilterBot;
+                body.search = this.beliefSearch.trim();
+            }
+            try {
+                const r = await fetch('/api/beliefs/batch-approve', {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify(body)
+                });
+                const d = await r.json();
+                if (d.ok) {
+                    let msg = `✓ 成功批量审核通过 ${d.approved_count} 条信念。`;
+                    if (d.skipped_count > 0) {
+                        msg += ` 有 ${d.skipped_count} 条信念因为缺乏证据而被安全机制熔断拦截。`;
+                    }
+                    alert(msg);
+                    this.clearBeliefSelection();
+                    await this.loadBeliefs();
+                } else {
+                    alert('批量审核失败: ' + (d.error || '未知错误'));
+                }
+            } catch(e) { alert('网络错误，批量审核失败'); }
+        },
+        async batchArchiveBeliefsSelected() {
+            if (!this.selectedBeliefIds.length) return;
+            if (this.beliefAllMatching) {
+                alert('跨页全选模式下暂不支持批量归档，建议使用“一键归档所有信念”或分勾选操作。');
+                return;
+            }
+            if (!confirm(`确认要将选中的 ${this.selectedBeliefIds.length} 条信念进行批量归档吗？`)) return;
+            try {
+                for (const bid of this.selectedBeliefIds) {
+                    await fetch(`/api/beliefs/${bid}/archive`, { method: 'POST' });
+                }
+                this.clearBeliefSelection();
+                await this.loadBeliefs();
+            } catch(e) { console.error(e); }
+        },
+        async batchDeleteBeliefs() {
+            if (!this.selectedBeliefIds.length) return;
+            const targetCount = this.beliefAllMatching ? this.beliefTotal : this.selectedBeliefIds.length;
+            if (!confirm(`确定要批量物理删除选中的 ${targetCount} 条信念吗？此操作不可撤销！`)) return;
+            
+            const body = {
+                all_matching: this.beliefAllMatching,
+                ids: this.selectedBeliefIds
+            };
+            if (this.beliefAllMatching) {
+                body.status = this.beliefFilter;
+                body.type = this.beliefFilterType;
+                body.bot_id = this.beliefFilterBot;
+                body.search = this.beliefSearch.trim();
+            }
+            try {
+                const r = await fetch('/api/beliefs/batch-delete', {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify(body)
+                });
+                const d = await r.json();
+                if (d.ok) {
+                    alert(`✓ 成功批量删除 ${d.deleted_count} 条信念。`);
+                    this.clearBeliefSelection();
+                    await this.loadBeliefs();
+                } else {
+                    alert('批量删除失败');
+                }
+            } catch(e) { alert('网络错误，批量删除失败'); }
+        },
+
+        openBeliefCreate() {
+            this.beliefEditIsNew = true;
+            this.beliefEdit = { id: null };
+            this.beliefEditForm = { content: '', type: 'self', confidence: 0.7, bot_id: '' };
+        },
+        openBeliefEdit(b) {
+            this.beliefEditIsNew = false;
+            this.beliefEdit = b;
+            this.beliefEditForm = { content: b.content || '', type: b.type || 'self', confidence: b.confidence ?? 0.7, bot_id: b.bot_id || '' };
+        },
+        async saveBeliefEdit() {
+            if (!this.beliefEditForm.content.trim()) { alert('信念内容不能为空'); return; }
+            const body = {
+                content: this.beliefEditForm.content.trim(),
+                type: this.beliefEditForm.type,
+                confidence: parseFloat(this.beliefEditForm.confidence) || 0.7,
+                bot_id: this.beliefEditForm.bot_id.trim() || null,
+            };
+            try {
+                if (this.beliefEditIsNew) {
+                    await fetch('/api/beliefs/', {
+                        method: 'POST',
+                        headers: {'Content-Type':'application/json'},
+                        body: JSON.stringify(body),
+                    });
+                } else {
+                    await fetch(`/api/beliefs/${this.beliefEdit.id}`, {
+                        method: 'PUT',
+                        headers: {'Content-Type':'application/json'},
+                        body: JSON.stringify({ content: body.content, type: body.type, confidence: body.confidence }),
+                    });
+                }
+                this.beliefEdit = null;
+                await this.loadBeliefs();
+            } catch(e) { console.error(e); alert('保存失败: '+e.message); }
+        },
+        async viewBeliefEvidence(b) {
+            this.beliefEvidence = b;
+            this.beliefEvidenceEpisodes = [];
+            this.beliefEvidenceMemories = [];
+            try {
+                const r = await fetch(`/api/beliefs/${b.id}/evidence`);
+                const d = await r.json();
+                this.beliefEvidenceEpisodes = d.episodes || [];
+                this.beliefEvidenceMemories = d.memories || [];
+            } catch(e) { console.error(e); }
         },
     };
 }

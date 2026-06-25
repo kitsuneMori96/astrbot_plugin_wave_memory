@@ -637,9 +637,22 @@
                 <option value="archived">已归档</option>
                 <option value="pending_legacy">旧遗产</option>
             </select>
+            <select x-model="beliefFilterBot" @change="searchBeliefs()" class="select w-32 text-xs">
+                <option value="">全部 Bot</option>
+                <option value="yushu">羽书 (yushu)</option>
+                <option value="baizz">白真真 (baizz)</option>
+            </select>
             <button @click="searchBeliefs()" class="btn btn-primary btn-xs">🔍 搜索</button>
             <button @click="openBeliefCreate()" class="btn btn-outline btn-xs">➕ 新建</button>
             <button @click="batchArchiveBeliefs()" class="btn btn-outline btn-xs" style="border-color:var(--warning);color:var(--warning)">📦 一键归档旧信念</button>
+            <span class="text-[11px] text-[var(--muted-fg)] ml-1">每页</span>
+            <select x-model.number="beliefPageSize" @change="searchBeliefs()" class="select w-20 text-xs !py-1 !px-2">
+                <option :value="10">10 条</option>
+                <option :value="15">15 条</option>
+                <option :value="20">20 条</option>
+                <option :value="50">50 条</option>
+                <option :value="100">100 条</option>
+            </select>
             <label class="flex items-center gap-1.5 cursor-pointer select-none ml-2 bg-white/5 px-2 py-1 rounded border border-white/5 hover:bg-white/10 transition">
                 <input type="checkbox" @change="toggleSelectAllBeliefs($event)" :checked="selectedBeliefIds.length === beliefs.length && beliefs.length > 0">
                 <span class="text-xs" style="color:var(--muted-fg)">全选</span>
@@ -744,24 +757,84 @@
 
         <!-- 证据查看弹窗 -->
         <div x-show="beliefEvidence" x-cloak class="dialog-overlay" @click.self="beliefEvidence=null">
-            <div class="dialog-content" x-show="beliefEvidence" style="max-width:640px">
+            <div class="dialog-content" x-show="beliefEvidence" style="max-width:720px">
                 <div class="px-5 py-4" style="border-bottom:1px solid var(--border)">
-                    <h3 class="text-sm font-semibold">信念 #<span x-text="beliefEvidence?.id"></span> 证据</h3>
+                    <h3 class="text-sm font-semibold">信念 #<span x-text="beliefEvidence?.id"></span> 证据链条</h3>
                 </div>
-                <div class="px-5 py-4">
-                    <div class="text-xs mb-3" style="color:var(--muted-fg)" x-text="beliefEvidence?.content"></div>
-                    <div x-show="!beliefEvidenceItems.length" class="empty-state">无证据记录</div>
-                    <div class="space-y-2" x-show="beliefEvidenceItems.length">
-                        <template x-for="ev in beliefEvidenceItems" :key="ev.type+'-'+ev.id">
-                            <div class="p-2.5 rounded-lg" style="background:var(--muted)">
-                                <div class="flex items-center gap-2 mb-1">
-                                    <span class="pill" :class="ev.type==='memory'?'pill-active':'pill-pending'" x-text="ev.type"></span>
-                                    <span class="font-mono text-xs" style="color:var(--muted-fg)">#<span x-text="ev.id"></span></span>
-                                    <span class="text-xs ml-auto" style="color:var(--muted-fg)" x-text="fmtTime(ev.timestamp)"></span>
+                <div class="px-5 py-4 max-h-[500px] overflow-y-auto space-y-4">
+                    <div class="text-xs p-3 rounded-lg border border-[var(--primary)] bg-[var(--primary)]/5">
+                        <span class="font-semibold block mb-1">信念命题：</span>
+                        <div class="leading-relaxed" x-text="beliefEvidence?.content"></div>
+                    </div>
+
+                    <!-- Upper Section: 经历事件 -->
+                    <div>
+                        <h4 class="text-xs font-semibold mb-2 flex items-center gap-1.5 text-[var(--primary)]">
+                            <span>🚀 经历事件 (Emerged Episodes)</span>
+                            <span class="text-[10px] bg-[var(--primary)]/10 px-1.5 py-0.5 rounded font-mono" x-text="beliefEvidenceEpisodes.length"></span>
+                        </h4>
+                        <div x-show="!beliefEvidenceEpisodes.length" class="empty-state py-4 text-xs">暂无关联的经历事件</div>
+                        <div class="space-y-2.5" x-show="beliefEvidenceEpisodes.length">
+                            <template x-for="ep in beliefEvidenceEpisodes" :key="'ep-'+ep.id">
+                                <div class="p-3 rounded-lg border border-[var(--border)] bg-[var(--card)] space-y-2">
+                                    <div class="flex items-center justify-between text-[11px] pb-1.5 border-b border-white/5">
+                                        <span class="font-semibold text-[var(--fg)]">
+                                            Episode #<span x-text="ep.id"></span> 
+                                            <span class="font-mono text-[10px] text-[var(--muted-fg)] ml-1" x-text="`(${ep.episode_type})`"></span>
+                                        </span>
+                                        <span class="text-[10px] text-[var(--muted-fg)]" x-text="fmtTime(ep.created_at)"></span>
+                                    </div>
+                                    <div class="text-xs space-y-1.5">
+                                        <div x-show="ep.trigger" class="flex gap-2">
+                                            <span class="text-[var(--muted-fg)] select-none shrink-0 w-12 text-right">触发:</span>
+                                            <span class="text-[var(--fg)] leading-relaxed" x-text="ep.trigger"></span>
+                                        </div>
+                                        <div x-show="ep.bot_inner_thought" class="flex gap-2 bg-yellow-500/5 p-1 rounded">
+                                            <span class="text-yellow-500/80 select-none shrink-0 w-12 text-right">内心独白:</span>
+                                            <span class="text-yellow-400/90 leading-relaxed italic" x-text="ep.bot_inner_thought"></span>
+                                        </div>
+                                        <div x-show="ep.bot_reply" class="flex gap-2">
+                                            <span class="text-green-500/80 select-none shrink-0 w-12 text-right">回复:</span>
+                                            <span class="text-green-400/95 leading-relaxed font-semibold" x-text="ep.bot_reply"></span>
+                                        </div>
+                                        <div x-show="ep.outcome" class="flex gap-2">
+                                            <span class="text-[var(--muted-fg)] select-none shrink-0 w-12 text-right">演变/反应:</span>
+                                            <span class="text-[var(--fg)] leading-relaxed" x-text="ep.outcome"></span>
+                                        </div>
+                                    </div>
                                 </div>
-                                <div class="text-xs leading-relaxed" x-text="ev.content || ev.summary"></div>
-                            </div>
-                        </template>
+                            </template>
+                        </div>
+                    </div>
+
+                    <!-- Lower Section: 当时真实群聊记录 -->
+                    <div>
+                        <h4 class="text-xs font-semibold mb-2 flex items-center gap-1.5 text-emerald-500">
+                            <span>💬 当时真实聊天记录 (Genuine Chat Context)</span>
+                            <span class="text-[10px] bg-emerald-500/10 text-emerald-400 px-1.5 py-0.5 rounded font-mono" x-text="beliefEvidenceMemories.length"></span>
+                        </h4>
+                        <div x-show="!beliefEvidenceMemories.length" class="empty-state py-4 text-xs">暂无关联的原始群聊记录</div>
+                        
+                        <!-- 微信群聊气泡样式流 -->
+                        <div class="p-3.5 rounded-lg border border-[var(--border)] bg-black/10 space-y-3 max-h-[300px] overflow-y-auto" x-show="beliefEvidenceMemories.length">
+                            <template x-for="mem in beliefEvidenceMemories" :key="'mem-'+mem.id">
+                                <div class="flex flex-col gap-1">
+                                    <!-- Sender Name and Badge -->
+                                    <div class="flex items-center gap-1.5 text-[11px]">
+                                        <span class="px-1.5 py-0.5 rounded text-[10px] font-medium" 
+                                              :style="mem.sender_name.includes('bot') || mem.sender_name === '羽书' || mem.sender_name === '白真真' ? 'background:rgba(16,185,129,0.15); color:#10b981;' : 'background:rgba(99,102,241,0.15); color:#818cf8;'"
+                                              x-text="mem.sender_name">
+                                        </span>
+                                        <span class="text-[10px] text-[var(--muted-fg)] font-mono" x-text="fmtTime(mem.timestamp)"></span>
+                                    </div>
+                                    <!-- Chat Bubble -->
+                                    <div class="max-w-[85%] self-start rounded-r-lg rounded-bl-lg p-2.5 text-xs leading-relaxed" 
+                                         :style="mem.sender_name.includes('bot') || mem.sender_name === '羽书' || mem.sender_name === '白真真' ? 'background:rgba(16,185,129,0.08); border:1px solid rgba(16,185,129,0.2);' : 'background:rgba(255,255,255,0.03); border:1px solid var(--border);'"
+                                         x-text="mem.content">
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
                     </div>
                 </div>
                 <div class="px-5 py-4 flex justify-end" style="border-top:1px solid var(--border)">
@@ -792,6 +865,14 @@
                 </select>
                 <button @click="searchJargon()" class="btn btn-primary btn-xs">🔍 搜索</button>
                 <button @click="openJargonCreate()" class="btn btn-outline btn-xs">➕ 新建</button>
+                <span class="text-[11px] text-[var(--muted-fg)] ml-1">每页</span>
+                <select x-model.number="jargonPageSize" @change="searchJargon()" class="select w-20 text-xs !py-1 !px-2">
+                    <option :value="10">10 条</option>
+                    <option :value="15">15 条</option>
+                    <option :value="20">20 条</option>
+                    <option :value="50">50 条</option>
+                    <option :value="100">100 条</option>
+                </select>
                 <label class="flex items-center gap-1.5 cursor-pointer select-none ml-2 bg-white/5 px-2 py-1 rounded border border-white/5 hover:bg-white/10 transition">
                     <input type="checkbox" @change="toggleSelectAllJargon($event)" :checked="selectedJargonIds.length === jargonItems.length && jargonItems.length > 0">
                     <span class="text-xs" style="color:var(--muted-fg)">全选</span>
@@ -929,6 +1010,11 @@
             <div class="flex flex-wrap items-center gap-3 bg-[var(--muted)] p-3 rounded-lg border border-[var(--border)] text-xs justify-between">
                 <div class="flex flex-wrap items-center gap-3">
                     <input type="text" x-model="holymanSearch" placeholder="过滤广域黑话..." class="input w-48">
+                    <select x-model="holymanFilter" class="select w-32">
+                        <option value="">全部状态</option>
+                        <option value="active">仅已激活</option>
+                        <option value="inactive">仅未激活</option>
+                    </select>
                     <label class="flex items-center gap-1.5 cursor-pointer text-[var(--muted-fg)] hover:text-white select-none">
                         <input type="checkbox" x-model="holymanUseProxy" class="rounded border-gray-700 text-primary focus:ring-primary bg-transparent">
                         <span>使用 Ghproxy 国内加速</span>
@@ -950,6 +1036,22 @@
                 <button @click="syncJargonHolyman()" class="btn btn-xs !py-1 !px-2.5" style="background:var(--warning); color:black; font-weight:600">一键同步更新</button>
             </div>
 
+            <!-- Batch Action Control Row -->
+            <div class="flex flex-wrap items-center gap-3 bg-[var(--muted)] p-3 rounded-lg border border-[var(--border)] text-xs mt-3">
+                <label class="flex items-center gap-1.5 cursor-pointer select-none bg-white/5 px-2.5 py-1 rounded border border-white/5 hover:bg-white/10 transition">
+                    <input type="checkbox" @change="toggleSelectAllHolyman($event)" :checked="selectedHolymanWords.length === filteredHolymanItems().length && filteredHolymanItems().length > 0">
+                    <span class="text-xs">全选</span>
+                </label>
+                <div x-show="selectedHolymanWords.length > 0" class="flex items-center gap-2">
+                    <span class="text-xs font-medium text-[var(--primary)]" x-text="`已选 ${selectedHolymanWords.length} 条`"></span>
+                    <button @click="batchToggleHolyman(true)" class="btn btn-success btn-xs">✓ 批量激活注入</button>
+                    <button @click="batchToggleHolyman(false)" class="btn btn-outline btn-xs" style="color:var(--danger)">✕ 批量禁用不注入</button>
+                </div>
+                <div x-show="selectedHolymanWords.length === 0" class="text-[11px] text-[var(--muted-fg)]">
+                    提示: 选择词条后可进行批量激活/去激活操作。
+                </div>
+            </div>
+
             <!-- Empty State -->
             <div x-show="holymanItems.length === 0" class="empty-state">未加载到广域黑话，请点击右上角在线同步</div>
 
@@ -960,12 +1062,18 @@
                          :class="h.is_activated ? 'border-emerald-500/20 bg-emerald-500/5' : 'bg-white/5 border-white/5 hover:border-white/10'" style="border-radius:10px">
                         
                         <div class="flex items-center justify-between gap-2 mb-2">
-                            <span class="badge badge-keyword font-bold text-xs" x-text="h.word" style="border:1px solid var(--border)"></span>
+                            <div class="flex items-center gap-1.5">
+                                <input type="checkbox" :value="h.word" x-model="selectedHolymanWords" class="w-3.5 h-3.5 rounded text-[var(--primary)] focus:ring-[var(--primary)]/30 bg-[var(--muted)] border-[var(--border)] cursor-pointer">
+                                <span class="badge badge-keyword font-bold text-xs" x-text="h.word" style="border:1px solid var(--border)"></span>
+                            </div>
                             
                             <!-- Activation Checkbox -->
-                            <input type="checkbox" class="w-4 h-4 rounded text-[var(--primary)] focus:ring-[var(--primary)]/30 focus:ring-2 bg-[var(--muted)] border-[var(--border)] cursor-pointer transition-colors" 
-                                   :checked="h.is_activated" 
-                                   @change="h.is_activated = $event.target.checked; toggleJargonHolyman(h)">
+                            <div class="flex items-center gap-1 text-[11px] text-[var(--muted-fg)]">
+                                <span x-text="h.is_activated ? '已激活' : '未激活'" :class="h.is_activated ? 'text-emerald-400 font-medium' : ''"></span>
+                                <input type="checkbox" class="w-4 h-4 rounded text-[var(--primary)] focus:ring-[var(--primary)]/30 focus:ring-2 bg-[var(--muted)] border-[var(--border)] cursor-pointer transition-colors" 
+                                       :checked="h.is_activated" 
+                                       @change="h.is_activated = $event.target.checked; toggleJargonHolyman(h)">
+                            </div>
                         </div>
 
                         <!-- Meaning (Double-clickable edit) -->
@@ -978,6 +1086,9 @@
                                    @keyup.enter="$el.blur()" 
                                    @keyup.escape="$el.style.display='none'; $el.previousElementSibling.style.display=''">
                         </div>
+
+                        <!-- Corpus Example -->
+                        <div x-show="h.example" class="text-[10px] text-[var(--muted-fg)] mt-2 italic bg-white/[0.02] p-1.5 rounded" x-text="'💬 语料: \"' + h.example + '\"'"></div>
                     </div>
                 </template>
             </div>
@@ -1364,6 +1475,7 @@ function dashboard() {
         beliefPageSize: 15,
         beliefSearch: '',
         beliefFilterType: '',
+        beliefFilterBot: '',
         beliefHasMore: false,
         beliefTotalPages: 1,
         
@@ -1682,6 +1794,7 @@ function dashboard() {
                 });
                 if (this.beliefFilter) params.set('status', this.beliefFilter);
                 if (this.beliefFilterType) params.set('type', this.beliefFilterType);
+                if (this.beliefFilterBot) params.set('bot_id', this.beliefFilterBot);
                 if (this.beliefSearch) params.set('search', this.beliefSearch.trim());
                 
                 const r = await fetch('/api/beliefs/?' + params);
@@ -1755,6 +1868,7 @@ function dashboard() {
             if (this.beliefAllMatching) {
                 body.status = this.beliefFilter;
                 body.type = this.beliefFilterType;
+                body.bot_id = this.beliefFilterBot;
                 body.search = this.beliefSearch.trim();
             }
             try {
@@ -1804,6 +1918,7 @@ function dashboard() {
             if (this.beliefAllMatching) {
                 body.status = this.beliefFilter;
                 body.type = this.beliefFilterType;
+                body.bot_id = this.beliefFilterBot;
                 body.search = this.beliefSearch.trim();
             }
             try {

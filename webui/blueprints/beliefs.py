@@ -180,38 +180,74 @@ async def belief_evidence(belief_id: int):
         return jsonify({"ok": False, "error": "belief not found"}), 404
 
     sources = json.loads(row[0] or "[]")
+    episodes = []
     memories = []
-    if sources and _table_exists(c.db.conn, "memories"):
+
+    if sources and _table_exists(c.db.conn, "experience_episodes"):
         placeholders = ",".join("?" * len(sources))
+        ep_rows = c.db.conn.execute(
+            f"SELECT id, trigger_text, outcome, bot_inner_thought, bot_reply, source_memory_ids, created_at, episode_type FROM experience_episodes WHERE id IN ({placeholders})",
+            sources,
+        ).fetchall()
+
+        all_memory_ids = set()
+        for r in ep_rows:
+            ep_id = r[0]
+            trigger = r[1]
+            outcome = r[2]
+            bot_inner_thought = r[3]
+            bot_reply = r[4]
+            source_mem_ids_str = r[5]
+            created_at = r[6]
+            episode_type = r[7]
+
+            try:
+                mem_ids = json.loads(source_mem_ids_str or "[]")
+                if isinstance(mem_ids, list):
+                    all_memory_ids.update(mem_ids)
+            except Exception:
+                pass
+
+            episodes.append({
+                "id": ep_id,
+                "trigger": trigger or "",
+                "outcome": outcome or "",
+                "bot_inner_thought": bot_inner_thought or "",
+                "bot_reply": bot_reply or "",
+                "created_at": created_at,
+                "episode_type": episode_type or ""
+            })
+
+        if all_memory_ids and _table_exists(c.db.conn, "memories"):
+            mem_ids_list = list(all_memory_ids)
+            mem_placeholders = ",".join("?" * len(mem_ids_list))
+            mem_rows = c.db.conn.execute(
+                f"SELECT id, content, sender_name, timestamp, group_id FROM memories WHERE id IN ({mem_placeholders}) ORDER BY timestamp ASC",
+                mem_ids_list,
+            ).fetchall()
+            memories = [
+                {"id": mr[0], "content": mr[1], "sender_name": mr[2] or "", "timestamp": mr[3], "group_id": mr[4]}
+                for mr in mem_rows
+            ]
+
+    # 回退机制：如果是遗留信念（sources 直接存的是 memories ID）
+    if sources and not episodes and _table_exists(c.db.conn, "memories"):
+        mem_placeholders = ",".join("?" * len(sources))
         mem_rows = c.db.conn.execute(
-            f"SELECT id, content, sender_name, timestamp, group_id FROM memories WHERE id IN ({placeholders})",
+            f"SELECT id, content, sender_name, timestamp, group_id FROM memories WHERE id IN ({mem_placeholders}) ORDER BY timestamp ASC",
             sources,
         ).fetchall()
         memories = [
-            {"id": r[0], "content": r[1], "sender_name": r[2] or "", "timestamp": r[3], "group_id": r[4]}
-            for r in mem_rows
+            {"id": mr[0], "content": mr[1], "sender_name": mr[2] or "", "timestamp": mr[3], "group_id": mr[4]}
+            for mr in mem_rows
         ]
-
-    # 关联 episodes（如果有 experience_episodes 表）
-    episodes = []
-    if _table_exists(c.db.conn, "experience_episodes"):
-        placeholders = ",".join("?" * len(sources)) if sources else ""
-        if placeholders:
-            ep_rows = c.db.conn.execute(
-                f"SELECT id, trigger_text, outcome, emotional_weight, created_at FROM experience_episodes WHERE id IN ({placeholders})",
-                sources,
-            ).fetchall()
-            episodes = [
-                {"id": r[0], "trigger": r[1], "outcome": r[2], "emotional_weight": r[3], "created_at": r[4]}
-                for r in ep_rows
-            ]
 
     return jsonify({
         "ok": True,
         "belief_id": belief_id,
         "sources": sources,
-        "memories": memories,
         "episodes": episodes,
+        "memories": memories,
     })
 
 
