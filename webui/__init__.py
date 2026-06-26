@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Optional
 
 from astrbot.api import logger
@@ -60,13 +61,44 @@ class WaveMemoryWebUI:
 
         # 创建服务器实例
         self._server = Server(host=host, port=port)
+        self._kg_warmup_task: asyncio.Task | None = None
 
     async def start(self) -> None:
-        """启动 WebUI 服务器。"""
+        """启动 WebUI 服务器，并后台预热 KG 星图缓存。"""
         await self._server.start()
+        self._kg_warmup_task = asyncio.create_task(self._async_kg_cache_warmup())
+        self._kg_warmup_task.add_done_callback(self._log_kg_warmup_result)
+
+    async def _async_kg_cache_warmup(self) -> dict:
+        """后台预热默认 KG 全量图缓存；不阻塞 AstrBot 启动。"""
+        logger.info("[WaveMemory] KG cache warmup started")
+        from .blueprints.kg import warmup_kg_cache
+
+        result = await asyncio.to_thread(warmup_kg_cache, "facts")
+        logger.info(
+            f"[WaveMemory] KG cache warmup SUCCESS: layers={result.get('layers')} "
+            f"edges={result.get('edges')} elapsed={result.get('elapsed_ms')}ms"
+        )
+        return result
+
+    @staticmethod
+    def _log_kg_warmup_result(task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            logger.warning("[WaveMemory] KG cache warmup canceled")
+        except Exception as e:
+            logger.warning(f"[WaveMemory] KG cache warmup failed: {e}")
 
     async def stop(self) -> None:
-        """停止 WebUI 服务器。"""
+        """停止 WebUI 服务器，并取消尚未完成的后台预热任务。"""
+        if self._kg_warmup_task and not self._kg_warmup_task.done():
+            self._kg_warmup_task.cancel()
+            try:
+                await self._kg_warmup_task
+            except asyncio.CancelledError:
+                pass
+        self._kg_warmup_task = None
         await self._server.stop()
         # 重置容器以便热重载
         ServiceContainer.reset()

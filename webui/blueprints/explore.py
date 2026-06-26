@@ -109,10 +109,14 @@ async def person(qq_id: str):
         return jsonify({"person": {"id": qq_id, "name": person_row[1], "count": person_row[2]}, "nodes": [], "edges": []})
 
     mem_ids = [r[0] for r in rows]
+    person_node_id = f"p{qq_id}"
     nodes = [
-        {"id": f"m{r[0]}", "memId": r[0], "name": (r[2] or "")[:6] + ": " + (r[1] or "")[:20],
-         "content": r[1] or "", "sender": r[2] or "", "ts": r[3], "type": "memory"}
-        for r in rows
+        {"id": person_node_id, "name": person_row[1] or qq_id, "type": "person", "degree": len(rows), "qq_id": qq_id, "isSeed": True},
+        *[
+            {"id": f"m{r[0]}", "memId": r[0], "name": (r[2] or "")[:6] + ": " + (r[1] or "")[:20],
+             "content": r[1] or "", "sender": r[2] or "", "ts": r[3], "type": "memory"}
+            for r in rows
+        ],
     ]
 
     # Tag 关联
@@ -140,7 +144,7 @@ async def person(qq_id: str):
         if t in tag_info:
             nodes.append(tag_info[t])
 
-    edges = []
+    edges = [{"source": person_node_id, "target": f"m{r[0]}", "label": "记忆", "weight": 1.0} for r in rows]
     for mid, tags in mem_tags.items():
         for t in tags:
             if t in shared_tags:

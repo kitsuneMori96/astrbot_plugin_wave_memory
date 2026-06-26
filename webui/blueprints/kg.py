@@ -326,10 +326,16 @@ async def add_fact():
     subject = (body.get("subject") or "").strip()
     predicate = (body.get("predicate") or "").strip()
     obj = (body.get("object") or "").strip()
+    try:
+        confidence = float(body.get("confidence", 0.8))
+    except (TypeError, ValueError):
+        confidence = 0.8
+    confidence = max(0.0, min(1.0, confidence))
     if not subject or not predicate or not obj:
         return jsonify({"ok": False, "error": "subject/predicate/object required"})
     try:
-        c.db.insert_fact(subject, predicate, obj, confidence=1.0)
+        c.db.insert_fact(subject, predicate, obj, confidence=confidence)
+        clear_kg_cache()
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
@@ -421,7 +427,7 @@ async def kg_config():
         "SELECT DISTINCT relation_type FROM tag_relations WHERE relation_type IS NOT NULL ORDER BY relation_type"
     ).fetchall()]
     rel_types += ["fact"]
-    node_types = ["person", "topic", "entity", "event", "emotion", "fact", "location", "time"]
+    node_types = ["person", "topic", "entity", "event", "emotion", "fact", "location", "time", "memory", "belief", "concern", "jargon", "community", "affinity", "source"]
     return jsonify({
         "relation_types": rel_types,
         "node_types": node_types,
@@ -429,32 +435,80 @@ async def kg_config():
     })
 
 
-@kg_bp.route("/full")
-@require_auth
-async def kg_full():
-    """全量知识图谱数据（按图层返回）。
+def clear_kg_cache() -> None:
+    """清空 KG 查询缓存，用于事实编辑后刷新和测试。"""
+    _overview_cache.clear()
+    _overview_cache.update({"version": None, "data": None, "ts": 0})
 
-    参数 layers: 逗号分隔(facts,beliefs,concerns,jargon,affinity,communities)
-    默认只返回 facts 图层。前端可勾选多图层叠加。
-    """
+
+def _safe_table_state(conn, table: str, time_columns: tuple[str, ...] = ()) -> tuple[int, float]:
+    """返回表的轻量版本状态：行数 + 可用时间列最大值。表/列缺失时安全降级。"""
+    if not _table_exists(conn, table):
+        return (0, 0.0)
+    try:
+        count = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] or 0)
+    except Exception:
+        count = 0
+    max_ts = 0.0
+    for column in time_columns:
+        try:
+            row = conn.execute(f"SELECT MAX({column}) FROM {table}").fetchone()
+            if row and row[0] is not None:
+                max_ts = max(max_ts, float(row[0] or 0))
+        except Exception:
+            continue
+    return (count, max_ts)
+
+
+def _full_graph_cache_version(conn, layers: set[str]) -> tuple:
+    """按请求图层涉及的数据表生成版本戳，避免非 facts 图层在 TTL 内陈旧。"""
+    watched: list[tuple[str, tuple[str, ...]]] = [("memories", ("timestamp",))]
+    if "facts" in layers:
+        watched.extend([("facts", ("created_at", "last_reinforced")), ("tag_relations", ("created_at",)), ("tags", ("updated_at", "last_seen", "created_at"))])
+    if "beliefs" in layers:
+        watched.append(("beliefs", ("last_reinforced", "created_at")))
+    if "concerns" in layers:
+        watched.append(("concerns", ("last_triggered", "created_at")))
+    if "jargon" in layers:
+        watched.append(("jargon", ("updated_at", "created_at")))
+    if "affinity" in layers:
+        watched.append(("user_profiles", ("last_seen", "updated_at", "created_at")))
+    if "communities" in layers:
+        watched.extend([("tags", ("updated_at", "last_seen", "created_at")), ("tag_relations", ("created_at",))])
+    return tuple((table, *_safe_table_state(conn, table, columns)) for table, columns in watched)
+
+
+def build_full_graph_data(layers_raw: str = "facts", *, use_cache: bool = True) -> dict:
+    """构建全量知识图谱数据；供 HTTP API 和启动 warmup 共用，避免启动期 HTTP 自请求。"""
     c = get_container()
-    layers_raw = request.args.get("layers", "facts")
     layers = set(layers_raw.split(",")) - {""}
+    if not layers:
+        layers = {"facts"}
+        layers_raw = "facts"
 
     now = time.time()
     cache_key = f"full:{layers_raw}"
-    if _overview_cache.get(cache_key) and (now - _overview_cache.get(f"{cache_key}_ts", 0)) < 300:
-        return jsonify(_overview_cache[cache_key])
+    conn = c.db.conn
+    version = _full_graph_cache_version(conn, layers)
+    if (
+        use_cache
+        and _overview_cache.get(cache_key)
+        and _overview_cache.get(f"{cache_key}_version") == version
+        and (now - _overview_cache.get(f"{cache_key}_ts", 0)) < 300
+    ):
+        return _overview_cache[cache_key]
 
     # 消歧映射
     name_to_qq: dict[str, str] = {}
     qq_to_main: dict[str, str] = {}
     try:
-        rows = c.db.conn.execute(
+        rows = conn.execute(
             "SELECT sender_name, sender_id, COUNT(*) FROM memories WHERE sender_id!='' AND sender_name!='' GROUP BY sender_name, sender_id ORDER BY 3 DESC"
         ).fetchall()
         for sname, sid, _ in rows:
-            key = sname.strip()[:25]
+            key = (sname or "").strip()[:25]
+            if not key or not sid:
+                continue
             name_to_qq[key] = sid
             if sid not in qq_to_main:
                 qq_to_main[sid] = key
@@ -470,50 +524,65 @@ async def kg_full():
 
     # ─── 图层: facts (facts + tag_relations) ───
     if "facts" in layers:
-        for r in c.db.conn.execute(
-            "SELECT t1.name, tr.relation_type, t2.name, tr.weight, t1.tag_type, t2.tag_type, tr.created_at FROM tag_relations tr JOIN tags t1 ON tr.source_tag_id=t1.id JOIN tags t2 ON tr.target_tag_id=t2.id"
-        ).fetchall():
-            s, t = resolve((r[0] or "").strip()[:25]), resolve((r[2] or "").strip()[:25])
-            if not s or not t or s == t:
-                continue
-            key = (s, t, r[1])
-            if key not in seen:
-                seen.add(key)
-                edges.append({"s": s, "t": t, "l": r[1] or "relates", "w": round(r[3] or 1, 2), "st": r[4] or "topic", "tt": r[5] or "topic", "ts": r[6] or 0, "layer": "facts"})
+        try:
+            for r in conn.execute(
+                "SELECT t1.name, tr.relation_type, t2.name, tr.weight, t1.tag_type, t2.tag_type, tr.created_at FROM tag_relations tr JOIN tags t1 ON tr.source_tag_id=t1.id JOIN tags t2 ON tr.target_tag_id=t2.id"
+            ).fetchall():
+                s, t = resolve((r[0] or "").strip()[:25]), resolve((r[2] or "").strip()[:25])
+                if not s or not t or s == t:
+                    continue
+                key = (s, t, r[1])
+                if key not in seen:
+                    seen.add(key)
+                    edges.append({"s": s, "t": t, "l": r[1] or "relates", "w": round(r[3] or 1, 2), "st": r[4] or "topic", "tt": r[5] or "topic", "ts": r[6] or 0, "layer": "facts"})
+        except Exception:
+            pass
 
-        for r in c.db.conn.execute("SELECT subject, predicate, object, confidence, created_at FROM facts"):
-            if not r[0] or not r[2]:
-                continue
-            s, t = resolve(r[0].strip()[:25]), resolve(r[2].strip()[:25])
-            if not s or not t or s == t:
-                continue
-            label = (r[1] or "relates").strip()[:15]
-            key = (s, t, label)
-            if key not in seen:
-                seen.add(key)
-                edges.append({"s": s, "t": t, "l": label, "w": round(r[3] or 1, 2), "st": "entity", "tt": "entity", "ts": r[4] or 0, "layer": "facts"})
+        try:
+            for r in conn.execute("SELECT subject, predicate, object, confidence, created_at FROM facts"):
+                if not r[0] or not r[2]:
+                    continue
+                s, t = resolve(r[0].strip()[:25]), resolve(r[2].strip()[:25])
+                if not s or not t or s == t:
+                    continue
+                label = (r[1] or "relates").strip()[:15]
+                key = (s, t, label)
+                if key not in seen:
+                    seen.add(key)
+                    edges.append({"s": s, "t": t, "l": label, "w": round(r[3] or 1, 2), "st": "entity", "tt": "entity", "ts": r[4] or 0, "layer": "facts"})
+        except Exception:
+            pass
 
     # ─── 图层: beliefs ───
     if "beliefs" in layers:
-        for r in c.db.conn.execute("SELECT content, type, strength, bot_id FROM beliefs WHERE status='active'"):
-            bot = qq_to_main.get("bot", "bot") if r[3] == "bot" else resolve(r[3] or "bot")
-            edges.append({"s": bot, "t": r[0][:25], "l": "believes", "w": round(r[2] or 0.5, 2), "st": "person", "tt": "belief", "ts": 0, "layer": "beliefs"})
+        try:
+            for r in conn.execute("SELECT content, type, strength, bot_id FROM beliefs WHERE status='active'"):
+                bot = qq_to_main.get("bot", "bot") if r[3] == "bot" else resolve(r[3] or "bot")
+                edges.append({"s": bot, "t": (r[0] or "")[:25], "l": "believes", "w": round(r[2] or 0.5, 2), "st": "person", "tt": "belief", "ts": 0, "layer": "beliefs"})
+        except Exception:
+            pass
 
     # ─── 图层: concerns ───
     if "concerns" in layers:
-        for r in c.db.conn.execute("SELECT topic, intensity, bot_id FROM concerns"):
-            bot = resolve(r[2] or "bot")
-            edges.append({"s": bot, "t": (r[0] or "")[:25], "l": "关注", "w": round(r[1] or 0.5, 2), "st": "person", "tt": "concern", "ts": 0, "layer": "concerns"})
+        try:
+            for r in conn.execute("SELECT topic, intensity, bot_id FROM concerns"):
+                bot = resolve(r[2] or "bot")
+                edges.append({"s": bot, "t": (r[0] or "")[:25], "l": "关注", "w": round(r[1] or 0.5, 2), "st": "person", "tt": "concern", "ts": 0, "layer": "concerns"})
+        except Exception:
+            pass
 
     # ─── 图层: jargon ───
     if "jargon" in layers:
-        for r in c.db.conn.execute("SELECT word, meaning, frequency, group_id FROM jargon WHERE is_jargon=1"):
-            edges.append({"s": f"群{r[3]}" if r[3] else "全局", "t": r[0], "l": "黑话", "w": min(r[2] or 1, 10), "st": "entity", "tt": "jargon", "ts": 0, "layer": "jargon"})
+        try:
+            for r in conn.execute("SELECT word, meaning, frequency, group_id FROM jargon WHERE is_jargon=1"):
+                edges.append({"s": f"群{r[3]}" if r[3] else "全局", "t": r[0], "l": "黑话", "w": min(r[2] or 1, 10), "st": "entity", "tt": "jargon", "ts": 0, "layer": "jargon"})
+        except Exception:
+            pass
 
     # ─── 图层: affinity (好感度) ───
     if "affinity" in layers:
         try:
-            for r in c.db.conn.execute("SELECT user_id, nickname, affection, bot_id FROM user_profiles WHERE affection != 0 LIMIT 200"):
+            for r in conn.execute("SELECT user_id, nickname, affection, bot_id FROM user_profiles WHERE affection != 0 LIMIT 200"):
                 person = resolve(r[1] or r[0])
                 bot = resolve(r[3] or "bot")
                 label = f"好感{r[2]}"
@@ -527,15 +596,14 @@ async def kg_full():
             communities = c.cooccurrence.detect_communities(min_community_size=5)
             for cid, members in list(communities.items())[:20]:
                 hub = members[0] if members else f"社区{cid}"
-                hub_name = ""
                 try:
-                    row = c.db.conn.execute("SELECT name FROM tags WHERE id=?", (hub,)).fetchone()
+                    row = conn.execute("SELECT name FROM tags WHERE id=?", (hub,)).fetchone()
                     hub_name = row[0] if row else f"tag#{hub}"
                 except Exception:
                     hub_name = f"tag#{hub}"
                 for mid in members[1:5]:
                     try:
-                        row = c.db.conn.execute("SELECT name FROM tags WHERE id=?", (mid,)).fetchone()
+                        row = conn.execute("SELECT name FROM tags WHERE id=?", (mid,)).fetchone()
                         member_name = row[0] if row else f"tag#{mid}"
                     except Exception:
                         member_name = f"tag#{mid}"
@@ -552,8 +620,29 @@ async def kg_full():
 
     data = {"edges": edges, "total": len(edges), "layers": list(layers)}
     _overview_cache[cache_key] = data
+    _overview_cache[f"{cache_key}_version"] = version
     _overview_cache[f"{cache_key}_ts"] = now
-    return jsonify(data)
+    return data
+
+
+def warmup_kg_cache(layers: str = "facts") -> dict:
+    """启动期预热 KG 全量图缓存。失败向上抛给调用方记录 warning。"""
+    started = time.perf_counter()
+    data = build_full_graph_data(layers, use_cache=False)
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+    return {"ok": True, "layers": layers, "edges": int(data.get("total", 0)), "elapsed_ms": elapsed_ms}
+
+
+@kg_bp.route("/full")
+@require_auth
+async def kg_full():
+    """全量知识图谱数据（按图层返回）。
+
+    参数 layers: 逗号分隔(facts,beliefs,concerns,jargon,affinity,communities)
+    默认只返回 facts 图层。前端可勾选多图层叠加。
+    """
+    layers_raw = request.args.get("layers", "facts")
+    return jsonify(build_full_graph_data(layers_raw, use_cache=True))
 
 
 @kg_bp.route("/entity/<entity_name>/timeline")
@@ -691,6 +780,7 @@ async def delete_fact(fact_id: int):
         return jsonify({"ok": False, "error": "facts table not found"})
     c.db.conn.execute("DELETE FROM facts WHERE rowid = ?", (fact_id,))
     c.db.conn.commit()
+    clear_kg_cache()
     return jsonify({"ok": True, "deleted": fact_id})
 
 
@@ -719,6 +809,7 @@ async def update_fact(fact_id: int):
     params.append(fact_id)
     c.db.conn.execute(f"UPDATE facts SET {', '.join(sets)} WHERE rowid = ?", params)
     c.db.conn.commit()
+    clear_kg_cache()
     return jsonify({"ok": True, "fact_id": fact_id})
 
 
@@ -731,4 +822,5 @@ async def delete_tag_relation(rel_id: int):
         return jsonify({"ok": False, "error": "tag_relations table not found"})
     c.db.conn.execute("DELETE FROM tag_relations WHERE id = ?", (rel_id,))
     c.db.conn.commit()
+    clear_kg_cache()
     return jsonify({"ok": True, "deleted": rel_id})
