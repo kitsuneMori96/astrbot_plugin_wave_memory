@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.3.0 (2026-06-25)
+
+### 黑话上下文证据与检索升级
+
+- **原始上下文锚点**：黑话条目现在保存 `source_memory_id/source_message_ts/source_sender_id/source_context/candidate_type`，可回填原始聊天证据
+- **动态上下文窗口**：新增 `GET /api/jargon/<id>/context`，支持前后消息窗口检索和 fallback 证据展示
+- **统计预筛增强**：候选记录保留 `source_contexts`，便于后续定位与回溯
+- **人名/昵称分流**：疑似人物称呼不再确认成黑话，改写入人物事实，降低黑话污染
+- **WebUI 证据弹窗**：本地黑话列表可直接查看证据窗口，支持 anchor 高亮与筛选
+
 ## v2.2.1 (2026-06-25)
 
 ### Hotfix
