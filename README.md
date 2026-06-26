@@ -2,7 +2,7 @@
 
 # Wave Memory
 
-[![Version](https://img.shields.io/badge/version-v2.3.0-blue.svg)](https://github.com/vivy1024/astrbot_plugin_wave_memory/releases)
+[![Version](https://img.shields.io/badge/version-v2.3.1-blue.svg)](https://github.com/vivy1024/astrbot_plugin_wave_memory/releases)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-≥4.14-green.svg)](https://github.com/AstrBotDevs/AstrBot)
@@ -25,7 +25,7 @@
 - 🗣️ **文化融入** — 自动挖掘群内黑话 + 风格范例注入 + 绰号识别
 - ⏰ **记忆生命周期** — 时间衰减 + 重要性分级 + 自动淘汰，像人一样遗忘
 - 🔍 **时间感知检索** — 说"昨天/上周"自动加时间过滤，群隔离精确加权
-- 📊 **交互式知识图谱** — Sigma.js WebGL 渲染，六层数据图层，多跳路径探索
+- 📊 **交互式知识图谱** — Three.js 3D 星图渲染，六层数据图层，多跳路径探索
 - 🔧 **零配置启动** — 填 2 个 Provider ID 即跑，所有子系统自动按条件就绪
 
 ---
@@ -34,6 +34,7 @@
 
 | 版本 | 日期 | 重点 |
 |------|------|------|
+| **v2.3.1** | 2026-06-26 | Three.js 3D 知识图谱 · KG cache 预热 · WebGL 降级保护 · 运行时验证 |
 | **v2.3.0** | 2026-06-25 | 黑话上下文证据 · 原始 memory 锚点 · 动态窗口检索 · 人名/昵称分流 |
 | **v2.2.0** | 2026-06-25 | 经历与关系事件重构 · 身份安全 · 数据治理 · Holyman 语料扩展 · 多 bot 防抖修复 |
 | **v2.1.0** | 2026-06-25 | 灵魂系统升级 · WebUI 管理面板 · soul/beliefs/jargon/kg API · 全选 2.0 |
@@ -192,7 +193,7 @@ Quart + Hypercorn 守护线程，纯 HTML + Alpine.js（无需 npm build）。
 |------|------|
 | 概览 | 系统健康 · 模块就绪度 · 依赖条件提示 · 错误监控 |
 | 记忆管理 | 分页搜索 · 编辑 · 批量操作 |
-| 知识图谱 | Sigma.js 交互式图谱 · 六层数据图层 · 时间线 · 多跳路径 |
+| 知识图谱 | Three.js 3D 交互式图谱 · 六层数据图层 · 时间线 · 多跳路径 |
 | 信念审核 | pending → active → archived 生命周期管理 |
 | 黑话审核 | 确认/拒绝/编辑释义 |
 | 灵魂状态 | 情绪轨迹 · 关切 · 好感度排行 |
