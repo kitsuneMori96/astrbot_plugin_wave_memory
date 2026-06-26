@@ -43,6 +43,10 @@ function app() {
         jargonEditForm: { word: '', meaning: '' },
         jargonCreate: false,
         jargonCreateForm: { word: '', meaning: '', group_id: '' },
+        jargonContext: null,
+        jargonContextTarget: null,
+        jargonContextBefore: 5,
+        jargonContextAfter: 5,
 
         selectedJargonIds: [],
         jargonAllMatching: false,
@@ -431,6 +435,26 @@ function app() {
                     alert('批量删除失败');
                 }
             } catch(e) { alert('网络错误，批量删除失败'); }
+        },
+
+        async openJargonContext(j) {
+            this.jargonContextTarget = j;
+            this.jargonContext = { jargon: j, messages: [], fallback_contexts: j.contexts || [], used_fallback: true };
+            await this.loadJargonContext();
+        },
+
+        async loadJargonContext() {
+            if (!this.jargonContextTarget) return;
+            try {
+                const params = new URLSearchParams({ before: this.jargonContextBefore, after: this.jargonContextAfter });
+                const r = await fetch(`/api/jargon/${this.jargonContextTarget.id}/context?${params}`);
+                const d = await r.json();
+                if (d.ok) this.jargonContext = d;
+                else alert(d.error || '加载黑话上下文失败');
+            } catch(e) {
+                console.error(e);
+                alert('加载黑话上下文失败: ' + e.message);
+            }
         },
 
         openJargonEdit(j) {

@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 import time
 from collections import defaultdict
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Set
 
 from astrbot.api import logger
 
@@ -57,25 +57,29 @@ class JargonStatisticalFilter:
         self._first_seen: Dict[str, Dict[str, float]] = defaultdict(dict)
         # group_id -> {word: set(user_ids)}
         self._user_freq: Dict[str, Dict[str, Set[str]]] = defaultdict(lambda: defaultdict(set))
-        # group_id -> {word: [context_snippets]}
-        self._contexts: Dict[str, Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
+        # group_id -> {word: [context metadata]}
+        self._contexts: Dict[str, Dict[str, List[Dict]]] = defaultdict(lambda: defaultdict(list))
 
-    def feed(self, text: str, group_id: str, sender_id: str = "") -> None:
+    def feed(self, text: str, group_id: str, sender_id: str = "", timestamp: float = None) -> None:
         """喂入一条消息，更新词频统计。"""
         if not _HAS_JIEBA:
             return
         words = self._tokenize(text)
-        now = time.time()
+        now = timestamp or time.time()
         for w in words:
             self._group_freq[group_id][w] += 1
             if w not in self._first_seen[group_id]:
                 self._first_seen[group_id][w] = now
             if sender_id:
                 self._user_freq[group_id][w].add(sender_id)
-            # 保留上下文
+            # 保留上下文锚点元数据，同时让 get_candidates 输出旧 contexts 文本数组兼容 UI。
             ctx_list = self._contexts[group_id][w]
             if len(ctx_list) < self._context_keep:
-                ctx_list.append(text[:100])
+                ctx_list.append({
+                    "content": text[:300],
+                    "timestamp": now,
+                    "sender_id": sender_id or "",
+                })
 
     def get_candidates(self, group_id: str, min_freq: int = 5, top_k: int = 20) -> List[Dict]:
         """获取候选黑话词（window_days 天内频率 >= min_freq 的非常规词）。
@@ -120,11 +124,13 @@ class JargonStatisticalFilter:
                      self._weight_burst * min(burst / 10, 1.0) +
                      self._weight_concentration * concentration)
 
+            source_contexts = self._contexts.get(group_id, {}).get(word, [])[:self._context_keep]
             candidates.append({
                 "word": word,
                 "frequency": count,
                 "score": round(score, 3),
-                "contexts": self._contexts.get(group_id, {}).get(word, [])[:self._context_keep],
+                "contexts": [ctx.get("content", "") for ctx in source_contexts],
+                "source_contexts": source_contexts,
             })
 
         candidates.sort(key=lambda x: x["score"], reverse=True)

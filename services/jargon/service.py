@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -72,15 +73,15 @@ class JargonService:
         """从近 N 天 memories 重放消息，重建内存词频统计。"""
         cutoff = time.time() - days * 86400
         rows = self._db.conn.execute(
-            """SELECT content, group_id, sender_id FROM memories
+            """SELECT content, group_id, sender_id, timestamp FROM memories
                WHERE timestamp >= ? AND group_id IS NOT NULL AND group_id != ''
                ORDER BY timestamp DESC LIMIT ?""",
             (cutoff, max_rows),
         ).fetchall()
         n = 0
-        for content, group_id, sender_id in rows:
+        for content, group_id, sender_id, ts in rows:
             if content and group_id:
-                self._filter.feed(content, str(group_id), str(sender_id or ""))
+                self._filter.feed(content, str(group_id), str(sender_id or ""), timestamp=float(ts or time.time()))
                 n += 1
         if n:
             groups = len(self._filter._group_freq)
@@ -117,16 +118,23 @@ class JargonService:
                 "source": "TEXT DEFAULT 'wave_memory'",
                 "last_infer_freq": "INTEGER DEFAULT 0",
                 "reject_reason": "TEXT",
+                "source_memory_id": "INTEGER",
+                "source_message_ts": "REAL",
+                "source_sender_id": "TEXT",
+                "source_context": "TEXT DEFAULT '[]'",
+                "candidate_type": "TEXT DEFAULT 'jargon'",
             }.items():
                 if col not in cols:
                     self._db.conn.execute(f"ALTER TABLE jargon ADD COLUMN {col} {ddl}")
+            self._db.conn.execute("CREATE INDEX IF NOT EXISTS idx_jargon_source_memory ON jargon(source_memory_id)")
+            self._db.conn.execute("CREATE INDEX IF NOT EXISTS idx_jargon_source_ts ON jargon(group_id, source_message_ts)")
             self._db.conn.commit()
         except Exception as e:
             logger.debug(f"[Jargon] table ensure: {e}")
 
     # ─── 公开接口 ───
 
-    def feed_message(self, text: str, group_id: str, sender_id: str = "") -> None:
+    def feed_message(self, text: str, group_id: str, sender_id: str = "", timestamp: float = None) -> None:
         """喂入一条消息（由 on_message 调用）。"""
         if not self._enabled:
             return
@@ -137,7 +145,7 @@ class JargonService:
                 self._warmup_from_memories(days=3, max_rows=10000)
             except Exception as e:
                 logger.debug(f"[Jargon] warmup skipped: {e}")
-        self._filter.feed(text, group_id, sender_id)
+        self._filter.feed(text, group_id, sender_id, timestamp=timestamp or time.time())
         self._msg_count[group_id] = self._msg_count.get(group_id, 0) + 1
 
     def should_mine(self, group_id: str) -> bool:
@@ -163,6 +171,9 @@ class JargonService:
         if not candidates:
             return []
 
+        candidates = [c for c in candidates if not self._should_filter_candidate(c.get("word", ""))]
+        if not candidates:
+            return []
         logger.info(f"[Jargon] 挖掘 {group_id}: {len(candidates)} 候选")
 
         # Step 1.5: LLM 批量验证（改动3，开关控制）
@@ -177,13 +188,48 @@ class JargonService:
 
         for cand in candidates:
             word = cand["word"]
-            contexts = cand["contexts"]
+            contexts = cand.get("contexts") or []
+            source_contexts = cand.get("source_contexts") or []
+            source_ctx = self._pick_source_context(cand)
+            source_memory_id = self._resolve_source_memory_id(group_id, word, source_ctx)
+            source_message_ts = source_ctx.get("timestamp")
+            source_sender_id = str(source_ctx.get("sender_id") or "")
+            source_context_json = json.dumps(source_contexts or [source_ctx] if source_ctx else [], ensure_ascii=False)
+            candidate_type = "jargon"
+
+            if self._should_filter_candidate(word):
+                continue
+            if self._is_person_like_candidate(word, source_sender_id):
+                candidate_type = "person_alias"
+                self._record_person_alias_fact(group_id, word, source_ctx, source_memory_id)
 
             # 检查是否已存在
             existing = self._db.conn.execute(
                 "SELECT id, frequency, is_jargon, last_infer_freq FROM jargon WHERE group_id = ? AND word = ?",
                 (group_id, word),
             ).fetchone()
+
+            if candidate_type == "person_alias":
+                self._db.conn.execute(
+                    """INSERT OR IGNORE INTO jargon
+                       (word, meaning, is_jargon, frequency, confidence, group_id, contexts,
+                        last_infer_freq, created_at, updated_at, status, scope, source, reject_reason,
+                        source_memory_id, source_message_ts, source_sender_id, source_context, candidate_type)
+                       VALUES (?, '', 0, ?, 0, ?, ?, 0, ?, ?, 'rejected', 'local', 'wave_memory',
+                               'person_alias_diverted', ?, ?, ?, ?, ?)""",
+                    (word, cand["frequency"], group_id, json.dumps(contexts, ensure_ascii=False), now, now,
+                     source_memory_id, source_message_ts, source_sender_id, source_context_json, candidate_type),
+                )
+                self._db.conn.execute(
+                    """UPDATE jargon SET frequency = ?, status = 'rejected', is_jargon = 0,
+                       reject_reason = 'person_alias_diverted', source_memory_id = COALESCE(source_memory_id, ?),
+                       source_message_ts = COALESCE(source_message_ts, ?), source_sender_id = COALESCE(source_sender_id, ?),
+                       source_context = ?, candidate_type = ?, updated_at = ?
+                       WHERE group_id = ? AND word = ? AND COALESCE(status, 'pending') != 'confirmed'""",
+                    (cand["frequency"], source_memory_id, source_message_ts, source_sender_id, source_context_json,
+                     candidate_type, now, group_id, word),
+                )
+                continue
 
             if existing:
                 row_id, old_freq, old_is_jargon, last_infer_freq = existing
@@ -212,14 +258,20 @@ class JargonService:
                     if reject_reason:
                         self._db.conn.execute(
                             """UPDATE jargon SET frequency = ?, meaning = ?, is_jargon = ?,
-                               confidence = ?, status = ?, reject_reason = ?, last_infer_freq = ?, updated_at = ? WHERE id = ?""",
-                            (current_freq, meaning, is_jargon, confidence, status, reject_reason, current_freq, now, row_id),
+                               confidence = ?, status = ?, reject_reason = ?, last_infer_freq = ?, updated_at = ?,
+                               source_memory_id = COALESCE(source_memory_id, ?), source_message_ts = COALESCE(source_message_ts, ?),
+                               source_sender_id = COALESCE(source_sender_id, ?), source_context = ?, candidate_type = ? WHERE id = ?""",
+                            (current_freq, meaning, is_jargon, confidence, status, reject_reason, current_freq, now,
+                             source_memory_id, source_message_ts, source_sender_id, source_context_json, candidate_type, row_id),
                         )
                     else:
                         self._db.conn.execute(
                             """UPDATE jargon SET frequency = ?, meaning = ?, is_jargon = ?,
-                               confidence = ?, status = ?, reject_reason = NULL, last_infer_freq = ?, updated_at = ? WHERE id = ?""",
-                            (current_freq, meaning, is_jargon, confidence, status, current_freq, now, row_id),
+                               confidence = ?, status = ?, reject_reason = NULL, last_infer_freq = ?, updated_at = ?,
+                               source_memory_id = COALESCE(source_memory_id, ?), source_message_ts = COALESCE(source_message_ts, ?),
+                               source_sender_id = COALESCE(source_sender_id, ?), source_context = ?, candidate_type = ? WHERE id = ?""",
+                            (current_freq, meaning, is_jargon, confidence, status, current_freq, now,
+                             source_memory_id, source_message_ts, source_sender_id, source_context_json, candidate_type, row_id),
                         )
 
                     if is_jargon:
@@ -227,8 +279,11 @@ class JargonService:
                 else:
                     # 仅更新频率
                     self._db.conn.execute(
-                        "UPDATE jargon SET frequency = ?, updated_at = ? WHERE id = ?",
-                        (current_freq, now, row_id),
+                        """UPDATE jargon SET frequency = ?, updated_at = ?,
+                           source_memory_id = COALESCE(source_memory_id, ?), source_message_ts = COALESCE(source_message_ts, ?),
+                           source_sender_id = COALESCE(source_sender_id, ?), source_context = ?, candidate_type = COALESCE(candidate_type, ?)
+                           WHERE id = ?""",
+                        (current_freq, now, source_memory_id, source_message_ts, source_sender_id, source_context_json, candidate_type, row_id),
                     )
                 continue
 
@@ -270,10 +325,12 @@ class JargonService:
             self._db.conn.execute(
                 """INSERT OR IGNORE INTO jargon
                    (word, meaning, is_jargon, frequency, confidence, group_id, contexts,
-                    last_infer_freq, created_at, updated_at, status, scope, source, reject_reason)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    last_infer_freq, created_at, updated_at, status, scope, source, reject_reason,
+                    source_memory_id, source_message_ts, source_sender_id, source_context, candidate_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (word, meaning, is_jargon, cand["frequency"], confidence, group_id,
-                 json.dumps(contexts, ensure_ascii=False), cand["frequency"], now, now, status, scope, source, reject_reason),
+                 json.dumps(contexts, ensure_ascii=False), cand["frequency"], now, now, status, scope, source, reject_reason,
+                 source_memory_id, source_message_ts, source_sender_id, source_context_json, candidate_type),
             )
 
             if is_jargon:
@@ -285,6 +342,101 @@ class JargonService:
         self._check_global_promotion()
 
         return results
+
+    @staticmethod
+    def _should_filter_candidate(word: str) -> bool:
+        """过滤明显不是黑话的候选，减少昵称/句子污染。"""
+        word = (word or "").strip()
+        if not word or "@" in word:
+            return True
+        if len(word) < 2 or len(word) > 12:
+            return True
+        if re.match(r"^https?://", word, re.I):
+            return True
+        if re.match(r"^[\d\s.]+$", word):
+            return True
+        if re.match(r"^[^\w\u4e00-\u9fff]+$", word):
+            return True
+        if re.search(r"[，。！？!?、；;：:\s]", word):
+            return True
+        if re.match(r"^[A-Za-z]+$", word) and len(word) > 6:
+            return True
+        if re.match(r"^\[.+\]$", word):
+            return True
+        common_words = {
+            "吃饭", "睡觉", "上班", "下班", "回家", "出门", "上课", "工作", "学习", "考试",
+            "好的", "可以", "谢谢", "没事", "不用", "不是", "没有", "手机", "电脑", "学校",
+            "今天", "昨天", "明天", "现在", "刚才", "马上", "哈哈", "哈哈哈", "嗯嗯", "呵呵",
+            "朋友", "同学", "老师", "家人", "爸爸", "妈妈", "真的", "确实", "其实", "当然",
+            "知道", "不知道", "怎么", "什么", "为什么", "这个", "那个",
+        }
+        return word in common_words
+
+    @staticmethod
+    def _is_person_like_candidate(word: str, sender_id: str = "") -> bool:
+        """识别疑似人名、昵称或 ID，保守分流到人物事实。"""
+        word = (word or "").strip()
+        if not word:
+            return False
+        if sender_id and word == str(sender_id):
+            return True
+        if re.match(r"^[A-Za-z][A-Za-z0-9_\-]{2,16}$", word) and not re.match(r"^[A-Z0-9]{2,6}$", word):
+            return True
+        # 常见 2-4 字中文姓名/昵称形态：不直接确认成黑话，交给 facts 保守记录。
+        if re.match(r"^[\u4e00-\u9fff]{2,4}$", word):
+            surname = word[0]
+            common_surnames = "赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦尤许何吕施张孔曹严华金魏陶姜谢邹喻柏水窦章云苏潘葛奚范彭郎鲁韦昌马苗凤花方俞任袁柳鲍史唐费廉岑薛雷贺倪汤滕殷罗毕郝邬安常乐于时傅皮卞齐康伍余元卜顾孟平黄和穆萧尹"
+            return surname in common_surnames and len(word) <= 3
+        return False
+
+    def _pick_source_context(self, cand: Dict) -> Dict:
+        """从候选上下文中选择一个最可信的源消息片段。"""
+        source_contexts = cand.get("source_contexts") or []
+        if source_contexts:
+            return source_contexts[0] if isinstance(source_contexts[0], dict) else {"content": str(source_contexts[0])}
+        contexts = cand.get("contexts") or []
+        return {"content": contexts[0]} if contexts else {}
+
+    def _resolve_source_memory_id(self, group_id: str, word: str, source_ctx: Dict) -> Optional[int]:
+        """按时间邻域和内容包含关系回填原始 memory id。"""
+        try:
+            ts = float(source_ctx.get("timestamp") or 0)
+            sender_id = str(source_ctx.get("sender_id") or "")
+            content = str(source_ctx.get("content") or "")
+            if not ts:
+                return None
+            like_text = f"%{word}%" if word else f"%{content[:40]}%"
+            rows = self._db.conn.execute(
+                """SELECT id, timestamp, content FROM memories
+                   WHERE group_id = ? AND timestamp BETWEEN ? AND ?
+                     AND (? = '' OR sender_id = ?)
+                     AND content LIKE ?
+                   ORDER BY ABS(timestamp - ?) ASC LIMIT 1""",
+                (group_id, ts - 30, ts + 30, sender_id, sender_id, like_text, ts),
+            ).fetchall()
+            if rows:
+                return int(rows[0][0])
+        except Exception as e:
+            logger.debug(f"[Jargon] resolve source memory skipped: {e}")
+        return None
+
+    def _record_person_alias_fact(self, group_id: str, word: str, source_ctx: Dict, memory_id: Optional[int]) -> None:
+        """把疑似人名/昵称分流为人物事实，避免污染黑话库。"""
+        sender_id = str(source_ctx.get("sender_id") or "")
+        if not sender_id or not word:
+            return
+        try:
+            self._db.insert_fact(
+                subject=sender_id,
+                predicate="alias_or_name",
+                obj=word,
+                group_id=group_id,
+                source_memory_id=memory_id,
+                confidence=0.6,
+                fact_type="PERSON_ALIAS",
+            )
+        except Exception as e:
+            logger.debug(f"[Jargon] person alias fact skipped: {e}")
 
     def _should_reinfer(self, current_freq: int, last_infer_freq: int) -> bool:
         """判断是否需要重新推断（改动1：递进重推机制）。"""

@@ -28,6 +28,19 @@ def _safe_int(val, default):
         return default
 
 
+def _safe_json_list(val):
+    try:
+        parsed = json.loads(val or "[]")
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+def _clamp_int(val, default, min_value=0, max_value=50):
+    num = _safe_int(val, default)
+    return max(min_value, min(max_value, num))
+
+
 @jargon_bp.route("/", methods=["GET"])
 @require_auth
 async def list_jargon():
@@ -56,8 +69,20 @@ async def list_jargon():
         sq = f"%{search_q.strip()}%"
         params.extend([sq, sq])
 
+    cols = {r[1] for r in c.db.conn.execute("PRAGMA table_info(jargon)").fetchall()}
+    extra_cols = [
+        "source_memory_id" if "source_memory_id" in cols else "NULL AS source_memory_id",
+        "source_message_ts" if "source_message_ts" in cols else "NULL AS source_message_ts",
+        "source_sender_id" if "source_sender_id" in cols else "NULL AS source_sender_id",
+        "source_context" if "source_context" in cols else "'[]' AS source_context",
+        "candidate_type" if "candidate_type" in cols else "'jargon' AS candidate_type",
+        "reject_reason" if "reject_reason" in cols else "NULL AS reject_reason",
+        "status" if "status" in cols else "'pending' AS status",
+    ]
     where_sql = " AND ".join(where_parts)
-    sql = f"SELECT id, word, meaning, is_jargon, frequency, confidence, is_global, group_id, contexts, created_at FROM jargon WHERE {where_sql} ORDER BY frequency DESC LIMIT ? OFFSET ?"
+    sql = f"""SELECT id, word, meaning, is_jargon, frequency, confidence, is_global, group_id,
+              contexts, created_at, {', '.join(extra_cols)}
+              FROM jargon WHERE {where_sql} ORDER BY frequency DESC LIMIT ? OFFSET ?"""
     params.extend([limit, offset])
 
     rows = c.db.conn.execute(sql, params).fetchall()
@@ -67,7 +92,10 @@ async def list_jargon():
     items = [
         {"id": r[0], "word": r[1], "meaning": r[2], "is_jargon": r[3],
          "frequency": r[4], "confidence": r[5], "is_global": bool(r[6]),
-         "group_id": r[7], "contexts": json.loads(r[8] or "[]"), "created_at": r[9]}
+         "group_id": r[7], "contexts": _safe_json_list(r[8]), "created_at": r[9],
+         "source_memory_id": r[10], "source_message_ts": r[11], "source_sender_id": r[12],
+         "source_context": _safe_json_list(r[13]), "candidate_type": r[14] or "jargon",
+         "reject_reason": r[15], "status": r[16] or "pending"}
         for r in rows
     ]
     return jsonify({"items": items, "total": total})
@@ -105,6 +133,107 @@ async def create_jargon():
     c.db.conn.commit()
     new_id = c.db.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     return jsonify({"ok": True, "id": new_id})
+
+
+@jargon_bp.route("/<int:jargon_id>/context", methods=["GET"])
+@require_auth
+async def get_jargon_context(jargon_id: int):
+    """按黑话锚点动态截取原始聊天上下文。"""
+    c = get_container()
+    if not _table_exists(c.db.conn, "jargon"):
+        return jsonify({"ok": False, "error": "jargon table not found"}), 500
+    before = _clamp_int(request.args.get("before"), 5)
+    after = _clamp_int(request.args.get("after"), 5)
+
+    cols = {r[1] for r in c.db.conn.execute("PRAGMA table_info(jargon)").fetchall()}
+    extra_cols = [
+        "source_memory_id" if "source_memory_id" in cols else "NULL AS source_memory_id",
+        "source_message_ts" if "source_message_ts" in cols else "NULL AS source_message_ts",
+        "source_sender_id" if "source_sender_id" in cols else "NULL AS source_sender_id",
+        "source_context" if "source_context" in cols else "'[]' AS source_context",
+        "candidate_type" if "candidate_type" in cols else "'jargon' AS candidate_type",
+    ]
+    row = c.db.conn.execute(
+        f"""SELECT id, word, meaning, group_id, contexts, {', '.join(extra_cols)}
+            FROM jargon WHERE id = ?""",
+        (jargon_id,),
+    ).fetchone()
+    if not row:
+        return jsonify({"ok": False, "error": "jargon not found"}), 404
+
+    jargon = {
+        "id": row[0], "word": row[1], "meaning": row[2], "group_id": row[3],
+        "contexts": _safe_json_list(row[4]), "source_memory_id": row[5],
+        "source_message_ts": row[6], "source_sender_id": row[7],
+        "source_context": _safe_json_list(row[8]), "candidate_type": row[9] or "jargon",
+    }
+
+    anchor = None
+    if jargon["source_memory_id"]:
+        anchor = c.db.conn.execute(
+            """SELECT id, group_id, sender_id, sender_name, content, timestamp FROM memories
+               WHERE id = ?""",
+            (jargon["source_memory_id"],),
+        ).fetchone()
+
+    if not anchor and jargon["source_message_ts"]:
+        word_like = f"%{jargon['word']}%"
+        sender_id = str(jargon.get("source_sender_id") or "")
+        anchor = c.db.conn.execute(
+            """SELECT id, group_id, sender_id, sender_name, content, timestamp FROM memories
+               WHERE group_id = ? AND timestamp BETWEEN ? AND ?
+                 AND (? = '' OR sender_id = ?)
+                 AND content LIKE ?
+               ORDER BY ABS(timestamp - ?) ASC LIMIT 1""",
+            (jargon["group_id"], float(jargon["source_message_ts"]) - 60, float(jargon["source_message_ts"]) + 60,
+             sender_id, sender_id, word_like, float(jargon["source_message_ts"])),
+        ).fetchone()
+        if anchor and "source_memory_id" in cols:
+            c.db.conn.execute("UPDATE jargon SET source_memory_id = ? WHERE id = ?", (anchor[0], jargon_id))
+            c.db.conn.commit()
+            jargon["source_memory_id"] = anchor[0]
+
+    def _row_to_msg(r, role):
+        return {
+            "id": r[0], "group_id": r[1], "sender_id": r[2], "sender_name": r[3],
+            "content": r[4], "timestamp": r[5], "role": role,
+        }
+
+    fallback_contexts = jargon["source_context"] or jargon["contexts"]
+    if not anchor:
+        return jsonify({
+            "ok": True,
+            "jargon": jargon,
+            "anchor": None,
+            "messages": [],
+            "fallback_contexts": fallback_contexts,
+            "used_fallback": True,
+        })
+
+    anchor_msg = _row_to_msg(anchor, "anchor")
+    anchor_ts = float(anchor[5])
+    group_id = anchor[1]
+    before_rows = c.db.conn.execute(
+        """SELECT id, group_id, sender_id, sender_name, content, timestamp FROM memories
+           WHERE group_id = ? AND timestamp < ? AND memory_type = 'message'
+           ORDER BY timestamp DESC LIMIT ?""",
+        (group_id, anchor_ts, before),
+    ).fetchall()
+    after_rows = c.db.conn.execute(
+        """SELECT id, group_id, sender_id, sender_name, content, timestamp FROM memories
+           WHERE group_id = ? AND timestamp > ? AND memory_type = 'message'
+           ORDER BY timestamp ASC LIMIT ?""",
+        (group_id, anchor_ts, after),
+    ).fetchall()
+    messages = [_row_to_msg(r, "before") for r in reversed(before_rows)] + [anchor_msg] + [_row_to_msg(r, "after") for r in after_rows]
+    return jsonify({
+        "ok": True,
+        "jargon": jargon,
+        "anchor": anchor_msg,
+        "messages": messages,
+        "fallback_contexts": fallback_contexts,
+        "used_fallback": False,
+    })
 
 
 @jargon_bp.route("/<int:jargon_id>/review", methods=["POST"])

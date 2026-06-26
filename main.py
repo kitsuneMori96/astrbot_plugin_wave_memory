@@ -1740,6 +1740,20 @@ class WaveMemoryPlugin(Star):
         group_id = event.get_group_id() or f"private:{sender_id}"
         bot_id = event.get_self_id() or ""
 
+        # 平台会把 bot 自己发送的图片回推成一条普通消息事件。
+        # 这种事件的 sender_id 等于 self_id（或配置里的 bot QQ）。
+        # 直接把它作为 bot 图片记忆入库，不进入用户消息防抖/LLM 流程。
+        if images and sender_id and (sender_id == bot_id or sender_id in self._bot_qq_ids):
+            await self.writer.enqueue({
+                "group_id": group_id,
+                "sender_id": "bot",
+                "sender_name": self._get_bot_name(sender_id if sender_id in self._bot_qq_ids else bot_id),
+                "content": message,
+                "timestamp": time.time(),
+            })
+            event.should_call_llm(False)
+            return
+
         if self.group_whitelist and group_id not in self.group_whitelist:
             return
         if self.group_blacklist and group_id in self.group_blacklist:
@@ -1936,18 +1950,19 @@ class WaveMemoryPlugin(Star):
             if len(locked_message) > self.max_message_length:
                 locked_message = locked_message[:self.max_message_length]
 
+            message_ts = time.time()
             await self.writer.enqueue({
                 "group_id": group_id,
                 "sender_id": sender_id,
                 "sender_name": sender_name,
                 "content": locked_message,
-                "timestamp": time.time(),
+                "timestamp": message_ts,
                 "is_at_bot": getattr(event, "is_at_or_wake_command", False),
             })
 
             # 黑话词频统计 + 触发挖掘 (US-4.1)
             if self.jargon_service:
-                self.jargon_service.feed_message(locked_message, group_id, sender_id)
+                self.jargon_service.feed_message(locked_message, group_id, sender_id, timestamp=message_ts)
                 if self.jargon_service.should_mine(group_id):
                     self._spawn(self._jargon_mine_task(group_id))
 
