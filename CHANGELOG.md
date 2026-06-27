@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.3.2 (2026-06-27)
+
+### 注入指标时间序列分析
+
+- **SQLite 指标持久化**：新增 `injection_metrics` 表记录每次 `inject_memory` 的耗时、token 与字符数样本，支持升级时自动建表和 31 天保留期清理
+- **时间范围聚合 API**：`GET /api/system/metrics/injection` 支持 `range=1d|3d|7d|1mo` 与 `from/to` 日历自定义查询，返回 summary、series 与 ranking
+- **WebUI 趋势图**：概览页新增原生 SVG 折线图，不引入 Chart.js 等外部图表库，支持总量、主记忆、灵魂、信念、关系、黑话等曲线开关
+- **模块消耗排行榜**：新增按模块 token 总量、均值与占比排序的注入消耗榜，便于定位高消耗注入通道
+- **测试覆盖**：新增 `tests/test_injection_metrics.py` 覆盖样本存储、时间桶聚合、排行榜与过期清理
+
 ## v2.3.1 (2026-06-26)
 
 ### KG 3D 可视化迁移

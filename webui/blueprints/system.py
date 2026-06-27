@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import time
+from datetime import datetime, timedelta
 
-from quart import Blueprint, jsonify
+from quart import Blueprint, jsonify, request
 
 from ..container import get_container
 from ..middleware.auth import require_auth
@@ -170,13 +172,82 @@ async def metrics():
     })
 
 
+def _parse_injection_metric_range():
+    """解析注入指标查询时间范围。"""
+    now = time.time()
+    preset = request.args.get("range", "7d")
+    preset_seconds = {
+        "1d": 86400,
+        "3d": 3 * 86400,
+        "7d": 7 * 86400,
+        "1mo": 31 * 86400,
+    }
+
+    from_arg = request.args.get("from")
+    to_arg = request.args.get("to")
+    if from_arg and to_arg:
+        try:
+            start = datetime.strptime(from_arg, "%Y-%m-%d")
+            end = datetime.strptime(to_arg, "%Y-%m-%d") + timedelta(days=1) - timedelta(seconds=1)
+            from_ts = start.timestamp()
+            to_ts = min(end.timestamp(), now)
+            span = max(0, to_ts - from_ts)
+            range_key = "custom"
+        except Exception:
+            span = preset_seconds["7d"]
+            from_ts = now - span
+            to_ts = now
+            range_key = "7d"
+    else:
+        range_key = preset if preset in preset_seconds else "7d"
+        span = preset_seconds[range_key]
+        from_ts = now - span
+        to_ts = now
+
+    if range_key == "1d" or span <= 2 * 86400:
+        bucket_seconds = 3600
+    elif range_key == "3d":
+        bucket_seconds = 3 * 3600
+    elif range_key == "7d" or span <= 14 * 86400:
+        bucket_seconds = 6 * 3600
+    else:
+        bucket_seconds = 86400
+    return range_key, from_ts, to_ts, bucket_seconds
+
+
 @system_bp.route("/metrics/injection", methods=["GET"])
 @require_auth
 async def metrics_injection():
     """inject_memory 各通道聚合统计 (US-3.2)。"""
     from ...utils.perf import get_perf_tracker
     tracker = get_perf_tracker()
-    return jsonify(tracker.get_injection_stats())
+    stats = tracker.get_injection_stats()
+    c = get_container()
+    range_key, from_ts, to_ts, bucket_seconds = _parse_injection_metric_range()
+    try:
+        persisted = c.db.get_injection_metrics(from_ts, to_ts, bucket_seconds)
+        stats.update({
+            "range": range_key,
+            "from": from_ts,
+            "to": to_ts,
+            "bucket_seconds": bucket_seconds,
+            "summary": persisted.get("summary", {}),
+            "series": persisted.get("series", []),
+            "ranking": persisted.get("ranking", []),
+            "count": persisted.get("count", stats.get("count", 0)),
+        })
+    except Exception as e:
+        stats.update({
+            "range": range_key,
+            "from": from_ts,
+            "to": to_ts,
+            "bucket_seconds": bucket_seconds,
+            "summary": {},
+            "series": [],
+            "ranking": [],
+            "error": str(e),
+        })
+    return jsonify(stats)
 
 
 @system_bp.route("/metrics/functions", methods=["GET"])

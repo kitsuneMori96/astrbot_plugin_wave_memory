@@ -13,6 +13,56 @@ from ..middleware.auth import require_auth
 jargon_bp = Blueprint("jargon", __name__, url_prefix="/api/jargon")
 
 
+HOLYMAN_CATEGORY_LABELS = {
+    "skill-core": "核心技能",
+    "gaming": "游戏文化",
+    "internet-culture": "互联网文化",
+    "communication": "沟通风格",
+    "rules": "人格规则",
+    "values": "价值观",
+    "iconic-quotes": "标志语录",
+    "internal-quotes": "内部语录",
+    "corpus": "神言语料",
+    "legacy": "旧版内置",
+    "unknown": "未分类",
+}
+
+
+def _normalize_holyman_phrase(word: str, value) -> dict:
+    """兼容旧版字符串 value 和新版 Holyman 结构化 value。"""
+    if isinstance(value, dict):
+        category = str(value.get("category") or "unknown")
+        meaning = str(value.get("meaning") or value.get("explanation") or "")
+        source = str(value.get("source") or "")
+        kind = str(value.get("kind") or "phrase")
+    else:
+        category = "legacy"
+        meaning = str(value or "")
+        source = ""
+        kind = "legacy"
+    return {
+        "word": word,
+        "meaning": meaning,
+        "category": category,
+        "category_label": HOLYMAN_CATEGORY_LABELS.get(category, category),
+        "source": source,
+        "kind": kind,
+    }
+
+
+def _build_holyman_categories(items: list[dict]) -> list[dict]:
+    counts: dict[str, int] = {}
+    labels: dict[str, str] = {}
+    for item in items:
+        category = item.get("category") or "unknown"
+        counts[category] = counts.get(category, 0) + 1
+        labels[category] = item.get("category_label") or HOLYMAN_CATEGORY_LABELS.get(category, category)
+    return [
+        {"id": category, "label": labels[category], "count": count}
+        for category, count in sorted(counts.items(), key=lambda kv: (-kv[1], labels.get(kv[0], kv[0])))
+    ]
+
+
 def _table_exists(conn, table: str) -> bool:
     """检查表是否存在。"""
     row = conn.execute(
@@ -98,7 +148,10 @@ async def list_jargon():
          "reject_reason": r[15], "status": r[16] or "pending"}
         for r in rows
     ]
-    return jsonify({"items": items, "total": total})
+    pending_count = c.db.conn.execute(
+        "SELECT COUNT(*) FROM jargon WHERE COALESCE(status, 'pending') = 'pending'"
+    ).fetchone()[0]
+    return jsonify({"items": items, "total": total, "pending_count": pending_count})
 
 
 @jargon_bp.route("/", methods=["POST"])
@@ -496,13 +549,14 @@ async def get_holyman():
         except Exception:
             pass
             
-    # 3. 构造 items 组合结果
+    # 3. 构造 items 组合结果：兼容旧版 string value 和新版 structured value
     items = []
     local_version = phrases.get("_version", "Unknown")
-    for word, meaning in phrases.items():
+    for word, raw_value in phrases.items():
         if word.startswith("_"):
             continue
-            
+
+        item = _normalize_holyman_phrase(word, raw_value)
         example = None
         for text in corpus:
             if word in text:
@@ -510,26 +564,24 @@ async def get_holyman():
                 if len(example) > 150:
                     example = example[:147] + "..."
                 break
-                
+
+        item["example"] = example
         if word in db_items:
-            items.append({
-                "word": word,
-                "meaning": meaning,
+            item.update({
                 "is_activated": True,
                 "db_id": db_items[word]["id"],
                 "custom_meaning": db_items[word]["meaning"],
-                "example": example
             })
         else:
-            items.append({
-                "word": word,
-                "meaning": meaning,
+            item.update({
                 "is_activated": False,
                 "db_id": None,
                 "custom_meaning": None,
-                "example": example
             })
-            
+        items.append(item)
+
+    categories = _build_holyman_categories(items)
+
     # 4. 获取远程最新提交的版本哈希
     remote_version = "Unknown"
     try:
@@ -548,6 +600,7 @@ async def get_holyman():
             
     return jsonify({
         "items": items,
+        "categories": categories,
         "local_version": local_version,
         "remote_version": remote_version
     })

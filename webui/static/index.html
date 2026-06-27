@@ -209,30 +209,99 @@
     <!-- ═══ 概览 Tab ═══ -->
     <div x-show="tab==='overview'" x-cloak>
         <!-- Stats Cards -->
-        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
-            <div class="card card-hover stat-card">
-                <div class="text-xs" style="color:var(--muted-fg)">记忆总量</div>
-                <div class="text-2xl font-bold mt-1" x-text="sys.memories?.total || '-'"></div>
-                <div class="text-xs mt-2" style="color:var(--muted-fg)">向量覆盖 <span style="color:var(--success)" x-text="sys.coverage?.vector_pct + '%'"></span></div>
-            </div>
-            <div class="card card-hover stat-card">
-                <div class="text-xs" style="color:var(--muted-fg)">Tag 总数</div>
-                <div class="text-2xl font-bold mt-1" x-text="sys.tags?.total || '-'"></div>
-                <div class="text-xs mt-2" style="color:var(--muted-fg)">结构化 <span style="color:var(--primary)" x-text="sys.tags?.structured || 0"></span></div>
-            </div>
-            <div class="card card-hover stat-card">
-                <div class="text-xs" style="color:var(--muted-fg)">Tag 覆盖率</div>
-                <div class="text-2xl font-bold mt-1" :style="`color:var(${(sys.coverage?.tag_pct||0) > 50 ? '--success' : '--warning'})`" x-text="(sys.coverage?.tag_pct || 0) + '%'"></div>
-                <div class="w-full h-1.5 rounded-full mt-3" style="background:var(--muted)">
-                    <div class="h-full rounded-full progress-bar" style="background:var(--primary)" :style="`width:${sys.coverage?.tag_pct || 0}%`"></div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
+                <div class="card card-hover stat-card">
+                    <div class="text-xs" style="color:var(--muted-fg)">记忆总量</div>
+                    <div class="text-2xl font-bold mt-1" x-text="sys.memories?.total || '-'"></div>
+                    <div class="text-xs mt-2" style="color:var(--muted-fg)">向量覆盖 <span style="color:var(--success)" x-text="sys.coverage?.vector_pct + '%'"></span></div>
                 </div>
-                <div x-show="sys.memories?.total && sys.memories?.with_tags" class="text-xs mt-1.5" style="color:var(--warning)" x-text="`${sys.memories.total - sys.memories.with_tags} 条待标记`"></div>
-            </div>
             <div class="card card-hover stat-card">
-                <div class="text-xs" style="color:var(--muted-fg)">数据库体积</div>
-                <div class="text-2xl font-bold mt-1" :style="`color:var(${(sys.db_size_mb||0) > 2048 ? '--danger' : (sys.db_size_mb||0) > 1536 ? '--warning' : '--fg'})`" x-text="sys.db_size_mb ? (sys.db_size_mb > 1024 ? (sys.db_size_mb/1024).toFixed(1) + ' GB' : sys.db_size_mb + ' MB') : '-'"></div>
-                <div class="text-xs mt-2" style="color:var(--muted-fg)">共现 <span x-text="sys.cooccurrence?.nodes || 0"></span> 节点 / <span x-text="sys.cooccurrence?.edges || 0"></span> 边</div>
-                <div x-show="(sys.db_size_mb||0) > 2048" class="text-xs mt-1.5" style="color:var(--danger)">⚠ 超过 2GB，建议清理</div>
+                <div class="text-xs" style="color:var(--muted-fg)">注入总 token</div>
+                <div class="text-2xl font-bold mt-1" x-text="sys.injection?.tokens?.total_tokens?.avg ?? sys.injection?.tokens?.total_tokens?.max ?? '-' "></div>
+                <div class="text-xs mt-2" style="color:var(--muted-fg)">样本 <span style="color:var(--primary)" x-text="sys.injection?.count || 0"></span> 次 / 平均 <span style="color:var(--primary)" x-text="sys.injection?.tokens?.total_tokens?.avg ?? 0"></span></div>
+                <div class="text-[11px] mt-1.5 leading-relaxed" style="color:var(--muted-fg)">
+                    <span x-text="`黑话 ${sys.injection?.tokens?.jargon_tokens?.avg ?? 0}`"></span> ·
+                    <span x-text="`信念 ${sys.injection?.tokens?.belief_tokens?.avg ?? 0}`"></span> ·
+                    <span x-text="`灵魂 ${sys.injection?.tokens?.persona_tokens?.avg ?? 0}`"></span> ·
+                    <span x-text="`关系 ${sys.injection?.tokens?.relation_memories_tokens?.avg ?? 0}`"></span>
+                </div>
+            </div>
+
+                <div class="card card-hover stat-card">
+                    <div class="text-xs" style="color:var(--muted-fg)">Tag 覆盖率</div>
+                    <div class="text-2xl font-bold mt-1" :style="`color:var(${(sys.coverage?.tag_pct||0) > 50 ? '--success' : '--warning'})`" x-text="(sys.coverage?.tag_pct || 0) + '%'"></div>
+                    <div class="w-full h-1.5 rounded-full mt-3" style="background:var(--muted)">
+                        <div class="h-full rounded-full progress-bar" style="background:var(--primary)" :style="`width:${sys.coverage?.tag_pct || 0}%`"></div>
+                    </div>
+                    <div x-show="sys.memories?.total && sys.memories?.with_tags" class="text-xs mt-1.5" style="color:var(--warning)" x-text="`${sys.memories.total - sys.memories.with_tags} 条待标记`"></div>
+                </div>
+                <div class="card card-hover stat-card">
+                    <div class="text-xs" style="color:var(--muted-fg)">数据库体积</div>
+                    <div class="text-2xl font-bold mt-1" :style="`color:var(${(sys.db_size_mb||0) > 2048 ? '--danger' : (sys.db_size_mb||0) > 1536 ? '--warning' : '--fg'})`" x-text="sys.db_size_mb ? (sys.db_size_mb > 1024 ? (sys.db_size_mb/1024).toFixed(1) + ' GB' : sys.db_size_mb + ' MB') : '-'"></div>
+                    <div class="text-xs mt-2" style="color:var(--muted-fg)">共现 <span x-text="sys.cooccurrence?.nodes || 0"></span> 节点 / <span x-text="sys.cooccurrence?.edges || 0"></span> 边</div>
+                    <div x-show="(sys.db_size_mb||0) > 2048" class="text-xs mt-1.5" style="color:var(--danger)">⚠ 超过 2GB，建议清理</div>
+                </div>
+            </div>
+
+
+        <!-- Injection Metrics Trend -->
+        <div class="card mt-4">
+            <div class="flex flex-wrap items-center gap-2 mb-3">
+                <h3 class="text-sm font-medium mr-auto">注入消耗趋势</h3>
+                <template x-for="opt in [{k:'1d',t:'1天'},{k:'3d',t:'3天'},{k:'7d',t:'7天'},{k:'1mo',t:'1月'}]" :key="opt.k">
+                    <button @click="setInjectionRange(opt.k)" class="btn btn-muted text-xs" :class="injectionRange===opt.k && 'btn-primary'" x-text="opt.t"></button>
+                </template>
+                <input type="date" x-model="injectionFrom" class="input text-xs w-36">
+                <input type="date" x-model="injectionTo" class="input text-xs w-36">
+                <button @click="applyCustomInjectionRange()" class="btn btn-ghost text-xs">应用</button>
+            </div>
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                <div class="lg:col-span-2">
+                    <div class="flex flex-wrap gap-2 mb-3 text-xs">
+                        <template x-for="line in injectionLines" :key="line.key">
+                            <label class="flex items-center gap-1 cursor-pointer" style="color:var(--muted-fg)">
+                                <input type="checkbox" x-model="injectionVisibleLines[line.key]">
+                                <span :style="`color:${line.color}`" x-text="line.label"></span>
+                            </label>
+                        </template>
+                    </div>
+                    <div x-show="injectionLoading" class="empty-state">正在加载注入指标…</div>
+                    <div x-show="!injectionLoading && !(sys.injection?.series||[]).length" class="empty-state">暂无该时间范围内的注入样本</div>
+                    <svg x-show="!injectionLoading && (sys.injection?.series||[]).length" class="w-full" viewBox="0 0 720 260" role="img" aria-label="注入 token 趋势">
+                        <line x1="45" y1="215" x2="700" y2="215" stroke="var(--border)" stroke-width="1"></line>
+                        <line x1="45" y1="20" x2="45" y2="215" stroke="var(--border)" stroke-width="1"></line>
+                        <template x-for="line in injectionLines.filter(l => injectionVisibleLines[l.key])" :key="line.key">
+                            <polyline fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" :stroke="line.color" :points="injectionLinePoints(line.key)"></polyline>
+                        </template>
+                        <template x-for="dot in injectionDots" :key="dot.key">
+                            <circle :cx="dot.x" :cy="dot.y" r="2.5" :fill="dot.color"><title x-text="dot.title"></title></circle>
+                        </template>
+                        <text x="45" y="238" font-size="10" fill="var(--muted-fg)" x-text="formatTime(sys.injection?.from)"></text>
+                        <text x="650" y="238" font-size="10" fill="var(--muted-fg)" x-text="formatTime(sys.injection?.to)"></text>
+                        <text x="48" y="16" font-size="10" fill="var(--muted-fg)" x-text="`${injectionChartMax} token`"></text>
+                    </svg>
+                </div>
+                <div>
+                    <h4 class="text-xs font-medium mb-2">模块消耗排行榜</h4>
+                    <div class="space-y-2 text-xs">
+                        <template x-for="item in (sys.injection?.ranking || [])" :key="item.key">
+                            <div>
+                                <div class="flex justify-between gap-2 mb-1">
+                                    <span x-text="item.label"></span>
+                                    <span class="font-mono" style="color:var(--primary)" x-text="`${Math.round(item.sum || 0)} token`"></span>
+                                </div>
+                                <div class="h-1.5 rounded-full" style="background:var(--muted)">
+                                    <div class="h-full rounded-full" style="background:var(--primary)" :style="`width:${Math.min(100, Math.round((item.ratio||0)*100))}%`"></div>
+                                </div>
+                                <div class="flex justify-between mt-0.5" style="color:var(--muted-fg)">
+                                    <span x-text="`均值 ${Math.round(item.avg || 0)}`"></span>
+                                    <span x-text="`${Math.round((item.ratio||0)*100)}%`"></span>
+                                </div>
+                            </div>
+                        </template>
+                        <div x-show="!(sys.injection?.ranking||[]).length" style="color:var(--muted-fg)">暂无排行数据</div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -337,6 +406,19 @@
         <!-- 筛选栏 -->
         <div class="flex flex-wrap items-center gap-2 mt-4 mb-3">
             <input type="text" x-model="memSearch" @keyup.enter="searchMemories()" placeholder="搜索内容..." class="input w-48">
+            <select x-model="memFilterSource" @change="searchMemories()" class="input w-32">
+                <option value="">全部来源</option>
+                <option value="chat">chat</option>
+                <option value="noise">noise</option>
+                <option value="core">core</option>
+                <option value="identity_quarantine">identity_quarantine</option>
+                <option value="evolution">evolution</option>
+                <option value="experience">experience</option>
+                <option value="lore">lore</option>
+                <option value="bzz_experience">bzz_experience</option>
+                <option value="bzz_evolution">bzz_evolution</option>
+                <option value="book_lore">book_lore</option>
+            </select>
             <select x-model="memFilterSender" @change="searchMemories()" class="input w-32">
                 <option value="">全部发送者</option>
                 <template x-for="s in senderList" :key="s.name">
@@ -376,6 +458,7 @@
                         <th class="px-3 py-2.5 text-left w-14 font-medium">ID</th>
                         <th class="px-3 py-2.5 text-left font-medium">内容</th>
                         <th class="px-3 py-2.5 text-left w-20 font-medium">发送者</th>
+                        <th class="px-3 py-2.5 text-left w-20 font-medium">来源</th>
                         <th class="px-3 py-2.5 text-left w-32 font-medium">Tags</th>
                         <th class="px-3 py-2.5 text-left w-14 font-medium">状态</th>
                         <th class="px-3 py-2.5 text-left w-28 font-medium">时间</th>
@@ -389,6 +472,9 @@
                             <td class="px-3 py-2 font-mono" style="color:var(--muted-fg)" x-text="m.id"></td>
                             <td class="px-3 py-2 cursor-pointer truncate max-w-sm" @click="openDetail(m.id)" x-text="m.content?.substring(0,60)"></td>
                             <td class="px-3 py-2 truncate" style="color:var(--muted-fg)" x-text="m.sender_name || '-'"></td>
+                            <td class="px-3 py-2">
+                                <span class="pill" :class="m.source ? 'pill-active' : 'pill-pending'" x-text="m.source || '—'"></span>
+                            </td>
                             <td class="px-3 py-2">
                                 <div class="flex gap-0.5 flex-wrap">
                                     <template x-for="t in (m.tags||[]).slice(0,2)" :key="t.name">
@@ -441,10 +527,11 @@
                         <div class="grid grid-cols-2 gap-3 text-xs">
                             <div><span style="color:var(--muted-fg)">发送者:</span> <span x-text="detailData.sender_name || '-'"></span></div>
                             <div><span style="color:var(--muted-fg)">群组:</span> <span x-text="detailData.group_id || '-'"></span></div>
-                            <div><span style="color:var(--muted-fg)">重要度:</span> <input type="number" x-model.number="detailData.importance" step="0.01" min="0" max="1" class="input w-20 ml-1" style="font-size:11px"></div>
+                            <div><span style="color:var(--muted-fg)">来源:</span> <span class="pill" :class="detailData.source ? 'pill-active' : 'pill-pending'" x-text="detailData.source || '—'"></span></div>
                             <div><span style="color:var(--muted-fg)">访问次数:</span> <span x-text="detailData.access_count"></span></div>
                             <div><span style="color:var(--muted-fg)">向量:</span> <span :style="`color:var(${detailData.has_vector ? '--success' : '--danger'})`" x-text="detailData.has_vector ? '✓ 有' : '✗ 无'"></span></div>
                             <div><span style="color:var(--muted-fg)">时间:</span> <span x-text="formatTime(detailData.timestamp)"></span></div>
+                            <div class="col-span-2"><span style="color:var(--muted-fg)">重要度:</span> <input type="number" x-model.number="detailData.importance" step="0.01" min="0" max="1" class="input w-20 ml-1" style="font-size:11px"></div>
                         </div>
 
                         <!-- Tags -->
@@ -909,6 +996,7 @@
                             <th class="px-3 py-2.5 text-left font-medium">词条</th>
                             <th class="px-3 py-2.5 text-left font-medium">释义</th>
                             <th class="px-3 py-2.5 text-left font-medium w-16">频次</th>
+                            <th class="px-3 py-2.5 text-left font-medium w-20">来源</th>
                             <th class="px-3 py-2.5 text-left font-medium w-20">状态</th>
                             <th class="px-3 py-2.5 text-left font-medium w-16">群</th>
                             <th class="px-3 py-2.5 text-right font-medium w-56">操作</th>
@@ -925,6 +1013,9 @@
                                 </td>
                                 <td class="px-3 py-2.5 font-mono" x-text="j.frequency"></td>
                                 <td class="px-3 py-2.5">
+                                    <span class="pill" :class="j.source_memory_id ? 'pill-active' : 'pill-pending'" x-text="j.source_memory_id ? '记忆' : (j.source_context?.length ? '上下文' : '—')"></span>
+                                </td>
+                                <td class="px-3 py-2.5">
                                     <span class="pill" :class="{'confirmed':'pill-active','rejected':'pill-rejected','pending':'pill-pending'}[j.status]||'pill-pending'"
                                         x-text="{'confirmed':'已确认','rejected':'已否决','pending':'待确认'}[j.status]||j.status||'待确认'"></span>
                                     <div x-show="j.status==='rejected' && j.reject_reason" class="text-xs mt-0.5" style="color:var(--danger)" x-text="j.reject_reason"></div>
@@ -934,11 +1025,13 @@
                                     <span x-show="!j.is_global" class="font-mono" style="color:var(--muted-fg)" x-text="j.group_id || '—'"></span>
                                 </td>
                                 <td class="px-3 py-2.5 text-right whitespace-nowrap">
-                                    <button @click="reviewJargon(j.id,'approve')" class="btn btn-success btn-xs">✓</button>
-                                    <button @click="reviewJargon(j.id,'reject')" class="btn btn-outline btn-xs" style="color:var(--danger)">✕</button>
-                                    <button @click="openJargonEdit(j)" class="btn btn-outline btn-xs">✎</button>
-                                    <button @click="toggleJargonGlobal(j.id)" class="btn btn-outline btn-xs" :title="j.is_global?'取消全局':'设为全局'">🌐</button>
-                                    <button @click="deleteJargon(j.id)" class="btn btn-outline btn-xs" style="color:var(--danger)">🗑</button>
+                <button @click="reviewJargon(j.id,'approve')" class="btn btn-success btn-xs">✓</button>
+                <button @click="reviewJargon(j.id,'reject')" class="btn btn-outline btn-xs" style="color:var(--danger)">✕</button>
+                <button @click="openJargonContext(j)" class="btn btn-outline btn-xs">证据</button>
+                <button @click="openJargonEdit(j)" class="btn btn-outline btn-xs">✎</button>
+                <button @click="toggleJargonGlobal(j.id)" class="btn btn-outline btn-xs" :title="j.is_global?'取消全局':'设为全局'">🌐</button>
+                <button @click="deleteJargon(j.id)" class="btn btn-outline btn-xs" style="color:var(--danger)">🗑</button>
+
                                 </td>
                             </tr>
                         </template>
@@ -951,6 +1044,50 @@
                 <button @click="jargonPrev()" class="btn btn-muted btn-xs" :disabled="jargonPage<=1">← 上一页</button>
                 <span class="text-xs font-mono" style="color:var(--muted-fg)" x-text="`${jargonPage} / ${jargonTotalPages}`"></span>
                 <button @click="jargonNext()" class="btn btn-muted btn-xs" :disabled="!jargonHasMore">下一页 →</button>
+            </div>
+
+            <!-- 黑话证据弹窗 -->
+            <div x-show="jargonContextOpen" x-cloak class="dialog-overlay" @click.self="closeJargonContext()">
+                <div class="dialog-content" x-show="jargonContextOpen">
+                    <div class="px-5 py-4" style="border-bottom:1px solid var(--border)">
+                        <h3 class="text-sm font-semibold">黑话证据 #<span x-text="jargonContextData?.jargon?.id"></span> · <span x-text="jargonContextData?.jargon?.word || ''"></span></h3>
+                    </div>
+                    <div class="px-5 py-4 space-y-3 text-xs">
+                        <template x-if="jargonContextLoading">
+                            <div style="color:var(--muted-fg)">正在加载上下文…</div>
+                        </template>
+                        <template x-if="jargonContextError">
+                            <div style="color:var(--danger)" x-text="jargonContextError"></div>
+                        </template>
+                        <template x-if="jargonContextData && !jargonContextLoading && !jargonContextError">
+                            <div class="space-y-3">
+                                <div class="flex flex-wrap gap-2">
+                                    <span class="pill pill-active" x-text="jargonContextData.used_fallback ? '使用回退上下文' : '动态截取上下文'"></span>
+                                    <span class="pill" x-text="`锚点记忆: ${jargonContextData.anchor ? jargonContextData.anchor.id : '无'}`"></span>
+                                    <span class="pill" x-text="`前 ${jargonContextData.messages?.filter(m => m.role==='before').length || 0} / 后 ${jargonContextData.messages?.filter(m => m.role==='after').length || 0}`"></span>
+                                </div>
+                                <div x-show="jargonContextData.anchor" class="p-3 rounded-lg" style="background:var(--muted); border:1px solid var(--border)">
+                                    <div class="text-[11px] mb-1" style="color:var(--muted-fg)">锚点</div>
+                                    <div class="font-mono text-[11px]" x-text="jargonContextData.anchor.content"></div>
+                                </div>
+                                <div class="space-y-2 max-h-[48vh] overflow-y-auto">
+                                    <template x-for="msg in (jargonContextData.messages || [])" :key="msg.id + '-' + msg.role">
+                                        <div class="p-2.5 rounded-lg" :style="`background:${msg.role==='anchor' ? 'rgba(99,102,241,0.14)' : 'var(--muted)'}; border:1px solid var(--border)`">
+                                            <div class="flex justify-between gap-2 text-[10px] mb-1" style="color:var(--muted-fg)">
+                                                <span x-text="`${msg.role} · ${msg.sender_name || msg.sender_id || '-'}`"></span>
+                                                <span x-text="formatTime(msg.timestamp)"></span>
+                                            </div>
+                                            <div x-text="msg.content"></div>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                    <div class="px-5 py-4 flex justify-end" style="border-top:1px solid var(--border)">
+                        <button @click="closeJargonContext()" class="btn btn-outline btn-xs">关闭</button>
+                    </div>
+                </div>
             </div>
 
             <!-- 编辑黑话弹窗 -->
@@ -1015,6 +1152,12 @@
                         <option value="active">仅已激活</option>
                         <option value="inactive">仅未激活</option>
                     </select>
+                    <select x-model="holymanCategory" class="select w-40">
+                        <option value="">全部分类</option>
+                        <template x-for="cat in holymanCategories" :key="cat.id">
+                            <option :value="cat.id" x-text="`${cat.label} (${cat.count})`"></option>
+                        </template>
+                    </select>
                     <label class="flex items-center gap-1.5 cursor-pointer text-[var(--muted-fg)] hover:text-white select-none">
                         <input type="checkbox" x-model="holymanUseProxy" class="rounded border-gray-700 text-primary focus:ring-primary bg-transparent">
                         <span>使用 Ghproxy 国内加速</span>
@@ -1065,6 +1208,7 @@
                             <div class="flex items-center gap-1.5">
                                 <input type="checkbox" :value="h.word" x-model="selectedHolymanWords" class="w-3.5 h-3.5 rounded text-[var(--primary)] focus:ring-[var(--primary)]/30 bg-[var(--muted)] border-[var(--border)] cursor-pointer">
                                 <span class="badge badge-keyword font-bold text-xs" x-text="h.word" style="border:1px solid var(--border)"></span>
+                                <span class="badge text-[10px]" style="background:rgba(59,130,246,0.12); color:#60a5fa; border:1px solid rgba(59,130,246,0.18)" :title="h.source || h.category || ''" x-text="h.category_label || h.category || '未分类'"></span>
                             </div>
                             
                             <!-- Activation Checkbox -->
@@ -1454,8 +1598,20 @@ function dashboard() {
     return {
         tab: 'overview',
         isDark: true,
-        sys: { memories: { total: 0, with_vector: 0, with_tags: 0 }, tags: { total: 0 }, coverage: {}, cooccurrence: {}, epa: {}, services_health: [] },
+        sys: { memories: { total: 0, with_vector: 0, with_tags: 0 }, tags: { total: 0 }, coverage: {}, cooccurrence: {}, epa: {}, services_health: [], injection: { count: 0, summary: {}, series: [], ranking: [] } },
         recentErrors: [],
+        injectionRange: '7d',
+        injectionFrom: '',
+        injectionTo: '',
+        injectionLoading: false,
+        injectionVisibleLines: {
+            total_tokens: true,
+            memories_tokens: true,
+            persona_tokens: true,
+            belief_tokens: true,
+            relation_memories_tokens: true,
+            jargon_tokens: true,
+        },
         // 记忆管理
         memories: [],
         memSearch: '',
@@ -1465,6 +1621,7 @@ function dashboard() {
         memCursor: null,
         memCursorStack: [],
         memPageSize: 30,
+        memFilterSource: '',
         memFilterSender: '',
         memFilterTags: '',
         memFilterVector: '',
@@ -1528,6 +1685,41 @@ function dashboard() {
         get llmProviders() {
             return this.providers.filter(p => p.type !== 'embedding' && !p.model.toLowerCase().includes('embed'));
         },
+        get injectionLines() {
+            return [
+                { key: 'total_tokens', label: '总量', color: '#f59e0b' },
+                { key: 'memories_tokens', label: '主记忆', color: '#6366f1' },
+                { key: 'persona_tokens', label: '灵魂', color: '#ec4899' },
+                { key: 'belief_tokens', label: '信念', color: '#22c55e' },
+                { key: 'relation_memories_tokens', label: '关系', color: '#06b6d4' },
+                { key: 'jargon_tokens', label: '黑话', color: '#a855f7' },
+            ];
+        },
+        get injectionChartMax() {
+            const series = this.sys.injection?.series || [];
+            let max = 0;
+            for (const row of series) {
+                for (const line of this.injectionLines) {
+                    if (this.injectionVisibleLines[line.key]) max = Math.max(max, Number(row[line.key] || 0));
+                }
+            }
+            return Math.max(1, Math.ceil(max));
+        },
+        get injectionDots() {
+            const series = this.sys.injection?.series || [];
+            const max = this.injectionChartMax;
+            const w = 655, h = 195, x0 = 45, y0 = 215;
+            const dots = [];
+            const denom = Math.max(1, series.length - 1);
+            this.injectionLines.filter(l => this.injectionVisibleLines[l.key]).forEach(line => {
+                series.forEach((row, i) => {
+                    const x = x0 + (w * i / denom);
+                    const y = y0 - (h * Number(row[line.key] || 0) / max);
+                    dots.push({ key: `${line.key}-${i}`, x: x.toFixed(1), y: y.toFixed(1), color: line.color, title: `${line.label}: ${Math.round(row[line.key] || 0)} token` });
+                });
+            });
+            return dots;
+        },
         configSaving: false,
         configMsg: '',
         configMsgOk: true,
@@ -1560,6 +1752,10 @@ function dashboard() {
         beliefEditForm: { content: '', type: 'self', confidence: 0.7, bot_id: '' },
         beliefEvidence: null,
         beliefEvidenceItems: [],
+        jargonContextOpen: false,
+        jargonContextLoading: false,
+        jargonContextData: null,
+        jargonContextError: '',
 
         // ─── 黑话审核 ───
         jargonSubTab: 'local',
@@ -1574,8 +1770,14 @@ function dashboard() {
         jargonCreateForm: { word: '', meaning: '', group_id: '' },
 
         holymanItems: [],
+        holymanCategories: [],
         holymanSearch: '',
+        holymanFilter: '',
+        holymanCategory: '',
         holymanUseProxy: true,
+        holymanLocalVersion: 'Unknown',
+        holymanRemoteVersion: 'Unknown',
+        selectedHolymanWords: [],
 
         // ─── 灵魂状态 ───
         concerns: [],
@@ -1638,11 +1840,50 @@ function dashboard() {
                 const r = await fetch('/api/system');
                 this.sys = await r.json();
             } catch(e) { console.error(e); }
+            await this.loadInjectionMetrics();
             try {
                 const r = await fetch('/api/errors');
                 const d = await r.json();
                 this.recentErrors = d.errors || [];
             } catch(e) {}
+        },
+
+        async loadInjectionMetrics() {
+            this.injectionLoading = true;
+            try {
+                const params = new URLSearchParams();
+                if (this.injectionRange === 'custom' && this.injectionFrom && this.injectionTo) {
+                    params.set('from', this.injectionFrom);
+                    params.set('to', this.injectionTo);
+                } else {
+                    params.set('range', this.injectionRange || '7d');
+                }
+                const r = await fetch('/api/system/metrics/injection?' + params);
+                this.sys.injection = await r.json();
+            } catch(e) { console.error(e); }
+            this.injectionLoading = false;
+        },
+        async setInjectionRange(range) {
+            this.injectionRange = range;
+            await this.loadInjectionMetrics();
+        },
+        async applyCustomInjectionRange() {
+            if (!this.injectionFrom || !this.injectionTo) { alert('请选择开始和结束日期'); return; }
+            if (this.injectionFrom > this.injectionTo) { alert('开始日期不能晚于结束日期'); return; }
+            this.injectionRange = 'custom';
+            await this.loadInjectionMetrics();
+        },
+        injectionLinePoints(key) {
+            const series = this.sys.injection?.series || [];
+            if (!series.length) return '';
+            const max = this.injectionChartMax;
+            const w = 655, h = 195, x0 = 45, y0 = 215;
+            const denom = Math.max(1, series.length - 1);
+            return series.map((row, i) => {
+                const x = x0 + (w * i / denom);
+                const y = y0 - (h * Number(row[key] || 0) / max);
+                return `${x.toFixed(1)},${y.toFixed(1)}`;
+            }).join(' ');
         },
 
         async loadConfig() {
@@ -1983,6 +2224,30 @@ function dashboard() {
                 this.beliefEvidenceItems = d.items || [];
             } catch(e) { console.error(e); }
         },
+        async openJargonContext(j) {
+            this.jargonContextOpen = true;
+            this.jargonContextLoading = true;
+            this.jargonContextError = '';
+            this.jargonContextData = { jargon: j, anchor: null, messages: [], fallback_contexts: [], used_fallback: false };
+            try {
+                const r = await fetch(`/api/jargon/${j.id}/context`);
+                const d = await r.json();
+                if (d.ok) {
+                    this.jargonContextData = d;
+                } else {
+                    this.jargonContextError = d.error || '获取上下文失败';
+                }
+            } catch(e) {
+                this.jargonContextError = e.message;
+            } finally {
+                this.jargonContextLoading = false;
+            }
+        },
+        closeJargonContext() {
+            this.jargonContextOpen = false;
+            this.jargonContextData = null;
+            this.jargonContextError = '';
+        },
 
         // ─── 黑话审核 ───
         async loadJargon() {
@@ -2000,7 +2265,7 @@ function dashboard() {
                 const d = await r.json();
                 this.jargonItems = d.items || [];
                 this.jargonTotal = d.total || 0;
-                this.jargonPending = this.jargonItems.filter(j => (j.status || 'pending') === 'pending').length;
+                this.jargonPending = d.pending_count || 0;
                 
                 // 重算页数
                 this.jargonTotalPages = Math.ceil(this.jargonTotal / this.jargonPageSize) || 1;
@@ -2163,6 +2428,12 @@ function dashboard() {
                 const r = await fetch('/api/jargon/holyman');
                 const d = await r.json();
                 this.holymanItems = d.items || [];
+                this.holymanCategories = d.categories || [];
+                this.holymanLocalVersion = d.local_version || 'Unknown';
+                this.holymanRemoteVersion = d.remote_version || 'Unknown';
+                if (this.holymanCategory && !this.holymanCategories.some(c => c.id === this.holymanCategory)) {
+                    this.holymanCategory = '';
+                }
             } catch(e) { console.error('loadJargonHolyman:', e); }
         },
         async syncJargonHolyman() {
@@ -2224,13 +2495,46 @@ function dashboard() {
             }
         },
         filteredHolymanItems() {
+            let items = this.holymanItems || [];
+            if (this.holymanFilter === 'active') {
+                items = items.filter(h => h.is_activated === true);
+            } else if (this.holymanFilter === 'inactive') {
+                items = items.filter(h => h.is_activated === false);
+            }
+            if (this.holymanCategory) {
+                items = items.filter(h => (h.category || 'unknown') === this.holymanCategory);
+            }
             const q = (this.holymanSearch || '').trim().toLowerCase();
-            if (!q) return this.holymanItems;
-            return this.holymanItems.filter(h => {
-                return h.word.toLowerCase().includes(q) || 
-                       (h.meaning || '').toLowerCase().includes(q) || 
-                       (h.custom_meaning || '').toLowerCase().includes(q);
-            });
+            if (q) {
+                items = items.filter(h => {
+                    return (h.word || '').toLowerCase().includes(q) ||
+                           (h.meaning || '').toLowerCase().includes(q) ||
+                           (h.custom_meaning || '').toLowerCase().includes(q) ||
+                           (h.category_label || '').toLowerCase().includes(q) ||
+                           (h.category || '').toLowerCase().includes(q);
+                });
+            }
+            return items;
+        },
+        toggleSelectAllHolyman(e) {
+            this.selectedHolymanWords = e.target.checked ? this.filteredHolymanItems().map(h => h.word) : [];
+        },
+        async batchToggleHolyman(activate) {
+            if (!this.selectedHolymanWords.length) return;
+            try {
+                await Promise.all(this.selectedHolymanWords.map(word => {
+                    const h = this.holymanItems.find(item => item.word === word);
+                    return fetch('/api/jargon/holyman/toggle', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ word, meaning: h ? (h.custom_meaning || h.meaning || '') : '', activate })
+                    }).then(r => r.json()).then(d => {
+                        if (!d.ok) throw new Error(d.error || '批量操作失败');
+                    });
+                }));
+                this.selectedHolymanWords = [];
+                await this.loadJargonHolyman();
+            } catch(e) { console.error(e); alert('批量操作失败: ' + e.message); }
         },
 
         // ─── 灵魂状态 ───
@@ -2446,6 +2750,7 @@ function dashboard() {
                 // keyset 游标：第 2 页起用上一页最后一条 id 做 before_id（深翻 O(1)，避免大 OFFSET）
                 if (this.memCursor) params.set('before_id', this.memCursor);
                 if (this.memSearch) params.set('search', this.memSearch);
+                if (this.memFilterSource) params.set('source', this.memFilterSource);
                 if (this.memFilterSender) params.set('sender', this.memFilterSender);
                 if (this.memFilterTags === 'yes') params.set('has_tags', 'true');
                 else if (this.memFilterTags === 'no') params.set('has_tags', 'false');
@@ -2487,6 +2792,7 @@ function dashboard() {
         },
         resetFilters() {
             this.memSearch = '';
+            this.memFilterSource = '';
             this.memFilterSender = '';
             this.memFilterTags = '';
             this.memFilterVector = '';

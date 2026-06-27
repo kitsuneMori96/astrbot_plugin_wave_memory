@@ -17,6 +17,7 @@ from .db.social_repo import SocialRepo
 from .db.knowledge_repo import KnowledgeRepo
 from .db.booklore_repo import BookLoreRepo
 from .db.belief_repo import BeliefRepo
+from .metrics_store import InjectionMetricStore
 
 
 class WaveMemoryDB:
@@ -36,8 +37,10 @@ class WaveMemoryDB:
         self._knowledge_repo = KnowledgeRepo(self._cm)
         self._booklore_repo = BookLoreRepo(self._cm)
         self._belief_repo = BeliefRepo(self._cm)
+        self._injection_metrics = InjectionMetricStore(self._cm)
 
         # FTS5 + 其他迁移
+        self._injection_metrics.ensure_schema()
         self._setup_fts5()
         self._setup_audit_table()
         self._backfill_tag_relations_created_at()
@@ -64,6 +67,18 @@ class WaveMemoryDB:
 
     def close(self):
         self._cm.close()
+
+    def record_injection_metric(self, sample: dict) -> None:
+        """持久化一次 inject_memory 指标样本。"""
+        self._injection_metrics.record(sample)
+
+    def get_injection_metrics(self, from_ts: float, to_ts: float, bucket_seconds: int) -> dict:
+        """查询指定时间范围的 inject_memory 指标聚合。"""
+        return self._injection_metrics.query(from_ts, to_ts, bucket_seconds)
+
+    def cleanup_injection_metrics(self, retention_seconds: float = 31 * 86400) -> int:
+        """清理过期 inject_memory 指标样本。"""
+        return self._injection_metrics.cleanup(retention_seconds=retention_seconds)
 
     # ═══════════════════════════════════════════════════════
     # Memory 委托
@@ -314,10 +329,11 @@ class WaveMemoryDB:
 
     def get_memory_detail(self, memory_id):
         row = self.conn.execute(
-            """SELECT id, group_id, sender_id, sender_name, content, vector IS NOT NULL,
+            """SELECT id, group_id, sender_id, sender_name, content, source, vector IS NOT NULL,
                       timestamp, importance, access_count, last_accessed FROM memories WHERE id=?""",
             (memory_id,),
         ).fetchone()
+
         if not row:
             return None
         tags = self.conn.execute(
@@ -326,8 +342,8 @@ class WaveMemoryDB:
         ).fetchall()
         return {
             "id": row[0], "group_id": row[1], "sender_id": row[2], "sender_name": row[3],
-            "content": row[4], "has_vector": bool(row[5]), "timestamp": row[6],
-            "importance": row[7], "access_count": row[8], "last_accessed": row[9],
+            "content": row[4], "source": row[5], "has_vector": bool(row[6]), "timestamp": row[7],
+            "importance": row[8], "access_count": row[9], "last_accessed": row[10],
             "tags": [{"id": t[0], "name": t[1]} for t in tags],
         }
 

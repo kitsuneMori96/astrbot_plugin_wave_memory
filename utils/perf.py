@@ -22,15 +22,24 @@ from typing import Any, Callable, Dict, List, Optional
 from astrbot.api import logger
 
 
+def estimate_tokens(text: str) -> int:
+    """粗略估算 token 消耗，用于 UI / 性能统计。"""
+    if not text:
+        return 0
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    other = len(text) - cjk
+    # 英文 / 标点按 4 字符约 1 token，中文按 1 字符约 1 token
+    return max(0, int(cjk + other / 4))
+
+
 class PerfTracker:
     """Ring buffer 性能追踪器 — 零外部依赖、纯内存。"""
 
     def __init__(self, maxlen: int = 200):
         self._maxlen = maxlen
-        # func_name -> deque of samples
         self._samples: Dict[str, deque] = {}
-        # func_name -> {calls, errors, total_ms}
         self._counters: Dict[str, Dict[str, Any]] = {}
+        self._injection_samples: deque = deque(maxlen=self._maxlen)
 
     def record(self, name: str, duration_ms: float, success: bool = True) -> None:
         """记录一次调用。"""
@@ -72,38 +81,47 @@ class PerfTracker:
                 results.append(s)
         return results
 
-    def record_injection(self, sample: Dict[str, float]) -> None:
-        """记录一次 inject_memory 各通道耗时 (US-3.2)。
+    @staticmethod
+    def _agg_numeric(samples: List[Dict[str, Any]], predicate) -> Dict[str, Dict[str, float]]:
+        keys = set()
+        for s in samples:
+            keys.update(k for k, v in s.items() if predicate(k, v))
+        result: Dict[str, Dict[str, float]] = {}
+        for key in sorted(keys):
+            values = [float(s.get(key, 0) or 0) for s in samples]
+            values_sorted = sorted(values)
+            n = len(values_sorted)
+            if not n:
+                continue
+            result[key] = {
+                "avg": round(sum(values_sorted) / n, 2),
+                "p50": round(values_sorted[n // 2], 2),
+                "p95": round(values_sorted[int(n * 0.95)], 2),
+                "max": round(values_sorted[-1], 2),
+                "min": round(values_sorted[0], 2),
+                "sample_count": n,
+            }
+        return result
 
-        sample 格式: {"total_ms": 12.3, "main_search_ms": 5.1, "experience_ms": 3.2, ...}
-        """
-        if "_injection_samples" not in self.__dict__:
-            self._injection_samples: deque = deque(maxlen=self._maxlen)
+    def record_injection(self, sample: Dict[str, Any]) -> None:
+        """记录一次 inject_memory 各通道耗时与 token 消耗。"""
+        if "ts" not in sample:
+            sample = {**sample, "ts": time.time()}
         self._injection_samples.append(sample)
 
     def get_injection_stats(self) -> Dict[str, Any]:
-        """聚合 inject_memory 各通道统计 (US-3.2)。"""
-        samples = getattr(self, "_injection_samples", None)
+        """聚合 inject_memory 各通道统计。"""
+        samples = list(self._injection_samples)
         if not samples:
-            return {"count": 0, "channels": {}}
+            return {"count": 0, "timing": {}, "tokens": {}, "chars": {}, "counts": {}}
 
-        n = len(samples)
-        # 收集所有通道 key
-        all_keys = set()
-        for s in samples:
-            all_keys.update(s.keys())
-
-        channels = {}
-        for key in sorted(all_keys):
-            values = sorted(s.get(key, 0) for s in samples)
-            channels[key] = {
-                "avg_ms": round(sum(values) / n, 2),
-                "p50_ms": round(values[n // 2], 2),
-                "p95_ms": round(values[int(n * 0.95)], 2),
-                "max_ms": round(values[-1], 2),
-            }
-
-        return {"count": n, "channels": channels}
+        return {
+            "count": len(samples),
+            "timing": self._agg_numeric(samples, lambda k, v: k.endswith("_ms") or k == "total_ms"),
+            "tokens": self._agg_numeric(samples, lambda k, v: k.endswith("_tokens") or k == "total_tokens"),
+            "chars": self._agg_numeric(samples, lambda k, v: k.endswith("_chars") or k == "total_chars"),
+            "counts": self._agg_numeric(samples, lambda k, v: k.endswith("_count") or k.endswith("_hits") or k == "parts_count"),
+        }
 
 
 # ─── 全局实例 ───

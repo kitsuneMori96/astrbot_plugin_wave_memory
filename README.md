@@ -2,7 +2,7 @@
 
 # Wave Memory
 
-[![Version](https://img.shields.io/badge/version-v2.3.1-blue.svg)](https://github.com/vivy1024/astrbot_plugin_wave_memory/releases)
+[![Version](https://img.shields.io/badge/version-v2.3.2-blue.svg)](https://github.com/vivy1024/astrbot_plugin_wave_memory/releases)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-≥4.14-green.svg)](https://github.com/AstrBotDevs/AstrBot)
@@ -34,6 +34,7 @@
 
 | 版本 | 日期 | 重点 |
 |------|------|------|
+| **v2.3.2** | 2026-06-27 | 注入指标时间序列 · SVG 折线图 · 模块消耗排行榜 · 自定义日期筛选 |
 | **v2.3.1** | 2026-06-26 | Three.js 3D 知识图谱 · KG cache 预热 · WebGL 降级保护 · 运行时验证 |
 | **v2.3.0** | 2026-06-25 | 黑话上下文证据 · 原始 memory 锚点 · 动态窗口检索 · 人名/昵称分流 |
 | **v2.2.0** | 2026-06-25 | 经历与关系事件重构 · 身份安全 · 数据治理 · Holyman 语料扩展 · 多 bot 防抖修复 |

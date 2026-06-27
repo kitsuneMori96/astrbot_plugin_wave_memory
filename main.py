@@ -112,7 +112,7 @@ def _parse_bot_config(cfg: dict, fallback_db_id: str = "") -> BotProfile:
     "astrbot_plugin_wave_memory",
     "vivy1024",
     "高性能记忆 + 灵魂引擎 + 知识图谱插件。五阶段零 LLM 检索管线、BDI 心智架构（信念/欲望/关切）、黑话学习、风格范例注入、Three.js 3D 交互式知识图谱可视化。",
-    "2.3.1",
+    "2.3.2",
     "https://github.com/vivy1024/astrbot_plugin_wave_memory",
 )
 class WaveMemoryPlugin(Star):
@@ -1219,10 +1219,40 @@ class WaveMemoryPlugin(Star):
         jargon_text = ""
         fewshot_text = ""
 
-        # ─── 计时容器 ───
+        # ─── 计时 / 消耗容器 ───
         timing = {}
+        consumption = {
+            "memories_tokens": 0,
+            "exp_memories_tokens": 0,
+            "relation_memories_tokens": 0,
+            "facts_tokens": 0,
+            "lore_tokens": 0,
+            "persona_tokens": 0,
+            "belief_tokens": 0,
+            "concern_tokens": 0,
+            "mood_tokens": 0,
+            "mood_traj_tokens": 0,
+            "jargon_tokens": 0,
+            "fewshot_tokens": 0,
+            "memories_chars": 0,
+            "exp_memories_chars": 0,
+            "relation_memories_chars": 0,
+            "facts_chars": 0,
+            "lore_chars": 0,
+            "persona_chars": 0,
+            "belief_chars": 0,
+            "concern_chars": 0,
+            "mood_chars": 0,
+            "mood_traj_chars": 0,
+            "jargon_chars": 0,
+            "fewshot_chars": 0,
+            "parts_count": 0,
+            "total_tokens": 0,
+            "total_chars": 0,
+        }
         import time as _time
         import re as _re
+        from .utils.perf import estimate_tokens
         t_start = _time.perf_counter()
 
         # ─── 时间感知检索：检测时间词，设置时间过滤 ───
@@ -1263,6 +1293,10 @@ class WaveMemoryPlugin(Star):
                             exclude_sources=exclude_sources,
                             source_filter=default_sources if not exclude_sources else None,
                         ), timeout=_CHANNEL_TIMEOUT)
+                if memories:
+                    consumption["memories_tokens"] = sum(estimate_tokens(self.query_engine.format_injection([m])) for m in memories)
+                    consumption["memories_chars"] = sum(len(self.query_engine.format_injection([m])) for m in memories)
+
             except asyncio.TimeoutError:
                 logger.warning("[WaveMemory] main_search timed out")
                 _record_err("main_search", "timeout")
@@ -1287,6 +1321,9 @@ class WaveMemoryPlugin(Star):
                 logger.warning("[WaveMemory] experience timed out")
             except Exception:
                 pass
+            if exp_memories:
+                consumption["exp_memories_tokens"] = sum(estimate_tokens(self.query_engine.format_injection([m])) for m in exp_memories)
+                consumption["exp_memories_chars"] = sum(len(self.query_engine.format_injection([m])) for m in exp_memories)
             timing["experience_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
 
         # ─── 通道 3: 关系记忆 ───
@@ -1317,6 +1354,8 @@ class WaveMemoryPlugin(Star):
                     ), timeout=_CHANNEL_TIMEOUT)
                 if relation_memories:
                     cache.set("relation", cache_key, relation_memories)
+                    consumption["relation_memories_tokens"] = sum(estimate_tokens(self.query_engine.format_injection([m])) for m in relation_memories)
+                    consumption["relation_memories_chars"] = sum(len(self.query_engine.format_injection([m])) for m in relation_memories)
             except asyncio.TimeoutError:
                 logger.warning("[WaveMemory] relation timed out")
             except Exception:
@@ -1345,6 +1384,8 @@ class WaveMemoryPlugin(Star):
                                 ).fetchone()
                                 if row:
                                     lore_text = f"<world_knowledge>\n{row[0]}：{row[1][:300]}\n</world_knowledge>"
+                                    consumption["lore_tokens"] = estimate_tokens(lore_text)
+                                    consumption["lore_chars"] = len(lore_text)
                         conn_lore.close()
             except asyncio.TimeoutError:
                 logger.warning("[WaveMemory] book_lore timed out")
@@ -1384,6 +1425,9 @@ class WaveMemoryPlugin(Star):
                     persona_text = self.persona_evolution.get_persona_injection(
                         sender_id, group_id, bot_id=pe_bot_id, realtime_ctx=_rt_ctx
                     ) or ""
+                    if persona_text:
+                        consumption["persona_tokens"] = estimate_tokens(persona_text)
+                        consumption["persona_chars"] = len(persona_text)
 
                 # 信念注入 (带缓存 US-2.2)
                 if hasattr(self, 'belief_engine') and self.belief_engine:
@@ -1400,28 +1444,45 @@ class WaveMemoryPlugin(Star):
                         belief_text = self.belief_engine.get_injection(sender_id=sender_id, keywords=belief_keywords) or ""
                         if belief_text:
                             cache.set("belief", belief_key, belief_text)
+                    if belief_text:
+                        consumption["belief_tokens"] = estimate_tokens(belief_text)
+                        consumption["belief_chars"] = len(belief_text)
 
                 # 关切
                 if hasattr(self, 'concern_tracker') and self.concern_tracker:
                     concern_summary = self.concern_tracker.summary or ""
+                    if concern_summary:
+                        consumption["concern_tokens"] = estimate_tokens(concern_summary)
+                        consumption["concern_chars"] = len(concern_summary)
 
                 # 情绪
                 if self.enable_mood and group_id:
                     mood = self.db.get_active_mood(group_id)
                     if mood:
                         mood_text = f"[当前情绪] {mood['mood_type']}（{mood['description']}）"
+                        consumption["mood_tokens"] = estimate_tokens(mood_text)
+                        consumption["mood_chars"] = len(mood_text)
 
                 # 情绪轨迹
                 if hasattr(self, 'mood_trajectory') and self.mood_trajectory:
                     mood_traj_text = self.mood_trajectory.summary or ""
+                    if mood_traj_text:
+                        consumption["mood_traj_tokens"] = estimate_tokens(mood_traj_text)
+                        consumption["mood_traj_chars"] = len(mood_traj_text)
 
                 # 黑话注入 (US-4.3)
                 if self.jargon_service and group_id:
                     jargon_text = self.jargon_service.get_injection(message, group_id)
+                    if jargon_text:
+                        consumption["jargon_tokens"] = estimate_tokens(jargon_text)
+                        consumption["jargon_chars"] = len(jargon_text)
 
                 # Few-Shot 风格范例注入 (US-5.2)
                 if self.few_shot_service:
                     fewshot_text = self.few_shot_service.get_injection(bot_id=bot_id)
+                    if fewshot_text:
+                        consumption["fewshot_tokens"] = estimate_tokens(fewshot_text)
+                        consumption["fewshot_chars"] = len(fewshot_text)
 
             except Exception as e:
                 logger.warning(f"[WaveMemory] soul channel error: {e}", exc_info=True)
@@ -1641,36 +1702,59 @@ class WaveMemoryPlugin(Star):
             injection_parts = []
             if memories:
                 injection_parts.append(self.query_engine.format_injection(memories))
+                consumption["parts_count"] += 1
             if facts_text:
                 injection_parts.append(facts_text)
+                consumption["parts_count"] += 1
+                consumption["facts_tokens"] = estimate_tokens(facts_text)
+                consumption["facts_chars"] = len(facts_text)
             if lore_text:
                 injection_parts.append(lore_text)
+                consumption["parts_count"] += 1
             if persona_text:
                 injection_parts.append(persona_text)
+                consumption["parts_count"] += 1
             if timeline_text:
                 injection_parts.append(timeline_text)
+                consumption["parts_count"] += 1
             if belief_text:
                 injection_parts.append(belief_text)
+                consumption["parts_count"] += 1
             if concern_summary:
                 injection_parts.append(concern_summary)
+                consumption["parts_count"] += 1
             if mood_text:
                 injection_parts.append(mood_text)
+                consumption["parts_count"] += 1
             if mood_traj_text:
                 injection_parts.append(mood_traj_text)
+                consumption["parts_count"] += 1
             if jargon_text:
                 injection_parts.append(jargon_text)
+                consumption["parts_count"] += 1
             if fewshot_text:
                 injection_parts.append(fewshot_text)
+                consumption["parts_count"] += 1
 
             if injection_parts:
                 from astrbot.core.agent.message import TextPart
                 injection = "\n\n".join(injection_parts)
                 req.extra_user_content_parts.append(TextPart(text=injection))
+                consumption["total_chars"] = len(injection)
+                consumption["total_tokens"] = estimate_tokens(injection)
 
             # 记录性能数据 (US-3.2)
             timing["total_ms"] = round((_time.perf_counter() - t_start) * 1000, 1)
             from .utils.perf import get_perf_tracker
-            get_perf_tracker().record_injection(timing)
+            perf_tracker = get_perf_tracker()
+            metric_sample = {**timing, **consumption}
+            perf_tracker.record_injection(metric_sample)
+            try:
+                if getattr(self, "db", None):
+                    self.db.record_injection_metric(metric_sample)
+                    self.db.cleanup_injection_metrics()
+            except Exception as e:
+                logger.warning(f"[WaveMemory] record injection metrics failed: {e}")
 
             # 详细注入日志
             parts_detail = []
@@ -1696,7 +1780,7 @@ class WaveMemoryPlugin(Star):
                 parts_detail.append("fewshot")
 
             if injection_parts:
-                logger.info(f"[WaveMemory] inject_memory SUCCESS: {len(injection_parts)} parts [{','.join(parts_detail)}], {len(injection)} chars, {timing['total_ms']:.0f}ms")
+                logger.info(f"[WaveMemory] inject_memory SUCCESS: {len(injection_parts)} parts [{','.join(parts_detail)}], {len(injection)} chars, {timing['total_ms']:.0f}ms | tokens={consumption['total_tokens']}")
 
                 # 记忆重要性提升：被召回的记忆 importance += 0.02（上限 3.0）
                 if memories:
