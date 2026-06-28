@@ -25,6 +25,20 @@ def _table_exists(conn, table: str) -> bool:
 _EXCLUDED_REASONS = ("identity_roleplay_contamination", "identity_cleanup_full")
 
 
+def _belief_level(strength) -> str:
+    try:
+        val = float(strength or 0)
+    except (TypeError, ValueError):
+        val = 0.0
+    if val >= 0.75:
+        return "核心"
+    if val >= 0.55:
+        return "稳定"
+    if val >= 0.35:
+        return "候选"
+    return "微弱"
+
+
 @beliefs_bp.route("/", methods=["GET"])
 @require_auth
 async def list_beliefs():
@@ -68,7 +82,10 @@ async def list_beliefs():
     params.extend(_EXCLUDED_REASONS)
 
     where_sql = " AND ".join(where_parts)
-    sql = f"SELECT id, content, type, strength, bot_id, sources, status, created_at, last_reinforced FROM beliefs WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    cols = {r[1] for r in c.db.conn.execute("PRAGMA table_info(beliefs)").fetchall()}
+    evidence_type_expr = "evidence_type" if "evidence_type" in cols else "'memory' AS evidence_type"
+    evidence_ids_expr = "evidence_ids" if "evidence_ids" in cols else "'[]' AS evidence_ids"
+    sql = f"SELECT id, content, type, strength, bot_id, sources, status, created_at, last_reinforced, {evidence_type_expr}, {evidence_ids_expr} FROM beliefs WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?"
     params.extend([limit, offset])
 
     rows = c.db.conn.execute(sql, params).fetchall()
@@ -81,12 +98,17 @@ async def list_beliefs():
         list(_EXCLUDED_REASONS),
     ).fetchone()[0]
 
-    items = [
-        {"id": r[0], "content": r[1], "type": r[2], "confidence": r[3],
-         "source": r[4], "sources": json.loads(r[5] or "[]"), "status": r[6],
-         "created_at": r[7], "updated_at": r[8]}
-        for r in rows
-    ]
+    items = []
+    for r in rows:
+        sources = json.loads(r[5] or "[]")
+        evidence_ids = json.loads(r[10] or "[]")
+        evidence_type = r[9] or "memory"
+        items.append({
+            "id": r[0], "content": r[1], "type": r[2], "confidence": r[3],
+            "bot_id": r[4], "source": evidence_type, "evidence_type": evidence_type,
+            "sources": evidence_ids or sources, "raw_sources": sources, "status": r[6],
+            "created_at": r[7], "updated_at": r[8], "level": _belief_level(r[3]),
+        })
     return jsonify({"items": items, "total": total, "pending_count": pending_count})
 
 
@@ -168,86 +190,99 @@ async def edit_belief(belief_id: int):
 @beliefs_bp.route("/<int:belief_id>/evidence", methods=["GET"])
 @require_auth
 async def belief_evidence(belief_id: int):
-    """返回 sources 关联的 memories / episodes。"""
+    """返回 sources/evidence_ids 关联的 memories / episodes / relationship_events。"""
     c = get_container()
     if not _table_exists(c.db.conn, "beliefs"):
         return jsonify({"ok": False, "error": "beliefs table not found"}), 500
 
+    cols = {r[1] for r in c.db.conn.execute("PRAGMA table_info(beliefs)").fetchall()}
+    evidence_type_expr = "evidence_type" if "evidence_type" in cols else "'memory' AS evidence_type"
+    evidence_ids_expr = "evidence_ids" if "evidence_ids" in cols else "'[]' AS evidence_ids"
     row = c.db.conn.execute(
-        "SELECT sources FROM beliefs WHERE id = ?", (belief_id,)
+        f"SELECT sources, {evidence_type_expr}, {evidence_ids_expr} FROM beliefs WHERE id = ?", (belief_id,)
     ).fetchone()
     if not row:
         return jsonify({"ok": False, "error": "belief not found"}), 404
 
-    sources = json.loads(row[0] or "[]")
+    raw_sources = json.loads(row[0] or "[]")
+    evidence_type = row[1] or "memory"
+    evidence_ids = json.loads(row[2] or "[]") or raw_sources
     episodes = []
     memories = []
+    relationship_events = []
 
-    if sources and _table_exists(c.db.conn, "experience_episodes"):
-        placeholders = ",".join("?" * len(sources))
-        ep_rows = c.db.conn.execute(
-            f"SELECT id, trigger_text, outcome, bot_inner_thought, bot_reply, source_memory_ids, created_at, episode_type FROM experience_episodes WHERE id IN ({placeholders})",
-            sources,
+    def _load_memories(ids: list[int]):
+        if not ids or not _table_exists(c.db.conn, "memories"):
+            return []
+        placeholders = ",".join("?" * len(ids))
+        rows = c.db.conn.execute(
+            f"SELECT id, content, sender_name, sender_id, timestamp, group_id FROM memories WHERE id IN ({placeholders}) ORDER BY timestamp ASC",
+            ids,
         ).fetchall()
+        return [
+            {"id": r[0], "content": r[1], "sender_name": r[2] or "", "sender_id": r[3] or "", "timestamp": r[4], "group_id": r[5]}
+            for r in rows
+        ]
 
+    if evidence_ids and evidence_type == "relationship_event" and _table_exists(c.db.conn, "relationship_events"):
+        placeholders = ",".join("?" * len(evidence_ids))
+        ev_rows = c.db.conn.execute(
+            f"""SELECT id, bot_id, group_id, user_id, event_type, dimension, delta, reason,
+                       source_episode_id, source_memory_id, created_at
+                  FROM relationship_events WHERE id IN ({placeholders}) ORDER BY created_at ASC""",
+            evidence_ids,
+        ).fetchall()
+        memory_ids = []
+        episode_ids = []
+        for r in ev_rows:
+            relationship_events.append({
+                "id": r[0], "bot_id": r[1], "group_id": r[2], "user_id": r[3],
+                "event_type": r[4], "dimension": r[5], "delta": r[6], "reason": r[7],
+                "source_episode_id": r[8], "source_memory_id": r[9], "created_at": r[10],
+            })
+            if r[8]:
+                episode_ids.append(int(r[8]))
+            if r[9]:
+                memory_ids.append(int(r[9]))
+        memories = _load_memories(list(dict.fromkeys(memory_ids)))
+        if episode_ids:
+            evidence_ids = list(dict.fromkeys(episode_ids))
+            evidence_type = "episode"
+
+    if evidence_ids and evidence_type in {"episode", "experience_episode"} and _table_exists(c.db.conn, "experience_episodes"):
+        placeholders = ",".join("?" * len(evidence_ids))
+        ep_rows = c.db.conn.execute(
+            f"SELECT id, trigger_text, outcome, bot_inner_thought, bot_reply, source_memory_ids, created_at, episode_type FROM experience_episodes WHERE id IN ({placeholders}) ORDER BY created_at ASC",
+            evidence_ids,
+        ).fetchall()
         all_memory_ids = set()
         for r in ep_rows:
-            ep_id = r[0]
-            trigger = r[1]
-            outcome = r[2]
-            bot_inner_thought = r[3]
-            bot_reply = r[4]
-            source_mem_ids_str = r[5]
-            created_at = r[6]
-            episode_type = r[7]
-
             try:
-                mem_ids = json.loads(source_mem_ids_str or "[]")
+                mem_ids = json.loads(r[5] or "[]")
                 if isinstance(mem_ids, list):
-                    all_memory_ids.update(mem_ids)
+                    all_memory_ids.update(int(x) for x in mem_ids if x)
             except Exception:
                 pass
-
             episodes.append({
-                "id": ep_id,
-                "trigger": trigger or "",
-                "outcome": outcome or "",
-                "bot_inner_thought": bot_inner_thought or "",
-                "bot_reply": bot_reply or "",
-                "created_at": created_at,
-                "episode_type": episode_type or ""
+                "id": r[0], "trigger": r[1] or "", "outcome": r[2] or "",
+                "bot_inner_thought": r[3] or "", "bot_reply": r[4] or "",
+                "created_at": r[6], "episode_type": r[7] or "",
             })
+        memories = memories or _load_memories(list(all_memory_ids))
 
-        if all_memory_ids and _table_exists(c.db.conn, "memories"):
-            mem_ids_list = list(all_memory_ids)
-            mem_placeholders = ",".join("?" * len(mem_ids_list))
-            mem_rows = c.db.conn.execute(
-                f"SELECT id, content, sender_name, timestamp, group_id FROM memories WHERE id IN ({mem_placeholders}) ORDER BY timestamp ASC",
-                mem_ids_list,
-            ).fetchall()
-            memories = [
-                {"id": mr[0], "content": mr[1], "sender_name": mr[2] or "", "timestamp": mr[3], "group_id": mr[4]}
-                for mr in mem_rows
-            ]
-
-    # 回退机制：如果是遗留信念（sources 直接存的是 memories ID）
-    if sources and not episodes and _table_exists(c.db.conn, "memories"):
-        mem_placeholders = ",".join("?" * len(sources))
-        mem_rows = c.db.conn.execute(
-            f"SELECT id, content, sender_name, timestamp, group_id FROM memories WHERE id IN ({mem_placeholders}) ORDER BY timestamp ASC",
-            sources,
-        ).fetchall()
-        memories = [
-            {"id": mr[0], "content": mr[1], "sender_name": mr[2] or "", "timestamp": mr[3], "group_id": mr[4]}
-            for mr in mem_rows
-        ]
+    if raw_sources and not memories and evidence_type == "memory":
+        memories = _load_memories(raw_sources)
 
     return jsonify({
         "ok": True,
         "belief_id": belief_id,
-        "sources": sources,
+        "sources": evidence_ids,
+        "raw_sources": raw_sources,
+        "evidence_type": evidence_type,
         "episodes": episodes,
+        "relationship_events": relationship_events,
         "memories": memories,
+        "items": memories,
     })
 
 
@@ -260,15 +295,18 @@ async def approve_belief(belief_id: int):
         return jsonify({"ok": False, "error": "beliefs table not found"}), 500
 
     # 检查是否有 evidence
+    cols = {r[1] for r in c.db.conn.execute("PRAGMA table_info(beliefs)").fetchall()}
+    evidence_ids_expr = "evidence_ids" if "evidence_ids" in cols else "'[]' AS evidence_ids"
     row = c.db.conn.execute(
-        "SELECT sources FROM beliefs WHERE id = ?", (belief_id,)
+        f"SELECT sources, {evidence_ids_expr} FROM beliefs WHERE id = ?", (belief_id,)
     ).fetchone()
     if not row:
         return jsonify({"ok": False, "error": "belief not found"}), 404
 
     sources = json.loads(row[0] or "[]")
-    if not sources:
-        return jsonify({"ok": False, "error": "Cannot approve belief without evidence (sources is empty)"}), 400
+    evidence_ids = json.loads(row[1] or "[]")
+    if not (sources or evidence_ids):
+        return jsonify({"ok": False, "error": "Cannot approve belief without evidence (sources/evidence_ids is empty)"}), 400
 
     c.db.conn.execute(
         "UPDATE beliefs SET status = 'active', last_reinforced = ? WHERE id = ? AND status IN ('pending','challenged','pending_legacy')",

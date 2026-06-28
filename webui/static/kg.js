@@ -28,6 +28,7 @@ let mouse = null;
 let galaxyContainer = null;
 let graphGroup = null;
 let edgeGroup = null;
+let edgeLabelGroup = null;
 let labelGroup = null;
 let starField = null;
 let animationId = null;
@@ -36,12 +37,37 @@ let graphUnavailableReason = '';
 
 let currentView = 'galaxy';
 let selectedNode = null;
+let selectedEdge = null;
 let activeFilter = null;
 let hoveredNode = null;
+let hoveredEdge = null;
 let hoveredNeighbors = new Set();
 let selectedFact = null;
 let selectedFactEntity = null;
 let _kgFullEdges = null;
+let layoutMode = 'semantic';
+let labelDensity = 'focus';
+let cameraPreset = 'overview';
+let actionRingNode = null;
+let pickableNodeObjects = [];
+let pickableEdgeObjects = [];
+let pointerFramePending = false;
+let latestPointerEvent = null;
+let lastActionRingPoint = { x: null, y: null };
+let transientHoverLabelNode = null;
+
+const LAYOUT_MODES = {
+    semantic: '语义群岛',
+    type: '类型分层',
+    layer: '图层分层',
+    time: '时间螺旋',
+};
+
+const relationState = {
+    selected: null,
+    hovered: null,
+    editing: null,
+};
 
 const graphState = {
     nodes: new Map(),
@@ -107,10 +133,10 @@ function normalizeEdgeEndpoint(value) {
     return raw;
 }
 
-function edgeKey(source, target, label='') {
+function edgeKey(source, target, label='', identity='') {
     const a = String(source);
     const b = String(target);
-    return `${a}::${b}::${label}`;
+    return `${a}::${b}::${label}::${identity}`;
 }
 
 function hashString(str) {
@@ -126,6 +152,30 @@ function getNeighbors(nodeId) {
     return Array.from(graphState.adjacency.get(String(nodeId)) || []);
 }
 
+function getEdgesForNode(nodeId) {
+    const id = String(nodeId);
+    return Array.from(graphState.edges.values()).filter(e => e.source === id || e.target === id);
+}
+
+function removeEdgeFromAdjacency(record) {
+    if (!record) return;
+    graphState.adjacency.get(record.source)?.delete(record.target);
+    graphState.adjacency.get(record.target)?.delete(record.source);
+}
+
+function replaceEdgeKey(record, newLabel) {
+    if (!record) return record;
+    graphState.edges.delete(record.key);
+    record.label = newLabel;
+    record.raw.label = newLabel;
+    record.raw.l = newLabel;
+    const identity = record.raw.id || record.raw.fact_id || record.raw.relation_id || record.raw.source_memory_id || '';
+    record.key = edgeKey(record.source, record.target, newLabel, identity);
+    graphState.edges.set(record.key, record);
+    if (selectedEdge) selectedEdge = record.key;
+    return record;
+}
+
 function getNodeRecord(nodeId) {
     return graphState.nodes.get(String(nodeId));
 }
@@ -135,6 +185,14 @@ function clearGraphState() {
     graphState.edges.clear();
     graphState.adjacency.clear();
     graphState.labelIndex.clear();
+    pickableNodeObjects = [];
+    pickableEdgeObjects = [];
+    transientHoverLabelNode = null;
+}
+
+function refreshPickableObjects() {
+    pickableNodeObjects = Array.from(graphState.nodes.values()).map(n => n.object).filter(Boolean);
+    pickableEdgeObjects = Array.from(graphState.edges.values()).map(e => e.object).filter(Boolean);
 }
 
 function ensureAdjacency(nodeId) {
@@ -177,8 +235,9 @@ function addEdgeRecord(rawEdge) {
     if (!source || !target || source === target) return null;
     if (!graphState.nodes.has(source) || !graphState.nodes.has(target)) return null;
 
-    const key = edgeKey(source, target, label);
-    const reverseKey = edgeKey(target, source, label);
+    const identity = rawEdge.id || rawEdge.fact_id || rawEdge.relation_id || rawEdge.source_memory_id || '';
+    const key = edgeKey(source, target, label, identity);
+    const reverseKey = edgeKey(target, source, label, identity);
     if (graphState.edges.has(key) || graphState.edges.has(reverseKey)) return graphState.edges.get(key) || graphState.edges.get(reverseKey);
 
     const weight = rawEdge.value || rawEdge.weight || rawEdge.w || rawEdge.count || 1;
@@ -189,6 +248,7 @@ function addEdgeRecord(rawEdge) {
         layer: rawEdge.layer || 'facts',
         raw: { ...rawEdge, source, target, label, weight },
         object: null,
+        labelObject: null,
         visible: true,
     };
     graphState.edges.set(key, record);
@@ -282,14 +342,17 @@ function initGraph() {
     controls.zoomSpeed = 0.6;
     controls.minDistance = 10;
     controls.maxDistance = 260;
+    controls.addEventListener?.('change', updateActionRingPosition);
 
     raycaster = new THREE.Raycaster();
     mouse = new THREE.Vector2();
 
     graphGroup = new THREE.Group();
     edgeGroup = new THREE.Group();
+    edgeLabelGroup = new THREE.Group();
     labelGroup = new THREE.Group();
     scene.add(edgeGroup);
+    scene.add(edgeLabelGroup);
     scene.add(graphGroup);
     scene.add(labelGroup);
 
@@ -355,21 +418,29 @@ function setupPointerEvents() {
     const tooltip = document.getElementById('node-tooltip');
     pointerHandlers = {
         mousemove(event) {
-            updateMouse(event);
-            const hit = pickNode();
-            if (hit !== hoveredNode) setHoveredNode(hit);
+            latestPointerEvent = event;
             if (tooltip) moveTooltip(event, tooltip);
+            if (pointerFramePending) return;
+            pointerFramePending = true;
+            requestAnimationFrame(processPointerFrame);
         },
         mouseleave() {
+            latestPointerEvent = null;
             setHoveredNode(null);
+            setHoveredEdge(null);
         },
         click() {
             if (hoveredNode) selectNodeById(hoveredNode);
+            else if (hoveredEdge) selectEdgeByKey(hoveredEdge);
             else {
                 selectedNode = null;
+                selectedEdge = null;
+                relationState.selected = null;
                 selectedFact = null;
                 selectedFactEntity = null;
                 hideDetail();
+                hideRelationDetail();
+                createContextActionRing(null);
                 applyVisibility();
             }
         },
@@ -388,12 +459,36 @@ function updateMouse(event) {
     mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 }
 
+function processPointerFrame() {
+    pointerFramePending = false;
+    if (!latestPointerEvent || !galaxyContainer) return;
+    updateMouse(latestPointerEvent);
+    const hit = pickNode();
+    const edgeHit = hit ? null : pickEdge();
+    if (hit !== hoveredNode) setHoveredNode(hit);
+    if (edgeHit !== hoveredEdge) setHoveredEdge(edgeHit);
+}
+
 function pickNode() {
     if (!raycaster || !camera) return null;
     raycaster.setFromCamera(mouse, camera);
-    const objects = Array.from(graphState.nodes.values()).map(n => n.object).filter(Boolean);
-    const hits = raycaster.intersectObjects(objects, false);
+    const hits = raycaster.intersectObjects(pickableNodeObjects, false);
     return hits.length ? hits[0].object.userData.nodeId : null;
+}
+
+function pickEdge() {
+    if (!raycaster || !camera) return null;
+    raycaster.params.Line = raycaster.params.Line || {};
+    raycaster.params.Line.threshold = 1.2;
+    raycaster.setFromCamera(mouse, camera);
+    const hits = raycaster.intersectObjects(pickableEdgeObjects, false);
+    return hits.length ? hits[0].object.userData.edgeKey : null;
+}
+
+function setHoveredEdge(edgeKeyValue) {
+    hoveredEdge = edgeKeyValue;
+    relationState.hovered = edgeKeyValue ? graphState.edges.get(edgeKeyValue) : null;
+    applyVisibility();
 }
 
 function setHoveredNode(nodeId) {
@@ -405,6 +500,7 @@ function setHoveredNode(nodeId) {
         if (nodeId) showNodeTooltip(nodeId, tooltip);
         else tooltip.classList.remove('visible');
     }
+    ensureHoverLabel(nodeId);
     applyVisibility();
 }
 
@@ -447,8 +543,12 @@ function animate() {
     animationId = requestAnimationFrame(animate);
     const t = performance.now() * 0.001;
     if (starField) starField.rotation.y = t * 0.012;
-    if (graphGroup) graphGroup.rotation.y += 0.00045;
+    if (graphGroup && !actionRingNode) graphGroup.rotation.y += 0.00045;
     if (edgeGroup) edgeGroup.rotation.y = graphGroup.rotation.y;
+    if (edgeLabelGroup) {
+        edgeLabelGroup.rotation.y = graphGroup.rotation.y;
+        edgeLabelGroup.children.forEach(sprite => sprite.lookAt(camera.position));
+    }
     if (labelGroup) {
         labelGroup.rotation.y = graphGroup.rotation.y;
         labelGroup.children.forEach(sprite => sprite.lookAt(camera.position));
@@ -467,10 +567,13 @@ function renderGraph(nodes, edges, options={}) {
 
     nodes.forEach((n, i) => addNodeRecord(n, i, renderOptions));
     edges.forEach(e => addEdgeRecord(e));
+    applySemanticLayout(renderOptions);
 
     graphState.nodes.forEach((record) => createNodeObject(record));
     graphState.edges.forEach((record) => createEdgeObject(record));
-    createImportantLabels();
+    refreshPickableObjects();
+    createAllReadableLabels();
+    createImportantEdgeLabels();
     updateStats();
     applyVisibility();
     flyToGraph();
@@ -488,12 +591,110 @@ function disposeSceneObject(child) {
 
 function clearGraph3D() {
     if (!graphGroup || !edgeGroup || !labelGroup) return;
-    [graphGroup, edgeGroup, labelGroup].forEach(group => {
+    [graphGroup, edgeGroup, edgeLabelGroup, labelGroup].filter(Boolean).forEach(group => {
         while (group.children.length) {
             const child = group.children.pop();
             disposeSceneObject(child);
         }
     });
+}
+
+function applySemanticLayout(options={}) {
+    const records = Array.from(graphState.nodes.values());
+    if (!records.length || typeof THREE === 'undefined') return;
+    const mode = layoutMode || options.layout || 'semantic';
+    const islandKeys = Array.from(new Set(records.map(r => {
+        if (mode === 'layer') return r.raw.layer || r.raw.sourceLayer || r.type || 'facts';
+        if (mode === 'type') return r.type || 'entity';
+        if (mode === 'time') return 'timeline';
+        return r.raw.community !== undefined ? `community-${r.raw.community}` : (r.type || r.raw.layer || 'entity');
+    })));
+    const centers = new Map();
+    const islandRadius = Math.max(20, Math.min(74, 16 + records.length * 0.18));
+    islandKeys.forEach((key, idx) => {
+        const angle = (idx / Math.max(1, islandKeys.length)) * Math.PI * 2;
+        centers.set(key, new THREE.Vector3(Math.cos(angle) * islandRadius, ((idx % 3) - 1) * 9, Math.sin(angle) * islandRadius));
+    });
+    const perIslandIndex = new Map();
+    records.forEach((record, idx) => {
+        if (record.raw.isSource || record.type === 'source') {
+            record.position.set(0, 0, 0);
+            return;
+        }
+        if (options.layout === 'path') {
+            record.position.copy(computeNodePosition(record.raw, idx, { ...options, layout: 'path', total: records.length }));
+            return;
+        }
+        if (options.layout === 'query') {
+            record.position.copy(computeNodePosition(record.raw, idx, { ...options, layout: 'query', total: records.length }));
+            return;
+        }
+        const key = mode === 'layer' ? (record.raw.layer || record.type || 'facts')
+            : mode === 'type' ? (record.type || 'entity')
+            : mode === 'time' ? 'timeline'
+            : (record.raw.community !== undefined ? `community-${record.raw.community}` : (record.type || record.raw.layer || 'entity'));
+        const localIndex = perIslandIndex.get(key) || 0;
+        perIslandIndex.set(key, localIndex + 1);
+        if (mode === 'time') {
+            const ts = Number(record.raw.ts || record.raw.timestamp || record.raw.created_at || 0);
+            const angle = idx * 0.55;
+            const radius = 8 + idx * 0.32;
+            const y = ts ? Math.sin(idx * 0.23) * 18 : ((idx % 9) - 4) * 2.2;
+            record.position.set(Math.cos(angle) * radius, y, Math.sin(angle) * radius);
+            return;
+        }
+        const center = centers.get(key) || new THREE.Vector3(0, 0, 0);
+        const seed = hashString(record.id + key);
+        const angle = ((seed % 360) * DEG2RAD) + localIndex * 0.72;
+        const lane = Math.floor(localIndex / 8);
+        const radius = 4 + (localIndex % 8) * 2.6 + lane * 5.2 + Math.min(6, (record.degree || 1) * 0.16);
+        const lift = (((seed >> 8) % 100) / 100 - 0.5) * 14;
+        record.position.copy(center.clone().add(new THREE.Vector3(Math.cos(angle) * radius, lift, Math.sin(angle) * radius)));
+    });
+    if (records.length <= 300) relaxNodePositions(3);
+}
+
+function relaxNodePositions(iterations=2) {
+    const records = Array.from(graphState.nodes.values());
+    for (let iter = 0; iter < iterations; iter++) {
+        for (let i = 0; i < records.length; i++) {
+            for (let j = i + 1; j < records.length; j++) {
+                const a = records[i];
+                const b = records[j];
+                const delta = a.position.clone().sub(b.position);
+                const dist = Math.max(0.01, delta.length());
+                if (dist > 5.5) continue;
+                const push = delta.normalize().multiplyScalar((5.5 - dist) * 0.18);
+                a.position.add(push);
+                b.position.sub(push);
+            }
+        }
+        graphState.edges.forEach(edge => {
+            const a = getNodeRecord(edge.source);
+            const b = getNodeRecord(edge.target);
+            if (!a || !b) return;
+            const delta = b.position.clone().sub(a.position);
+            const dist = delta.length();
+            if (dist < 18 || dist > 65) return;
+            const pull = delta.normalize().multiplyScalar(Math.min(1.8, (dist - 18) * 0.018));
+            a.position.add(pull);
+            b.position.sub(pull);
+        });
+    }
+}
+
+function updateLayoutMode(value) {
+    layoutMode = value || 'semantic';
+    applySemanticLayout({ layout: currentView === 'path' ? 'path' : currentView === 'query' ? 'query' : 'galaxy', total: graphState.nodes.size || 1 });
+    graphState.nodes.forEach(record => {
+        if (!record.object) return;
+        if (typeof gsap !== 'undefined') gsap.to(record.object.position, { x: record.position.x, y: record.position.y, z: record.position.z, duration: 0.65, ease: 'power2.out' });
+        else record.object.position.copy(record.position);
+    });
+    rebuildEdgeObjects();
+    createAllReadableLabels();
+    createImportantEdgeLabels();
+    applyVisibility();
 }
 
 function createNodeObject(record) {
@@ -520,31 +721,114 @@ function createEdgeObject(record) {
     const b = getNodeRecord(record.target);
     if (!a || !b) return;
     const geo = new THREE.BufferGeometry().setFromPoints([a.position, b.position]);
-    const color = record.isPath ? '#fbbf24' : (a.color || '#8b5cf6');
+    const color = record.isPath ? '#fbbf24' : (record.raw.kind === 'fact' ? '#a78bfa' : (a.color || '#8b5cf6'));
     const mat = new THREE.LineBasicMaterial({
         color: new THREE.Color(color),
         transparent: true,
-        opacity: record.isPath ? 0.78 : Math.max(0.16, Math.min(0.46, Number(record.weight || 1) / 4)),
+        opacity: record.isPath ? 0.82 : Math.max(0.18, Math.min(0.58, Number(record.weight || 1) / 3)),
         blending: THREE.AdditiveBlending,
         depthWrite: false,
     });
     const line = new THREE.Line(geo, mat);
     line.userData.edgeKey = record.key;
+    line.userData.baseOpacity = mat.opacity;
     edgeGroup.add(line);
     record.object = line;
 }
 
+function rebuildEdgeObjects() {
+    if (!edgeGroup) return;
+    while (edgeGroup.children.length) disposeSceneObject(edgeGroup.children.pop());
+    graphState.edges.forEach(record => {
+        record.object = null;
+        createEdgeObject(record);
+    });
+    refreshPickableObjects();
+}
+
 function createImportantLabels() {
-    const records = Array.from(graphState.nodes.values())
-        .sort((a, b) => (b.degree || 0) - (a.degree || 0))
-        .slice(0, Math.min(80, graphState.nodes.size));
-    records.forEach(record => {
+    createAllReadableLabels();
+}
+
+function createAllReadableLabels() {
+    if (!labelGroup) return;
+    while (labelGroup.children.length) disposeSceneObject(labelGroup.children.pop());
+    graphState.nodes.forEach(record => { record.labelObject = null; });
+    const records = Array.from(graphState.nodes.values()).sort((a, b) => (b.degree || 0) - (a.degree || 0));
+    let selectedRecords = records;
+    if (labelDensity === 'core') selectedRecords = records.slice(0, Math.min(80, records.length));
+    else if (labelDensity === 'focus') {
+        const focusSet = new Set();
+        if (selectedNode) {
+            focusSet.add(selectedNode);
+            getNeighbors(selectedNode).forEach(n => focusSet.add(n));
+        }
+        if (hoveredNode) {
+            focusSet.add(hoveredNode);
+            getNeighbors(hoveredNode).forEach(n => focusSet.add(n));
+        }
+        selectedRecords = records.filter((r, idx) => idx < 36 || focusSet.has(r.id));
+    }
+    selectedRecords.forEach(record => {
         const sprite = createTextSprite(record.label, record.color, record.radius);
         sprite.position.copy(record.position).add(new THREE.Vector3(record.radius * 1.7, record.radius * 0.7, 0));
         sprite.userData.nodeId = record.id;
         labelGroup.add(sprite);
         record.labelObject = sprite;
     });
+}
+
+function ensureHoverLabel(nodeId) {
+    if (!labelGroup) return;
+    if (transientHoverLabelNode && transientHoverLabelNode !== nodeId) {
+        const prev = getNodeRecord(transientHoverLabelNode);
+        if (prev?.labelObject?.userData?.transient) {
+            labelGroup.remove(prev.labelObject);
+            disposeSceneObject(prev.labelObject);
+            prev.labelObject = null;
+        }
+        transientHoverLabelNode = null;
+    }
+    if (!nodeId) return;
+    const record = getNodeRecord(nodeId);
+    if (!record || record.labelObject) return;
+    const sprite = createTextSprite(record.label, record.color, record.radius);
+    sprite.position.copy(record.position).add(new THREE.Vector3(record.radius * 1.7, record.radius * 0.7, 0));
+    sprite.userData.nodeId = record.id;
+    sprite.userData.transient = true;
+    labelGroup.add(sprite);
+    record.labelObject = sprite;
+    transientHoverLabelNode = nodeId;
+}
+
+function setLabelDensity(value) {
+    labelDensity = value || 'focus';
+    createAllReadableLabels();
+    createImportantEdgeLabels();
+    applyVisibility();
+}
+
+function createImportantEdgeLabels() {
+    if (!edgeLabelGroup) return;
+    while (edgeLabelGroup.children.length) disposeSceneObject(edgeLabelGroup.children.pop());
+    graphState.edges.forEach(record => { record.labelObject = null; });
+    const records = Array.from(graphState.edges.values()).sort((a, b) => (Number(b.weight || 0) - Number(a.weight || 0)));
+    const limit = labelDensity === 'all' ? Math.min(220, records.length) : labelDensity === 'focus' ? Math.min(72, records.length) : Math.min(28, records.length);
+    records.slice(0, limit).forEach(record => createEdgeLabelObject(record));
+}
+
+function createEdgeLabelObject(record) {
+    const a = getNodeRecord(record.source);
+    const b = getNodeRecord(record.target);
+    if (!a || !b || !record.label) return null;
+    const color = record.isPath ? '#fbbf24' : (record.raw.kind === 'fact' ? '#c4b5fd' : '#93c5fd');
+    const sprite = createTextSprite(record.label, color, 0.7);
+    sprite.position.copy(a.position).lerp(b.position, 0.5).add(new THREE.Vector3(0, 1.3, 0));
+    sprite.scale.multiplyScalar(0.58);
+    sprite.userData.edgeKey = record.key;
+    edgeLabelGroup.add(sprite);
+    record.labelObject = sprite;
+    return sprite;
 }
 
 function createTextSprite(text, color, radius) {
@@ -599,7 +883,8 @@ function applyVisibility() {
             record.object.scale.setScalar(record.radius * pulse);
         }
         if (record.labelObject) {
-            record.labelObject.visible = visible && !(hoverDim || selectedDim);
+            const forceLabel = labelDensity === 'all' || record.id === hoveredNode || record.id === selectedNode || hoveredNeighbors.has(record.id);
+            record.labelObject.visible = visible && (forceLabel || !(hoverDim || selectedDim));
         }
     });
     graphState.edges.forEach(record => {
@@ -608,11 +893,16 @@ function applyVisibility() {
         const filterHidden = activeFilter && a?.type !== activeFilter && b?.type !== activeFilter;
         const hoverHit = hoveredNode && (record.source === hoveredNode || record.target === hoveredNode);
         const selectedHit = selectedNode && (record.source === selectedNode || record.target === selectedNode);
+        const edgeHit = record.key === hoveredEdge || record.key === selectedEdge;
         const visible = !filterHidden && a?.visible !== false && b?.visible !== false;
         record.visible = visible;
         if (record.object) {
             record.object.visible = visible;
-            record.object.material.opacity = visible ? (hoveredNode || selectedNode ? (hoverHit || selectedHit || record.isPath ? 0.9 : 0.04) : (record.isPath ? 0.82 : Math.max(0.12, Math.min(0.42, Number(record.weight || 1) / 4)))) : 0;
+            const baseOpacity = record.object.userData.baseOpacity || Math.max(0.12, Math.min(0.42, Number(record.weight || 1) / 4));
+            record.object.material.opacity = visible ? ((edgeHit || hoverHit || selectedHit || record.isPath) ? 0.95 : (hoveredNode || selectedNode || hoveredEdge || selectedEdge ? 0.08 : baseOpacity)) : 0;
+        }
+        if (record.labelObject) {
+            record.labelObject.visible = visible && (labelDensity === 'all' || edgeHit || hoverHit || selectedHit || record.isPath);
         }
     });
 }
@@ -643,6 +933,7 @@ function flyToNode(nodeId) {
         camera.position.copy(camTarget);
     }
     createScreenRipple(nodeId);
+    if (actionRingNode) setTimeout(updateActionRingPosition, 780);
 }
 
 function createScreenRipple(nodeId) {
@@ -687,12 +978,14 @@ function appendGraphData(newNodes, newEdges) {
     graphState.edges.forEach(record => {
         if (!record.object) createEdgeObject(record);
     });
+    refreshPickableObjects();
     while (labelGroup.children.length) {
         const child = labelGroup.children.pop();
         disposeSceneObject(child);
     }
     graphState.nodes.forEach(record => { record.labelObject = null; });
-    createImportantLabels();
+    createAllReadableLabels();
+    createImportantEdgeLabels();
     updateStats();
     applyVisibility();
 }
@@ -781,10 +1074,10 @@ function applyKgConfig() {
     if (sortedNodes.length > maxNodes) sortedNodes = sortedNodes.slice(0, maxNodes);
     const topSet = new Set(sortedNodes.map(x => x[0]));
 
-    const nodes = sortedNodes.map(([name, deg]) => ({ id: name, name, type: nodeType[name] || 'entity', degree: deg }));
+    const nodes = sortedNodes.map(([name, deg]) => ({ id: name, name, type: nodeType[name] || 'entity', degree: deg, layer: 'facts' }));
     const edges = filtered
         .filter(e => topSet.has(e.s) && topSet.has(e.t))
-        .map(e => ({ source: e.s, target: e.t, label: e.l, weight: e.w, layer: e.layer }));
+        .map(e => ({ ...e, id: e.id, source: e.s, target: e.t, label: e.l, weight: e.w, layer: e.layer, kind: e.kind, editable: e.editable }));
 
     renderGraph(nodes, edges, { layout: 'galaxy' });
     const status = document.getElementById('cfg-status');
@@ -1010,6 +1303,177 @@ function deriveExpansionFromEntity(entityName, d) {
     return { nodes, edges };
 }
 
+// ─── Relation HUD ───
+function selectEdgeByKey(edgeKeyValue) {
+    const record = graphState.edges.get(edgeKeyValue);
+    if (!record) return;
+    selectedEdge = edgeKeyValue;
+    relationState.selected = record;
+    selectedNode = null;
+    selectedFact = null;
+    hideDetail();
+    createContextActionRing(null);
+    showRelationDetail(record);
+    createImportantEdgeLabels();
+    applyVisibility();
+}
+
+function showRelationDetail(record) {
+    const panel = document.getElementById('relation-panel');
+    if (!panel || !record) return;
+    const source = getNodeRecord(record.source)?.label || record.source;
+    const target = getNodeRecord(record.target)?.label || record.target;
+    const kind = record.raw.kind === 'tag_relation' ? 'Tag 关系' : record.raw.kind === 'fact' ? '事实边' : (record.layer || '关系');
+    const confidence = record.raw.confidence ?? record.weight;
+    const time = record.raw.ts ? new Date(record.raw.ts * 1000).toLocaleString('zh-CN', {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '未知时间';
+    document.getElementById('relation-title').textContent = `${source} → ${target}`;
+    document.getElementById('relation-meta').innerHTML = `<span class="text-purple-300">${escapeHtml(kind)}</span> · ${escapeHtml(record.label || 'relates')} · 权重 ${Number(record.weight || 0).toFixed(2)}`;
+    document.getElementById('relation-body').innerHTML = `
+        <div class="rounded-xl bg-white/[.03] border border-white/5 p-3 space-y-2 text-[11px]">
+            <div><span class="text-slate-500">起点</span><div class="text-purple-200 mt-0.5">${escapeHtml(source)}</div></div>
+            <div><span class="text-slate-500">关系</span><div class="text-amber-200 mt-0.5">${escapeHtml(record.label || 'relates')}</div></div>
+            <div><span class="text-slate-500">终点</span><div class="text-blue-200 mt-0.5">${escapeHtml(target)}</div></div>
+            <div class="grid grid-cols-2 gap-2 pt-1 text-slate-400">
+                <div>置信度 <span class="font-mono text-slate-200">${confidence !== undefined && confidence !== null ? Number(confidence).toFixed(2) : '-'}</span></div>
+                <div>时间 <span class="text-slate-300">${escapeHtml(time)}</span></div>
+                <div>ID <span class="font-mono text-slate-300">${escapeHtml(record.raw.id || record.key)}</span></div>
+                <div>图层 <span class="text-slate-300">${escapeHtml(record.raw.layer || record.layer || '-')}</span></div>
+            </div>
+        </div>`;
+    const editBtn = document.getElementById('btn-edit-relation');
+    const deleteBtn = document.getElementById('btn-delete-relation');
+    if (editBtn) editBtn.style.display = record.raw.editable ? '' : 'none';
+    if (deleteBtn) deleteBtn.style.display = record.raw.editable ? '' : 'none';
+    panel.classList.remove('hidden');
+    if (typeof gsap !== 'undefined') gsap.fromTo(panel, { autoAlpha: 0, x: 30 }, { autoAlpha: 1, x: 0, duration: 0.35, ease: 'power3.out' });
+}
+
+function hideRelationDetail() {
+    const panel = document.getElementById('relation-panel');
+    if (!panel || panel.classList.contains('hidden')) return;
+    if (typeof gsap !== 'undefined') gsap.to(panel, { autoAlpha: 0, x: 30, duration: 0.2, onComplete: () => panel.classList.add('hidden') });
+    else panel.classList.add('hidden');
+}
+
+function editSelectedRelation() {
+    const record = relationState.selected;
+    if (!record) return;
+    if (record.raw.kind === 'fact') {
+        selectedFact = { id: record.raw.fact_id, subject: getNodeRecord(record.source)?.label || record.source, predicate: record.label, object: getNodeRecord(record.target)?.label || record.target, confidence: record.raw.confidence ?? record.weight };
+        editEntity();
+        return;
+    }
+    const dialog = document.getElementById('relation-edit-dialog');
+    if (!dialog) return;
+    document.getElementById('edit-relation-label').value = record.label || '';
+    document.getElementById('edit-relation-weight').value = record.weight || 1;
+    document.getElementById('edit-relation-confidence').value = record.raw.confidence ?? 0.8;
+    dialog.classList.remove('hidden');
+    if (typeof gsap !== 'undefined') gsap.fromTo(dialog.querySelector('.glass'), { scale: 0.92, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.25, ease: 'back.out(1.4)' });
+}
+
+function closeRelationEdit() {
+    const dialog = document.getElementById('relation-edit-dialog');
+    if (!dialog) return;
+    if (typeof gsap !== 'undefined') gsap.to(dialog.querySelector('.glass'), { scale: 0.92, opacity: 0, duration: 0.18, onComplete: () => dialog.classList.add('hidden') });
+    else dialog.classList.add('hidden');
+}
+
+async function saveRelationEdit() {
+    const record = relationState.selected;
+    if (!record || record.raw.kind !== 'tag_relation') return;
+    const relationId = record.raw.relation_id;
+    const relation_type = document.getElementById('edit-relation-label').value.trim();
+    const weight = parseFloat(document.getElementById('edit-relation-weight').value) || 1;
+    const confidence = parseFloat(document.getElementById('edit-relation-confidence').value) || 0.8;
+    if (!relation_type) { alert('关系类型不能为空'); return; }
+    try {
+        const r = await fetch(`/api/kg/tag-relations/${relationId}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ relation_type, weight, confidence }) });
+        const d = await r.json();
+        if (!d.ok) { alert('保存失败: ' + (d.error || '未知错误')); return; }
+        replaceEdgeKey(record, relation_type);
+        record.weight = weight;
+        record.raw.weight = weight;
+        record.raw.w = weight;
+        record.raw.confidence = confidence;
+        closeRelationEdit();
+        showRelationDetail(record);
+        rebuildEdgeObjects();
+        createImportantEdgeLabels();
+        applyVisibility();
+        _kgFullEdges = null;
+    } catch(e) {
+        alert('网络错误，保存失败');
+    }
+}
+
+async function deleteSelectedRelation() {
+    const record = relationState.selected;
+    if (!record || !record.raw.editable) return;
+    const label = `${getNodeRecord(record.source)?.label || record.source} → ${record.label} → ${getNodeRecord(record.target)?.label || record.target}`;
+    if (!confirm(`确认删除关系？\n${label}`)) return;
+    const url = record.raw.kind === 'fact' ? `/api/kg/facts/${record.raw.fact_id}` : `/api/kg/tag-relations/${record.raw.relation_id}`;
+    try {
+        const r = await fetch(url, { method: 'DELETE' });
+        const d = await r.json();
+        if (!d.ok) { alert('删除失败: ' + (d.error || '未知错误')); return; }
+        graphState.edges.delete(record.key);
+        removeEdgeFromAdjacency(record);
+        hideRelationDetail();
+        selectedEdge = null;
+        relationState.selected = null;
+        _kgFullEdges = null;
+        rebuildEdgeObjects();
+        createImportantEdgeLabels();
+        applyVisibility();
+    } catch(e) {
+        alert('网络错误，删除失败');
+    }
+}
+
+function createContextActionRing(nodeId) {
+    const ring = document.getElementById('node-action-ring');
+    actionRingNode = nodeId;
+    lastActionRingPoint = { x: null, y: null };
+    if (!ring) return;
+    if (!nodeId) { ring.classList.add('hidden'); return; }
+    updateActionRingPosition();
+}
+
+function updateActionRingPosition() {
+    const ring = document.getElementById('node-action-ring');
+    if (!ring || !actionRingNode) return;
+    const record = getNodeRecord(actionRingNode);
+    if (!record || !record.object || !camera || !galaxyContainer) { ring.classList.add('hidden'); return; }
+    const p = record.object.position.clone();
+    graphGroup.localToWorld(p);
+    p.project(camera);
+    const rect = galaxyContainer.getBoundingClientRect();
+    const x = Math.round((p.x * 0.5 + 0.5) * rect.width + rect.left);
+    const y = Math.round((-p.y * 0.5 + 0.5) * rect.height + rect.top);
+    if (x !== lastActionRingPoint.x) ring.style.left = x + 'px';
+    if (y !== lastActionRingPoint.y) ring.style.top = y + 'px';
+    lastActionRingPoint = { x, y };
+    ring.classList.remove('hidden');
+}
+
+function applyCameraPreset(preset) {
+    cameraPreset = preset || 'overview';
+    if (cameraPreset === 'selected' && selectedNode) return flyToNode(selectedNode);
+    if (cameraPreset === 'path') {
+        if (!camera || !controls) return;
+        const target = new THREE.Vector3(0, 0, 0);
+        if (typeof gsap !== 'undefined') {
+            gsap.to(camera.position, { x: 0, y: 22, z: 88, duration: 0.7, ease: 'power2.out' });
+            gsap.to(controls.target, { x: target.x, y: target.y, z: target.z, duration: 0.7, ease: 'power2.out' });
+        } else {
+            camera.position.set(0, 22, 88); controls.target.copy(target);
+        }
+        return;
+    }
+    flyToGraph();
+}
+
 // ─── Timeline View ───
 async function loadTimeline() {
     if (!selectedNode) return;
@@ -1047,10 +1511,16 @@ async function loadTimeline() {
 // ─── Detail Panel ───
 async function selectNodeById(nodeId) {
     selectedNode = nodeId;
+    selectedEdge = null;
+    relationState.selected = null;
     selectedFact = null;
     selectedFactEntity = null;
+    hideRelationDetail();
+    createContextActionRing(nodeId);
     await showDetail(nodeId);
     flyToNode(nodeId);
+    createAllReadableLabels();
+    createImportantEdgeLabels();
     applyVisibility();
 }
 
@@ -1260,7 +1730,11 @@ function switchView(view) {
         if (view === 'person') gsap.fromTo('#person-panel', { x: -40, autoAlpha: 0 }, { x: 0, autoAlpha: 1, duration: 0.45, ease: 'power3.out' });
     }
     hideDetail();
+    hideRelationDetail();
+    createContextActionRing(null);
     selectedNode = null;
+    selectedEdge = null;
+    relationState.selected = null;
     selectedFact = null;
     selectedFactEntity = null;
     activeFilter = null;
@@ -1307,9 +1781,16 @@ function disposeGraph() {
     galaxyContainer = null;
     graphGroup = null;
     edgeGroup = null;
+    edgeLabelGroup = null;
     labelGroup = null;
     starField = null;
+    selectedEdge = null;
     hoveredNode = null;
+    hoveredEdge = null;
+    relationState.selected = null;
+    relationState.hovered = null;
+    actionRingNode = null;
+    transientHoverLabelNode = null;
     hoveredNeighbors.clear();
     clearGraphState();
 }

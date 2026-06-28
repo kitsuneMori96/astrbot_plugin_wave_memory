@@ -149,6 +149,15 @@
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: rgba(139,92,246,0.2); border-radius: 3px; }
 
+    /* Node action ring */
+    #node-action-ring {
+        position: fixed;
+        z-index: 28;
+        transform: translate(-50%, -50%);
+        pointer-events: none;
+    }
+    #node-action-ring button { pointer-events: auto; }
+
     /* Animations */
     @keyframes pulse-glow {
         0%, 100% { box-shadow: 0 0 12px rgba(139,92,246,0.1); }
@@ -165,6 +174,14 @@
     <div id="grid-overlay"></div>
     <div id="galaxy-container"></div>
     <div id="node-tooltip" class="node-tooltip"></div>
+    <div id="node-action-ring" class="hidden">
+        <div class="relative w-40 h-40">
+            <button onclick="expandNode()" class="absolute left-1/2 top-0 -translate-x-1/2 px-2 py-1 rounded-full bg-purple-500/20 border border-purple-400/30 text-purple-200 text-[10px] hover:bg-purple-500/30">展开</button>
+            <button onclick="loadTimeline()" class="absolute right-0 top-1/2 -translate-y-1/2 px-2 py-1 rounded-full bg-blue-500/20 border border-blue-400/30 text-blue-200 text-[10px] hover:bg-blue-500/30">时间线</button>
+            <button onclick="editEntity()" class="absolute left-1/2 bottom-0 -translate-x-1/2 px-2 py-1 rounded-full bg-amber-500/20 border border-amber-400/30 text-amber-200 text-[10px] hover:bg-amber-500/30">修正</button>
+            <button onclick="applyCameraPreset('selected')" class="absolute left-0 top-1/2 -translate-y-1/2 px-2 py-1 rounded-full bg-white/10 border border-white/15 text-slate-200 text-[10px] hover:bg-white/15">聚焦</button>
+        </div>
+    </div>
 
     <!-- Top Bar -->
     <div class="fixed top-0 inset-x-0 z-30 topbar flex items-center gap-3 px-5 py-2.5">
@@ -178,6 +195,27 @@
             <button data-view="path" class="tab-btn px-3 py-1.5 rounded-md text-xs transition">路径</button>
             <a href="/maintain" class="px-3 py-1.5 rounded-md text-xs text-amber-400/80 border border-amber-400/20 hover:bg-amber-400/10 transition">🔧 维护</a>
         </div>
+    </div>
+
+    <!-- Neuro Toy Table Controls -->
+    <div id="toy-controls" class="fixed top-14 left-4 z-20 glass rounded-xl px-3 py-2 flex items-center gap-2 text-[10px] text-slate-400">
+        <span class="text-purple-300 font-medium">玩具台</span>
+        <select id="layout-mode" onchange="updateLayoutMode(this.value)" class="px-2 py-1 bg-nebula-700 border border-white/10 rounded text-slate-300 outline-none">
+            <option value="semantic">语义群岛</option>
+            <option value="type">类型分层</option>
+            <option value="layer">图层分层</option>
+            <option value="time">时间螺旋</option>
+        </select>
+        <select id="label-density" onchange="setLabelDensity(this.value)" class="px-2 py-1 bg-nebula-700 border border-white/10 rounded text-slate-300 outline-none">
+            <option value="focus">邻域标签</option>
+            <option value="core">核心标签</option>
+            <option value="all">全部标签</option>
+        </select>
+        <select id="camera-preset" onchange="applyCameraPreset(this.value)" class="px-2 py-1 bg-nebula-700 border border-white/10 rounded text-slate-300 outline-none">
+            <option value="overview">总览镜头</option>
+            <option value="selected">选中节点</option>
+            <option value="path">路径走廊</option>
+        </select>
     </div>
 
     <!-- KG Config Panel -->
@@ -275,6 +313,24 @@
         </div>
     </div>
 
+    <!-- Relation Panel -->
+    <div id="relation-panel" class="fixed right-4 top-16 w-96 z-20 glass glass-accent rounded-2xl overflow-hidden hidden detail-panel">
+        <div class="p-5">
+            <div class="flex items-start justify-between mb-3">
+                <div>
+                    <h3 id="relation-title" class="text-white text-sm font-semibold">-</h3>
+                    <p id="relation-meta" class="text-slate-500 text-[11px] mt-1">-</p>
+                </div>
+                <button onclick="hideRelationDetail()" class="w-7 h-7 flex items-center justify-center rounded-lg bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white text-xs transition">✕</button>
+            </div>
+            <div id="relation-body" class="space-y-2.5 max-h-[52vh] overflow-y-auto"></div>
+            <div class="flex gap-2 mt-4 flex-wrap">
+                <button id="btn-edit-relation" onclick="editSelectedRelation()" class="px-3 py-1.5 bg-amber-500/10 border border-amber-500/20 rounded-lg text-amber-300 text-[11px] hover:bg-amber-500/20 transition">✏️ 编辑关系</button>
+                <button id="btn-delete-relation" onclick="deleteSelectedRelation()" class="px-3 py-1.5 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-[11px] hover:bg-red-500/20 transition">🗑 删除关系</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Stats Badge -->
     <div id="stats-badge" class="fixed bottom-4 left-4 z-20 glass rounded-lg px-3 py-2 text-[11px] text-slate-500">0 节点 · 0 连线</div>
 
@@ -285,6 +341,34 @@
     <div id="loading" class="fixed inset-0 z-50 hidden items-center justify-center bg-nebula-900/95 flex-col gap-4">
         <div class="w-9 h-9 border-3 border-glow-purple/20 border-t-glow-purple rounded-full animate-spin"></div>
         <p id="loading-text" class="text-slate-400 text-sm">加载中...</p>
+    </div>
+
+    <!-- 编辑 tag_relation 弹窗 -->
+    <div id="relation-edit-dialog" class="fixed inset-0 z-50 hidden items-center justify-center" style="background:rgba(0,0,0,0.6); backdrop-filter:blur(3px)">
+        <div class="glass glass-accent rounded-2xl w-full max-w-md mx-4 overflow-hidden">
+            <div class="px-5 py-4 border-b border-white/5 flex items-center justify-between">
+                <h3 class="text-sm font-semibold text-white">编辑关系边</h3>
+                <button onclick="closeRelationEdit()" class="text-slate-400 hover:text-white">✕</button>
+            </div>
+            <div class="px-5 py-4 space-y-3.5 text-xs">
+                <div>
+                    <label class="text-slate-500 block mb-1">关系类型 / Predicate</label>
+                    <input type="text" id="edit-relation-label" class="w-full px-3 py-2 bg-nebula-700 border border-white/10 rounded-md text-slate-200 outline-none focus:border-glow-purple">
+                </div>
+                <div>
+                    <label class="text-slate-500 block mb-1">权重 Weight</label>
+                    <input type="number" step="0.1" min="0" id="edit-relation-weight" class="w-full px-3 py-2 bg-nebula-700 border border-white/10 rounded-md text-slate-200 outline-none focus:border-glow-purple">
+                </div>
+                <div>
+                    <label class="text-slate-500 block mb-1">置信度 Confidence 0-1</label>
+                    <input type="number" step="0.1" min="0" max="1" id="edit-relation-confidence" class="w-full px-3 py-2 bg-nebula-700 border border-white/10 rounded-md text-slate-200 outline-none focus:border-glow-purple">
+                </div>
+            </div>
+            <div class="px-5 py-4 border-t border-white/5 flex justify-end gap-2">
+                <button onclick="closeRelationEdit()" class="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-400 text-[11px] transition">取消</button>
+                <button onclick="saveRelationEdit()" class="px-4 py-1.5 rounded-lg bg-glow-purple/80 hover:bg-glow-purple text-white text-[11px] font-medium transition">保存关系</button>
+            </div>
+        </div>
     </div>
 
     <!-- 修正事实三元组弹窗 -->

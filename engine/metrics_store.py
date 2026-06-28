@@ -13,6 +13,7 @@ TOKEN_KEYS = [
     "relation_memories_tokens",
     "facts_tokens",
     "lore_tokens",
+    "soul_tokens",
     "persona_tokens",
     "belief_tokens",
     "concern_tokens",
@@ -28,6 +29,7 @@ LABELS = {
     "relation_memories_tokens": "关系记忆",
     "facts_tokens": "事实",
     "lore_tokens": "世界知识",
+    "soul_tokens": "灵魂合计",
     "persona_tokens": "灵魂人格",
     "belief_tokens": "信念",
     "concern_tokens": "关切",
@@ -82,6 +84,7 @@ class InjectionMetricStore:
                 normalized[key] = _num(value)
             else:
                 normalized[key] = value
+        normalized["soul_tokens"] = _num(normalized.get("persona_tokens")) + _num(normalized.get("concern_tokens")) + _num(normalized.get("mood_tokens")) + _num(normalized.get("mood_traj_tokens"))
         self.conn.execute(
             "INSERT INTO injection_metrics (ts, sample_json) VALUES (?, ?)",
             (ts, json.dumps(normalized, ensure_ascii=False, sort_keys=True)),
@@ -109,6 +112,8 @@ class InjectionMetricStore:
                 sample = {}
             if isinstance(sample, dict):
                 sample["ts"] = _num(sample.get("ts") or ts)
+                if "soul_tokens" not in sample:
+                    sample["soul_tokens"] = _num(sample.get("persona_tokens")) + _num(sample.get("concern_tokens")) + _num(sample.get("mood_tokens")) + _num(sample.get("mood_traj_tokens"))
                 samples.append(sample)
         return samples
 
@@ -140,9 +145,28 @@ class InjectionMetricStore:
         return result
 
     @staticmethod
-    def _series(samples: Iterable[Dict[str, Any]], bucket_seconds: int) -> List[Dict[str, Any]]:
+    def _series(samples: Iterable[Dict[str, Any]], bucket_seconds: int,
+                from_ts: float | None = None, to_ts: float | None = None) -> List[Dict[str, Any]]:
         bucket_seconds = max(1, int(bucket_seconds))
+        samples = list(samples)
+        numeric_keys = set(TOKEN_KEYS + ["total_tokens"])
+        for sample in samples:
+            for key, value in sample.items():
+                if key != "ts" and (isinstance(value, (int, float)) or value is None):
+                    numeric_keys.add(key)
+
         buckets: Dict[int, Dict[str, Any]] = {}
+        if from_ts is not None and to_ts is not None:
+            start_bucket = int(float(from_ts) // bucket_seconds * bucket_seconds)
+            end_bucket = int(float(to_ts) // bucket_seconds * bucket_seconds)
+            bucket = start_bucket
+            while bucket <= end_bucket:
+                item = {"bucket_ts": bucket, "count": 0}
+                for key in numeric_keys:
+                    item[key] = 0
+                buckets[bucket] = item
+                bucket += bucket_seconds
+
         for sample in samples:
             ts = _num(sample.get("ts"))
             bucket = int(ts // bucket_seconds * bucket_seconds)
@@ -183,6 +207,6 @@ class InjectionMetricStore:
         return {
             "count": len(samples),
             "summary": self._summary(samples),
-            "series": self._series(samples, bucket_seconds),
+            "series": self._series(samples, bucket_seconds, from_ts=from_ts, to_ts=to_ts),
             "ranking": self._ranking(samples),
         }

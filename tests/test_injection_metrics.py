@@ -19,7 +19,7 @@ class InjectionMetricStoreTest(unittest.TestCase):
 
     def test_query_groups_samples_into_expected_buckets(self):
         store = self._store()
-        base = 1_700_000_000
+        base = 1_700_002_800  # aligned to 1-hour bucket
         store.record({"total_tokens": 100, "memories_tokens": 60, "jargon_tokens": 10, "total_ms": 200}, ts=base)
         store.record({"total_tokens": 200, "memories_tokens": 80, "belief_tokens": 40, "total_ms": 400}, ts=base + 1800)
         store.record({"total_tokens": 300, "persona_tokens": 90, "total_ms": 600}, ts=base + 7200)
@@ -27,10 +27,11 @@ class InjectionMetricStoreTest(unittest.TestCase):
         result = store.query(base, base + 10_800, bucket_seconds=3600)
 
         self.assertEqual(result["count"], 3)
-        self.assertEqual(len(result["series"]), 2)
+        self.assertEqual(len(result["series"]), 4)
         self.assertEqual(result["series"][0]["total_tokens"], 300)
         self.assertEqual(result["series"][0]["memories_tokens"], 140)
-        self.assertEqual(result["series"][1]["total_tokens"], 300)
+        self.assertEqual(result["series"][1]["total_tokens"], 0)
+        self.assertEqual(result["series"][2]["total_tokens"], 300)
         self.assertEqual(result["summary"]["total_tokens"]["sum"], 600)
         self.assertEqual(result["summary"]["total_tokens"]["avg"], 200)
 
@@ -61,6 +62,30 @@ class InjectionMetricStoreTest(unittest.TestCase):
         self.assertEqual(deleted, 1)
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["summary"]["total_tokens"]["sum"], 2)
+
+    def test_query_fills_empty_buckets_for_line_chart(self):
+        store = self._store()
+        base = 1_700_002_800  # aligned to 1-hour bucket
+        store.record({"total_tokens": 100, "memories_tokens": 50}, ts=base + 3600)
+
+        result = store.query(base, base + 3 * 3600, bucket_seconds=3600)
+
+        self.assertEqual([row["bucket_ts"] for row in result["series"]], [base, base + 3600, base + 7200, base + 10800])
+        self.assertEqual([row["total_tokens"] for row in result["series"]], [0, 100, 0, 0])
+        self.assertEqual([row["memories_tokens"] for row in result["series"]], [0, 50, 0, 0])
+        self.assertEqual([row["jargon_tokens"] for row in result["series"]], [0, 0, 0, 0])
+        self.assertEqual([row["count"] for row in result["series"]], [0, 1, 0, 0])
+
+    def test_summary_exposes_soul_token_rollup(self):
+        store = self._store()
+        base = 1_700_000_000
+        store.record({"total_tokens": 100, "persona_tokens": 10, "concern_tokens": 20, "mood_tokens": 5, "mood_traj_tokens": 15}, ts=base)
+
+        result = store.query(base, base + 3600, bucket_seconds=3600)
+
+        self.assertEqual(result["summary"]["soul_tokens"]["sum"], 50)
+        self.assertEqual(result["series"][0]["soul_tokens"], 50)
+        self.assertEqual(result["ranking"][0]["key"], "soul_tokens")
 
 
 if __name__ == "__main__":

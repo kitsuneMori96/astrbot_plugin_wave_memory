@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 
@@ -61,6 +62,45 @@ def _build_holyman_categories(items: list[dict]) -> list[dict]:
         {"id": category, "label": labels[category], "count": count}
         for category, count in sorted(counts.items(), key=lambda kv: (-kv[1], labels.get(kv[0], kv[0])))
     ]
+
+
+def _holyman_content_entries(phrases: dict) -> dict:
+    if not isinstance(phrases, dict):
+        return {}
+    return {
+        key: value
+        for key, value in phrases.items()
+        if isinstance(key, str) and not key.startswith("_")
+    }
+
+
+def _holyman_content_hash(phrases: dict) -> str:
+    payload = json.dumps(_holyman_content_entries(phrases), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _holyman_content_status(phrases: dict, local_count: int, remote_version: str) -> dict:
+    """Judge Holyman asset health by content, not by sync timestamp/commit string alone."""
+    content_hash = str(phrases.get("_content_hash") or _holyman_content_hash(phrases))
+    content_count = _safe_int(phrases.get("_content_count"), local_count)
+    remote_commit_version = phrases.get("_remote_commit_version") or phrases.get("_remote_version") or ""
+    is_legacy_asset = content_count < 300
+    is_update_available = False
+
+    if is_legacy_asset:
+        is_update_available = True
+    elif remote_version != "Unknown" and remote_commit_version:
+        # A different remote commit only means "try sync" when the generated content digest is missing/old.
+        # Current 300+ cleaned assets with content hash should not warn just because sync-* differs from GitHub SHA.
+        is_update_available = not content_hash
+
+    return {
+        "content_hash": content_hash,
+        "content_count": content_count,
+        "remote_commit_version": remote_commit_version,
+        "is_update_available": is_update_available,
+        "asset_status": "legacy" if is_legacy_asset else "ready",
+    }
 
 
 def _table_exists(conn, table: str) -> bool:
@@ -581,8 +621,9 @@ async def get_holyman():
         items.append(item)
 
     categories = _build_holyman_categories(items)
+    local_count = len(items)
 
-    # 4. 获取远程最新提交的版本哈希
+    # 4. 获取远程最新提交的版本哈希；是否提示更新由本地内容健康度决定，避免 commit 字符串误报。
     remote_version = "Unknown"
     try:
         import urllib.request
@@ -597,12 +638,20 @@ async def get_holyman():
             remote_version = f"{date}-{sha}"
     except Exception:
         pass
-            
+
+    content_status = _holyman_content_status(phrases, local_count, remote_version)
+
     return jsonify({
         "items": items,
         "categories": categories,
+        "local_count": local_count,
         "local_version": local_version,
-        "remote_version": remote_version
+        "remote_version": remote_version,
+        "remote_commit_version": content_status["remote_commit_version"],
+        "content_count": content_status["content_count"],
+        "content_hash": content_status["content_hash"],
+        "asset_status": content_status["asset_status"],
+        "is_update_available": content_status["is_update_available"],
     })
 
 

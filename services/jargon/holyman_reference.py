@@ -27,10 +27,25 @@ _DEFAULT_PHRASES = {
 class HolymanReference:
     """Loads holyman-skills files and matches broad abstract-culture phrases."""
 
+    _MATCH_BLOCKLIST = {
+        "背景", "架构", "安装", "安装使用", "使用", "目录", "示例", "规则", "核心", "方法", "触发词",
+        "玩家", "游戏", "群聊", "今天", "昨天", "明天", "一个", "这个", "那个", "什么", "不是", "没有",
+        "可以", "但是", "因为", "所以", "如果", "就是", "我们", "你们", "他们", "自己", "现在",
+        "License", "Rules", "Core Rules", "Output Rules", "Opening", "Closing", "Resolution", "Background",
+        "Activation", "Acknowledgement", "OpenClaw",
+    }
+    _MATCH_NOISE_MARKERS = (
+        "git clone", "PowerShell", "Git Bash", "Claude Code", "License", "Acknowledgement", "README",
+        ".md", ".json", "http://", "https://", "详见", "Opening**", "Closing**", "Resolution**",
+        "Response Hints", "Core Rules", "Output Rules", "Hard Boundaries", "Language (", "Mode ",
+    )
+    _ENGLISH_ALLOWLIST = {"Ciallo", "Ciallo～", "Galgame", "NGA", "KPL", "CSGO", "CNCS", "DeepSeek", "AstraAI", "Bilibili"}
+    _SHORT_SUBSTRING_ALLOWLIST = {"原神", "黄油", "神人", "抽象", "狗粉丝", "孙笑川", "急了", "鼠鼠", "叠甲", "丁真"}
+
     def __init__(self, root_path: str | None = None, max_examples: int = 3):
         self.root_path = Path(root_path) if root_path else None
         self.max_examples = max_examples
-        self._phrases: dict[str, str] = {}
+        self._phrases: dict[str, Any] = {}
         self._examples: list[str] = []
         self.reload()
 
@@ -94,17 +109,69 @@ class HolymanReference:
     def available(self) -> bool:
         return bool(self._phrases or self._examples)
 
+    def _is_matchable_phrase(self, phrase: str) -> bool:
+        phrase = (phrase or "").strip()
+        if not phrase or phrase in self._MATCH_BLOCKLIST:
+            return False
+        lowered = phrase.lower()
+        if any(marker.lower() in lowered for marker in self._MATCH_NOISE_MARKERS):
+            return False
+        if phrase.startswith("|") or phrase.endswith("|") or "```" in phrase:
+            return False
+        if re.fullmatch(r"[A-Za-z0-9 /_().~↑↓<>=*:-]+", phrase) and phrase not in self._ENGLISH_ALLOWLIST:
+            return False
+        if re.fullmatch(r"[\u4e00-\u9fff]{2,3}", phrase) and phrase not in {"急了", "典", "绷", "鼠鼠", "叠甲", "丁真", "原神", "黄油", "神人", "抽象", "狗粉丝", "孙笑川"}:
+            return False
+        if len(phrase) > 30:
+            return False
+        return True
+
+    def _term_hits_phrase(self, term: str, phrase: str) -> bool:
+        if phrase == term:
+            return True
+        if len(phrase) <= 3:
+            return False
+        if len(term) <= 3:
+            return term in self._SHORT_SUBSTRING_ALLOWLIST and term in phrase
+        return phrase in term or term in phrase
+
+    @staticmethod
+    def _phrase_meaning(value: Any) -> str:
+        """Return phrase meaning while accepting old string and new structured asset values."""
+        if isinstance(value, dict):
+            meaning = value.get("meaning") or value.get("explanation") or ""
+            return str(meaning)
+        return str(value or "")
+
+    def _format_explanation(self, value: Any) -> str:
+        meaning = self._phrase_meaning(value).strip()
+        return f"{meaning} 仅作为理解参考，不改变羽书人格或回复风格。" if meaning else "仅作为理解参考，不改变羽书人格或回复风格。"
+
     def match(self, term: str, context: str = "") -> dict[str, Any]:
         term = (term or "").strip()
         context = context or ""
         if not term:
             return self._no_match()
+        term_matchable = term not in self._MATCH_BLOCKLIST and self._is_matchable_phrase(term)
+
+        if term_matchable:
+            for phrase, explanation in self._phrases.items():
+                if phrase == term and self._is_matchable_phrase(phrase):
+                    return {
+                        "matched": True,
+                        "classification": "global_abstract",
+                        "confidence": 0.85,
+                        "term": phrase,
+                        "explanation": self._format_explanation(explanation),
+                        "examples": self._find_examples(phrase),
+                        "context_hint": False,
+                    }
 
         context_hints = []
         for phrase, explanation in self._phrases.items():
-            if not phrase:
+            if not self._is_matchable_phrase(phrase):
                 continue
-            term_hit = phrase == term or phrase in term or (len(term) >= 4 and term in phrase)
+            term_hit = term_matchable and self._term_hits_phrase(term, phrase)
             if term_hit:
                 return {
                     "matched": True,
@@ -123,7 +190,7 @@ class HolymanReference:
             result.update({"context_hint": True, "hint_phrase": context_hints[0]})
             return result
 
-        examples = self._find_examples(term)
+        examples = self._find_examples(term) if term_matchable else []
         if examples:
             return {
                 "matched": True,

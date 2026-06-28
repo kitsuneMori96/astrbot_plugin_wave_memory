@@ -52,17 +52,45 @@ class BeliefEmergenceService:
             if not content or self._duplicate(content):
                 continue
             source_ids = [int(e[0]) for e in events]
-            belief_id = self.db.add_belief(
-                content=content,
-                belief_type="person_judgment",
-                bot_id=self.bot_id,
-                strength=min(0.3 + min(abs(total), 20) / 100, 0.55),
-                sources=source_ids,
-                status="pending",
-            )
+            strength = min(0.4 + min(abs(total), 20) / 80, 0.7)
+            try:
+                belief_id = self.db.add_belief(
+                    content=content,
+                    belief_type="person_judgment",
+                    bot_id=self.bot_id,
+                    strength=strength,
+                    sources=source_ids,
+                    status="pending",
+                    evidence_type="relationship_event",
+                    evidence_ids=source_ids,
+                )
+            except TypeError:
+                belief_id = self.db.add_belief(
+                    content=content,
+                    belief_type="person_judgment",
+                    bot_id=self.bot_id,
+                    strength=strength,
+                    sources=source_ids,
+                    status="pending",
+                )
+                self._mark_relationship_evidence(belief_id, source_ids)
+            self._mark_relationship_evidence(belief_id, source_ids)
             created.append({"id": belief_id, "content": content, "evidence_event_ids": source_ids})
             logger.info("[BeliefEmergence] Pending belief: %s", content[:80])
         return created
+
+    def _mark_relationship_evidence(self, belief_id: int, event_ids: list[int]) -> None:
+        """兼容旧 DB facade：确保信念证据明确指向 relationship_events。"""
+        try:
+            cols = {r[1] for r in self.db.conn.execute("PRAGMA table_info(beliefs)").fetchall()}
+            if "evidence_type" in cols and "evidence_ids" in cols:
+                self.db.conn.execute(
+                    "UPDATE beliefs SET evidence_type = ?, evidence_ids = ? WHERE id = ?",
+                    ("relationship_event", json.dumps(event_ids), belief_id),
+                )
+                self.db.conn.commit()
+        except Exception:
+            pass
 
     def _make_belief(self, user_id: str, dimension: str, total: float, count: int, events: list) -> str:
         reasons = []

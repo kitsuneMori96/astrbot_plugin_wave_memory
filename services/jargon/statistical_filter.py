@@ -64,6 +64,8 @@ class JargonStatisticalFilter:
         """喂入一条消息，更新词频统计。"""
         if not _HAS_JIEBA:
             return
+        if self._is_bot_sender(sender_id):
+            return
         words = self._tokenize(text)
         now = timestamp or time.time()
         for w in words:
@@ -153,8 +155,28 @@ class JargonStatisticalFilter:
                 continue
             if re.match(r'^[\d\s\W]+$', w):  # 纯数字/标点
                 continue
+            if self._is_vocal_noise(w):
+                continue
             result.append(w)
         return result
+
+    @staticmethod
+    def _is_bot_sender(sender_id: str) -> bool:
+        sid = str(sender_id or "")
+        return sid in {"bot", "2500447291", "1336495069"} or sid.endswith("_archived") or sid.startswith("bot_")
+
+    @staticmethod
+    def _is_vocal_noise(word: str) -> bool:
+        word = (word or "").strip()
+        if re.fullmatch(r"[呜嗷啊哈呵嗯喵汪]+", word) and len(set(word)) <= 4 and len(word) >= 3:
+            return True
+        if len(word) >= 4:
+            chars = [ch for ch in word if ch.strip()]
+            if chars:
+                most = max(chars.count(ch) for ch in set(chars))
+                if most / len(chars) >= 0.75:
+                    return True
+        return False
 
     def _is_standard_word(self, word: str) -> bool:
         """检查是否为标准词典词。"""

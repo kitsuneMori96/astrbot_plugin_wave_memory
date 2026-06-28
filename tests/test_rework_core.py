@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sqlite3
 import sys
@@ -6,6 +7,31 @@ import time
 import types
 import unittest
 from pathlib import Path
+
+if "quart" not in sys.modules:
+    quart_mod = types.ModuleType("quart")
+    class _Blueprint:
+        def __init__(self, *args, **kwargs): pass
+        def route(self, *args, **kwargs):
+            def deco(fn): return fn
+            return deco
+    class _Quart:
+        def __init__(self, *args, **kwargs): pass
+        def route(self, *args, **kwargs):
+            def deco(fn): return fn
+            return deco
+        def register_blueprint(self, *args, **kwargs): pass
+    def _jsonify(obj=None, *args, **kwargs): return obj if obj is not None else {}
+    class _Response:
+        def __init__(self, *args, **kwargs): pass
+    async def _send_from_directory(*args, **kwargs): return None
+    quart_mod.Blueprint = _Blueprint
+    quart_mod.Quart = _Quart
+    quart_mod.Response = _Response
+    quart_mod.jsonify = _jsonify
+    quart_mod.request = types.SimpleNamespace(args={}, headers={}, get_json=lambda *args, **kwargs: {})
+    quart_mod.send_from_directory = _send_from_directory
+    sys.modules["quart"] = quart_mod
 
 if "astrbot.api" not in sys.modules:
     astrbot_mod = types.ModuleType("astrbot")
@@ -274,6 +300,92 @@ class ReworkCoreTest(unittest.TestCase):
                 cm.close()
             tmp.cleanup()
 
+    def test_jargon_filter_ignores_bot_messages_and_vocal_noise(self):
+        from services.jargon.statistical_filter import JargonStatisticalFilter
+
+        import time
+
+        filt = JargonStatisticalFilter(context_keep=10, jieba_threshold=999999)
+        now = time.time()
+        for i in range(8):
+            filt.feed("邪修 邪修 嗷嗷嗷嗷嗷", "g1", sender_id="2500447291", timestamp=now + i)
+        for i in range(5):
+            filt.feed("邪修 今天又在修仙", "g1", sender_id="user_a", timestamp=now + 100 + i)
+
+        candidates = filt.get_candidates("g1", min_freq=5, top_k=20)
+        words = {c["word"] for c in candidates}
+
+        self.assertIn("邪修", words)
+        self.assertNotIn("嗷嗷", words)
+        self.assertTrue(all(ctx["sender_id"] != "2500447291" for c in candidates for ctx in c.get("source_contexts", [])))
+
+    def test_belief_emergence_records_relationship_event_evidence_metadata(self):
+        from services.belief_emergence import BeliefEmergenceService
+
+        conn, _ = self._connect()
+        self.addCleanup(conn.close)
+        conn.executescript("""
+            CREATE TABLE relationship_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bot_id TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                dimension TEXT NOT NULL,
+                delta REAL NOT NULL,
+                reason TEXT NOT NULL,
+                source_episode_id INTEGER,
+                source_memory_id INTEGER,
+                created_at REAL NOT NULL
+            );
+            CREATE TABLE beliefs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                content TEXT NOT NULL,
+                type TEXT NOT NULL DEFAULT 'world_view',
+                strength REAL DEFAULT 0.5,
+                bot_id TEXT NOT NULL DEFAULT '',
+                sources TEXT DEFAULT '[]',
+                conflicts TEXT DEFAULT '[]',
+                status TEXT DEFAULT 'active',
+                created_at REAL,
+                last_reinforced REAL,
+                archived_reason TEXT,
+                evidence_type TEXT DEFAULT 'memory',
+                evidence_ids TEXT DEFAULT '[]'
+            );
+        """)
+        now = time.time()
+        for i in range(3):
+            conn.execute(
+                """INSERT INTO relationship_events
+                   (bot_id, group_id, user_id, event_type, dimension, delta, reason, created_at)
+                   VALUES ('yushu', 'g1', 'u1', 'gift_or_feed', 'trust', 3, '用户投喂小蛋糕', ?)""",
+                (now - i,),
+            )
+        conn.commit()
+
+        class DB:
+            def __init__(self, connection):
+                self.conn = connection
+            def add_belief(self, content, belief_type, bot_id, strength=0.5, sources=None, status='active', evidence_type=None, evidence_ids=None):
+                cur = self.conn.execute(
+                    """INSERT INTO beliefs (content, type, strength, bot_id, sources, status, created_at, last_reinforced, evidence_type, evidence_ids)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (content, belief_type, strength, bot_id, json.dumps(sources or []), status, now, now, evidence_type or 'memory', json.dumps(evidence_ids or [])),
+                )
+                self.conn.commit()
+                return cur.lastrowid
+            def get_beliefs(self, bot_id=None, status='active', limit=50):
+                return []
+
+        created = asyncio.run(BeliefEmergenceService(DB(conn), bot_id='yushu').emerge_recent(days=1, limit=1))
+
+        self.assertEqual(len(created), 1)
+        row = conn.execute("SELECT sources, evidence_type, evidence_ids, strength FROM beliefs").fetchone()
+        self.assertEqual(row[1], "relationship_event")
+        self.assertEqual(json.loads(row[0]), json.loads(row[2]))
+        self.assertGreater(row[3], 0.4)
+
     def test_jargon_injection_only_uses_confirmed_nonempty_entries(self):
         from services.jargon.inference import JargonInjector
 
@@ -395,6 +507,206 @@ class ReworkCoreTest(unittest.TestCase):
         result = ref.match('帽子店', '今天有人说 v我50')
         self.assertFalse(result.get('matched'), result)
         self.assertTrue(result.get('context_hint'), result)
+
+    def test_holyman_sync_filters_skill_document_noise(self):
+        from services.jargon.sync import HolymanSyncService
+
+        svc = HolymanSyncService()
+        phrases = {}
+        readme = """
+# 背景
+## 架构
+## 安装使用
+### Claude Code（推荐）
+```bash
+git clone https://github.com/ykdeso/holyman-skills.git
+```
+## OpenClaw
+## License
+"""
+        skill = """
+# AI 互联网抽象人
+## Catchphrases
+- **解构一切**: 任何严肃话题都能被拆解成梗
+- **苏式转折**: 深情铺垫后突然 v我50
+- "你说得对，但是……"
+"""
+
+        svc._parse_markdown_phrases(readme, "README.md", phrases)
+        svc._parse_markdown_phrases(skill, "神人.skill/SKILL.md", phrases)
+
+        self.assertIn("解构一切", phrases)
+        self.assertIn("苏式转折", phrases)
+        self.assertIn("你说得对，但是……", phrases)
+        for noisy in ["背景", "架构", "安装使用", "Claude Code（推荐", "git clone https", "OpenClaw", "License"]:
+            self.assertNotIn(noisy, phrases)
+        self.assertFalse([word for word in phrases if "**" in word or word.startswith("|")], phrases)
+
+    def test_holyman_sync_corpus_keeps_quotes_but_drops_generic_frequency_terms(self):
+        from services.jargon.sync import HolymanSyncService
+
+        svc = HolymanSyncService()
+        phrases = {}
+        corpus = json.dumps({"items": [
+            {"text": "今天 吃饭 今天 出门 今天 睡觉"},
+            {"text": "经典结尾是\"v我50\"，不是普通词。"},
+            {"text": "今天 今天 今天 今天"},
+        ]}, ensure_ascii=False)
+
+        corpus_list = svc._parse_corpus(corpus, phrases)
+
+        self.assertEqual(len(corpus_list), 3)
+        self.assertIn("v我50", phrases)
+        self.assertNotIn("今天", phrases)
+        self.assertNotIn("吃饭", phrases)
+
+    def test_holyman_sync_outputs_category_metadata(self):
+        from services.jargon.sync import HolymanSyncService
+
+        svc = HolymanSyncService()
+        phrases = {}
+        svc._parse_markdown_phrases(
+            '- **游戏即信仰**: 游戏不是娱乐，是身份\n"原神"',
+            "神人.skill/_knowledge/gaming.md",
+            phrases,
+        )
+        svc._parse_markdown_phrases(
+            '- **复制粘贴模式**: 长文案轰炸',
+            "神人.skill/_persona/communication.md",
+            phrases,
+        )
+
+        self.assertIsInstance(phrases["游戏即信仰"], dict)
+        self.assertEqual(phrases["游戏即信仰"]["meaning"], "游戏不是娱乐，是身份")
+        self.assertEqual(phrases["游戏即信仰"]["category"], "gaming")
+        self.assertEqual(phrases["游戏即信仰"]["source"], "神人.skill/_knowledge/gaming.md")
+        self.assertIn(phrases["游戏即信仰"]["kind"], {"bold_term", "colon_term"})
+        self.assertEqual(phrases["复制粘贴模式"]["category"], "communication")
+
+    def test_holyman_sync_replaces_legacy_asset_when_parsed_result_is_healthy(self):
+        from services.jargon.sync import HolymanSyncService
+
+        svc = HolymanSyncService()
+        existing = {"旧版噪声词": "旧版短释义", "_version": "old", "_update_time": 1}
+        parsed = {
+            f"清噪词条{i}": {
+                "meaning": f"清噪释义{i}",
+                "category": "gaming",
+                "source": "神人.skill/_knowledge/gaming.md",
+                "kind": "bold_term",
+            }
+            for i in range(60)
+        }
+
+        merged = svc._merge_phrases_for_save(existing, parsed)
+
+        self.assertNotIn("旧版噪声词", merged)
+        self.assertIn("清噪词条1", merged)
+        self.assertEqual(len(merged), 60)
+
+    def test_holyman_content_hash_ignores_version_metadata_and_counts_entries(self):
+        from services.jargon.sync import HolymanSyncService
+        from webui.blueprints.jargon import _holyman_content_status
+
+        phrases = {
+            "v我50": {"meaning": "转折梗", "category": "skill-core"},
+            "解构一切": {"meaning": "拆成梗", "category": "skill-core"},
+            "_version": "sync-a",
+            "_update_time": 1,
+            "_remote_commit_version": "2026-01-01-abcdef0",
+        }
+        same_content_new_meta = dict(phrases, _version="sync-b", _update_time=999)
+
+        self.assertEqual(HolymanSyncService.content_count(phrases), 2)
+        self.assertEqual(HolymanSyncService.content_hash(phrases), HolymanSyncService.content_hash(same_content_new_meta))
+
+        with_meta = HolymanSyncService.attach_content_metadata(phrases)
+        self.assertEqual(with_meta["_content_count"], 2)
+        self.assertEqual(with_meta["_content_hash"], HolymanSyncService.content_hash(phrases))
+
+        ready_phrases = {
+            f"词条{i}": {"meaning": f"释义{i}", "category": "corpus"}
+            for i in range(300)
+        }
+        ready_phrases = HolymanSyncService.attach_content_metadata(ready_phrases)
+        ready_status = _holyman_content_status(ready_phrases, local_count=300, remote_version="2026-02-01-bbbbbbb")
+        self.assertFalse(ready_status["is_update_available"])
+        self.assertEqual(ready_status["asset_status"], "ready")
+
+        legacy_status = _holyman_content_status({"旧词": "旧释义"}, local_count=108, remote_version="2026-02-01-bbbbbbb")
+        self.assertTrue(legacy_status["is_update_available"])
+        self.assertEqual(legacy_status["asset_status"], "legacy")
+
+    def test_holyman_reference_accepts_structured_phrase_values(self):
+        from services.jargon.holyman_reference import HolymanReference
+
+        ref = HolymanReference()
+        ref._phrases = {
+            "v我50": {"meaning": "常见荒诞转折梗。", "category": "skill-core", "source": "神人.skill/SKILL.md"},
+        }
+        ref._examples = []
+
+        match = ref.match("v我50")
+
+        self.assertTrue(match["matched"], match)
+        self.assertEqual(match["term"], "v我50")
+        self.assertIn("常见荒诞转折梗", match["explanation"])
+
+    def test_holyman_api_helpers_normalize_legacy_and_structured_categories(self):
+        from webui.blueprints.jargon import _normalize_holyman_phrase, _build_holyman_categories
+
+        legacy = _normalize_holyman_phrase("v我50", "常见荒诞转折梗。")
+        structured = _normalize_holyman_phrase("游戏即信仰", {
+            "meaning": "游戏不是娱乐，是身份。",
+            "category": "gaming",
+            "source": "神人.skill/_knowledge/gaming.md",
+            "kind": "bold_term",
+        })
+        categories = _build_holyman_categories([legacy, structured, structured])
+
+        self.assertEqual(legacy["category"], "legacy")
+        self.assertEqual(legacy["category_label"], "旧版内置")
+        self.assertEqual(structured["category"], "gaming")
+        self.assertEqual(structured["category_label"], "游戏文化")
+        self.assertEqual(structured["source"], "神人.skill/_knowledge/gaming.md")
+        self.assertEqual(categories[0], {"id": "gaming", "label": "游戏文化", "count": 2})
+        self.assertIn({"id": "legacy", "label": "旧版内置", "count": 1}, categories)
+
+    def test_holyman_frontend_exposes_category_filter_and_badges(self):
+        html = (Path(__file__).resolve().parent.parent / "webui" / "static" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("holymanCategory", html)
+        self.assertIn("holymanCategories", html)
+        self.assertIn("全部分类", html)
+        self.assertIn("category_label", html)
+        self.assertIn("h.category", html)
+
+    def test_holyman_reference_rejects_document_noise_and_generic_substrings(self):
+        from services.jargon.holyman_reference import HolymanReference
+
+        ref = HolymanReference()
+        ref._phrases = {
+            "背景": "文档标题，不是黑话。",
+            "架构": "文档标题，不是黑话。",
+            "触发词": "文档标题，不是黑话。",
+            "git clone https": "安装命令，不是黑话。",
+            "OpenClaw": "项目名，不是黑话。",
+            "Claude Code（推荐": "安装说明，不是黑话。",
+            "今天": "普通时间词，不是黑话。",
+            "v我50": "常见荒诞转折梗。",
+            "Ciallo～(∠・ω< )⌒★": "典型二次元问候。",
+            "复制粘贴模式": "抽象文化表达模式。",
+            "孙笑川/狗粉丝文化": "抽象文化历史阶段。",
+        }
+        ref._examples = ["深情铺垫最后 v我50", "Ciallo～(∠・ω< )⌒★"]
+
+        for noisy in ["背景", "架构", "触发词", "git clone", "OpenClaw", "Claude Code", "今天吃饭"]:
+            result = ref.match(noisy)
+            self.assertFalse(result.get("matched"), (noisy, result))
+
+        for useful in ["v我50", "Ciallo", "复制粘贴模式", "狗粉丝"]:
+            result = ref.match(useful)
+            self.assertTrue(result.get("matched"), (useful, result))
 
     def test_cleanup_dry_run_does_not_modify_and_apply_marks_legacy_rows(self):
         from scripts.cleanup_legacy_social_data import analyze_database, apply_cleanup

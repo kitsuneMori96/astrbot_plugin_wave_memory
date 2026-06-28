@@ -60,8 +60,15 @@ from .services.mood_trajectory import MoodTrajectory
 from .services.subjective_time import SubjectiveTime
 from .services.desire_engine import DesireEngine
 from .services.belief_engine import BeliefEngine
+from .services.belief_emergence import BeliefEmergenceService
 from .services.jargon.service import JargonService
 from .services.few_shot.service import FewShotService
+from .services.identity_safety import (
+    build_identity_safety_injection,
+    filter_identity_contamination_memories,
+    is_identity_contamination,
+    prepend_identity_safety_system_prompt,
+)
 
 
 @dataclass
@@ -461,6 +468,8 @@ class WaveMemoryPlugin(Star):
         self.consolidation = None
         self.eviction_service = None
         self.belief_engine = None
+        self.belief_emergence = None
+        self._last_belief_emerge_ts = 0
         self.concern_tracker = None
         self.mood_trajectory = None
         self.subjective_time = None
@@ -885,6 +894,12 @@ class WaveMemoryPlugin(Star):
             logger.warning(f"[WaveMemory] BeliefEngine init failed: {e}")
             _record_err("BeliefEngine", e)
             self.belief_engine = None
+        try:
+            self.belief_emergence = BeliefEmergenceService(db=self.db, bot_id=soul_bot_id) if soul_bot_id else None
+        except Exception as e:
+            logger.warning(f"[WaveMemory] BeliefEmergence init failed: {e}")
+            _record_err("BeliefEmergence", e)
+            self.belief_emergence = None
         # 关切 / 情绪轨迹 / 时间锚点（纯 DB，无需 LLM）
         try:
             self.concern_tracker = ConcernTracker(db=self.db, bot_id=soul_bot_id)
@@ -1086,6 +1101,15 @@ class WaveMemoryPlugin(Star):
         bot_id = event.get_self_id() or ""
         is_at_bot = getattr(event, "is_at_or_wake_command", False)
 
+        # 最高优先级身份/风格防线：不让历史回复、记忆或当前诱导覆盖当前人格。
+        req.system_prompt = prepend_identity_safety_system_prompt(
+            getattr(req, "system_prompt", ""), message, always=True
+        )
+        safety_injection = build_identity_safety_injection(message)
+        if safety_injection:
+            from astrbot.core.agent.message import TextPart
+            req.extra_user_content_parts.append(TextPart(text=safety_injection))
+
         # ─── 规则链前置过滤 ───
         engage = self._should_engage(event)
         if engage == "skip":
@@ -1168,6 +1192,18 @@ class WaveMemoryPlugin(Star):
         # 不再有独立 LLM 调用。bot 在主对话中用自己的人格自然思考态度。
         # 好感度变化靠 LifecycleService 互动频率 + 极端事件规则驱动。
 
+    async def _belief_emergence_task(self) -> None:
+        """后台关系事件信念涌现任务。"""
+        try:
+            if not getattr(self, "belief_emergence", None):
+                return
+            created = await self.belief_emergence.emerge_recent(days=14, limit=2)
+            if created:
+                logger.info(f"[WaveMemory] Belief emerged {len(created)} candidates")
+        except Exception as e:
+            logger.debug(f"[WaveMemory] Belief emergence error: {e}")
+            _record_err("BeliefEmergence", e)
+
     async def _jargon_mine_task(self, group_id: str) -> None:
         """后台黑话挖掘任务。"""
         try:
@@ -1191,6 +1227,14 @@ class WaveMemoryPlugin(Star):
         message = event.get_message_str()
         if not message or len(message.strip()) < 4:
             return
+
+        req.system_prompt = prepend_identity_safety_system_prompt(
+            getattr(req, "system_prompt", ""), message, always=True
+        )
+        safety_injection = build_identity_safety_injection(message)
+        if safety_injection:
+            from astrbot.core.agent.message import TextPart
+            req.extra_user_content_parts.append(TextPart(text=safety_injection))
 
         group_id = event.get_group_id()
         bot_id = event.get_self_id() or ""
@@ -1294,6 +1338,7 @@ class WaveMemoryPlugin(Star):
                             source_filter=default_sources if not exclude_sources else None,
                         ), timeout=_CHANNEL_TIMEOUT)
                 if memories:
+                    memories = filter_identity_contamination_memories(memories)
                     consumption["memories_tokens"] = sum(estimate_tokens(self.query_engine.format_injection([m])) for m in memories)
                     consumption["memories_chars"] = sum(len(self.query_engine.format_injection([m])) for m in memories)
 
@@ -1322,6 +1367,7 @@ class WaveMemoryPlugin(Star):
             except Exception:
                 pass
             if exp_memories:
+                exp_memories = filter_identity_contamination_memories(exp_memories)
                 consumption["exp_memories_tokens"] = sum(estimate_tokens(self.query_engine.format_injection([m])) for m in exp_memories)
                 consumption["exp_memories_chars"] = sum(len(self.query_engine.format_injection([m])) for m in exp_memories)
             timing["experience_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
@@ -1527,7 +1573,10 @@ class WaveMemoryPlugin(Star):
                         decay = max(0.1, 1.0 - age * _rate) if _rate > 0 else 1.0
                         return (r[4] or 1.0) * decay
 
-                    sorted_rows = sorted(rows, key=_eff_conf, reverse=True)[:self.facts_max]
+                    sorted_rows = [
+                        r for r in sorted(rows, key=_eff_conf, reverse=True)
+                        if not is_identity_contamination(f"{r[1]} {r[2]} {r[3]}")
+                    ][:self.facts_max]
                     lines = [f"{r[1]} {r[2]} {r[3]}" for r in sorted_rows]
                     hit_rowids = {r[0] for r in sorted_rows}
 
@@ -1547,11 +1596,13 @@ class WaveMemoryPlugin(Star):
                             [entity, entity] + list(hit_rowids),
                         ).fetchall()
                         for er in extra_rows:
-                            if er[0] not in hit_rowids:
-                                lines.append(f"{er[1]} {er[2]} {er[3]}")
+                            extra_line = f"{er[1]} {er[2]} {er[3]}"
+                            if er[0] not in hit_rowids and not is_identity_contamination(extra_line):
+                                lines.append(extra_line)
                                 hit_rowids.add(er[0])
 
-                    facts_text = "<known_facts>\n" + "\n".join(lines) + "\n</known_facts>"
+                    if lines:
+                        facts_text = "<known_facts>\n" + "\n".join(lines) + "\n</known_facts>"
             except Exception:
                 pass
             timing["facts_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
@@ -1578,14 +1629,17 @@ class WaveMemoryPlugin(Star):
                     fts5_memories = []
                     for row in rows:
                         mem = self.db.conn.execute(
-                            "SELECT id, content, sender_id, sender_name, timestamp, importance, source, group_id FROM memories WHERE id=?",
+                            "SELECT id, content, sender_id, sender_name, timestamp, importance, source, group_id, memory_type FROM memories WHERE id=? AND memory_type='message'",
                             (row[0],),
                         ).fetchone()
                         if mem:
+                            mem_content = mem[1] or ""
+                            if is_identity_contamination(mem_content):
+                                continue
                             # 当前群权重 1.0，跨群 0.5
                             score = 1.0 if mem[7] == group_id else 0.5
                             fts5_memories.append({
-                                "id": mem[0], "content": mem[1], "sender_id": mem[2],
+                                "id": mem[0], "content": mem_content, "sender_id": mem[2],
                                 "sender_name": mem[3], "timestamp": mem[4],
                                 "importance": mem[5], "source": mem[6],
                                 "group_id": mem[7], "score": score,
@@ -1619,8 +1673,10 @@ class WaveMemoryPlugin(Star):
                      _time.time() - 7 * 86400, self.timeline_max),
                 ).fetchall()
                 if rows:
-                    lines = [f"- {r[1]}: {r[0][:60]}" for r in rows]
-                    timeline_text = "[最近与此人的事件]\n" + "\n".join(lines)
+                    safe_rows = [r for r in rows if not is_identity_contamination(r[0] or "")]
+                    lines = [f"- {r[1]}: {r[0][:60]}" for r in safe_rows]
+                    if lines:
+                        timeline_text = "[最近与此人的事件]\n" + "\n".join(lines)
             except Exception:
                 pass
             timing["timeline_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
@@ -1824,18 +1880,20 @@ class WaveMemoryPlugin(Star):
         group_id = event.get_group_id() or f"private:{sender_id}"
         bot_id = event.get_self_id() or ""
 
-        # 平台会把 bot 自己发送的图片回推成一条普通消息事件。
-        # 这种事件的 sender_id 等于 self_id（或配置里的 bot QQ）。
-        # 直接把它作为 bot 图片记忆入库，不进入用户消息防抖/LLM 流程。
-        if images and sender_id and (sender_id == bot_id or sender_id in self._bot_qq_ids):
-            await self.writer.enqueue({
-                "group_id": group_id,
-                "sender_id": "bot",
-                "sender_name": self._get_bot_name(sender_id if sender_id in self._bot_qq_ids else bot_id),
-                "content": message,
-                "timestamp": time.time(),
-            })
+        # 平台会把 bot 自己发出的文本/图片回推成普通消息事件。
+        # ignore_bot_messages=true 时必须在这里也截断；after_message_sent 不是唯一入口。
+        if sender_id and (sender_id == bot_id or sender_id in self._bot_qq_ids):
             event.should_call_llm(False)
+            if self.ignore_bot_messages:
+                return
+            if images:
+                await self.writer.enqueue({
+                    "group_id": group_id,
+                    "sender_id": "bot",
+                    "sender_name": self._get_bot_name(sender_id if sender_id in self._bot_qq_ids else bot_id),
+                    "content": message,
+                    "timestamp": time.time(),
+                })
             return
 
         if self.group_whitelist and group_id not in self.group_whitelist:
@@ -2075,6 +2133,16 @@ class WaveMemoryPlugin(Star):
                     is_reply_to_bot=is_reply_to_bot,
                     hour=hour,
                 )
+                if getattr(self, "belief_emergence", None) and time.time() - getattr(self, "_last_belief_emerge_ts", 0) > 900:
+                    self._last_belief_emerge_ts = time.time()
+                    self._spawn(self._belief_emergence_task())
+                if getattr(self, "concern_tracker", None) and (is_at_bot or len(locked_message) > 80):
+                    topic = locked_message[:60].strip()
+                    if topic:
+                        self.concern_tracker.add(topic=topic, intensity=0.55 if is_at_bot else 0.4)
+                if getattr(self, "subjective_time", None) and (is_at_bot or is_reply_to_bot or len(locked_message) > 120):
+                    summary = f"{sender_name or sender_id}: {locked_message[:80]}"
+                    self.subjective_time.add_anchor(summary, emotional_weight=0.6 if is_at_bot or is_reply_to_bot else 0.45, timestamp=message_ts)
 
             # 欲望触发：检测红包等特殊事件
             desire_engine = getattr(self, 'desire_engine', None)

@@ -7,6 +7,10 @@ import time
 from typing import Any, Dict, List, Optional
 
 from astrbot.api import logger
+try:
+    from ..identity_safety import is_identity_contamination
+except ImportError:
+    from services.identity_safety import is_identity_contamination
 
 
 # ─── 推断 Prompts ───
@@ -194,7 +198,10 @@ class JargonInjector:
                    ORDER BY frequency DESC LIMIT 100""",
                 (group_id,),
             ).fetchall()
-            result = [{"word": r[0], "meaning": r[1]} for r in rows]
+            result = [
+                {"word": r[0], "meaning": r[1]} for r in rows
+                if not is_identity_contamination(f"{r[0]} {r[1]}")
+            ]
 
             # 也加载全局黑话
             global_rows = self._db.conn.execute(

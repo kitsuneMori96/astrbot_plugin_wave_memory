@@ -57,7 +57,9 @@ function app() {
         jargonTotalPages: 1,
 
         holymanItems: [],
+        holymanCategories: [],
         holymanSearch: '',
+        holymanCategory: '',
         holymanUseProxy: true,
         holymanSyncing: false,
         holymanLocalVersion: 'Unknown',
@@ -520,8 +522,12 @@ function app() {
             try {
                 const data = await this.api('/api/jargon/holyman');
                 this.holymanItems = data.items || [];
+                this.holymanCategories = data.categories || [];
                 this.holymanLocalVersion = data.local_version || 'Unknown';
                 this.holymanRemoteVersion = data.remote_version || 'Unknown';
+                if (this.holymanCategory && !this.holymanCategories.some(c => c.id === this.holymanCategory)) {
+                    this.holymanCategory = '';
+                }
             } catch (e) {
                 console.error('Failed to load Holyman items:', e);
             }
@@ -594,14 +600,21 @@ function app() {
                 items = items.filter(h => h.is_activated === false);
             }
 
-            // 2. Search Text Filter
+            // 2. Category Filter
+            if (this.holymanCategory) {
+                items = items.filter(h => (h.category || 'unknown') === this.holymanCategory);
+            }
+
+            // 3. Search Text Filter
             const search = (this.holymanSearch || '').trim().toLowerCase();
             if (search) {
                 items = items.filter(item => {
                     const word = (item.word || '').toLowerCase();
                     const meaning = (item.meaning || '').toLowerCase();
                     const custom_meaning = (item.custom_meaning || '').toLowerCase();
-                    return word.includes(search) || meaning.includes(search) || custom_meaning.includes(search);
+                    const category = (item.category || '').toLowerCase();
+                    const categoryLabel = (item.category_label || '').toLowerCase();
+                    return word.includes(search) || meaning.includes(search) || custom_meaning.includes(search) || category.includes(search) || categoryLabel.includes(search);
                 });
             }
 

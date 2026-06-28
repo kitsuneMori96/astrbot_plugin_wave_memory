@@ -282,11 +282,29 @@ async def reject_time_anchor(anchor_id: int):
 async def mood_trajectory():
     """情绪轨迹（折线图数据）。"""
     c = get_container()
+    limit = max(1, min(500, _safe_int(request.args.get("limit", 100), 100)))
+    bot_id = request.args.get("bot_id")
+
+    if _table_exists(c.db.conn, "mood_snapshots"):
+        sql = "SELECT id, bot_id, timestamp, valence, arousal, cause FROM mood_snapshots WHERE 1=1"
+        params = []
+        if bot_id:
+            sql += " AND bot_id = ?"
+            params.append(bot_id)
+        sql += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+        rows = c.db.conn.execute(sql, params).fetchall()
+        items = [
+            {"id": r[0], "group_id": r[1] or "", "bot_id": r[1] or "", "type": "positive" if (r[3] or 0) > 0.1 else "negative" if (r[3] or 0) < -0.1 else "neutral",
+             "intensity": min(1.0, max(0.0, abs(float(r[3] or 0)) + float(r[4] or 0) * 0.5)), "valence": r[3], "arousal": r[4], "desc": r[5] or "", "ts": r[2], "is_active": False}
+            for r in rows
+        ]
+        items.reverse()
+        return jsonify({"items": items})
+
     if not _table_exists(c.db.conn, "bot_mood"):
         return jsonify({"items": []})
     group_id = request.args.get("group_id")
-    limit = max(1, min(500, _safe_int(request.args.get("limit", 100), 100)))
-
     sql = "SELECT id, group_id, mood_type, intensity, description, start_time, end_time, is_active FROM bot_mood WHERE typeof(start_time) IN ('real', 'integer')"
     params = []
     if group_id:
@@ -301,7 +319,6 @@ async def mood_trajectory():
          "ts": r[5], "end_time": r[6], "is_active": bool(r[7])}
         for r in rows
     ]
-    # 时间正序用于前端折线图
     items.reverse()
     return jsonify({"items": items})
 

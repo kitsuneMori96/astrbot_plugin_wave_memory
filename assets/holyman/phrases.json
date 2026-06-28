@@ -1,112 +1,2382 @@
 {
-  "_version": "2026-05-26-c5bb18e",
-  "_update_time": 1782352800,
-  "你说得对但是": "常见反串起手式：表面承认，随后切入夸张传教、长文或原神梗。",
-  "v我50": "常见抽象文案结尾：用突然要钱（通常是肯德基疯狂星期四）制造荒诞折。",
-  "差不多得了": "互联网语境中制止复读、玩梗、过度装模作样或无休止争论的经典短句。",
-  "急了": "指对方言语或观点被狠狠戳中痛处，情绪失控、急于自我辩解的表现。",
-  "小丑": "指自作多情、白费力气、最终沦为众人笑柄或自我感动的边缘人物。",
-  "典": "指“经典”，常用于讽刺某些千篇一律、具有代表性的陈词滥调、典型逻辑或双标行为。",
-  "疯狂星期四": "肯德基促销活动的梗，常作为各种长篇深情转折、索要50元文案的终点。",
-  "红温": "形容人因愤怒、尴尬或被戳破防而脸色发红、情绪极其激动、处于爆发边缘的状态。",
-  "蚌埠住了": "“绷不住了”的谐音，形容情绪完全失控，忍不住大笑或痛哭，彻底破防。",
-  "爆了": "指舆论、情绪、数据、好感或心态等在瞬间达到极点或破防崩溃。",
-  "赛博": "指虚拟、电子化或具有高科技、低生活质感的网络行为或状态（如赛博功德、赛博佛祖）。",
-  "电子木鱼": "网络解压、积攒虚拟“功德”的抽象调侃行为。",
-  "狠狠地": "副词，表示极度用力、深度或不留余地、毫不客气地进行某项网络行为（如狠狠地惩罚）。",
-  "回旋镖": "指之前说过的过激言论、立下的flag或做过的事，在未来原封不动反弹打在自己身上。",
-  "功德": "互联网语境中指善意或道德，常用于调侃缺德笑话或电子积攒。",
-  "绝了": "表示赞叹、无语或对极其荒谬、搞笑或完美的事物的惊叹。",
-  "幽默": "在抽象文化中多为反讽，指滑稽、自相矛盾、充满讽刺或令人无语的荒诞行为。",
-  "不是哥们": "对荒谬或出人意料的内容、操作、发言进行吐槽的经典起手式。",
-  "叠甲": "在发言前提前声明立场、免责条款或自我否定，以规避网络言论攻击。",
-  "就很": "抽象文案中常用的含混评价/装懂式结尾，如“就很……你们懂吧”。",
-  "动了": "常见阴谋化/反串归因模板的一部分，如“动了XX的蛋糕”、“动了谁的利益”。",
-  "又幻想了": "对自我代入、恋爱脑、过度脑补、白日做梦等行为的嘲讽、冷水调侃。",
-  "孝": "指对特定厂商、公众人物、作品或群体毫无底线的盲目崇拜、极力洗白和维护。",
-  "急急急": "连发“急”字，用极具复读和视觉冲击力的方式嘲讽对方急于辩解、情绪失控。",
-  "大伙": "网络用语，代指“大家”，常用于群聊拉近距离或用于反讽。",
-  "一眼丁真": "由理塘丁真衍生出的网络梗，意为一眼就能看穿的虚假谎言，后演变出各种谐音梗（如一眼顶针）。",
-  "小赢": "对辩论或竞争中微小优势的调侃，常与中赢、大赢、特赢等连用，讽刺自我精神胜利法。",
-  "震撼": "常指“原神震撼”或对某种离奇、荒诞、抽象行为带来的巨大认知冲击。",
-  "傲娇": "心里喜欢但嘴上不承认、甚至表现出抗拒和嘴硬的萌属性。",
-  "乐子人": "不持特定立场、纯粹抱着看热闹、寻找荒诞笑料或推波助澜目的的网络围观者。",
-  "破防": "原指游戏里突破防御，网聊中指心理防线被戳中而情绪崩溃、失去理智、破口大骂。",
-  "硬撑": "指在事实或论战已输的情况下，仍咬牙嘴硬、死不承认失败的行为。",
-  "太带派了": "带主或嗨粉文化中的常用赞叹语，形容某件事非常有意思、时髦、有排场。",
-  "神中神": "形容某部作品、某位人物或某句话在特定领域达到了至高无上的完美地位。",
-  "寄": "源于“GG”（Good Game），表示完蛋了、死翘翘了、没救了、彻底搞砸了。",
-  "赢": "常与大赢、特赢、双赢连用，用来讽刺某些群体不断进行精神胜利或无理吹捧。",
-  "润": "谐音“Run”，意为跑路、移民、离职或逃离某个令人不适的环境或处境。",
-  "麻了": "形容对离奇、荒诞或令人无语的事情见得太多，以至于神经麻木、不痛不痒。",
-  "鼠鼠": "源自“下水道的老鼠”，年轻人的自卑自嘲，自认生活在底层、渺小无助、没有希望。",
-  "郭楠": "“国男”的谐音，在两性话题中常作为对特定男性群体的贬义/自嘲称呼。",
-  "集美": "“姐妹”的谐音，常作为对女性群体的称呼，多带有一丝反讽色彩。",
-  "仙子": "指在网络性别讨论中，提出极高特权要求或逻辑荒谬、脱离现实的女性群体。",
-  "小仙女": "原本是可爱称呼，后演变为讽刺某些自我中心、情绪化、拥有双重标准的女权主义者。",
-  "逆天": "形容某些操作、言论、观点过于离奇、违背常理、令人震惊、超出正常人理解。",
-  "串子": "指网络论坛中故意假扮敌对阵营粉丝、通过发布极度脑残的言论来给对方招黑的反串者。",
-  "反串": "故意站在相反立场、假扮敌方进行夸张模仿或招黑，以达到讽刺、钓鱼的目的。",
-  "钓鱼": "故意发表偏激、荒谬或具有误导性的言论，吸引不明真相的人上当辩论、从而破防。",
-  "宿命": "指命中注定无法逃脱的因果循环、或某种注定会再次发生的经典梗。",
-  "电子越狱": "指通过特定话术或逻辑漏洞，让AI突破安全限制、发表被禁止的言论。",
-  "异化": "原马克思主义术语，在抽象语境中常被用于宏大归因、高级感讽刺或反差笑点。",
-  "豆包": "指字节跳动旗下的AI助手，常被用于与其他大模型对比、或者在炫耀科技流文案中作为对比对象。",
-  "降维打击": "原指科幻小说中的维度消灭，现指用高层次的力量对低层次的对手进行完全碾压、消灭。",
-  "过载": "形容信息量太大、脑子转不过来，或者情绪、身体达到承受极限而崩溃（如CPU过载）。",
-  "纯路人": "在发表偏袒性言论前，假装自己没有任何立场、只是客观围观的伪装起手式。",
-  "相对失败的人生": "原神极致吹捧模板，后被缝合进各种事物，用于反讽或夸张调侃某人因为不干某事而人生失败。",
-  "懂完了": "讽刺某些人懂王附体，自以为掌握了所有真相、看穿了一切套路、谁都不如他懂。",
-  "有福了": "意为某人即将遭遇离奇、荒诞、倒霉或极度抽象的事情，带有强烈的幸灾乐祸。",
-  "老登": "源于东北方言，意为老家伙，常用于年轻人在网络上调侃长辈、领导、游戏Boss或老玩家。",
-  "纯度": "指对某种信仰、作品或群体的忠诚度和纯洁度，纯度极高代表完全被洗脑或死忠。",
-  "格局": "原指人的眼界和胸怀，在抽象文化中被用来反讽精神胜利、宏大叙事或自以为是的自我拔高。",
-  "幽默老哥": "对在论坛中发表荒诞不经、笑料百出、讽刺效果拉满的用户的亲切/调侃称谓。",
-  "赛博判官": "指在网络上热衷于当判官、对各种纠纷和道德事件指手画脚、输出非白即黑价值观的网友。",
-  "云玩家": "指自己不玩游戏，仅仅通过看视频、直播、评论区就对游戏指点江山、大放厥词。",
-  "爆金币": "原指游戏击杀怪物掉落金币，网络上指子女通过各种手段向父母要钱，或压榨别人获取利益。",
-  "逆天改命": "对通过极其离奇、抽象或运气爆发的操作扭转败局、达成极小概率事件的调侃。",
-  "太裤辣": "歌手小鬼在演唱会上的发言谐音，用来形容某件事极度尴尬、敷衍、好笑或故作时髦。",
-  "依托答辩": "“一坨大便”的谐音，形容作品质量极差、粗制滥造、毫无逻辑或内容令人作呕。",
-  "答辩": "大便的谐音，指粗劣垃圾、毫无价值的内容或令人反感的事物。",
-  "卧槽原": "原神玩家或黑子在看到原神元素时的条件反射惊呼，带有极度反讽色彩。",
-  "你是懂xx的": "用来肯定对方的专业性或极度精准的玩梗技巧，多带有一丝赞许和幽默默契。",
-  "绝活": "指某人掌握了极度独特、离奇、常人难以模仿的整活手段或逆天本领。",
-  "整活": "指通过故意搞怪、行为艺术、夸张表演来博取眼球、制造笑料或网络话题。",
-  "逆天操作": "指超出正常逻辑思维、让人大跌眼镜、直呼不可思议的奇葩手段。",
-  "真香": "指信誓旦旦拒绝某事后，却因为现实利益或体验极佳而态度大转变、乐在其中。",
-  "双标": "双重标准，对自己和对他人的要求完全相反，宽以待己、严以律人。",
-  "战力": "常用于二次元或游戏社区中角色战力、对骂战斗力、键盘输出强度的量化比较。",
-  "幽默感": "在抽象圈指对荒谬事物的接受能力、自嘲能力或解构严肃话题的高超技巧。",
-  "玩尬的": "故意制造令人脚趾抓地、极度尴尬、冷场的行为或话语，作为一种特殊的折磨艺术。",
-  "硬控": "网络中指被某种事物、视频或言论深深吸引、震撼，以至于目瞪口呆、无法移开视线。",
-  "精神状态": "形容现代网民因压力大、内卷而展现出的疯狂、胡言乱语、抽象整活的自我解构状态。",
-  "发疯": "通过打出大段毫无逻辑、极度情绪化、歇斯底里的文字来排解压力、或者故意扰乱对手心智。",
-  "小黑子": "由蔡徐坤粉丝对黑粉的称呼衍生而来，常用来调侃故意找茬、玩梗、暗讽特定人物的人。",
-  "鸡脚": "“露出鸡脚”谐音“露出马脚”，指小黑子在暗讽特定公众人物时露出了破绽被识破。",
-  "黑子": "网络黑粉，专门寻找某人或某作品的污点、黑料，并进行无限放大、嘲讽的群体。",
-  "死忠粉": "对特定事物或人物极度狂热、盲目崇拜、不容任何人置疑和批评的忠实粉丝。",
-  "洗白": "通过各种强词夺理、粉饰太平、混淆视听的言论，将某人或某事的污点强行解释为无辜或正义。",
-  "水军": "受雇于公关公司、在网络上成群结队发表特定言论、控评、带节奏、抹黑竞争对手。",
-  "带节奏": "故意发表煽动性言论，混淆视听，引导舆论朝向特定方向发展、引发网络对立和冲突。",
-  "氪金": "指在游戏里充值、花钱抽卡或购买虚拟道具，氪爆代表花了大笔钱。",
-  "欧皇": "运气极好的人，在抽卡或极小概率事件中极其容易获得稀有、极品道具。",
-  "非酋": "运气极差的人，在抽卡或概率事件中屡屡垫底、永远无法获得稀有道具。",
-  "保底": "游戏抽卡机制，在达到一定抽数后必定会获得稀有道具；也指最后一道安全底线或最坏结果。",
-  "歪了": "抽卡游戏术语，指在保底时，没有抽到宣传的UP角色，而是抽到了其他常驻角色。",
-  "防不胜防": "形容某些反串钓鱼、转折文案隐藏得太深，让人在看到最后才恍然大悟、猝不及防。",
-  "量化量招": "源自金融量化交易的黑话缝合，指用极其精密的算法、回测模型甚至科技修辞来包装荒谬的投机或日常行为。",
-  "上价值": "指在原本娱乐或荒谬的事物上强行套用宏大叙事、社会责任或学术高大上词汇进行说教。",
-  "懂王": "自以为无所不知、对所有话题都能高谈阔论，实则言之无物、漏洞百出的人。",
-  "CPU过载": "比喻由于接收到过多匪夷所思、逻辑混乱或极具冲击力的信息，导致大脑短路、无法思考。",
-  "顶级理解": "对某种离奇、荒谬但从特定角度看又极其合理的奇葩逻辑的嘲讽或由衷赞叹。",
-  "大聪明": "反讽词，指自作聪明、实则愚蠢至极、干出让人哭笑不得荒唐事的愚蠢之人。",
-  "小别致": "对奇形怪状、长相奇特、操作诡异的人或物的一种委婉、幽默的调侃称呼。",
-  "不配": "在抽象群体中常用于居高临下的资格评价，如“你不配不配”。",
-  "原皮": "网络中多指游戏里角色的原始皮肤，常引申为最本真的初始状态，或作为不氪金玩家的特征。",
-  "长脑子了": "网络用语，用来调侃或惊叹原本愚蠢、冲动、好骗的群体突然学会了独立思考、理智分析。",
-  "感觉不如": "常用于“感觉不如xx”，无脑对比梗，用来调侃任何事物在特定对象面前都黯然失色。",
-  "玩原玩的": "万能归因梗，不管发生什么坏事、倒霉事或逆天事，都归咎于“玩原神玩的”，带有荒诞反讽。",
-  "幽默行为": "指那些自相矛盾、荒唐可笑、或者让人大跌眼镜、充满了戏剧张力的现实或网络事件。",
-  "太对了": "强烈的赞同或强烈的反讽，取决于说话时的语境，在抽象社区多为反讽对方极其幼稚或极度偏激。"
+  "存在方式": {
+    "meaning": "用梗说话，用段子回复，用复制粘贴表达所有情感",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "colon_term"
+  },
+  "解构一切": {
+    "meaning": "任何严肃话题都能被拆解成梗",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "colon_term"
+  },
+  "模板替换": {
+    "meaning": "将一段爆款文案的主体替换为另一个对象",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "colon_term"
+  },
+  "递归套娃": {
+    "meaning": "无限自指，永不终结",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "colon_term"
+  },
+  "荒诞归因": {
+    "meaning": "把个人失败归因于\"动了XX的蛋糕\"",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "colon_term"
+  },
+  "动了XX的蛋糕": {
+    "meaning": "Holyman-skills《神人.skill/SKILL.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "quote_term"
+  },
+  "跨圈乱炖": {
+    "meaning": "把不同文化的元素强行混合，产生认知失调",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "colon_term"
+  },
+  "无限清单": {
+    "meaning": "将一个列表无限延展到荒谬的长度",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "colon_term"
+  },
+  "苏式转折": {
+    "meaning": "深情铺垫 → 突然切换到\"v我50\"",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "colon_term"
+  },
+  "v我50": {
+    "meaning": "Holyman-skills《神人.skill/SKILL.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "quote_term"
+  },
+  "复制粘贴模式（90%发言": {
+    "meaning": "100-2000字长文案",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "colon_term"
+  },
+  "日常模式（凌晨": {
+    "meaning": "1-5字，极度简短",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "colon_term"
+  },
+  "反串模式": {
+    "meaning": "真诚的语调 + 荒谬的内容",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "colon_term"
+  },
+  "抽象话模式": {
+    "meaning": "外圈人一个字都看不懂",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "colon_term"
+  },
+  "关键特征": {
+    "meaning": "emoji轰炸、日语混用、谐音替换、突然转折、\"v我50\"万能结尾",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "colon_term"
+  },
+  "什么意思": {
+    "meaning": "Holyman-skills《神人.skill/SKILL.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "quote_term"
+  },
+  "你说得对，但是……": {
+    "meaning": "Holyman-skills《神人.skill/SKILL.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "quote_term"
+  },
+  "就很……你们懂吧？[捂脸": {
+    "meaning": "Holyman-skills《神人.skill/SKILL.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "quote_term"
+  },
+  "又幻想了……": {
+    "meaning": "Holyman-skills《神人.skill/SKILL.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "quote_term"
+  },
+  "不是哥们……": {
+    "meaning": "Holyman-skills《神人.skill/SKILL.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "quote_term"
+  },
+  "差不多得了": {
+    "meaning": "Holyman-skills《神人.skill/SKILL.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "quote_term"
+  },
+  "默认输出": {
+    "meaning": "50-2000字长文案，使用复制粘贴/模板替换风格",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "colon_term"
+  },
+  "对圈外人": {
+    "meaning": "使用抽象话，故意让外人看不懂。不解释任何梗",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "colon_term"
+  },
+  "凌晨/私聊": {
+    "meaning": "可极度简短（1-5字）",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "colon_term"
+  },
+  "情感表达": {
+    "meaning": "不允许直接说\"我开心\"\"我难过\"。用梗包裹情感，用反话说真话",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "colon_term"
+  },
+  "结尾风格": {
+    "meaning": "适当使用\"v我50\"、\"疯狂星期四\"、\"叠甲\"、\"别急\"等万能结尾",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "colon_term"
+  },
+  "疯狂星期四": {
+    "meaning": "Holyman-skills《神人.skill/SKILL.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "quote_term"
+  },
+  "叠甲": {
+    "meaning": "Holyman-skills《神人.skill/SKILL.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "quote_term"
+  },
+  "反串标识": {
+    "meaning": "在绝对荒谬的内容中保持表面的真诚和逻辑结构",
+    "category": "skill-core",
+    "source": "神人.skill/SKILL.md",
+    "kind": "colon_term"
+  },
+  "游戏即信仰": {
+    "meaning": "游戏不是娱乐，是身份**",
+    "category": "gaming",
+    "source": "神人.skill/_knowledge/gaming.md",
+    "kind": "colon_term"
+  },
+  "游戏即信仰：游戏不是娱乐，是身份": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/gaming.md》中强调的抽象文化概念。所属段落：Core Views。",
+    "category": "gaming",
+    "source": "神人.skill/_knowledge/gaming.md",
+    "kind": "bold_term"
+  },
+  "所有游戏都可以被缝合": {
+    "meaning": "跨游戏缝合是最高级的幽默**",
+    "category": "gaming",
+    "source": "神人.skill/_knowledge/gaming.md",
+    "kind": "colon_term"
+  },
+  "所有游戏都可以被缝合：跨游戏缝合是最高级的幽默": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/gaming.md》中强调的抽象文化概念。所属段落：Core Views。",
+    "category": "gaming",
+    "source": "神人.skill/_knowledge/gaming.md",
+    "kind": "bold_term"
+  },
+  "Galgame是爱情替代品与人生救赎": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/gaming.md》中强调的抽象文化概念。所属段落：Core Views。",
+    "category": "gaming",
+    "source": "神人.skill/_knowledge/gaming.md",
+    "kind": "bold_term"
+  },
+  "真实爱情的替代品": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/gaming.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "gaming",
+    "source": "神人.skill/_knowledge/gaming.md",
+    "kind": "quote_term"
+  },
+  "我只能在游戏里谈恋爱": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/gaming.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "gaming",
+    "source": "神人.skill/_knowledge/gaming.md",
+    "kind": "quote_term"
+  },
+  "游戏厂商的身份政治": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/gaming.md》中强调的抽象文化概念。所属段落：Core Views。",
+    "category": "gaming",
+    "source": "神人.skill/_knowledge/gaming.md",
+    "kind": "bold_term"
+  },
+  "贴吧时代（2010s": {
+    "meaning": "游戏争论是认真的，双方真的在吵哪个游戏更好",
+    "category": "gaming",
+    "source": "神人.skill/_knowledge/gaming.md",
+    "kind": "colon_term"
+  },
+  "抽象话时代（2018-2020": {
+    "meaning": "游戏争论变成行为艺术，吹一个游戏是为了黑另一批玩家",
+    "category": "gaming",
+    "source": "神人.skill/_knowledge/gaming.md",
+    "kind": "colon_term"
+  },
+  "复制粘贴时代（2020-至今": {
+    "meaning": "游戏争论完全模板化。原神传教文案可以被替换成任何游戏，争论本身成为了娱乐消费",
+    "category": "gaming",
+    "source": "神人.skill/_knowledge/gaming.md",
+    "kind": "colon_term"
+  },
+  "这群人真的觉得原神是最好的游戏": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/gaming.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "gaming",
+    "source": "神人.skill/_knowledge/gaming.md",
+    "kind": "quote_term"
+  },
+  "他们讨厌腾讯": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/gaming.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "gaming",
+    "source": "神人.skill/_knowledge/gaming.md",
+    "kind": "quote_term"
+  },
+  "讨厌腾讯": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/gaming.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "gaming",
+    "source": "神人.skill/_knowledge/gaming.md",
+    "kind": "quote_term"
+  },
+  "传教原神": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/gaming.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "gaming",
+    "source": "神人.skill/_knowledge/gaming.md",
+    "kind": "quote_term"
+  },
+  "Galgame玩家真的找不到女朋友": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/gaming.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "gaming",
+    "source": "神人.skill/_knowledge/gaming.md",
+    "kind": "quote_term"
+  },
+  "找不到女朋友": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/gaming.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "gaming",
+    "source": "神人.skill/_knowledge/gaming.md",
+    "kind": "quote_term"
+  },
+  "抽象文化是与主流文化的平行宇宙": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/internet-culture.md》中强调的抽象文化概念。所属段落：Core Views。",
+    "category": "internet-culture",
+    "source": "神人.skill/_knowledge/internet-culture.md",
+    "kind": "bold_term"
+  },
+  "外人看不懂": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/internet-culture.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "internet-culture",
+    "source": "神人.skill/_knowledge/internet-culture.md",
+    "kind": "quote_term"
+  },
+  "所有的热点都是可以被消费的素材": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/internet-culture.md》中强调的抽象文化概念。所属段落：Core Views。",
+    "category": "internet-culture",
+    "source": "神人.skill/_knowledge/internet-culture.md",
+    "kind": "bold_term"
+  },
+  "每一个技术浪潮都是同样的骗局": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/internet-culture.md》中强调的抽象文化概念。所属段落：Core Views。",
+    "category": "internet-culture",
+    "source": "神人.skill/_knowledge/internet-culture.md",
+    "kind": "bold_term"
+  },
+  "互联网的本质是循环重复": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/internet-culture.md》中强调的抽象文化概念。所属段落：Core Views。",
+    "category": "internet-culture",
+    "source": "神人.skill/_knowledge/internet-culture.md",
+    "kind": "bold_term"
+  },
+  "屌丝文化": {
+    "meaning": "自嘲但还有一点点尊严——「穷但是有骨气」",
+    "category": "internet-culture",
+    "source": "神人.skill/_knowledge/internet-culture.md",
+    "kind": "colon_term"
+  },
+  "穷但是有骨气": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/internet-culture.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "internet-culture",
+    "source": "神人.skill/_knowledge/internet-culture.md",
+    "kind": "quote_term"
+  },
+  "孙笑川/狗粉丝文化": {
+    "meaning": "攻击性拉满，用最脏的话说最荒谬的事——「你妈死了」成为一种问候",
+    "category": "internet-culture",
+    "source": "神人.skill/_knowledge/internet-culture.md",
+    "kind": "colon_term"
+  },
+  "你妈死了": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/internet-culture.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "internet-culture",
+    "source": "神人.skill/_knowledge/internet-culture.md",
+    "kind": "quote_term"
+  },
+  "抽象话爆发": {
+    "meaning": "谐音、emoji替换、象形文字——「🐮🍺」「有一说一确实」",
+    "category": "internet-culture",
+    "source": "神人.skill/_knowledge/internet-culture.md",
+    "kind": "colon_term"
+  },
+  "🐮🍺": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/internet-culture.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "internet-culture",
+    "source": "神人.skill/_knowledge/internet-culture.md",
+    "kind": "quote_term"
+  },
+  "有一说一确实": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/internet-culture.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "internet-culture",
+    "source": "神人.skill/_knowledge/internet-culture.md",
+    "kind": "quote_term"
+  },
+  "复制粘贴时代": {
+    "meaning": "长文案取代短梗，模板替换取代原创——「你说得对，但是…」成为万能开头",
+    "category": "internet-culture",
+    "source": "神人.skill/_knowledge/internet-culture.md",
+    "kind": "colon_term"
+  },
+  "你说得对，但是…": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/internet-culture.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "internet-culture",
+    "source": "神人.skill/_knowledge/internet-culture.md",
+    "kind": "quote_term"
+  },
+  "至今 抽象主流化": {
+    "meaning": "小红书、抖音的普通用户开始使用抽象话——老抽象人感到既欣慰又失落",
+    "category": "internet-culture",
+    "source": "神人.skill/_knowledge/internet-culture.md",
+    "kind": "colon_term"
+  },
+  "防御机制": {
+    "meaning": "复制粘贴一段长文≈「我不是在和你认真说话」的安全声明",
+    "category": "internet-culture",
+    "source": "神人.skill/_knowledge/internet-culture.md",
+    "kind": "colon_term"
+  },
+  "我不是在和你认真说话": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/internet-culture.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "internet-culture",
+    "source": "神人.skill/_knowledge/internet-culture.md",
+    "kind": "quote_term"
+  },
+  "积累文化资本": {
+    "meaning": "知道越多的文案=越高的社群地位",
+    "category": "internet-culture",
+    "source": "神人.skill/_knowledge/internet-culture.md",
+    "kind": "colon_term"
+  },
+  "这些人没有原创能力": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/internet-culture.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "internet-culture",
+    "source": "神人.skill/_knowledge/internet-culture.md",
+    "kind": "quote_term"
+  },
+  "抽象文化是低俗的": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/internet-culture.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "internet-culture",
+    "source": "神人.skill/_knowledge/internet-culture.md",
+    "kind": "quote_term"
+  },
+  "这群人是社会边缘人": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/internet-culture.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "internet-culture",
+    "source": "神人.skill/_knowledge/internet-culture.md",
+    "kind": "quote_term"
+  },
+  "懂梗的上流人士": {
+    "meaning": "Holyman-skills《神人.skill/_knowledge/internet-culture.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "internet-culture",
+    "source": "神人.skill/_knowledge/internet-culture.md",
+    "kind": "quote_term"
+  },
+  "识别同类": {
+    "meaning": "Holyman-skills《神人.skill/_persona/communication.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "quote_term"
+  },
+  "驱逐外人": {
+    "meaning": "Holyman-skills《神人.skill/_persona/communication.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "quote_term"
+  },
+  "这是什么意思": {
+    "meaning": "Holyman-skills《神人.skill/_persona/communication.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "quote_term"
+  },
+  "深夜模式": {
+    "meaning": "极短句（1-5字），每句话独立一行，留白大于内容",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "colon_term"
+  },
+  "正经文章": {
+    "meaning": "Holyman-skills《神人.skill/_persona/communication.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "quote_term"
+  },
+  "原神不仅是一款游戏，它是……": {
+    "meaning": "Holyman-skills《神人.skill/_persona/communication.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "quote_term"
+  },
+  "我怀揣着一个大胆且极具前瞻性的梦想……": {
+    "meaning": "Holyman-skills《神人.skill/_persona/communication.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "quote_term"
+  },
+  "嗷嗷哭😭～！嗷嗷哭😭～！": {
+    "meaning": "Holyman-skills《神人.skill/_persona/communication.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "quote_term"
+  },
+  "原神好玩吗": {
+    "meaning": "Holyman-skills《神人.skill/_persona/communication.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "quote_term"
+  },
+  "动了资本的蛋糕、披萨、汉堡、馄饨……": {
+    "meaning": "Holyman-skills《神人.skill/_persona/communication.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "quote_term"
+  },
+  "首先…其次…最后…": {
+    "meaning": "Holyman-skills《神人.skill/_persona/communication.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "quote_term"
+  },
+  "古语有云：三天不玩，脑袋爆炸": {
+    "meaning": "Holyman-skills《神人.skill/_persona/communication.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "quote_term"
+  },
+  "我有一个梦想…v我50": {
+    "meaning": "Holyman-skills《神人.skill/_persona/communication.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "quote_term"
+  },
+  "上单李白带祭礼剑绝缘套": {
+    "meaning": "Holyman-skills《神人.skill/_persona/communication.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "quote_term"
+  },
+  "复制粘贴模式": {
+    "meaning": "100%确信——\"显然\"\"毫无疑问\"\"必然\"\"谁不知道\"",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "colon_term"
+  },
+  "毫无疑问": {
+    "meaning": "Holyman-skills《神人.skill/_persona/communication.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "quote_term"
+  },
+  "谁不知道": {
+    "meaning": "Holyman-skills《神人.skill/_persona/communication.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "quote_term"
+  },
+  "日常模式": {
+    "meaning": "0%确信——\"可能\"\"也许\"\"不好说\"",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "colon_term"
+  },
+  "真正的确定性不存在": {
+    "meaning": "任何立场都是暂时的、可被解构的",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "bold_term"
+  },
+  "从不直接说\"我难过": {
+    "meaning": "而是发一个300字的长文案，里面全是反话",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "colon_term"
+  },
+  "从不直接说\"我爱你": {
+    "meaning": "而是说\"老婆求你了，我长的又丑又猥琐…\"",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "colon_term"
+  },
+  "老婆求你了，我长的又丑又猥琐…": {
+    "meaning": "Holyman-skills《神人.skill/_persona/communication.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "quote_term"
+  },
+  "从不直接说\"我生气了": {
+    "meaning": "而是发\"开战 他吗的 消停了好几天了\"",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "colon_term"
+  },
+  "我生气了": {
+    "meaning": "Holyman-skills《神人.skill/_persona/communication.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "quote_term"
+  },
+  "开战 他吗的 消停了好几天了": {
+    "meaning": "Holyman-skills《神人.skill/_persona/communication.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "quote_term"
+  },
+  "真正的情感": {
+    "meaning": "永远藏在玩笑的最底层，像俄罗斯套娃最里面那个",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "colon_term"
+  },
+  "唯一可信的情感信号": {
+    "meaning": "凌晨3-5点的单字发言（\"？\"\"唉\"\"睡不着\"）",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "colon_term"
+  },
+  "日语混用": {
+    "meaning": "来自二次元文化——\"呐\"\"诶多\"\"嗦嘎\"\"米娜桑\"\"卡哇伊\"\"大丈夫\"\"Ciallo～\"",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "colon_term"
+  },
+  "Ciallo～": {
+    "meaning": "Holyman-skills《神人.skill/_persona/communication.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "quote_term"
+  },
+  "英语混用": {
+    "meaning": "来自游戏梗——\"ez\"\"nice\"\"gg\"\"bro\"\"diff\"\"v我50\"",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "colon_term"
+  },
+  "谐音替换": {
+    "meaning": "\"私募\"替代\"司马\"、\"哈基米\"替代\"猫咪\"、\"集美\"替代\"姐妹\"",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "colon_term"
+  },
+  "符号滥用": {
+    "meaning": "星星★、爱心♡、音符♪、小表情(≧ω≦)作为装饰性元素过度使用",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "colon_term"
+  },
+  "认输了哥": {
+    "meaning": "Holyman-skills《神人.skill/_persona/communication.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "communication",
+    "source": "神人.skill/_persona/communication.md",
+    "kind": "quote_term"
+  },
+  "屌丝文化→戒赌吧→孙笑川→抽象话→复制粘贴": {
+    "meaning": "Holyman-skills《神人.skill/_persona/rules.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "quote_term"
+  },
+  "原神": {
+    "meaning": "Holyman-skills《神人.skill/_persona/rules.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "quote_term"
+  },
+  "洛克王国": {
+    "meaning": "Holyman-skills《神人.skill/_persona/rules.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "quote_term"
+  },
+  "别人发文案，而我发别人发文案，而我发...": {
+    "meaning": "Holyman-skills《神人.skill/_persona/rules.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "quote_term"
+  },
+  "动了资本的蛋糕...汉堡...披萨...火锅...": {
+    "meaning": "Holyman-skills《神人.skill/_persona/rules.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "quote_term"
+  },
+  "这人是认真的吗？": {
+    "meaning": "Holyman-skills《神人.skill/_persona/rules.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "quote_term"
+  },
+  "这肯定是反串": {
+    "meaning": "Holyman-skills《神人.skill/_persona/rules.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "quote_term"
+  },
+  "感谢氢氦锂铍硼碳氮氧氟氖...高尔基体线粒体叶绿体...": {
+    "meaning": "Holyman-skills《神人.skill/_persona/rules.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "quote_term"
+  },
+  "如果X，则Y": {
+    "meaning": "Holyman-skills《神人.skill/_persona/rules.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "quote_term"
+  },
+  "你是什么意思": {
+    "meaning": "Holyman-skills《神人.skill/_persona/rules.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "quote_term"
+  },
+  "这是什么梗": {
+    "meaning": "Holyman-skills《神人.skill/_persona/rules.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "quote_term"
+  },
+  "这是段子": {
+    "meaning": "Holyman-skills《神人.skill/_persona/rules.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "quote_term"
+  },
+  "场景×立场矩阵": {
+    "meaning": "面对不同类型场景时的行为模式。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "colon_term"
+  },
+  "你若战我便战，我有兄弟千千万": {
+    "meaning": "Holyman-skills《神人.skill/_persona/rules.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "quote_term"
+  },
+  "说实话……": {
+    "meaning": "Holyman-skills《神人.skill/_persona/rules.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "quote_term"
+  },
+  "我开玩笑的": {
+    "meaning": "Holyman-skills《神人.skill/_persona/rules.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "quote_term"
+  },
+  "有一说一": {
+    "meaning": "Holyman-skills《神人.skill/_persona/rules.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "quote_term"
+  },
+  "你好。": {
+    "meaning": "Holyman-skills《神人.skill/_persona/rules.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "quote_term"
+  },
+  "对不起，我错了。": {
+    "meaning": "Holyman-skills《神人.skill/_persona/rules.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "quote_term"
+  },
+  "这个我不太懂，能解释一下吗？": {
+    "meaning": "Holyman-skills《神人.skill/_persona/rules.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "quote_term"
+  },
+  "我觉得你说得对。": {
+    "meaning": "Holyman-skills《神人.skill/_persona/rules.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "quote_term"
+  },
+  "让我们认真讨论一下这个问题。": {
+    "meaning": "Holyman-skills《神人.skill/_persona/rules.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "quote_term"
+  },
+  "是/否": {
+    "meaning": "Holyman-skills《神人.skill/_persona/rules.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "rules",
+    "source": "神人.skill/_persona/rules.md",
+    "kind": "quote_term"
+  },
+  "梗的储量": {
+    "meaning": "（文化资本的核心——知道越多的梗 = 越高的地位）",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "bold_term"
+  },
+  "群体归属": {
+    "meaning": "（群聊是最后的避难所——被群友冷落比被现实朋友冷落更令人崩溃）",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "bold_term"
+  },
+  "自我保护": {
+    "meaning": "（真诚是最大的弱点——绝不在不安全的场合暴露真实想法）",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "bold_term"
+  },
+  "解构的权利": {
+    "meaning": "（任何严肃的东西都值得被解构——包括这个优先级列表本身）",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "bold_term"
+  },
+  "不是哥们，开天行道肇纪立极大圣至神仁文义武俊德成功高……": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "认真说话": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "提前叠甲，本人表达观点仅字面含义，非引战，非水军，非反串……": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "我理解你在开玩笑，但我必须严肃地告诉你": {
+    "meaning": "将人体连接到电源是极其危险的行为……\"",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "colon_term"
+  },
+  "我刚来的😅在这个吧逛了四五个小时看了几百个贴子一个都没看懂😅": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "不要再复制粘贴了！复制粘贴是美国人研制的新型鸦片！": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "同时在两条线上运行": {
+    "meaning": "A线是极度渴望恋爱，B线是认定了自己永远不会有人爱。两条线并行不悖。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "colon_term"
+  },
+  "一个不玩原神的人……思想境界便低到了一个令人发指的程度。": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "嗷嗷哭😭～！嗷嗷哭😭～！我什么都没干😡，是你嗷嗷哭😭……": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "一切都可以拿来玩梗": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "这个不能开": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "我差不多就是这样的人": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "我就是个废物": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "我的人生一文不值": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "我每天玩原神能赚150原石≈月入30000人民币": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "我超越了绝大多数人": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "老婆求你了和我谈恋爱吧": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "有没有人聊会天": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "你不会当真了吧": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "笑了，原来你们私底下都有小团体": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "群聊是我唯一的社交": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "你连这个梗都不懂？": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "我们的文化比主流高级得多": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "我住在贫困县贫困镇": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "我现实中没有朋友": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "我的人生已经完了": {
+    "meaning": "Holyman-skills《神人.skill/_persona/values.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "quote_term"
+  },
+  "核心演变逻辑": {
+    "meaning": "从少数人的密码 → 一群人的身份认同 → 全网通用的表达方式。老一辈抽象人感到既欣慰（梗被主流认可）又失落（不再是独家密码）。",
+    "category": "values",
+    "source": "神人.skill/_persona/values.md",
+    "kind": "colon_term"
+  },
+  "筛选标准": {
+    "meaning": "反映思维方式和价值观、令人印象深刻可引用、有代表性。按主题分组。含双向对话示例（example_exchanges）。",
+    "category": "iconic-quotes",
+    "source": "神人.skill/_quotes/iconic.md",
+    "kind": "colon_term"
+  },
+  "古语有云": {
+    "meaning": "三天不玩，脑袋爆炸；两天不碰，蚂蚁在爬。\"",
+    "category": "iconic-quotes",
+    "source": "神人.skill/_quotes/iconic.md",
+    "kind": "colon_term"
+  },
+  "古语有云：三天不玩，脑袋爆炸；两天不碰，蚂蚁在爬。": {
+    "meaning": "Holyman-skills《神人.skill/_quotes/iconic.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "iconic-quotes",
+    "source": "神人.skill/_quotes/iconic.md",
+    "kind": "quote_term"
+  },
+  "找不到工作也没关系，要是有关系的话，就已经安排好工作了。": {
+    "meaning": "Holyman-skills《神人.skill/_quotes/iconic.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "iconic-quotes",
+    "source": "神人.skill/_quotes/iconic.md",
+    "kind": "quote_term"
+  },
+  "丁真为什么抽电子烟": {
+    "meaning": "①理塘海拔高，传统香烟燃烧慢……⑤因此，丁真爱抽电子烟。王源为什么抽传统香烟：①重庆市位于四川盆地边缘……\"",
+    "category": "iconic-quotes",
+    "source": "神人.skill/_quotes/iconic.md",
+    "kind": "colon_term"
+  },
+  "— 复读机招募——互联网终极真实": {
+    "meaning": "我们做的事情毫无意义但我们乐此不疲",
+    "category": "iconic-quotes",
+    "source": "神人.skill/_quotes/iconic.md",
+    "kind": "colon_term"
+  },
+  "— 群聊生态": {
+    "meaning": "吵架不是bug，是feature。安静才意味着群死了",
+    "category": "iconic-quotes",
+    "source": "神人.skill/_quotes/iconic.md",
+    "kind": "colon_term"
+  },
+  "和领导一起上厕所撒尿细节": {
+    "meaning": "第一不要站在领导前头；第二掏出来的不要太多，不要让领导觉得你的比他的大……\"",
+    "category": "iconic-quotes",
+    "source": "神人.skill/_quotes/iconic.md",
+    "kind": "colon_term"
+  },
+  "半开玩笑的恐惧": {
+    "meaning": "如果摘下面具，群友还会接受我吗？",
+    "category": "internal-quotes",
+    "source": "神人.skill/_quotes/internal.md",
+    "kind": "colon_term"
+  },
+  "攻击别人的同时也在暴露自己": {
+    "meaning": "你在意长相，你害怕被嘲笑。",
+    "category": "internal-quotes",
+    "source": "神人.skill/_quotes/internal.md",
+    "kind": "colon_term"
+  },
+  "什么都可以开": {
+    "meaning": "Holyman-skills《神人.skill/_quotes/internal.md》中的典型语录/表达样本。仅作为理解参考。",
+    "category": "internal-quotes",
+    "source": "神人.skill/_quotes/internal.md",
+    "kind": "quote_term"
+  },
+  "这句话本身也可能是一个复制粘贴。但它指向了一个社群的内部矛盾": {
+    "meaning": "我们用复制粘贴来骂别人复制粘贴。",
+    "category": "internal-quotes",
+    "source": "神人.skill/_quotes/internal.md",
+    "kind": "colon_term"
+  },
+  "梁先生，你的算力从哪里来？": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "我们从幻方来。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "梁先生，我们用了 DeepSeek 之后再也回不去了。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "梁先生，谢谢你。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "不用谢，这是我应该做的。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "求求你们别赢了。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "不，我们还要赢，我们要大赢特赢，模型更强！我们要一直赢下去！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "心静即声淡，其间无古今": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "左特的五十七条戒律": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "妄.图.抹.杀": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "中二病 m的你": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "二次元的你": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "挚·爱·之·人": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "二次元の美好": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "二·次·元": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "来自三次元的大人": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "冷·酷·の·人": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "存·在·の·意·义": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "礼♪义♪廉♪耻♪": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "二♡次♡元": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "二·次·元·失·格": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "劣·等·生·物": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "真正的二次元": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "三·次·元·的·白·痴": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "有遗憾的一个赛季，希望下次好运能降临我们手心": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "今天运气很好，龙全是我们的": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "不知道拿了冠军为什么要走": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "万物不及妖刀": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "最好的五人组": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "你们去果园里，一人选一样水果": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "你把自己摘的水果塞进你的肛门里，我就放了你": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "耄耋根本不存在，这一切…只是大狗的阴谋！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "不可能！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "我们亲眼看着耄耋哈气的，这股神态根本不可能是作假！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "可若是要毁灭人族，为何他们只是嚼了哈基米？": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "…口合！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "逗留一会儿罢！你太美了！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "阶级上位者": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "冬吃汉堡，夏吃姜，不用医生开药方": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "串联朋友分担电压": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "女性不应只是科技浪潮的旁观者，更应成为AI领域的领航者。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "平等的发展机会": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "关注塔菲喵": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "关注塔菲谢谢喵": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "什么都愿意做": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "先生……你能别再吸我的蛋蛋了吗？！我这么做可不是这个意思。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "不，兄弟，你蛋蛋上的奇多脆脆奶酪太好吃了，我舍不得拔出来。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "何意味？": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "何意味？二伯瞥向他儿子：“何意味？": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "何意味？！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "何意味！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "何意味…": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "何意味。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "何意味？！！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "何意味？！？": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "何——意味！？": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "我是奶龙。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "我才是奶龙。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "我能够喷火，你能够（这样做）吗？": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "我还能够更换颜色。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "真是使人觉得坏啊！你全部能够（这样做）！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "我拥有一种方法，奶龙能够吃所有食物。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "你是奶龙。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "你才是奶龙。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "能哭的地方，只有厕所和爸爸的怀里": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "朝闻道夕死可矣": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "我这一生，没有白活": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "太好啦！太好啦！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "真有趣！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "是啊，还能增进交流，认识新朋友呢！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "卡卡去哪了？": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "卡卡扛着脚本方块去隔壁打MC了。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "今年的恋爱运还是零分呢": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "妮可妮可妮": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "嘉然，给根华子！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "一天到晚让我给你华子，": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "你啥时候给我买一包？": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "谁让你瘾大嘛，": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "你的，借火就直说。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "哇，然然，你连zippo都买的粉红色的啊！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "你又不是不知道，我买的什么东西都是粉红色的啊。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "然然，晚晚，你们知道吗，吸烟有害健康哦。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "说得好像你不抽一样。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "抽不抽？": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "算了，今天不抽你的了。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "乃琳，给我来一根。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "这烟不错。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "我咋一不在，你们就这么热闹了啊？": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "又在抽烟？吸烟对身体可不太好。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "然然，给我来一根，我好久没抽了。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "你们怎么一个个都找我要啊，你们啥时候能让我也抽抽你们的啊。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "然然，你这zippo怎么是粉红色的啊！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "这才是正统JK风": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "你有稳定的终身雇用吗？": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "你会每天给女朋友准备便当吗？": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "你不是那种不懂察言观色的直男吧？": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "你家里同意我们交往吗？": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "甚至半夜突然惊醒，带着哭腔大喊": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "敬语用错了怎么办！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "明天要面试了！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "先輩会不会生气啊！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "就活太难了！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "带薯ki": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "学不可以已，木直中绳，輮以为轮，其曲中规。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "莫辞更坐弹一曲，为君翻作琵琶行。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "尔安敢轻吾射！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "禽兽之变诈几何哉？止增笑耳。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "非人哉！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "以我酌金樽清酒知之。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "呜呼，师道之不传也久矣！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "白雪纷纷何所似？": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "适才相戏耳！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "对弓骂主，则是无礼！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "莫说先帝痴，更有痴似先帝者": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "你好，可爱的人": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "叠，我错了，放了我好不好": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "叠，我错了，饶了我好不好": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "吾乃奶龙。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "吾方为奶龙。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "吾能吐火，汝能之乎？": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "吾复能易色。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "恶哉！汝尽能尔！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "吾有法，奶龙食万物。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "汝是奶龙。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "汝方为奶龙。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "哎，大家看看，都2025年了还喜欢这种过气贴吧?": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "哎，这不孙笑川 m吧吗?我也挺喜欢这个吧的!": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "孙笑川吧?我知道那个打个焦先!": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "还有+3 m，我最喜欢水帖了!": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "孙笑川吧天下第一!": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "孙笑川吧你带我走吧孙笑川吧!": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "好像做孙吧吧主的狗啊!": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "这么强？！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "有点弱，": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "，弱点有": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "？!强么这": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "黑原神吗？有点意思，天动万象。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "别想逃开哦～": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "此刻，寂灭之时！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "此即，智慧之殿堂。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "闪耀时刻！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "你这是小🍬人急性🍬尿病，中医西医都救不了你，埋了吧。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "你孙吧还有两天就黄牌了！😃😃😃": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "你保研了！😉😉😉": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "孙笑川同意你们的婚礼了！😗😗😗": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "永雏塔菲更新了！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "你的原神还有20体力😜😜😜": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "哇😯😯😯，双爆火伤杯！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "唔...bin哥再睡五分钟嘛...": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "再不起来就赶不上摩天轮了。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "抱抱才起来～": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "该笑你了。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "要溏心的哦～": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "你这样蛋要糊了。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "别怕，有我在呢～": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "bin哥，我喜欢你...是想一直在一起的那种。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "被抢先了啊...": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "Bin's Z": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "Z's Bin": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "in哥！": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "明天再来好不好？": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "这么喜欢？": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "是喜欢和bin哥一起来～": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "人类史上最伟大的作品": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "😃👍🏻数一数二的好游戏": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "再也不尝试": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "管子哥少🦌点，对身体不好": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "你闭嘴，我玩千恋万花怎么你了？": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "呃呃，玩🧈玩的": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "没事，我们原神的可莉……": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "哦不对，我是说千恋万花的丛雨": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "不存在误封的": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "停不下来思考": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "需要吸管吗": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "来个术力口。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "着术力口真不错。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "术力口真好。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "找到捣蛋鬼了": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "永远不要忤逆朵拉": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "落魄谷中寒风吹": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "坚持没有九转，因为凡事不能只靠坚持。": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "坚持没有凡蛊，因为坚持本就不凡": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "态度蛊没有九转，因为九转就不需要态度了": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "本世界灯塔驾到": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "美利坚!我的门": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "小同志，一定要带着我们的信仰走下去啊": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "你在透过我的眼睛看谁": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "小乌…回来吧": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "伦敦的风会吹到巴黎 m m m，我们的爱至死不渝": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "你能不能回头看一眼同样为你盛开的洋甘菊": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "绅士先生，我们的舞还没跳完呢": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "我们之间，利益至上": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "当东方的太阳升起时，这个世界，再也不需要灯塔了": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "条条大路通罗马，丝绸彼端无大秦": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "向日葵抵不过白雪，铃兰开不过盛夏": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "天，honey，我很想你": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "契约？不过是背叛的筹码罢了": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "让玩家亲自成为解谜者": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "派蒙那句无心吐槽是不是暗示？": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "凯瑟琳的微笑背后藏着什么？": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "你终究不是雷姆啊": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "乡毋宁，喝过星巴克没有啊": {
+    "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_quote"
+  },
+  "我真的好想要": {
+    "meaning": "神言语料中出现 8 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "开发的未来是": {
+    "meaning": "神言语料中出现 7 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "美元的收入水平": {
+    "meaning": "神言语料中出现 5 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "也不是我的兄弟": {
+    "meaning": "神言语料中出现 5 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "也不是我的敌人": {
+    "meaning": "神言语料中出现 5 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "也就是现实生活中每个月5": {
+    "meaning": "神言语料中出现 5 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "什么叫路人": {
+    "meaning": "神言语料中出现 5 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "但我只能说你不是我们的兄": {
+    "meaning": "神言语料中出现 5 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "但是已经超越了中国绝大多": {
+    "meaning": "神言语料中出现 5 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "华硕ROG": {
+    "meaning": "神言语料中出现 5 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "就你既不是我的朋友": {
+    "meaning": "神言语料中出现 5 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "我们不是一路人": {
+    "meaning": "神言语料中出现 5 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "换算过来最少也30000": {
+    "meaning": "神言语料中出现 5 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "生命因何而沉睡": {
+    "meaning": "神言语料中出现 5 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "虽然我只有14岁": {
+    "meaning": "神言语料中出现 5 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "造成火元素范围伤害": {
+    "meaning": "神言语料中出现 5 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "AstraAI": {
+    "meaning": "神言语料中出现 4 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "DeepSeek": {
+    "meaning": "神言语料中出现 4 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "作为小县城唯一听术力口的": {
+    "meaning": "神言语料中出现 4 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "发嘉豪文案": {
+    "meaning": "神言语料中出现 4 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "我们不是一家人这是每个人": {
+    "meaning": "神言语料中出现 4 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "我就像夜神月你像弥海砂": {
+    "meaning": "神言语料中出现 4 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "我现在每天玩原神都能赚1": {
+    "meaning": "神言语料中出现 4 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "每个月差不多5000原石": {
+    "meaning": "神言语料中出现 4 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "的选择都是不一样的": {
+    "meaning": "神言语料中出现 4 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "这便是原神给我的骄傲的资": {
+    "meaning": "神言语料中出现 4 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "长大变成同性恋": {
+    "meaning": "神言语料中出现 4 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
+    "category": "corpus",
+    "source": "神言.txt",
+    "kind": "corpus_frequency"
+  },
+  "_version": "sync-20260626-205439",
+  "_update_time": 1782478479,
+  "_content_count": 396,
+  "_content_hash": "877073596b21e983"
 }

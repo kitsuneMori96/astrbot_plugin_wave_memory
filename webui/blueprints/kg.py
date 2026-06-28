@@ -29,6 +29,30 @@ def _table_exists(conn, table: str) -> bool:
     return row is not None
 
 
+def _table_columns(conn, table: str) -> set[str]:
+    """返回表字段集合；旧库/缺表时安全降级。"""
+    if not _table_exists(conn, table):
+        return set()
+    try:
+        return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    except Exception:
+        return set()
+
+
+def _json_loads_safe(value, default=None):
+    """解析 JSON 字符串，失败时返回 default。"""
+    if default is None:
+        default = {}
+    if value in (None, ""):
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(value)
+    except Exception:
+        return default
+
+
 @kg_bp.route("/overview")
 @require_auth
 async def overview():
@@ -423,9 +447,11 @@ async def kg_stats():
 async def kg_config():
     """图谱可用的筛选选项(供前端配置面板)。"""
     c = get_container()
-    rel_types = [r[0] for r in c.db.conn.execute(
-        "SELECT DISTINCT relation_type FROM tag_relations WHERE relation_type IS NOT NULL ORDER BY relation_type"
-    ).fetchall()]
+    rel_types = []
+    if _table_exists(c.db.conn, "tag_relations"):
+        rel_types = [r[0] for r in c.db.conn.execute(
+            "SELECT DISTINCT relation_type FROM tag_relations WHERE relation_type IS NOT NULL ORDER BY relation_type"
+        ).fetchall()]
     rel_types += ["fact"]
     node_types = ["person", "topic", "entity", "event", "emotion", "fact", "location", "time", "memory", "belief", "concern", "jargon", "community", "affinity", "source"]
     return jsonify({
@@ -524,32 +550,86 @@ def build_full_graph_data(layers_raw: str = "facts", *, use_cache: bool = True) 
 
     # ─── 图层: facts (facts + tag_relations) ───
     if "facts" in layers:
+        tag_rel_cols = _table_columns(conn, "tag_relations")
+        fact_cols = _table_columns(conn, "facts")
         try:
+            tr_confidence = "tr.confidence" if "confidence" in tag_rel_cols else "NULL"
+            tr_metadata = "tr.metadata" if "metadata" in tag_rel_cols else "NULL"
+            tr_created = "tr.created_at" if "created_at" in tag_rel_cols else "0"
             for r in conn.execute(
-                "SELECT t1.name, tr.relation_type, t2.name, tr.weight, t1.tag_type, t2.tag_type, tr.created_at FROM tag_relations tr JOIN tags t1 ON tr.source_tag_id=t1.id JOIN tags t2 ON tr.target_tag_id=t2.id"
+                f"""SELECT tr.id, t1.name, tr.relation_type, t2.name, tr.weight,
+                          t1.tag_type, t2.tag_type, {tr_created}, tr.source_tag_id,
+                          tr.target_tag_id, {tr_confidence}, {tr_metadata}
+                   FROM tag_relations tr
+                   JOIN tags t1 ON tr.source_tag_id=t1.id
+                   JOIN tags t2 ON tr.target_tag_id=t2.id"""
             ).fetchall():
-                s, t = resolve((r[0] or "").strip()[:25]), resolve((r[2] or "").strip()[:25])
+                s, t = resolve((r[1] or "").strip()[:25]), resolve((r[3] or "").strip()[:25])
                 if not s or not t or s == t:
                     continue
-                key = (s, t, r[1])
+                key = (s, t, r[2], "tag_relation", r[0])
                 if key not in seen:
                     seen.add(key)
-                    edges.append({"s": s, "t": t, "l": r[1] or "relates", "w": round(r[3] or 1, 2), "st": r[4] or "topic", "tt": r[5] or "topic", "ts": r[6] or 0, "layer": "facts"})
+                    edges.append({
+                        "id": f"tagrel:{r[0]}",
+                        "kind": "tag_relation",
+                        "relation_id": r[0],
+                        "source_tag_id": r[8],
+                        "target_tag_id": r[9],
+                        "s": s,
+                        "t": t,
+                        "l": r[2] or "relates",
+                        "w": round(r[4] or 1, 2),
+                        "st": r[5] or "topic",
+                        "tt": r[6] or "topic",
+                        "ts": r[7] or 0,
+                        "confidence": r[10],
+                        "metadata": _json_loads_safe(r[11], {}),
+                        "editable": True,
+                        "layer": "facts",
+                    })
         except Exception:
             pass
 
         try:
-            for r in conn.execute("SELECT subject, predicate, object, confidence, created_at FROM facts"):
-                if not r[0] or not r[2]:
+            fact_group = "group_id" if "group_id" in fact_cols else "NULL"
+            fact_source = "source_memory_id" if "source_memory_id" in fact_cols else "NULL"
+            fact_created = "created_at" if "created_at" in fact_cols else "0"
+            fact_reinforced = "last_reinforced" if "last_reinforced" in fact_cols else "NULL"
+            fact_type = "fact_type" if "fact_type" in fact_cols else "NULL"
+            for r in conn.execute(
+                f"""SELECT id, subject, predicate, object, confidence, {fact_created},
+                          {fact_group}, {fact_source}, {fact_reinforced}, {fact_type}
+                   FROM facts"""
+            ):
+                if not r[1] or not r[3]:
                     continue
-                s, t = resolve(r[0].strip()[:25]), resolve(r[2].strip()[:25])
+                s, t = resolve(r[1].strip()[:25]), resolve(r[3].strip()[:25])
                 if not s or not t or s == t:
                     continue
-                label = (r[1] or "relates").strip()[:15]
-                key = (s, t, label)
+                label = (r[2] or "relates").strip()[:15]
+                key = (s, t, label, "fact", r[0])
                 if key not in seen:
                     seen.add(key)
-                    edges.append({"s": s, "t": t, "l": label, "w": round(r[3] or 1, 2), "st": "entity", "tt": "entity", "ts": r[4] or 0, "layer": "facts"})
+                    edges.append({
+                        "id": f"fact:{r[0]}",
+                        "kind": "fact",
+                        "fact_id": r[0],
+                        "s": s,
+                        "t": t,
+                        "l": label,
+                        "w": round(r[4] or 1, 2),
+                        "st": "entity",
+                        "tt": "entity",
+                        "ts": r[5] or 0,
+                        "group_id": r[6],
+                        "source_memory_id": r[7],
+                        "last_reinforced": r[8],
+                        "fact_type": r[9] or "FACTUAL",
+                        "confidence": r[4],
+                        "editable": True,
+                        "layer": "facts",
+                    })
         except Exception:
             pass
 
@@ -778,8 +858,10 @@ async def delete_fact(fact_id: int):
     c = get_container()
     if not _table_exists(c.db.conn, "facts"):
         return jsonify({"ok": False, "error": "facts table not found"})
-    c.db.conn.execute("DELETE FROM facts WHERE rowid = ?", (fact_id,))
+    cur = c.db.conn.execute("DELETE FROM facts WHERE rowid = ?", (fact_id,))
     c.db.conn.commit()
+    if (cur.rowcount or 0) == 0:
+        return jsonify({"ok": False, "error": "fact not found"}), 404
     clear_kg_cache()
     return jsonify({"ok": True, "deleted": fact_id})
 
@@ -807,8 +889,10 @@ async def update_fact(fact_id: int):
     if not sets:
         return jsonify({"ok": False, "error": "No valid fields to update"}), 400
     params.append(fact_id)
-    c.db.conn.execute(f"UPDATE facts SET {', '.join(sets)} WHERE rowid = ?", params)
+    cur = c.db.conn.execute(f"UPDATE facts SET {', '.join(sets)} WHERE rowid = ?", params)
     c.db.conn.commit()
+    if (cur.rowcount or 0) == 0:
+        return jsonify({"ok": False, "error": "fact not found"}), 404
     clear_kg_cache()
     return jsonify({"ok": True, "fact_id": fact_id})
 
@@ -820,7 +904,170 @@ async def delete_tag_relation(rel_id: int):
     c = get_container()
     if not _table_exists(c.db.conn, "tag_relations"):
         return jsonify({"ok": False, "error": "tag_relations table not found"})
-    c.db.conn.execute("DELETE FROM tag_relations WHERE id = ?", (rel_id,))
+    cur = c.db.conn.execute("DELETE FROM tag_relations WHERE id = ?", (rel_id,))
     c.db.conn.commit()
+    if (cur.rowcount or 0) == 0:
+        return jsonify({"ok": False, "error": "tag relation not found"}), 404
     clear_kg_cache()
     return jsonify({"ok": True, "deleted": rel_id})
+
+
+@kg_bp.route("/tag-relations/<int:rel_id>", methods=["PUT"])
+@require_auth
+async def update_tag_relation(rel_id: int):
+    """修改 tag 关系（relation_type/weight/confidence/metadata）。"""
+    c = get_container()
+    conn = c.db.conn
+    if not _table_exists(conn, "tag_relations"):
+        return jsonify({"ok": False, "error": "tag_relations table not found"})
+    body = await request.get_json(silent=True) or {}
+    columns = _table_columns(conn, "tag_relations")
+    sets: list[str] = []
+    params: list = []
+    relation_type = body.get("relation_type", body.get("type"))
+    if relation_type is not None:
+        value = str(relation_type).strip()
+        if not value:
+            return jsonify({"ok": False, "error": "relation_type cannot be empty"}), 400
+        sets.append("relation_type = ?")
+        params.append(value)
+    if "weight" in body and body["weight"] is not None:
+        try:
+            sets.append("weight = ?")
+            params.append(max(0.0, float(body["weight"])))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "invalid weight"}), 400
+    if "confidence" in body and body["confidence"] is not None and "confidence" in columns:
+        try:
+            sets.append("confidence = ?")
+            params.append(max(0.0, min(1.0, float(body["confidence"]))))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "invalid confidence"}), 400
+    if "metadata" in body and "metadata" in columns:
+        sets.append("metadata = ?")
+        params.append(json.dumps(body.get("metadata") or {}, ensure_ascii=False))
+    if not sets:
+        return jsonify({"ok": False, "error": "No valid fields to update"}), 400
+    params.append(rel_id)
+    cur = conn.execute(f"UPDATE tag_relations SET {', '.join(sets)} WHERE id = ?", params)
+    conn.commit()
+    if (cur.rowcount or 0) == 0:
+        return jsonify({"ok": False, "error": "tag relation not found"}), 404
+    clear_kg_cache()
+    return jsonify({"ok": True, "relation_id": rel_id})
+
+
+@kg_bp.route("/tags/<int:tag_id>", methods=["PUT"])
+@require_auth
+async def update_tag(tag_id: int):
+    """修改 tag 节点元信息（name/tag_type/description/aliases）。"""
+    c = get_container()
+    conn = c.db.conn
+    if not _table_exists(conn, "tags"):
+        return jsonify({"ok": False, "error": "tags table not found"})
+    body = await request.get_json(silent=True) or {}
+    columns = _table_columns(conn, "tags")
+    sets: list[str] = []
+    params: list = []
+    if "name" in body and body["name"] is not None:
+        name = str(body["name"]).strip()
+        if not name:
+            return jsonify({"ok": False, "error": "name cannot be empty"}), 400
+        sets.append("name = ?")
+        params.append(name)
+    if "tag_type" in body and body["tag_type"] is not None and "tag_type" in columns:
+        tag_type = str(body["tag_type"]).strip() or "keyword"
+        sets.append("tag_type = ?")
+        params.append(tag_type)
+    if "description" in body and "description" in columns:
+        sets.append("description = ?")
+        params.append(str(body.get("description") or "").strip())
+    if "aliases" in body and "aliases" in columns:
+        aliases = body.get("aliases") or []
+        if isinstance(aliases, list):
+            aliases_value = ",".join(str(a).strip() for a in aliases if str(a).strip())
+        else:
+            aliases_value = str(aliases).strip()
+        sets.append("aliases = ?")
+        params.append(aliases_value)
+    if not sets:
+        return jsonify({"ok": False, "error": "No valid fields to update"}), 400
+    if "updated_at" in columns:
+        sets.append("updated_at = ?")
+        params.append(time.time())
+    params.append(tag_id)
+    try:
+        cur = conn.execute(f"UPDATE tags SET {', '.join(sets)} WHERE id = ?", params)
+        conn.commit()
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    if (cur.rowcount or 0) == 0:
+        return jsonify({"ok": False, "error": "tag not found"}), 404
+    clear_kg_cache()
+    return jsonify({"ok": True, "tag_id": tag_id})
+
+
+@kg_bp.route("/entities/rename-preview", methods=["POST"])
+@require_auth
+async def rename_entity_preview():
+    """预览实体改名会影响的 facts 数量。"""
+    c = get_container()
+    conn = c.db.conn
+    if not _table_exists(conn, "facts"):
+        return jsonify({"ok": False, "error": "facts table not found"})
+    body = await request.get_json(silent=True) or {}
+    old_name = str(body.get("from") or body.get("old") or body.get("source") or "").strip()
+    new_name = str(body.get("to") or body.get("new") or body.get("target") or "").strip()
+    if not old_name or not new_name:
+        return jsonify({"ok": False, "error": "from/to required"}), 400
+    subject_count = int(conn.execute("SELECT COUNT(*) FROM facts WHERE subject = ?", (old_name,)).fetchone()[0] or 0)
+    object_count = int(conn.execute("SELECT COUNT(*) FROM facts WHERE object = ?", (old_name,)).fetchone()[0] or 0)
+    tag_matches = 0
+    if _table_exists(conn, "tags"):
+        tag_matches = int(conn.execute("SELECT COUNT(*) FROM tags WHERE name = ?", (old_name,)).fetchone()[0] or 0)
+    return jsonify({
+        "ok": True,
+        "from": old_name,
+        "to": new_name,
+        "subject_facts": subject_count,
+        "object_facts": object_count,
+        "affected_facts": subject_count + object_count,
+        "tag_matches": tag_matches,
+        "note": "默认只改 facts；传 sync_tags=true 时会同步改名同名 tag。",
+    })
+
+
+@kg_bp.route("/entities/rename", methods=["POST"])
+@require_auth
+async def rename_entity():
+    """事务性重命名 facts 中的实体 subject/object。"""
+    c = get_container()
+    conn = c.db.conn
+    if not _table_exists(conn, "facts"):
+        return jsonify({"ok": False, "error": "facts table not found"})
+    body = await request.get_json(silent=True) or {}
+    old_name = str(body.get("from") or body.get("old") or body.get("source") or "").strip()
+    new_name = str(body.get("to") or body.get("new") or body.get("target") or "").strip()
+    if not old_name or not new_name:
+        return jsonify({"ok": False, "error": "from/to required"}), 400
+    if old_name == new_name:
+        return jsonify({"ok": True, "updated_facts": 0, "from": old_name, "to": new_name})
+    sync_tags = bool(body.get("sync_tags"))
+    try:
+        cur_subject = conn.execute("UPDATE facts SET subject = ? WHERE subject = ?", (new_name, old_name))
+        cur_object = conn.execute("UPDATE facts SET object = ? WHERE object = ?", (new_name, old_name))
+        updated_tags = 0
+        if sync_tags and _table_exists(conn, "tags"):
+            tag_cols = _table_columns(conn, "tags")
+            if "updated_at" in tag_cols:
+                cur_tags = conn.execute("UPDATE tags SET name = ?, updated_at = ? WHERE name = ?", (new_name, time.time(), old_name))
+            else:
+                cur_tags = conn.execute("UPDATE tags SET name = ? WHERE name = ?", (new_name, old_name))
+            updated_tags = int(cur_tags.rowcount or 0)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"ok": False, "error": str(e)}), 400
+    updated = int((cur_subject.rowcount or 0) + (cur_object.rowcount or 0))
+    clear_kg_cache()
+    return jsonify({"ok": True, "updated_facts": updated, "updated_tags": updated_tags, "from": old_name, "to": new_name})

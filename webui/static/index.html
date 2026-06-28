@@ -220,10 +220,10 @@
                 <div class="text-2xl font-bold mt-1" x-text="sys.injection?.tokens?.total_tokens?.avg ?? sys.injection?.tokens?.total_tokens?.max ?? '-' "></div>
                 <div class="text-xs mt-2" style="color:var(--muted-fg)">样本 <span style="color:var(--primary)" x-text="sys.injection?.count || 0"></span> 次 / 平均 <span style="color:var(--primary)" x-text="sys.injection?.tokens?.total_tokens?.avg ?? 0"></span></div>
                 <div class="text-[11px] mt-1.5 leading-relaxed" style="color:var(--muted-fg)">
-                    <span x-text="`黑话 ${sys.injection?.tokens?.jargon_tokens?.avg ?? 0}`"></span> ·
-                    <span x-text="`信念 ${sys.injection?.tokens?.belief_tokens?.avg ?? 0}`"></span> ·
-                    <span x-text="`灵魂 ${sys.injection?.tokens?.persona_tokens?.avg ?? 0}`"></span> ·
-                    <span x-text="`关系 ${sys.injection?.tokens?.relation_memories_tokens?.avg ?? 0}`"></span>
+                    <span x-text="`黑话 ${sys.injection?.tokens?.jargon_tokens?.avg ?? sys.injection?.summary?.jargon_tokens?.avg ?? 0}`"></span> ·
+                    <span x-text="`信念 ${sys.injection?.tokens?.belief_tokens?.avg ?? sys.injection?.summary?.belief_tokens?.avg ?? 0}`"></span> ·
+                    <span x-text="`灵魂 ${sys.injection?.tokens?.soul_tokens?.avg ?? sys.injection?.summary?.soul_tokens?.avg ?? 0}`"></span> ·
+                    <span x-text="`关系 ${sys.injection?.tokens?.relation_memories_tokens?.avg ?? sys.injection?.summary?.relation_memories_tokens?.avg ?? 0}`"></span>
                 </div>
             </div>
 
@@ -264,6 +264,12 @@
                                 <span :style="`color:${line.color}`" x-text="line.label"></span>
                             </label>
                         </template>
+                    </div>
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3 text-xs">
+                        <div class="p-2 rounded-lg" style="background:var(--muted)">样本 <span class="font-mono" style="color:var(--primary)" x-text="sys.injection?.count || 0"></span></div>
+                        <div class="p-2 rounded-lg" style="background:var(--muted)">总量 <span class="font-mono" style="color:var(--primary)" x-text="Math.round(sys.injection?.summary?.total_tokens?.sum || 0)"></span></div>
+                        <div class="p-2 rounded-lg" style="background:var(--muted)">均值 <span class="font-mono" style="color:var(--primary)" x-text="Math.round(sys.injection?.summary?.total_tokens?.avg || 0)"></span></div>
+                        <div class="p-2 rounded-lg" style="background:var(--muted)">桶长 <span class="font-mono" style="color:var(--primary)" x-text="formatBucket(sys.injection?.bucket_seconds)"></span></div>
                     </div>
                     <div x-show="injectionLoading" class="empty-state">正在加载注入指标…</div>
                     <div x-show="!injectionLoading && !(sys.injection?.series||[]).length" class="empty-state">暂无该时间范围内的注入样本</div>
@@ -854,6 +860,27 @@
                         <div class="leading-relaxed" x-text="beliefEvidence?.content"></div>
                     </div>
 
+                    <!-- Relationship Events: 关系事件证据 -->
+                    <div>
+                        <h4 class="text-xs font-semibold mb-2 flex items-center gap-1.5 text-sky-400">
+                            <span>🧭 关系事件证据 (Relationship Events)</span>
+                            <span class="text-[10px] bg-sky-500/10 px-1.5 py-0.5 rounded font-mono" x-text="beliefEvidenceEvents.length"></span>
+                        </h4>
+                        <div x-show="!beliefEvidenceEvents.length" class="empty-state py-4 text-xs">暂无关联的关系事件</div>
+                        <div class="space-y-2.5" x-show="beliefEvidenceEvents.length">
+                            <template x-for="ev in beliefEvidenceEvents" :key="'ev-'+ev.id">
+                                <div class="p-3 rounded-lg border border-[var(--border)] bg-[var(--card)] space-y-1.5">
+                                    <div class="flex items-center justify-between text-[11px]">
+                                        <span class="font-semibold">Event #<span x-text="ev.id"></span> · <span x-text="ev.dimension"></span> <span class="font-mono" :style="Number(ev.delta||0)>=0?'color:var(--success)':'color:var(--danger)'" x-text="`${Number(ev.delta||0)>=0?'+':''}${ev.delta}`"></span></span>
+                                        <span style="color:var(--muted-fg)" x-text="fmtTime(ev.created_at)"></span>
+                                    </div>
+                                    <div style="color:var(--muted-fg)">对象 <span class="font-mono" x-text="ev.user_id"></span> / 群 <span class="font-mono" x-text="ev.group_id"></span> / 类型 <span x-text="ev.event_type"></span></div>
+                                    <div class="leading-relaxed" x-text="ev.reason"></div>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+
                     <!-- Upper Section: 经历事件 -->
                     <div>
                         <h4 class="text-xs font-semibold mb-2 flex items-center gap-1.5 text-[var(--primary)]">
@@ -1025,8 +1052,10 @@
                                     <span x-show="!j.is_global" class="font-mono" style="color:var(--muted-fg)" x-text="j.group_id || '—'"></span>
                                 </td>
                                 <td class="px-3 py-2.5 text-right whitespace-nowrap">
-                <button @click="reviewJargon(j.id,'approve')" class="btn btn-success btn-xs">✓</button>
-                <button @click="reviewJargon(j.id,'reject')" class="btn btn-outline btn-xs" style="color:var(--danger)">✕</button>
+                <button x-show="j.status!=='confirmed'" @click="reviewJargon(j.id,'approve')" class="btn btn-success btn-xs">✓ 确认</button>
+                <span x-show="j.status==='confirmed'" class="btn btn-muted btn-xs opacity-70">已确认</span>
+                <button x-show="j.status!=='rejected'" @click="reviewJargon(j.id,'reject')" class="btn btn-outline btn-xs" style="color:var(--danger)">✕ 否决</button>
+                <span x-show="j.status==='rejected'" class="btn btn-muted btn-xs opacity-70" style="color:var(--danger)">已否决</span>
                 <button @click="openJargonContext(j)" class="btn btn-outline btn-xs">证据</button>
                 <button @click="openJargonEdit(j)" class="btn btn-outline btn-xs">✎</button>
                 <button @click="toggleJargonGlobal(j.id)" class="btn btn-outline btn-xs" :title="j.is_global?'取消全局':'设为全局'">🌐</button>
@@ -1061,6 +1090,12 @@
                         </template>
                         <template x-if="jargonContextData && !jargonContextLoading && !jargonContextError">
                             <div class="space-y-3">
+                                <div class="flex flex-wrap items-center gap-2 p-2 rounded-lg" style="background:var(--muted)">
+                                    <span style="color:var(--muted-fg)">上下文窗口</span>
+                                    <label class="flex items-center gap-1">前 <input type="number" min="0" max="50" x-model.number="jargonContextBefore" class="input text-xs w-16"></label>
+                                    <label class="flex items-center gap-1">后 <input type="number" min="0" max="50" x-model.number="jargonContextAfter" class="input text-xs w-16"></label>
+                                    <button @click="openJargonContext(jargonContextData.jargon)" class="btn btn-primary btn-xs">刷新</button>
+                                </div>
                                 <div class="flex flex-wrap gap-2">
                                     <span class="pill pill-active" x-text="jargonContextData.used_fallback ? '使用回退上下文' : '动态截取上下文'"></span>
                                     <span class="pill" x-text="`锚点记忆: ${jargonContextData.anchor ? jargonContextData.anchor.id : '无'}`"></span>
@@ -1167,12 +1202,12 @@
             </div>
             
             <div class="text-xs px-1 text-[var(--muted-fg)] leading-relaxed flex flex-wrap items-center gap-3 justify-between">
-                <span>“开箱即用，内置加载 108+ 条核心互联网抽象黑话，支持一键实时拉取同步 GitHub 最新语料库。”</span>
+                <span x-text="`开箱即用，当前加载 ${holymanLocalCount || holymanItems.length || 0} 条核心互联网抽象黑话，支持一键实时拉取同步 GitHub 最新语料库。`"></span>
                 <span class="font-mono text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded" x-text="`本地版本: ${holymanLocalVersion}`"></span>
             </div>
 
             <!-- Version Update Alert Box -->
-            <div x-show="holymanLocalVersion !== holymanRemoteVersion && holymanRemoteVersion !== 'Unknown'" class="p-3 rounded-lg text-xs flex items-center justify-between border" style="background:rgba(245,158,11,0.08); border-color:rgba(245,158,11,0.2); color:var(--warning)">
+            <div x-show="holymanUpdateAvailable" class="p-3 rounded-lg text-xs flex items-center justify-between border" style="background:rgba(245,158,11,0.08); border-color:rgba(245,158,11,0.2); color:var(--warning)">
                 <div class="flex items-center gap-2">
                     <span>💡 广域黑话官方库已更新！本地版本：<span class="font-mono" x-text="holymanLocalVersion"></span>，线上最新：<span class="font-mono font-bold" x-text="holymanRemoteVersion"></span>。</span>
                 </div>
@@ -1607,7 +1642,7 @@ function dashboard() {
         injectionVisibleLines: {
             total_tokens: true,
             memories_tokens: true,
-            persona_tokens: true,
+            soul_tokens: true,
             belief_tokens: true,
             relation_memories_tokens: true,
             jargon_tokens: true,
@@ -1689,7 +1724,7 @@ function dashboard() {
             return [
                 { key: 'total_tokens', label: '总量', color: '#f59e0b' },
                 { key: 'memories_tokens', label: '主记忆', color: '#6366f1' },
-                { key: 'persona_tokens', label: '灵魂', color: '#ec4899' },
+                { key: 'soul_tokens', label: '灵魂合计', color: '#ec4899' },
                 { key: 'belief_tokens', label: '信念', color: '#22c55e' },
                 { key: 'relation_memories_tokens', label: '关系', color: '#06b6d4' },
                 { key: 'jargon_tokens', label: '黑话', color: '#a855f7' },
@@ -1752,10 +1787,15 @@ function dashboard() {
         beliefEditForm: { content: '', type: 'self', confidence: 0.7, bot_id: '' },
         beliefEvidence: null,
         beliefEvidenceItems: [],
+        beliefEvidenceEvents: [],
+        beliefEvidenceEpisodes: [],
+        beliefEvidenceMemories: [],
         jargonContextOpen: false,
         jargonContextLoading: false,
         jargonContextData: null,
         jargonContextError: '',
+        jargonContextBefore: 5,
+        jargonContextAfter: 5,
 
         // ─── 黑话审核 ───
         jargonSubTab: 'local',
@@ -1777,6 +1817,8 @@ function dashboard() {
         holymanUseProxy: true,
         holymanLocalVersion: 'Unknown',
         holymanRemoteVersion: 'Unknown',
+        holymanLocalCount: 0,
+        holymanUpdateAvailable: false,
         selectedHolymanWords: [],
 
         // ─── 灵魂状态 ───
@@ -1838,7 +1880,8 @@ function dashboard() {
         async loadSystem() {
             try {
                 const r = await fetch('/api/system');
-                this.sys = await r.json();
+                const systemData = await r.json();
+                this.sys = { ...systemData, injection: this.sys.injection || { count: 0, summary: {}, series: [], ranking: [] } };
             } catch(e) { console.error(e); }
             await this.loadInjectionMetrics();
             try {
@@ -1858,9 +1901,11 @@ function dashboard() {
                 } else {
                     params.set('range', this.injectionRange || '7d');
                 }
-                const r = await fetch('/api/system/metrics/injection?' + params);
-                this.sys.injection = await r.json();
-            } catch(e) { console.error(e); }
+                const r = await fetch('/api/metrics/injection?' + params);
+                if (!r.ok) throw new Error(`注入指标 API ${r.status}`);
+                const data = await r.json();
+                this.sys = { ...this.sys, injection: data };
+            } catch(e) { console.error(e); this.sys = { ...this.sys, injection: { ...(this.sys.injection || {}), error: e.message } }; }
             this.injectionLoading = false;
         },
         async setInjectionRange(range) {
@@ -1872,6 +1917,13 @@ function dashboard() {
             if (this.injectionFrom > this.injectionTo) { alert('开始日期不能晚于结束日期'); return; }
             this.injectionRange = 'custom';
             await this.loadInjectionMetrics();
+        },
+        formatBucket(seconds) {
+            const s = Number(seconds || 0);
+            if (!s) return '-';
+            if (s < 3600) return `${s}s`;
+            if (s < 86400) return `${Math.round(s/3600)}h`;
+            return `${Math.round(s/86400)}d`;
         },
         injectionLinePoints(key) {
             const series = this.sys.injection?.series || [];
@@ -2218,10 +2270,17 @@ function dashboard() {
         async viewBeliefEvidence(b) {
             this.beliefEvidence = b;
             this.beliefEvidenceItems = [];
+            this.beliefEvidenceEvents = [];
+            this.beliefEvidenceEpisodes = [];
+            this.beliefEvidenceMemories = [];
             try {
                 const r = await fetch(`/api/beliefs/${b.id}/evidence`);
                 const d = await r.json();
-                this.beliefEvidenceItems = d.items || [];
+                this.beliefEvidenceEvents = d.relationship_events || [];
+                this.beliefEvidenceEpisodes = d.episodes || [];
+                this.beliefEvidenceMemories = d.memories || d.items || [];
+                this.beliefEvidenceItems = this.beliefEvidenceMemories;
+                this.beliefEvidence = { ...b, evidence_type: d.evidence_type || b.evidence_type, sources: d.sources || b.sources };
             } catch(e) { console.error(e); }
         },
         async openJargonContext(j) {
@@ -2230,7 +2289,8 @@ function dashboard() {
             this.jargonContextError = '';
             this.jargonContextData = { jargon: j, anchor: null, messages: [], fallback_contexts: [], used_fallback: false };
             try {
-                const r = await fetch(`/api/jargon/${j.id}/context`);
+                const params = new URLSearchParams({ before: this.jargonContextBefore || 5, after: this.jargonContextAfter || 5 });
+                const r = await fetch(`/api/jargon/${j.id}/context?` + params);
                 const d = await r.json();
                 if (d.ok) {
                     this.jargonContextData = d;
@@ -2431,6 +2491,8 @@ function dashboard() {
                 this.holymanCategories = d.categories || [];
                 this.holymanLocalVersion = d.local_version || 'Unknown';
                 this.holymanRemoteVersion = d.remote_version || 'Unknown';
+                this.holymanLocalCount = d.local_count || this.holymanItems.length || 0;
+                this.holymanUpdateAvailable = !!d.is_update_available;
                 if (this.holymanCategory && !this.holymanCategories.some(c => c.id === this.holymanCategory)) {
                     this.holymanCategory = '';
                 }

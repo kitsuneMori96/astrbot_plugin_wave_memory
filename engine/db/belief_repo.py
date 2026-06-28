@@ -47,6 +47,10 @@ class BeliefRepo:
             self.cm.execute_write("ALTER TABLE beliefs ADD COLUMN last_reinforced REAL")
         if "archived_reason" not in columns:
             self.cm.execute_write("ALTER TABLE beliefs ADD COLUMN archived_reason TEXT")
+        if "evidence_type" not in columns:
+            self.cm.execute_write("ALTER TABLE beliefs ADD COLUMN evidence_type TEXT DEFAULT 'memory'")
+        if "evidence_ids" not in columns:
+            self.cm.execute_write("ALTER TABLE beliefs ADD COLUMN evidence_ids TEXT DEFAULT '[]'")
         self.cm.execute_write("UPDATE beliefs SET last_reinforced = COALESCE(last_reinforced, created_at) WHERE last_reinforced IS NULL")
         self.cm.commit()
 
@@ -58,6 +62,8 @@ class BeliefRepo:
         strength: float = 0.5,
         sources: list[int] = None,
         status: str = "active",
+        evidence_type: str = "memory",
+        evidence_ids: list[int] = None,
     ) -> int:
         """新增信念，返回 ID。status 默认 active；传 'pending' 进入待审。"""
         now = time.time()
@@ -66,10 +72,11 @@ class BeliefRepo:
             status = "archived"
             strength = 0.01
             archived_reason = "identity_roleplay_contamination"
+        evidence_ids = evidence_ids if evidence_ids is not None else (sources or [])
         cursor = self.cm.execute_write(
-            """INSERT INTO beliefs (content, type, strength, bot_id, sources, status, created_at, last_reinforced, archived_reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (content, belief_type, strength, bot_id, json.dumps(sources or []), status, now, now, archived_reason),
+            """INSERT INTO beliefs (content, type, strength, bot_id, sources, status, created_at, last_reinforced, archived_reason, evidence_type, evidence_ids)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (content, belief_type, strength, bot_id, json.dumps(sources or []), status, now, now, archived_reason, evidence_type or "memory", json.dumps(evidence_ids or [])),
         )
         self.cm.commit()
         return cursor.lastrowid
@@ -95,7 +102,7 @@ class BeliefRepo:
 
         where = " AND ".join(conditions)
         rows = self.cm.conn.execute(
-            f"SELECT id, content, type, strength, bot_id, sources, conflicts, status, created_at, last_reinforced, archived_reason "
+            f"SELECT id, content, type, strength, bot_id, sources, conflicts, status, created_at, last_reinforced, archived_reason, evidence_type, evidence_ids "
             f"FROM beliefs WHERE {where} ORDER BY strength DESC LIMIT ?",
             params + [limit],
         ).fetchall()
@@ -104,7 +111,7 @@ class BeliefRepo:
 
     def get_belief_by_id(self, belief_id: int) -> Optional[dict]:
         row = self.cm.conn.execute(
-            "SELECT id, content, type, strength, bot_id, sources, conflicts, status, created_at, last_reinforced, archived_reason "
+            "SELECT id, content, type, strength, bot_id, sources, conflicts, status, created_at, last_reinforced, archived_reason, evidence_type, evidence_ids "
             "FROM beliefs WHERE id = ?",
             (belief_id,),
         ).fetchone()
@@ -176,7 +183,7 @@ class BeliefRepo:
 
         where = " AND ".join(conditions)
         rows = self.cm.conn.execute(
-            f"SELECT id, content, type, strength, bot_id, sources, conflicts, status, created_at, last_reinforced, archived_reason "
+            f"SELECT id, content, type, strength, bot_id, sources, conflicts, status, created_at, last_reinforced, archived_reason, evidence_type, evidence_ids "
             f"FROM beliefs WHERE {where} ORDER BY strength DESC LIMIT ?",
             params + [limit],
         ).fetchall()
@@ -206,4 +213,6 @@ class BeliefRepo:
             "created_at": row[8],
             "last_reinforced": row[9],
             "archived_reason": row[10],
+            "evidence_type": row[11] if len(row) > 11 else "memory",
+            "evidence_ids": json.loads(row[12] or "[]") if len(row) > 12 else json.loads(row[5] or "[]"),
         }
