@@ -1,0 +1,253 @@
+import asyncio
+import sqlite3
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+
+
+class _FakeLogger:
+    def debug(self, *args, **kwargs): pass
+    def info(self, *args, **kwargs): pass
+    def warning(self, *args, **kwargs): pass
+    def error(self, *args, **kwargs): pass
+
+
+try:
+    import astrbot.api  # type: ignore
+except Exception:
+    import sys
+    import types
+    astrbot_mod = types.ModuleType("astrbot")
+    api_mod = types.ModuleType("astrbot.api")
+    api_mod.logger = _FakeLogger()
+    sys.modules.setdefault("astrbot", astrbot_mod)
+    sys.modules["astrbot.api"] = api_mod
+
+
+class _Completion:
+    def __init__(self, text):
+        self.completion_text = text
+
+
+class _FakeLLM:
+    def __init__(self):
+        self.prompts = []
+
+    async def text_chat(self, prompt=None, system_prompt=None, contexts=None):
+        self.prompts.append({"prompt": prompt or "", "system_prompt": system_prompt or ""})
+        return _Completion(
+            "内心：先保持边界\n"
+            "行动：回复\n"
+            "语气：正常\n"
+            "好感度：0\n"
+            "印象：正常交流\n"
+            "情绪：0"
+        )
+
+
+class _FakeBeliefEngine:
+    def __init__(self):
+        self.calls = []
+        self.bot_id = "baizhenzhen"
+
+    def get_injection(self, sender_id=None, keywords=None):
+        self.calls.append({"sender_id": sender_id, "keywords": keywords})
+        return "<beliefs>\n- 觉得：白真真不喜欢被当成攻击工具\n</beliefs>"
+
+
+class _FakeQueryEngine:
+    def __init__(self):
+        self.calls = []
+
+    async def query(self, **kwargs):
+        self.calls.append(kwargs)
+        return [
+            {"id": 1, "content": "第一次在群里认真解释剑阵，不靠嘴臭压人。", "source": "bzz_experience"},
+            {"id": 2, "content": "（猫耳朵一抖）这种身份污染经历不能注入。", "source": "bzz_evolution"},
+            {"id": 3, "content": "后来学会先判断事实，再给出克制回应。", "source": "bzz_evolution"},
+        ]
+
+    def format_injection(self, memories):
+        return "\n".join(f"[记忆#{m['id']}] {m['content']}" for m in memories)
+
+
+class PersonaBeliefReworkTest(unittest.TestCase):
+    def _connect(self):
+        tmp = tempfile.TemporaryDirectory()
+        path = Path(tmp.name) / "wave_memory.db"
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        self.addCleanup(tmp.cleanup)
+        self.addCleanup(conn.close)
+        return conn
+
+    def test_persona_composer_builds_layered_safe_context(self):
+        from services.persona_composer import PersonaComposer
+
+        composer = PersonaComposer(
+            db=SimpleNamespace(conn=self._connect()),
+            belief_engine=_FakeBeliefEngine(),
+            query_engine=_FakeQueryEngine(),
+            few_shot_service=SimpleNamespace(get_injection=lambda bot_id="", max_items=None: "<style_examples>\n- 先看事实，再冷淡回应。\n</style_examples>"),
+            bot_profiles={
+                "1336495069": SimpleNamespace(
+                    qq_id="1336495069",
+                    name="白真真",
+                    db_id="baizhenzhen",
+                    aliases=["真真"],
+                    exclude_sources=[],
+                )
+            },
+            default_bot_db_id="baizhenzhen",
+        )
+
+        result = asyncio.run(composer.build_self_persona(
+            bot_id="1336495069",
+            group_id="g1",
+            sender_id="u1",
+            sender_name="芒果",
+            message="你怎么看刚才那件事",
+            recent_context=["芒果: 刚才争论有点乱"],
+        ))
+
+        self.assertIn("persona_block", result)
+        self.assertIn("belief_block", result)
+        self.assertIn("experience_block", result)
+        self.assertIn("style_block", result)
+        self.assertTrue(result["persona_block"].startswith("<self_persona>"))
+        self.assertTrue(result["belief_block"].startswith("<beliefs>"))
+        self.assertIn("白真真", result["persona_block"])
+        self.assertIn("不喜欢被当成攻击工具", result["belief_block"])
+        self.assertIn("认真解释剑阵", result["experience_block"])
+        self.assertNotIn("猫耳朵", result["experience_block"])
+        self.assertIn("先看事实", result["style_block"])
+        self.assertEqual(result["debug"]["experience_ids"], [1, 3])
+
+    def test_layered_injection_parts_keep_self_persona_first(self):
+        from services.persona_composer import build_layered_injection_parts
+
+        parts = build_layered_injection_parts(
+            self_persona_text="<self_persona>人格</self_persona>",
+            belief_text="<beliefs>信念</beliefs>",
+            self_experience_text="<self_experiences>经历</self_experiences>",
+            persona_text="<persona>对话对象画像</persona>",
+            timeline_text="timeline",
+            facts_text="facts",
+            lore_text="lore",
+            memories_text="memories",
+            concern_summary="concern",
+            mood_text="mood",
+            mood_traj_text="mood_traj",
+            jargon_text="jargon",
+            fewshot_text="fewshot",
+        )
+
+        self.assertEqual(parts[:4], [
+            "<self_persona>人格</self_persona>",
+            "<beliefs>信念</beliefs>",
+            "<self_experiences>经历</self_experiences>",
+            "<persona>对话对象画像</persona>",
+        ])
+        self.assertLess(parts.index("timeline"), parts.index("facts"))
+        self.assertLess(parts.index("jargon"), parts.index("fewshot"))
+        self.assertLess(parts.index("fewshot"), parts.index("memories"))
+
+    def test_default_memory_sources_leave_bzz_experience_to_composer(self):
+        from services.persona_composer import default_recall_sources
+
+        sources = default_recall_sources()
+
+        self.assertNotIn("bzz_experience", sources)
+        self.assertNotIn("bzz_evolution", sources)
+        self.assertIn("core", sources)
+        self.assertIn("book_lore", sources)
+
+    def test_metathinking_extreme_attack_uses_boundary_not_attack_back(self):
+        from services.meta_thinking import MetaThinking
+
+        meta = MetaThinking(
+            db=SimpleNamespace(conn=self._connect()),
+            context=None,
+            bot_qq_id="1336495069",
+            bot_qq_ids=["1336495069"],
+            bot_names={"1336495069": "白真真"},
+            bot_db_ids={"1336495069": "baizhenzhen"},
+            config={"enabled": True},
+        )
+        meta.llm = _FakeLLM()
+
+        result = asyncio.run(meta.should_respond(
+            sender_id="u1",
+            group_id="g1",
+            nickname="芒果",
+            message="@白真真 nmsl",
+            is_at_bot=True,
+            context_messages=[],
+            bot_id="1336495069",
+            system_prompt="你是白真真。保持克制。",
+        ))
+
+        self.assertNotEqual(result.get("action"), "attack_back")
+        self.assertIn(result.get("action"), {"reply", "short_reply", "ignore"})
+        prompt_text = "\n".join(p["prompt"] for p in meta.llm.prompts)
+        self.assertNotIn("怼回去", prompt_text)
+        self.assertNotIn("不要客气", prompt_text)
+
+    def test_metathinking_without_system_prompt_uses_neutral_prompt_not_hardcoded_persona(self):
+        from services.meta_thinking import MetaThinking
+
+        meta = MetaThinking(
+            db=SimpleNamespace(conn=self._connect()),
+            context=None,
+            bot_qq_id="1336495069",
+            bot_qq_ids=["1336495069"],
+            bot_names={"1336495069": "白真真"},
+            bot_db_ids={"1336495069": "baizhenzhen"},
+            config={"enabled": True},
+        )
+        meta.llm = _FakeLLM()
+
+        asyncio.run(meta.should_respond(
+            sender_id="u1",
+            group_id="g1",
+            nickname="芒果",
+            message="你在吗",
+            is_at_bot=True,
+            context_messages=[],
+            bot_id="1336495069",
+            system_prompt=None,
+        ))
+
+        prompt_text = "\n".join(p["prompt"] for p in meta.llm.prompts)
+        self.assertNotIn("你是一个有感情的人。你有喜好、有脾气、有记忆", prompt_text)
+        self.assertNotIn("怼回去", prompt_text)
+
+    def test_few_shot_filters_aggressive_or_identity_contaminated_examples(self):
+        from services.few_shot.service import FewShotService
+
+        conn = self._connect()
+        service = FewShotService(db=SimpleNamespace(conn=conn), enabled=True, config={"max_inject": 3})
+        now = int(time.time())
+        conn.executemany(
+            """INSERT INTO few_shot_examples (content, score, traits, status, bot_id, created_at, approved_at)
+               VALUES (?, ?, '[]', 'approved', ?, ?, ?)""",
+            [
+                ("先看事实，再简短回应。", 0.95, "1336495069", now, now),
+                ("这种人就该狠狠怼回去，别客气。", 0.99, "1336495069", now, now),
+                ("（猫耳朵一抖）本真君才不是猫娘喵。", 0.98, "1336495069", now, now),
+            ],
+        )
+        conn.commit()
+
+        injection = service.get_injection(bot_id="1336495069", max_items=3)
+
+        self.assertIn("先看事实", injection)
+        self.assertNotIn("怼回去", injection)
+        self.assertNotIn("猫耳朵", injection)
+        self.assertEqual(service._last_injected_ids, [1])
+
+
+if __name__ == "__main__":
+    unittest.main()

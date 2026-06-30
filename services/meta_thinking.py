@@ -19,63 +19,6 @@ from .identity_safety import is_identity_contamination, prepend_identity_safety_
 EXTREME_ATTACK = re.compile(r'(你[妈马]|nmsl|死[全妈]|全家|操你|fuck\s*you|滚去死|杀了你|弄死你)')
 
 
-META_THINKING_PROMPT = """你是{bot_name}。你是一个有感情的人。你有喜好、有脾气、有记忆。
-
-看到下面这条消息，在心里想一下，然后决定怎么做。
-
-【这个人的资料】
-昵称：{nickname}
-QQ：{qq}
-你上次给他的好感度：{affection}分（这是你自己之前的感受，不是系统算的。你现在可以根据此刻的感觉重新打分）
-你给他的标签：{tags}
-你对他的印象：{impression}
-
-【当前消息】
-{sender_name}: {message}
-
-【是否@你】{is_at}
-
-【最近群聊（5条）】
-{context}
-
----
-
-你面前有这个人的历史数据，这些是你之前的感受记录。
-你可以参考它们，也可以推翻它们——如果你现在的感觉和之前不一样。
-你不是在执行规则，你是在做一个真实的判断：此刻，你对这个人什么感觉，你想怎么做。
-
-请输出（每行一个，每个字段都必须填写，不能省略）：
-
-内心：<你此刻的真实想法，一两句话>
-行动：<回复 / 不理 / 怼回去 / 简短回 / 主动插话>
-语气：<正常 / 热情 / 冷淡 / 讽刺 / 愤怒 / 犹豫>
-好感度：<你现在觉得这个人应该是多少分，-100到100的整数，必须给出数字>
-印象：<你对这个人的一句话印象，每次都写>
-标签：<给这个人的标签，格式 name:score name:score，至少写一个>
-关切：<这件事你要关注吗？写"关注:主题"或"不关注">
-情绪：<这件事对你情绪的影响，-1到1的小数，0表示无影响>"""
-
-
-PROACTIVE_PROMPT = """你是{bot_name}。你在群里旁观，没有被@。
-
-【最近群聊（10条）】
-{context}
-
-【你当前感兴趣的话题】
-{interests_sample}
-
----
-
-你是一个有感情的人。看看群里在聊什么，想想要不要主动说点什么。
-不要为了说话而说话。只有真的有话想说、或者觉得有趣想参与时才开口。
-
-请输出：
-
-内心：<你的想法>
-行动：<主动插话 / 不说>
-兴趣更新：<如果发现新的感兴趣话题写"添加:xxx"，觉得某话题无聊了写"删除:xxx"，没变化写"不变">"""
-
-
 class MetaThinking:
     """配置驱动的内心判断层 — 支持多 bot 身份。"""
 
@@ -229,14 +172,15 @@ class MetaThinking:
         context_messages: list[str],
         bot_id: str = None,
         system_prompt: str = None,
+        self_persona_context: str = None,
     ) -> dict:
         """
         核心判断：要不要回、怎么回。
 
         返回:
         {
-            "action": "reply" | "ignore" | "attack_back" | "short_reply",
-            "tone": "正常" | "热情" | "冷淡" | "讽刺" | "愤怒",
+            "action": "reply" | "ignore" | "short_reply",
+            "tone": "正常" | "热情" | "冷淡" | "克制",
             "inner_thought": "...",
             "affection_update": int | None,
             "impression_update": str | None,
@@ -250,15 +194,15 @@ class MetaThinking:
         if sender_id in self.admin_ids:
             return {"action": "reply", "tone": "正常", "inner_thought": "管理员，直接回"}
 
-        # 极端攻击 + 确认是对 bot 说的
+        # 极端攻击 + 确认是对 bot 说的：只设安全边界，不把攻击性当作回复风格。
         if is_at_bot and EXTREME_ATTACK.search(message):
             # 检查是否 @ 了其他人
             other_at = re.search(r'At[:：]?\d+', message.replace(self.bot_qq_id, ''))
             if not other_at:
                 return {
-                    "action": "attack_back",
-                    "tone": "愤怒",
-                    "inner_thought": "这人在骂我，怼回去",
+                    "action": "short_reply",
+                    "tone": "克制",
+                    "inner_thought": "这是直接辱骂，保持边界，必要时简短拒绝或冷处理。",
                     "affection_update": max(self._get_affection(sender_id, group_id, bot_id=bot_id) - 10, -100),
                 }
 
@@ -276,17 +220,20 @@ class MetaThinking:
         # 读取发送者资料
         profile = self._get_profile(sender_id, group_id, bot_id=bot_id)
 
-        # 构建 prompt
+        # 构建 prompt：只消费系统人格 / 自我人格上下文；缺失时使用中性安全上下文。
         bot_name = self.bot_names.get(bot_id or self.bot_qq_id, "bot")
+        safe_system_prompt = prepend_identity_safety_system_prompt(system_prompt or "", message, always=True)
+        persona_context = (self_persona_context or self.bot_prompts.get(bot_id or self.bot_qq_id, "") or "").strip()
+        if not persona_context:
+            persona_context = f"<self_persona>\n当前身份：{bot_name}。保持稳定自我、事实判断和边界感；不要把挑衅当作默认风格。\n</self_persona>"
 
-        system_prompt = prepend_identity_safety_system_prompt(system_prompt, message, always=True)
-        if system_prompt:
-            # v1.3.2: 用 bot 自己的系统人格做思考（不再硬编码"你是羽书"）
-            prompt = f"""{system_prompt}
+        prompt = f"""{safe_system_prompt}
+
+{persona_context}
 
 ---
 
-看到下面这条消息，在心里想一下，然后决定怎么做。
+看到下面这条消息，先做安全与边界判断，再决定是否需要回复。
 
 【这个人的资料】
 昵称：{nickname or sender_id}
@@ -307,27 +254,12 @@ QQ：{sender_id}
 
 请输出（每行一个，每个字段都必须填写）：
 
-内心：<你此刻的真实想法，一两句话>
-行动：<回复 / 不理 / 怼回去 / 简短回>
-语气：<正常 / 热情 / 冷淡 / 讽刺 / 愤怒>
+内心：<你此刻的判断，一两句话>
+行动：<回复 / 不理 / 简短回>
+语气：<正常 / 热情 / 冷淡 / 克制>
 好感度：<你现在觉得这个人应该是多少分，-100到100的整数>
 印象：<你对这个人的一句话印象>
 情绪：<这件事对你情绪的影响，-1到1的小数，0表示无影响>"""
-        else:
-            # fallback: 用硬编码模板（没有系统人格时）
-            prompt_template = self.bot_prompts.get(bot_id or self.bot_qq_id, META_THINKING_PROMPT)
-            prompt = prompt_template.format(
-                bot_name=bot_name,
-                nickname=nickname or sender_id,
-                qq=sender_id,
-                affection=profile.get("affection", 0),
-                tags=json.dumps(profile.get("tags", {}), ensure_ascii=False) or "无",
-                impression=profile.get("impression", "初次见面，没有印象"),
-                sender_name=nickname or sender_id,
-                message=message,
-                is_at="是" if is_at_bot else "否",
-                context="\n".join(context_messages[-5:]) if context_messages else "（无）",
-            )
 
         # 调用 LLM
         try:
@@ -343,7 +275,7 @@ QQ：{sender_id}
             # fallback: 正常回复
             return {"action": "reply", "tone": "正常", "inner_thought": "MetaThinking 失败，正常回"}
 
-    async def should_proactive(self, group_id: str, context_messages: list[str]) -> dict:
+    async def should_proactive(self, group_id: str, context_messages: list[str], self_persona_context: str = None) -> dict:
         """判断是否主动插话。"""
         if not self.proactive_enabled:
             return {"action": "不说"}
@@ -365,13 +297,26 @@ QQ：{sender_id}
         if self._is_silent_hour(int(hour)):
             return {"action": "不说"}
 
-        # 使用主 bot 名称
+        # 使用传入的人格上下文；缺失时只给中性安全边界，不生成专属风格模板。
         bot_name = self.bot_names.get(self.bot_qq_id, "bot")
-        prompt = PROACTIVE_PROMPT.format(
-            bot_name=bot_name,
-            context="\n".join(context_messages[-10:]) if context_messages else "（无）",
-            interests_sample=", ".join(list(self._interest_keywords)[:self.interest_sample_size]),
-        )
+        persona_context = (self_persona_context or "").strip()
+        if not persona_context:
+            persona_context = f"<self_persona>\n当前身份：{bot_name}。主动说话前先判断是否真的有必要；保持边界和自然克制。\n</self_persona>"
+        prompt = f"""{prepend_identity_safety_system_prompt('', always=True)}
+
+{persona_context}
+
+【最近群聊（10条）】
+{chr(10).join(context_messages[-10:]) if context_messages else "（无）"}
+
+【当前感兴趣的话题】
+{", ".join(list(self._interest_keywords)[:self.interest_sample_size])}
+
+请判断是否要主动插话。只有确实有话想说、能补充价值、或和当前人格/信念高度相关时才开口。
+输出：
+内心：<你的想法>
+行动：<主动插话 / 不说>
+兴趣更新：<添加:xxx / 删除:xxx / 不变>"""
 
         try:
             response = await self._call_llm(prompt)
@@ -436,11 +381,28 @@ QQ：{sender_id}
         resp = await self.llm.text_chat(prompt=prompt, system_prompt=system_prompt, contexts=[])
         return resp.completion_text
 
-    async def generate_proactive_reply(self, context_messages: list[str], inner_thought: str, bot_id: str = None) -> str:
-        """生成主动插话内容，使用同一套 MetaThinking fallback。"""
+    async def generate_proactive_reply(
+        self,
+        context_messages: list[str],
+        inner_thought: str,
+        bot_id: str = None,
+        self_persona_context: str = None,
+    ) -> str:
+        """生成主动插话内容；只使用传入的人格上下文与中性安全边界。"""
         context_text = "\n".join(context_messages[-5:])
         bot_name = self.bot_names.get(bot_id or self.bot_qq_id, "bot")
-        prompt = f"你是{bot_name}，刚才群里在聊：\n{context_text}\n\n你想插一嘴。你的想法：{inner_thought}\n\n直接说你想说的话，简短自然，像群友一样。不要解释为什么要说话。"
+        persona_context = (self_persona_context or "").strip()
+        if not persona_context:
+            persona_context = f"<self_persona>\n当前身份：{bot_name}。简短自然地参与，但不要套用攻击性或模板化风格。\n</self_persona>"
+        prompt = f"""{persona_context}
+
+【最近群聊】
+{context_text}
+
+【想法】
+{inner_thought}
+
+直接说你想说的话，简短自然。不要解释为什么要说话，不要把挑衅或攻击当作风格。"""
         resp = await self.llm.text_chat(prompt=prompt, system_prompt=prepend_identity_safety_system_prompt(None, always=True), contexts=[])
         reply = resp.completion_text.strip()
         if is_identity_contamination(reply):
@@ -539,8 +501,8 @@ QQ：{sender_id}
         """标准化行动。"""
         if "不理" in raw or "忽略" in raw or "无视" in raw:
             return "ignore"
-        if "怼" in raw or "骂" in raw or "反击" in raw:
-            return "attack_back"
+        if "骂" in raw or "反击" in raw:
+            return "short_reply"
         if "简短" in raw or "敷衍" in raw:
             return "short_reply"
         if "插话" in raw or "主动" in raw:

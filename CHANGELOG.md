@@ -1,15 +1,14 @@
 # Changelog
 
-## v2.3.4 (2026-06-30)
+## v3.0.0 (2026-06-30)
 
-### WebUI 全局断流空指针与 SVG 嵌套循环热修
+### 白真人格 / 经历 / 信念分层重构
 
-- **内联状态补充**：修补 index.html 内联 dashboard() 缺少的 Holyman 状态和方法，解决第一帧变量 undefined 导致的 Alpine 全局初始化断流
-- **弹窗空指针防御**：重构信念/关切/时间线/情绪编辑弹窗标题，增加 existence 条件保护，避免默认没有编辑数据时 `Edit.id` 爆 null 指针
-- **SVG 兼容性去耦**：将指标趋势图 SVG 内的 `<template x-for>` 替换为平铺多指标连线，彻底绕过 Alpine 克隆原生 SVG 节点时的 `children` TypeError
-- **词法 SyntaxError 规避**：将 x-text 字符拼接中的双引号转义 `\"` 替换为中文免转义书名号 `「`，断绝 HTML 双引号提前切断导致的词法 SyntaxError
-- **测试覆盖**：扩展测试 `test_holyman_frontend_has_layered_tabs_search_and_batch_candidate_controls` 覆盖内联状态检测，保障后续改动绝不回退
-- **高真实验证**：通过 headless 浏览器对容器 9876 服务完成真实 fetch 验证，确认 console 达到完美 zero-error、黑话分层 tabs 运行无瑕疵
+- **PersonaComposer**：新增自我人格编排层，将人格、信念、精选经历、健康风格样本拆出独立职责，避免 MetaThinking 硬编码 fallback 决定白真真风格
+- **主注入收口**：主回复与主动对话统一复用自我人格上下文；注入顺序改为人格 → 信念 → 经历 → 对话对象画像 → 其他辅助块
+- **安全边界收缩**：移除 `attack_back` 默认风格升级，极端辱骂仅保留安全边界，不再默认“怼回去”
+- **few-shot 净化**：few-shot 提取与注入增加攻击性 / 身份污染过滤，坏样本不再回灌为风格模板
+- **文档同步**：更新 README 功能地图与项目结构，补齐 PersonaComposer、BeliefEmergence、ExperienceEpisodeService、identity_safety 等真实能力
 
 ## v2.3.3 (2026-06-30)
 

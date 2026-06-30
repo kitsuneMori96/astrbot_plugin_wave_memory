@@ -11,10 +11,13 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import re
 import time
 from typing import Any, Dict, List, Optional
 
 from astrbot.api import logger
+
+from ..identity_safety import is_identity_contamination
 
 
 # ─── LLM Prompt ───
@@ -38,6 +41,12 @@ _DRIFT_CHECK_PROMPT = """你是一个对话风格一致性分析师。
 
 请判断最新回复与范例库的风格是否一致。
 返回 JSON：{{"similarity": 0.8, "drift_detected": false, "reason": "..."}}"""
+
+
+_AGGRESSIVE_STYLE_RE = re.compile(
+    r"(怼回去|狠狠怼|别客气|骂回去|反击|嘴臭|阴阳怪气|傻逼|脑残|滚|nmsl|你妈|操你|fuck\s*you)",
+    re.IGNORECASE,
+)
 
 
 class FewShotService:
@@ -106,6 +115,8 @@ class FewShotService:
         candidates = []
         for mem_id, content in rows:
             try:
+                if not self._is_healthy_example(content):
+                    continue
                 result = await self._evaluate_style(content)
                 score = result.get("score", 0)
                 if score >= self._min_score:
@@ -152,10 +163,15 @@ class FewShotService:
         if not rows:
             return ""
 
+        healthy_rows = [(r[0], r[1]) for r in rows if self._is_healthy_example(r[1])]
+        if not healthy_rows:
+            self._last_injected_ids = []
+            return ""
+
         # 不连续重复同一条
-        available = [(r[0], r[1]) for r in rows if r[0] not in self._last_injected_ids]
+        available = [(r[0], r[1]) for r in healthy_rows if r[0] not in self._last_injected_ids]
         if len(available) < max_items:
-            available = [(r[0], r[1]) for r in rows]  # 库太小时允许重复
+            available = healthy_rows  # 库太小时允许重复
 
         selected = random.sample(available, min(max_items, len(available)))
         self._last_injected_ids = [s[0] for s in selected]
@@ -195,6 +211,17 @@ class FewShotService:
         return None
 
     # ─── 内部方法 ───
+
+    def _is_healthy_example(self, content: str) -> bool:
+        """Return True only for style examples that are safe to re-inject."""
+        text = str(content or "").strip()
+        if not text:
+            return False
+        if is_identity_contamination(text):
+            return False
+        if _AGGRESSIVE_STYLE_RE.search(text):
+            return False
+        return True
 
     async def _evaluate_style(self, reply: str) -> Dict:
         prompt = _EVALUATE_STYLE_PROMPT.format(reply=reply[:500])
