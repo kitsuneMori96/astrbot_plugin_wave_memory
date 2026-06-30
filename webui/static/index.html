@@ -273,19 +273,27 @@
                     </div>
                     <div x-show="injectionLoading" class="empty-state">正在加载注入指标…</div>
                     <div x-show="!injectionLoading && !(sys.injection?.series||[]).length" class="empty-state">暂无该时间范围内的注入样本</div>
-                    <svg x-show="!injectionLoading && (sys.injection?.series||[]).length" class="w-full" viewBox="0 0 720 260" role="img" aria-label="注入 token 趋势">
-                        <line x1="45" y1="215" x2="700" y2="215" stroke="var(--border)" stroke-width="1"></line>
-                        <line x1="45" y1="20" x2="45" y2="215" stroke="var(--border)" stroke-width="1"></line>
-                        <template x-for="line in injectionLines.filter(l => injectionVisibleLines[l.key])" :key="line.key">
-                            <polyline fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" :stroke="line.color" :points="injectionLinePoints(line.key)"></polyline>
-                        </template>
-                        <template x-for="dot in injectionDots" :key="dot.key">
-                            <circle :cx="dot.x" :cy="dot.y" r="2.5" :fill="dot.color"><title x-text="dot.title"></title></circle>
-                        </template>
-                        <text x="45" y="238" font-size="10" fill="var(--muted-fg)" x-text="formatTime(sys.injection?.from)"></text>
-                        <text x="650" y="238" font-size="10" fill="var(--muted-fg)" x-text="formatTime(sys.injection?.to)"></text>
-                        <text x="48" y="16" font-size="10" fill="var(--muted-fg)" x-text="`${injectionChartMax} token`"></text>
-                    </svg>
+                    <template x-if="!injectionLoading && (sys.injection?.series||[]).length">
+                        <svg class="w-full" viewBox="0 0 720 260" role="img" aria-label="注入 token 趋势">
+                            <line x1="45" y1="215" x2="700" y2="215" stroke="var(--border)" stroke-width="1"></line>
+                            <line x1="45" y1="20" x2="45" y2="215" stroke="var(--border)" stroke-width="1"></line>
+                            <!-- 总量 -->
+                            <polyline x-show="injectionVisibleLines.total_tokens" fill="none" stroke="#f59e0b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" :points="injectionLinePoints('total_tokens')"></polyline>
+                            <!-- 主记忆 -->
+                            <polyline x-show="injectionVisibleLines.memories_tokens" fill="none" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" :points="injectionLinePoints('memories_tokens')"></polyline>
+                            <!-- 灵魂合计 -->
+                            <polyline x-show="injectionVisibleLines.soul_tokens" fill="none" stroke="#ec4899" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" :points="injectionLinePoints('soul_tokens')"></polyline>
+                            <!-- 信念 -->
+                            <polyline x-show="injectionVisibleLines.belief_tokens" fill="none" stroke="#22c55e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" :points="injectionLinePoints('belief_tokens')"></polyline>
+                            <!-- 关系 -->
+                            <polyline x-show="injectionVisibleLines.relation_memories_tokens" fill="none" stroke="#06b6d4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" :points="injectionLinePoints('relation_memories_tokens')"></polyline>
+                            <!-- 黑话 -->
+                            <polyline x-show="injectionVisibleLines.jargon_tokens" fill="none" stroke="#a855f7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" :points="injectionLinePoints('jargon_tokens')"></polyline>
+                            <text x="45" y="238" font-size="10" fill="var(--muted-fg)" x-text="formatTime(sys.injection?.from)"></text>
+                            <text x="650" y="238" font-size="10" fill="var(--muted-fg)" x-text="formatTime(sys.injection?.to)"></text>
+                            <text x="48" y="16" font-size="10" fill="var(--muted-fg)" x-text="`${injectionChartMax} token`"></text>
+                        </svg>
+                    </template>
                 </div>
                 <div>
                     <h4 class="text-xs font-medium mb-2">模块消耗排行榜</h4>
@@ -814,7 +822,7 @@
         <div x-show="beliefEdit" x-cloak class="dialog-overlay" @click.self="beliefEdit=null">
             <div class="dialog-content" x-show="beliefEdit">
                 <div class="px-5 py-4" style="border-bottom:1px solid var(--border)">
-                    <h3 class="text-sm font-semibold"><span x-text="beliefEditIsNew ? '新建信念' : '编辑信念 #'+beliefEdit.id"></span></h3>
+                    <h3 class="text-sm font-semibold"><span x-text="beliefEditIsNew ? '新建信念' : '编辑信念 #'+(beliefEdit ? beliefEdit.id : '')"></span></h3>
                 </div>
                 <div class="px-5 py-4 space-y-3">
                     <div>
@@ -963,7 +971,7 @@
         <!-- Sub-tabs Toggle -->
         <div class="flex border-b mb-4 gap-6 text-xs select-none" style="border-color:var(--border)">
             <button @click="jargonSubTab='local'; loadJargon()" class="pb-2 font-semibold transition" :class="jargonSubTab==='local' ? 'border-b-2 border-[var(--primary)] text-[var(--primary)]' : 'text-[var(--muted-fg)] hover:text-[var(--fg)]'">群聊本地黑话</button>
-            <button @click="jargonSubTab='global'; loadJargonHolyman()" class="pb-2 font-semibold transition" :class="jargonSubTab==='global' ? 'border-b-2 border-[var(--primary)] text-[var(--primary)]' : 'text-[var(--muted-fg)] hover:text-[var(--fg)]'">广域抽象黑话 (Holyman)</button>
+            <button @click="jargonSubTab='global'; loadJargonHolyman()" class="pb-2 font-semibold transition" :class="jargonSubTab==='global' ? 'border-b-2 border-[var(--primary)] text-[var(--primary)]' : 'text-[var(--muted-fg)] hover:text-[var(--fg)]'">Holyman 黑话知识库</button>
         </div>
 
         <!-- Sub-Tab 1: Local Jargon -->
@@ -1202,20 +1210,27 @@
             </div>
             
             <div class="text-xs px-1 text-[var(--muted-fg)] leading-relaxed flex flex-wrap items-center gap-3 justify-between">
-                <span x-text="`开箱即用，当前加载 ${holymanLocalCount || holymanItems.length || 0} 条核心互联网抽象黑话，支持一键实时拉取同步 GitHub 最新语料库。`"></span>
-                <span class="font-mono text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded" x-text="`本地版本: ${holymanLocalVersion}`"></span>
+                <span x-text="`Holyman 黑话知识库：精选 ${holymanItems.length || 0} 条 · 概念 ${holymanConcepts.length || 0} · 例句 ${holymanExamples.length || 0} · 语料 ${holymanCorpusSummary?.count || 0} · 候选 ${holymanCandidates.length || 0}`"></span>
+                <span class="font-mono text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded" x-text="`本地版本: ${holymanLocalVersion} / 状态: ${holymanAssetStatus}`"></span>
             </div>
 
             <!-- Version Update Alert Box -->
-            <div x-show="holymanUpdateAvailable" class="p-3 rounded-lg text-xs flex items-center justify-between border" style="background:rgba(245,158,11,0.08); border-color:rgba(245,158,11,0.2); color:var(--warning)">
+            <div x-show="holymanUpdateAvailable || holymanAssetStatus !== 'ready'" class="p-3 rounded-lg text-xs flex items-center justify-between border" style="background:rgba(245,158,11,0.08); border-color:rgba(245,158,11,0.2); color:var(--warning)">
                 <div class="flex items-center gap-2">
-                    <span>💡 广域黑话官方库已更新！本地版本：<span class="font-mono" x-text="holymanLocalVersion"></span>，线上最新：<span class="font-mono font-bold" x-text="holymanRemoteVersion"></span>。</span>
+                    <span x-text="holymanAssetStatus === 'ready' ? `💡 Holyman 知识库有更新：本地版本 ${holymanLocalVersion}，线上最新 ${holymanRemoteVersion}` : `⚠ Holyman 知识库当前为 ${holymanAssetStatus}，建议先同步原始资料并重新生成分层资产`"></span>
                 </div>
-                <button @click="syncJargonHolyman()" class="btn btn-xs !py-1 !px-2.5" style="background:var(--warning); color:black; font-weight:600">一键同步更新</button>
+                <button @click="syncJargonHolyman()" class="btn btn-xs !py-1 !px-2.5" style="background:var(--warning); color:black; font-weight:600">同步原始资料/更新知识库</button>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-2 text-[11px]">
+                <div class="p-2 rounded border border-white/5 bg-white/5">质量状态：<span class="font-mono" x-text="holymanAssetStatus"></span></div>
+                <div class="p-2 rounded border border-white/5 bg-white/5">错误：<span class="font-mono" x-text="Object.values(holymanQualityReport.errors || {}).reduce((a,b)=>a+Number(b||0), 0)"></span></div>
+                <div class="p-2 rounded border border-white/5 bg-white/5">屏蔽项：<span class="font-mono" x-text="Object.keys(holymanBlocked || {}).length"></span></div>
+                <div class="p-2 rounded border border-white/5 bg-white/5">候选：<span class="font-mono" x-text="holymanCandidates.length"></span></div>
             </div>
 
             <!-- Batch Action Control Row -->
-            <div class="flex flex-wrap items-center gap-3 bg-[var(--muted)] p-3 rounded-lg border border-[var(--border)] text-xs mt-3">
+            <div x-show="holymanKnowledgeTab==='phrases'" class="flex flex-wrap items-center gap-3 bg-[var(--muted)] p-3 rounded-lg border border-[var(--border)] text-xs mt-3">
                 <label class="flex items-center gap-1.5 cursor-pointer select-none bg-white/5 px-2.5 py-1 rounded border border-white/5 hover:bg-white/10 transition">
                     <input type="checkbox" @change="toggleSelectAllHolyman($event)" :checked="selectedHolymanWords.length === filteredHolymanItems().length && filteredHolymanItems().length > 0">
                     <span class="text-xs">全选</span>
@@ -1230,11 +1245,100 @@
                 </div>
             </div>
 
+            <!-- Layered knowledge sections -->
+            <div class="card !p-3 space-y-3">
+                <div class="flex flex-wrap items-center gap-2 justify-between">
+                    <div class="flex flex-wrap gap-1.5 text-[11px]">
+                        <button @click="holymanKnowledgeTab='phrases'" class="btn btn-xs" :class="holymanKnowledgeTab==='phrases' ? 'btn-primary' : 'btn-outline'">Holyman 精选词条</button>
+                        <button @click="holymanKnowledgeTab='concepts'" class="btn btn-xs" :class="holymanKnowledgeTab==='concepts' ? 'btn-primary' : 'btn-outline'">Holyman 文化概念</button>
+                        <button @click="holymanKnowledgeTab='examples'" class="btn btn-xs" :class="holymanKnowledgeTab==='examples' ? 'btn-primary' : 'btn-outline'">Holyman 语录证据</button>
+                        <button @click="holymanKnowledgeTab='corpus'" class="btn btn-xs" :class="holymanKnowledgeTab==='corpus' ? 'btn-primary' : 'btn-outline'">Holyman 原始语料</button>
+                        <button @click="holymanKnowledgeTab='candidates'" class="btn btn-xs" :class="holymanKnowledgeTab==='candidates' ? 'btn-primary' : 'btn-outline'">Holyman 待审核候选</button>
+                        <button @click="holymanKnowledgeTab='blocked'" class="btn btn-xs" :class="holymanKnowledgeTab==='blocked' ? 'btn-primary' : 'btn-outline'">Holyman 屏蔽项</button>
+                    </div>
+                    <input x-show="holymanKnowledgeTab !== 'phrases'" type="text" x-model="holymanEvidenceSearch" placeholder="搜索概念 / 例句 / 候选 / 屏蔽..." class="input w-64 text-xs">
+                </div>
+                <div class="text-[11px] text-[var(--muted-fg)] bg-white/[0.03] border border-white/5 rounded p-2">
+                    证据层只读展示，文化概念、语录证据、原始语料不可一键激活；只有精选词条和人工通过的候选才能进入激活层。
+                </div>
+
+                <div x-show="holymanKnowledgeTab==='concepts'" class="space-y-2">
+                    <div class="flex items-center justify-between"><h4 class="text-xs font-semibold">Holyman 文化概念</h4><span class="text-[10px] font-mono text-[var(--muted-fg)]" x-text="filteredHolymanConcepts().length"></span></div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-72 overflow-y-auto pr-1">
+                        <template x-for="c in filteredHolymanConcepts().slice(0, 80)" :key="c.id || c.title">
+                            <div class="p-2 rounded bg-white/[0.03] border border-white/5">
+                                <div class="text-xs font-medium" x-text="c.title"></div>
+                                <div class="text-[11px] text-[var(--muted-fg)] mt-1" x-text="c.summary"></div>
+                                <div class="text-[10px] text-[var(--muted-fg)] mt-1 font-mono" x-text="c.source || 'holyman_skills'"></div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <div x-show="holymanKnowledgeTab==='examples'" class="space-y-2">
+                    <div class="flex items-center justify-between"><h4 class="text-xs font-semibold">Holyman 语录证据</h4><span class="text-[10px] font-mono text-[var(--muted-fg)]" x-text="filteredHolymanExamples().length"></span></div>
+                    <div class="space-y-1.5 max-h-72 overflow-y-auto pr-1">
+                        <template x-for="e in filteredHolymanExamples().slice(0, 120)" :key="e.text">
+                            <div class="p-2 rounded bg-white/[0.03] border border-white/5">
+                                <div class="text-[11px] text-[var(--fg)]" x-text="e.text"></div>
+                                <div class="text-[10px] text-[var(--muted-fg)] mt-1" x-text="`linked: ${(e.linked_terms || []).join(', ') || '—'} · safe_for_prompt=${!!e.safe_for_prompt}`"></div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <div x-show="holymanKnowledgeTab==='corpus'" class="space-y-2">
+                    <div class="flex items-center justify-between"><h4 class="text-xs font-semibold">Holyman 原始语料</h4><span class="text-[10px] font-mono text-[var(--muted-fg)]" x-text="holymanCorpusSummary?.count || 0"></span></div>
+                    <div class="p-3 rounded bg-white/[0.03] border border-white/5 text-xs text-[var(--muted-fg)] leading-relaxed">
+                        原始语料保存在 corpus 层，当前共 <span class="font-mono" x-text="holymanCorpusSummary?.count || 0"></span> 条；该层 reference_only，不直接注入 prompt，也不参与 confirmed 匹配。
+                    </div>
+                </div>
+
+                <div x-show="holymanKnowledgeTab==='candidates'" class="space-y-2">
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                        <div class="flex items-center gap-2">
+                            <h4 class="text-xs font-semibold">Holyman 待审核候选</h4>
+                            <span class="text-[10px] font-mono text-[var(--muted-fg)]" x-text="filteredHolymanCandidates().length"></span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <input type="text" x-model="holymanCandidateSearch" placeholder="筛选候选..." class="input w-40 text-xs">
+                            <label class="flex items-center gap-1 text-[11px]"><input type="checkbox" @change="toggleSelectAllHolymanCandidates($event)" :checked="selectedHolymanCandidateIds.length === filteredHolymanCandidates().length && filteredHolymanCandidates().length > 0">全选</label>
+                            <button @click="batchReviewHolymanCandidates('approve')" x-show="selectedHolymanCandidateIds.length > 0" class="btn btn-success btn-xs">✓ 批量通过</button>
+                            <button @click="batchReviewHolymanCandidates('reject')" x-show="selectedHolymanCandidateIds.length > 0" class="btn btn-outline btn-xs" style="color:var(--danger)">✕ 批量拒绝并屏蔽</button>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 max-h-72 overflow-y-auto pr-1">
+                        <template x-for="c in filteredHolymanCandidates().slice(0, 180)" :key="c.id || c.word">
+                            <div class="p-2 rounded bg-white/[0.03] border border-white/5 text-xs">
+                                <div class="flex items-center justify-between gap-2">
+                                    <label class="flex items-center gap-1.5"><input type="checkbox" :value="c.id" x-model="selectedHolymanCandidateIds"><span class="font-medium" x-text="c.word"></span></label>
+                                    <span class="badge text-[10px]" x-text="c.status || 'pending_review'"></span>
+                                </div>
+                                <div class="text-[10px] text-[var(--muted-fg)] mt-1" x-text="`${c.reason || 'candidate'} · count=${c.count || 1} · ${c.source || 'holyman_skills'}`"></div>
+                                <div class="flex gap-1 mt-2">
+                                    <button @click="reviewHolymanCandidate(c, 'approve')" class="btn btn-success btn-xs">通过</button>
+                                    <button @click="reviewHolymanCandidate(c, 'reject')" class="btn btn-outline btn-xs" style="color:var(--danger)">拒绝</button>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <div x-show="holymanKnowledgeTab==='blocked'" class="space-y-2">
+                    <div class="flex items-center justify-between"><h4 class="text-xs font-semibold">Holyman 屏蔽项</h4><span class="text-[10px] font-mono text-[var(--muted-fg)]" x-text="Object.keys(holymanBlocked || {}).length"></span></div>
+                    <div class="flex flex-wrap gap-1.5 max-h-48 overflow-y-auto pr-1">
+                        <template x-for="item in holymanBlockedItems.filter(i => !holymanEvidenceSearch || [i.word, i.reason].join(' ').toLowerCase().includes(holymanEvidenceSearch.toLowerCase())).slice(0, 160)" :key="item.word">
+                            <span class="badge text-[10px]" style="background:rgba(239,68,68,0.1); color:#fca5a5; border:1px solid rgba(239,68,68,0.18)" :title="item.reason" x-text="item.word"></span>
+                        </template>
+                    </div>
+                </div>
+            </div>
+
             <!-- Empty State -->
-            <div x-show="holymanItems.length === 0" class="empty-state">未加载到广域黑话，请点击右上角在线同步</div>
+            <div x-show="holymanKnowledgeTab==='phrases' && holymanItems.length === 0" class="empty-state">未加载到 Holyman 精选词条，请点击右上角同步原始资料/更新知识库</div>
 
             <!-- Grid Card List -->
-            <div x-show="holymanItems.length > 0" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mt-3 max-h-[58vh] overflow-y-auto pr-1">
+            <div x-show="holymanKnowledgeTab==='phrases' && holymanItems.length > 0" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mt-3 max-h-[58vh] overflow-y-auto pr-1">
                 <template x-for="h in filteredHolymanItems()" :key="h.word">
                     <div class="card !p-3 flex flex-col justify-between border border-transparent transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-primary/5" 
                          :class="h.is_activated ? 'border-emerald-500/20 bg-emerald-500/5' : 'bg-white/5 border-white/5 hover:border-white/10'" style="border-radius:10px">
@@ -1248,7 +1352,7 @@
                             
                             <!-- Activation Checkbox -->
                             <div class="flex items-center gap-1 text-[11px] text-[var(--muted-fg)]">
-                                <span x-text="h.is_activated ? '已激活' : '未激活'" :class="h.is_activated ? 'text-emerald-400 font-medium' : ''"></span>
+                                <span x-text="h.is_activated ? '已激活到注入' : '仅知识库'" :class="h.is_activated ? 'text-emerald-400 font-medium' : ''"></span>
                                 <input type="checkbox" class="w-4 h-4 rounded text-[var(--primary)] focus:ring-[var(--primary)]/30 focus:ring-2 bg-[var(--muted)] border-[var(--border)] cursor-pointer transition-colors" 
                                        :checked="h.is_activated" 
                                        @change="h.is_activated = $event.target.checked; toggleJargonHolyman(h)">
@@ -1267,7 +1371,7 @@
                         </div>
 
                         <!-- Corpus Example -->
-                        <div x-show="h.example" class="text-[10px] text-[var(--muted-fg)] mt-2 italic bg-white/[0.02] p-1.5 rounded" x-text="'💬 语料: \"' + h.example + '\"'"></div>
+                        <div x-show="h.example" class="text-[10px] text-[var(--muted-fg)] mt-2 italic bg-white/[0.02] p-1.5 rounded" x-text="'💬 语料: 「' + h.example + '」'"></div>
                     </div>
                 </template>
             </div>
@@ -1418,7 +1522,7 @@
         <div x-show="concernEdit" x-cloak class="dialog-overlay" @click.self="concernEdit=null">
             <div class="dialog-content" x-show="concernEdit">
                 <div class="px-5 py-4" style="border-bottom:1px solid var(--border)">
-                    <h3 class="text-sm font-semibold"><span x-text="concernEditIsNew ? '新建关切' : '编辑关切 #'+concernEdit.id"></span></h3>
+                    <h3 class="text-sm font-semibold"><span x-text="concernEditIsNew ? '新建关切' : '编辑关切 #'+(concernEdit ? concernEdit.id : '')"></span></h3>
                 </div>
                 <div class="px-5 py-4 space-y-3">
                     <div>
@@ -1445,7 +1549,7 @@
         <div x-show="anchorEdit" x-cloak class="dialog-overlay" @click.self="anchorEdit=null">
             <div class="dialog-content" x-show="anchorEdit">
                 <div class="px-5 py-4" style="border-bottom:1px solid var(--border)">
-                    <h3 class="text-sm font-semibold"><span x-text="anchorEditIsNew ? '新建时间锚点' : '编辑时间锚点 #'+anchorEdit.id"></span></h3>
+                    <h3 class="text-sm font-semibold"><span x-text="anchorEditIsNew ? '新建时间锚点' : '编辑时间锚点 #'+(anchorEdit ? anchorEdit.id : '')"></span></h3>
                 </div>
                 <div class="px-5 py-4 space-y-3">
                     <div>
@@ -1472,7 +1576,7 @@
         <div x-show="moodEdit" x-cloak class="dialog-overlay" @click.self="moodEdit=null">
             <div class="dialog-content" x-show="moodEdit">
                 <div class="px-5 py-4" style="border-bottom:1px solid var(--border)">
-                    <h3 class="text-sm font-semibold">编辑情绪 #<span x-text="moodEdit.id"></span></h3>
+                    <h3 class="text-sm font-semibold">编辑情绪 #<span x-text="moodEdit ? moodEdit.id : ''"></span></h3>
                 </div>
                 <div class="px-5 py-4 space-y-3">
                     <div>
@@ -1720,6 +1824,11 @@ function dashboard() {
         get llmProviders() {
             return this.providers.filter(p => p.type !== 'embedding' && !p.model.toLowerCase().includes('embed'));
         },
+        get filteredInjectionLines() {
+            const visible = this.injectionVisibleLines;
+            if (!visible) return [];
+            return this.injectionLines.filter(l => visible[l.key]);
+        },
         get injectionLines() {
             return [
                 { key: 'total_tokens', label: '总量', color: '#f59e0b' },
@@ -1732,10 +1841,12 @@ function dashboard() {
         },
         get injectionChartMax() {
             const series = this.sys.injection?.series || [];
+            const visible = this.injectionVisibleLines;
+            if (!visible) return 1;
             let max = 0;
             for (const row of series) {
                 for (const line of this.injectionLines) {
-                    if (this.injectionVisibleLines[line.key]) max = Math.max(max, Number(row[line.key] || 0));
+                    if (visible[line.key]) max = Math.max(max, Number(row[line.key] || 0));
                 }
             }
             return Math.max(1, Math.ceil(max));
@@ -1743,10 +1854,12 @@ function dashboard() {
         get injectionDots() {
             const series = this.sys.injection?.series || [];
             const max = this.injectionChartMax;
+            const visible = this.injectionVisibleLines;
+            if (!visible) return [];
             const w = 655, h = 195, x0 = 45, y0 = 215;
             const dots = [];
             const denom = Math.max(1, series.length - 1);
-            this.injectionLines.filter(l => this.injectionVisibleLines[l.key]).forEach(line => {
+            this.injectionLines.filter(l => visible[l.key]).forEach(line => {
                 series.forEach((row, i) => {
                     const x = x0 + (w * i / denom);
                     const y = y0 - (h * Number(row[line.key] || 0) / max);
@@ -1811,7 +1924,18 @@ function dashboard() {
 
         holymanItems: [],
         holymanCategories: [],
+        holymanConcepts: [],
+        holymanExamples: [],
+        holymanCandidates: [],
+        holymanBlocked: {},
+        holymanBlockedItems: [],
+        holymanCorpusSummary: { count: 0 },
+        holymanQualityReport: {},
+        holymanAssetStatus: 'unknown',
         holymanSearch: '',
+        holymanEvidenceSearch: '',
+        holymanCandidateSearch: '',
+        holymanKnowledgeTab: 'phrases',
         holymanFilter: '',
         holymanCategory: '',
         holymanUseProxy: true,
@@ -1820,6 +1944,7 @@ function dashboard() {
         holymanLocalCount: 0,
         holymanUpdateAvailable: false,
         selectedHolymanWords: [],
+        selectedHolymanCandidateIds: [],
 
         // ─── 灵魂状态 ───
         concerns: [],
@@ -2487,8 +2612,17 @@ function dashboard() {
             try {
                 const r = await fetch('/api/jargon/holyman');
                 const d = await r.json();
-                this.holymanItems = d.items || [];
+                this.holymanItems = d.items || d.phrases || [];
                 this.holymanCategories = d.categories || [];
+                this.holymanConcepts = d.concepts || [];
+                this.holymanExamples = d.examples || [];
+                this.holymanCandidates = d.candidates || [];
+                this.selectedHolymanCandidateIds = [];
+                this.holymanBlocked = d.blocked || {};
+                this.holymanBlockedItems = Object.entries(this.holymanBlocked || {}).map(([word, reason]) => ({ word, reason }));
+                this.holymanCorpusSummary = d.corpus_summary || { count: 0 };
+                this.holymanQualityReport = d.quality_report || {};
+                this.holymanAssetStatus = d.asset_status || 'unknown';
                 this.holymanLocalVersion = d.local_version || 'Unknown';
                 this.holymanRemoteVersion = d.remote_version || 'Unknown';
                 this.holymanLocalCount = d.local_count || this.holymanItems.length || 0;
@@ -2555,6 +2689,62 @@ function dashboard() {
                 h.is_activated = true;
                 await this.toggleJargonHolyman(h, newMeaning);
             }
+        },
+        async reviewHolymanCandidate(candidate, action) {
+            if (!candidate || candidate.id === undefined || candidate.id === null) return;
+            try {
+                const r = await fetch(`/api/jargon/holyman/candidates/${candidate.id}/${action}`, { method: 'POST' });
+                const d = await r.json();
+                if (d.ok) await this.loadJargonHolyman();
+                else alert(d.error || '候选审核失败');
+            } catch(e) { console.error(e); alert('候选审核失败: ' + e.message); }
+        },
+        filteredHolymanCandidates() {
+            let items = this.holymanCandidates || [];
+            const q = (this.holymanCandidateSearch || this.holymanEvidenceSearch || '').trim().toLowerCase();
+            if (q) {
+                items = items.filter(c => [c.word, c.reason, c.source, c.status, c.reject_reason].join(' ').toLowerCase().includes(q));
+            }
+            return items;
+        },
+        filteredHolymanConcepts() {
+            let items = this.holymanConcepts || [];
+            const q = (this.holymanEvidenceSearch || '').trim().toLowerCase();
+            if (q) {
+                items = items.filter(c => [c.title, c.summary, c.source, (c.tags || []).join(' ')].join(' ').toLowerCase().includes(q));
+            }
+            return items;
+        },
+        filteredHolymanExamples() {
+            let items = this.holymanExamples || [];
+            const q = (this.holymanEvidenceSearch || '').trim().toLowerCase();
+            if (q) {
+                items = items.filter(e => [e.text, e.category, e.source, (e.linked_terms || []).join(' ')].join(' ').toLowerCase().includes(q));
+            }
+            return items;
+        },
+        toggleSelectAllHolymanCandidates(e) {
+            this.selectedHolymanCandidateIds = e.target.checked
+                ? this.filteredHolymanCandidates().map(c => c.id).filter(id => id !== undefined && id !== null)
+                : [];
+        },
+        async batchReviewHolymanCandidates(action) {
+            if (!this.selectedHolymanCandidateIds.length) return;
+            if (action === 'reject' && !confirm(`确认拒绝并屏蔽选中的 ${this.selectedHolymanCandidateIds.length} 个候选？`)) return;
+            try {
+                const r = await fetch('/api/jargon/holyman/candidates/batch-review', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ ids: this.selectedHolymanCandidateIds, action })
+                });
+                const d = await r.json();
+                if (d.ok) {
+                    alert(`✓ 已批量${action === 'approve' ? '通过' : '拒绝'} ${d.reviewed_count || 0} 个候选`);
+                    await this.loadJargonHolyman();
+                } else {
+                    alert(d.error || '候选批量审核失败');
+                }
+            } catch(e) { console.error(e); alert('候选批量审核失败: ' + e.message); }
         },
         filteredHolymanItems() {
             let items = this.holymanItems || [];

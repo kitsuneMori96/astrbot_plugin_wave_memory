@@ -1,75 +1,61 @@
-"""HolymanSyncService for loading and syncing phrases and corpus from Github (with proxy support)."""
+"""HolymanSyncService for layered Holyman jargon knowledge assets."""
 
 from __future__ import annotations
 
-import hashlib
+import asyncio
 import json
 import re
-import urllib.request
 import urllib.parse
-import asyncio
-import time
+import urllib.request
 from datetime import datetime
 from pathlib import Path
+from typing import Any
+
 from astrbot.api import logger
 
+from .holyman_assets import (
+    DEFAULT_BLOCKED,
+    atomic_write_json,
+    attach_content_metadata,
+    build_manifest,
+    content_entries,
+    content_hash,
+    generate_candidates,
+    parse_concepts,
+    parse_corpus,
+    parse_curated_phrases,
+    parse_examples,
+    quality_report,
+)
+
+try:
+    from engine.database import WaveMemoryDB
+except ImportError:  # tests may import services.* as top-level modules
+    WaveMemoryDB = None
+
+
 class HolymanSyncService:
-    """Service to synchronize Holyman abstract-culture jargon assets from remote GitHub repository."""
+    """Synchronize ykdeso/holyman-skills into layered reference-only jargon assets."""
 
     RAW_BASE = "https://raw.githubusercontent.com/ykdeso/holyman-skills/main/"
     PROXY_BASE = "https://mirror.ghproxy.com/https://raw.githubusercontent.com/ykdeso/holyman-skills/main/"
 
-    # Holyman 原仓库不是单纯词典，而是 skill + knowledge + persona + quotes + 365 条神言语料。
-    # 旧同步器只抓 3 个 markdown 的 `- 词: 释义` 行，导致前端只剩 100+ 条。
-    # 这里改成全量拉取可结构化的核心文件，并从神言语料中抽取可检索触发短语。
     SOURCE_PATHS = [
         "README.md",
+        "神言.txt",
         "神人.skill/SKILL.md",
+        "神人.skill/_persona/rules.md",
+        "神人.skill/_persona/communication.md",
+        "神人.skill/_persona/values.md",
         "神人.skill/_knowledge/gaming.md",
         "神人.skill/_knowledge/internet-culture.md",
-        "神人.skill/_meta/sources.md",
-        "神人.skill/_persona/communication.md",
-        "神人.skill/_persona/rules.md",
-        "神人.skill/_persona/values.md",
         "神人.skill/_quotes/iconic.md",
         "神人.skill/_quotes/internal.md",
-        "神言.txt",
+        "神人.skill/_meta/sources.md",
     ]
 
     def __init__(self, assets_dir: str | Path | None = None):
-        if assets_dir:
-            self.assets_dir = Path(assets_dir)
-        else:
-            self.assets_dir = Path(__file__).resolve().parent.parent.parent / "assets" / "holyman"
-
-    _SKIP_PHRASE_SOURCES = {"README.md", "神人.skill/_meta/sources.md"}
-    _ENGLISH_ALLOWLIST = {
-        "Ciallo", "Ciallo～", "Galgame", "NGA", "KPL", "CSGO", "CNCS", "DeepSeek", "AstraAI", "Bilibili",
-    }
-    _GENERIC_TERMS = {
-        "背景", "架构", "安装", "安装使用", "使用", "目录", "示例", "规则", "核心", "方法", "触发词",
-        "玩家", "游戏", "群聊", "今天", "昨天", "明天", "一个", "这个", "那个", "什么", "不是", "没有",
-        "可以", "但是", "因为", "所以", "如果", "就是", "我们", "你们", "他们", "自己", "现在",
-        "真的", "这种", "进行", "时候", "觉得", "来说", "一下", "这些", "那些", "任何", "问题",
-        "面对", "的人", "的话", "然后", "还是", "License", "Rules", "Core Rules", "Output Rules",
-        "Opening", "Closing", "Resolution", "Background", "Activation", "Acknowledgement",
-    }
-    _NOISE_MARKERS = (
-        "git clone", "PowerShell", "Git Bash", "Claude Code", "License", "Acknowledgement", "README",
-        ".md", ".json", "http://", "https://", "详见", "Opening**", "Closing**", "Resolution**",
-        "Response Hints", "Core Rules", "Output Rules", "Hard Boundaries", "Language (", "Mode ",
-    )
-    _CATEGORY_BY_SOURCE = {
-        "神人.skill/SKILL.md": "skill-core",
-        "神人.skill/_knowledge/gaming.md": "gaming",
-        "神人.skill/_knowledge/internet-culture.md": "internet-culture",
-        "神人.skill/_persona/communication.md": "communication",
-        "神人.skill/_persona/rules.md": "rules",
-        "神人.skill/_persona/values.md": "values",
-        "神人.skill/_quotes/iconic.md": "iconic-quotes",
-        "神人.skill/_quotes/internal.md": "internal-quotes",
-        "神言.txt": "corpus",
-    }
+        self.assets_dir = Path(assets_dir) if assets_dir else Path(__file__).resolve().parent.parent.parent / "assets" / "holyman"
 
     def _source_urls(self, path: str) -> tuple[str, str]:
         encoded = urllib.parse.quote(path)
@@ -88,299 +74,271 @@ class HolymanSyncService:
                 req = urllib.request.Request(direct_url, headers=headers)
                 with urllib.request.urlopen(req, timeout=15) as response:
                     return response.read().decode("utf-8", errors="ignore")
-            else:
-                raise e
-
-    @staticmethod
-    def _clean_phrase_word(word: str) -> str:
-        word = re.sub(r"^\s*[-*#>\d.、]+\s*", "", word or "").strip()
-        word = word.strip(" `*_《》\"'“”‘’[]【】（）()：:")
-        word = re.sub(r"\*\*", "", word)
-        word = re.sub(r"\s+", " ", word)
-        return word[:80]
-
-    @staticmethod
-    def _clean_phrase_meaning(meaning: str) -> str:
-        meaning = re.sub(r"\s+", " ", meaning or "").strip()
-        return meaning[:500]
-
-    def _category_for_source(self, source_name: str, *, from_corpus: bool = False) -> str:
-        if from_corpus:
-            return "corpus"
-        return self._CATEGORY_BY_SOURCE.get(source_name, "unknown")
-
-    def _is_good_phrase(self, word: str, *, source_name: str = "", from_corpus: bool = False) -> bool:
-        if not word or word.startswith("_") or len(word) < 2:
-            return False
-        if word in self._GENERIC_TERMS:
-            return False
-        if word.startswith("|") or word.endswith("|") or "```" in word:
-            return False
-        lowered = word.lower()
-        if any(marker.lower() in lowered for marker in self._NOISE_MARKERS):
-            return False
-        if re.fullmatch(r"[A-Za-z0-9 /_().~↑↓<>=*:-]+", word) and word not in self._ENGLISH_ALLOWLIST:
-            return False
-        if re.fullmatch(r"[\u4e00-\u9fff]{2,3}", word) and word not in {"急了", "典", "绷", "鼠鼠", "叠甲", "丁真", "原神", "黄油", "神人", "抽象", "狗粉丝", "孙笑川"}:
-            return False
-        if len(word) > 30:
-            return False
-        if from_corpus:
-            if len(word) < 4 and word not in {"典", "绷", "急了", "鼠鼠", "叠甲", "v我50"}:
-                return False
-            if re.fullmatch(r"[\u4e00-\u9fff]{2,4}", word) and word not in {"急了", "鼠鼠", "叠甲", "原神", "黄油", "神人", "抽象", "狗粉丝"}:
-                return False
-        return True
-
-    def _add_phrase(
-        self,
-        phrases: dict,
-        word: str,
-        meaning: str,
-        *,
-        source_name: str = "",
-        from_corpus: bool = False,
-        kind: str = "phrase",
-    ) -> None:
-        word = self._clean_phrase_word(word)
-        meaning = self._clean_phrase_meaning(meaning)
-        if not meaning:
-            return
-        if not self._is_good_phrase(word, source_name=source_name, from_corpus=from_corpus):
-            return
-        phrases.setdefault(word, {
-            "meaning": meaning,
-            "category": self._category_for_source(source_name, from_corpus=from_corpus),
-            "source": source_name or ("神言.txt" if from_corpus else ""),
-            "kind": kind,
-        })
+            raise
 
     @staticmethod
     def content_entries(phrases: dict) -> dict:
-        """Return user-visible Holyman phrase entries, excluding metadata keys."""
-        if not isinstance(phrases, dict):
-            return {}
-        return {
-            key: value
-            for key, value in phrases.items()
-            if isinstance(key, str) and not key.startswith("_")
-        }
+        return content_entries(phrases)
 
     @classmethod
     def content_count(cls, phrases: dict) -> int:
-        """Count actual phrase entries, excluding metadata keys."""
-        return len(cls.content_entries(phrases))
+        return len(content_entries(phrases))
 
     @classmethod
     def content_hash(cls, phrases: dict) -> str:
-        """Stable hash of actual phrase content, independent of sync time/version metadata."""
-        payload = json.dumps(cls.content_entries(phrases), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+        return content_hash(phrases)
 
     @classmethod
     def attach_content_metadata(cls, phrases: dict) -> dict:
-        """Attach content-derived metadata used by WebUI update checks."""
-        phrases = dict(phrases or {})
-        phrases["_content_count"] = cls.content_count(phrases)
-        phrases["_content_hash"] = cls.content_hash(phrases)
-        return phrases
+        return attach_content_metadata(phrases)
 
-    def _merge_phrases_for_save(self, existing_phrases: dict, parsed_phrases: dict) -> dict:
-        """Prefer the current cleaned structured parse; keep old assets only if remote parse is clearly unhealthy."""
-        if isinstance(parsed_phrases, dict) and len(parsed_phrases) >= 50:
-            return dict(parsed_phrases)
-        merged = self.content_entries(existing_phrases or {})
-        merged.update(parsed_phrases or {})
-        return merged
+    def _read_json(self, name: str, default: Any) -> Any:
+        path = self.assets_dir / name
+        if not path.exists():
+            return default
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning(f"[HolymanSync] Failed to read {name}: {e}")
+            return default
+
+    def _write_json(self, name: str, data: Any) -> None:
+        atomic_write_json(self.assets_dir / name, data)
+
+    def _sync_runtime_snapshot(self, assets: dict[str, Any]) -> None:
+        if WaveMemoryDB is None:
+            return
+        try:
+            db_path = self.assets_dir.parent / "wave_memory.db"
+            if not db_path.exists():
+                return
+            db = WaveMemoryDB(str(db_path))
+            try:
+                db.upsert_jargon_knowledge_snapshot("holyman_skills", {
+                    "repo": assets["manifest"].get("source"),
+                    "remote_version": assets["manifest"].get("remote_version"),
+                    "local_version": assets["phrases"].get("_version"),
+                    "content_hash": assets["phrases"].get("_content_hash"),
+                    "asset_status": assets["quality_report"].get("status"),
+                    "manifest": assets["manifest"],
+                    "quality_report": assets["quality_report"],
+                })
+                db.replace_jargon_knowledge_table("jargon_examples", [
+                    {
+                        "word": ",".join(item.get("linked_terms", [])) if isinstance(item, dict) else "",
+                        "example": item.get("text") if isinstance(item, dict) else str(item),
+                        "category": item.get("category") if isinstance(item, dict) else "unknown",
+                        "source": item.get("source") if isinstance(item, dict) else "",
+                        "source_path": item.get("source") if isinstance(item, dict) else "",
+                        "safe_for_prompt": 1 if (isinstance(item, dict) and item.get("safe_for_prompt")) else 0,
+                    }
+                    for item in assets.get("examples", [])
+                ])
+                db.replace_jargon_knowledge_table("jargon_concepts", [
+                    {
+                        "concept_id": item.get("id") if isinstance(item, dict) else str(idx),
+                        "title": item.get("title") if isinstance(item, dict) else str(item),
+                        "summary": item.get("summary") if isinstance(item, dict) else "",
+                        "source": item.get("source") if isinstance(item, dict) else "",
+                        "tags": json.dumps(item.get("tags", []), ensure_ascii=False) if isinstance(item, dict) else "[]",
+                        "confidence": item.get("confidence") if isinstance(item, dict) else 0,
+                    }
+                    for idx, item in enumerate(assets.get("concepts", []), start=1)
+                ], unique_col="concept_id")
+                db.replace_jargon_knowledge_table("jargon_candidates", [
+                    {
+                        "word": item.get("word") if isinstance(item, dict) else str(item),
+                        "reason": item.get("reason") if isinstance(item, dict) else "",
+                        "count": item.get("count") if isinstance(item, dict) else 1,
+                        "source": item.get("source") if isinstance(item, dict) else "",
+                        "status": item.get("status") if isinstance(item, dict) else "pending_review",
+                        "reject_reason": item.get("reject_reason") if isinstance(item, dict) else "",
+                        "metadata": json.dumps(item, ensure_ascii=False) if isinstance(item, dict) else "{}",
+                    }
+                    for item in assets.get("candidates", [])
+                ])
+                db.replace_jargon_knowledge_table("jargon_blocklist", [
+                    {
+                        "word": word,
+                        "reason": reason,
+                        "source": "holyman_skills",
+                    }
+                    for word, reason in (assets.get("blocked") or {}).items()
+                ])
+            finally:
+                db.close()
+        except Exception as e:
+            logger.debug(f"[HolymanSync] runtime snapshot sync skipped: {e}")
+
+    def _parse_curated_phrases(self, fetched: dict[str, str], existing_phrases: dict[str, Any] | None = None) -> dict[str, Any]:
+        return parse_curated_phrases(fetched, existing_phrases=existing_phrases)
+
+    def _parse_concepts(self, fetched: dict[str, str]) -> list[dict[str, Any]]:
+        return parse_concepts(fetched)
+
+    def _parse_examples(self, fetched: dict[str, str], phrases: dict[str, Any]) -> list[dict[str, Any]]:
+        return parse_examples(fetched, phrases)
 
     def _parse_markdown_phrases(self, text: str, source_name: str, phrases: dict) -> None:
-        """Extract high-signal terms from Holyman skill files without importing document scaffolding."""
-        if source_name in self._SKIP_PHRASE_SOURCES:
+        if source_name in {"README.md", "神人.skill/_meta/sources.md"}:
             return
-
+        from .holyman_assets import add_phrase
+        category = {
+            "神人.skill/SKILL.md": "skill-core",
+            "神人.skill/_knowledge/gaming.md": "gaming",
+            "神人.skill/_knowledge/internet-culture.md": "internet-culture",
+            "神人.skill/_persona/communication.md": "communication",
+            "神人.skill/_persona/rules.md": "rules",
+            "神人.skill/_persona/values.md": "values",
+            "神人.skill/_quotes/iconic.md": "iconic-quotes",
+            "神人.skill/_quotes/internal.md": "internal-quotes",
+        }.get(source_name, "unknown")
         colon_pattern = re.compile(r"^\s*(?:[-*]\s*)?(?:\d+[.、]\s*)?(?:\*\*)?([^*：:]{2,50})(?:\*\*)?\s*[:：]\s*(.{2,})$")
-        bold_pattern = re.compile(r"\*\*([^*]{2,40})\*\*[:：]?\s*([^\n]*)")
         quote_pattern = re.compile(r"[\"“「『]([^\"”」』]{2,40})[\"”」』]")
-
-        current_heading = ""
-        in_code_block = False
-        for raw in text.splitlines():
+        for raw in (text or "").splitlines():
             line = raw.strip()
-            if line.startswith("```"):
-                in_code_block = not in_code_block
+            if not line or line.startswith("#"):
                 continue
-            if in_code_block or not line or line in {"---", "..."}:
-                continue
-            if line.startswith(("topic:", "last_updated:", "sources:", "methodology:", "name:", "description:")):
-                continue
+            match = colon_pattern.match(line)
+            if match:
+                kind = "bold_term" if "**" in line else "colon_term"
+                add_phrase(phrases, match.group(1), match.group(2), category=category, source=source_name, kind=kind)
+            for quote in quote_pattern.findall(line):
+                if quote == "v我50":
+                    continue
+                phrases.setdefault(quote, {
+                    "meaning": f"Holyman-skills《{source_name}》中的典型语录/表达样本。仅作为理解参考。",
+                    "category": category,
+                    "source": source_name,
+                    "kind": "quote_term",
+                    "confidence": 0.6,
+                    "safety_level": "safe_reference",
+                })
 
-            if line.startswith("#"):
-                current_heading = self._clean_phrase_word(line.lstrip("#"))
-                continue
+    def _parse_corpus(self, corpus_data: str, phrases: dict | None = None) -> list[dict[str, Any]]:
+        corpus = parse_corpus(corpus_data)
+        if phrases is not None:
+            for item in corpus:
+                text = item.get("text", "") if isinstance(item, dict) else str(item)
+                for quoted in __import__("re").findall(r"[\"“「『]([^\"”」』]{2,24})[\"”」』]", text):
+                    if quoted == "v我50":
+                        phrases.setdefault("v我50", {
+                            "meaning": "长篇铺垫或煽情叙述后突然索要 50 元，常关联疯狂星期四，用来制造荒诞转折。",
+                            "category": "catchphrase",
+                            "source": "神言.txt",
+                            "kind": "corpus_quote",
+                            "confidence": 0.9,
+                            "safety_level": "safe_reference",
+                        })
+        return corpus
 
-            matched_structured = False
-            m = colon_pattern.match(line)
-            if m:
-                matched_structured = True
-                self._add_phrase(phrases, m.group(1), m.group(2), source_name=source_name, kind="colon_term")
+    def _merge_phrases_for_save(self, existing_phrases: dict, parsed_phrases: dict) -> dict:
+        if isinstance(parsed_phrases, dict) and len(content_entries(parsed_phrases)) >= 50:
+            return dict(content_entries(parsed_phrases))
+        merged = dict(content_entries(existing_phrases or {}))
+        merged.update(content_entries(parsed_phrases or {}))
+        return merged
 
-            for bm in bold_pattern.finditer(line):
-                matched_structured = True
-                word = bm.group(1)
-                tail = bm.group(2).strip(" ：:-—")
-                meaning = tail or (f"Holyman-skills《{source_name}》中强调的抽象文化概念。" + (f"所属段落：{current_heading}。" if current_heading else ""))
-                self._add_phrase(phrases, word, meaning, source_name=source_name, kind="bold_term")
+    def _generate_candidates(self, corpus: list[Any], phrases: dict[str, Any]) -> list[dict[str, Any]]:
+        return generate_candidates(corpus, phrases, DEFAULT_BLOCKED)
 
-            for qm in quote_pattern.finditer(line):
-                matched_structured = True
-                q = qm.group(1).strip()
-                if 2 <= len(q) <= 30:
-                    self._add_phrase(phrases, q, f"Holyman-skills《{source_name}》中的典型语录/表达样本。仅作为理解参考。", source_name=source_name, kind="quote_term")
+    def _build_quality_report(self, assets: dict[str, Any]) -> dict[str, Any]:
+        return quality_report(assets)
 
-            # Bare list items are only safe in quote/knowledge files; skip markdown structure labels.
-            if not matched_structured and source_name.startswith("神人.skill/_quotes/") and line.startswith(("- ", "* ")):
-                item = self._clean_phrase_word(line[2:])
-                if 2 <= len(item) <= 24:
-                    self._add_phrase(phrases, item, f"Holyman-skills《{source_name}》条目：{item}。用于理解抽象文化群聊语境。", source_name=source_name, kind="list_term")
-
-    def _parse_corpus(self, corpus_data: str, phrases: dict) -> list[str]:
-        corpus_list = []
+    def _fetch_remote_version(self) -> str:
         try:
-            parsed_json = json.loads(corpus_data)
-            items = parsed_json.get("items", []) if isinstance(parsed_json, dict) else parsed_json
-            if isinstance(items, list):
-                for item in items:
-                    text = item.get("text", "") if isinstance(item, dict) else str(item)
-                    text = text.strip()
-                    if text:
-                        corpus_list.append(text)
-            elif isinstance(parsed_json, str) and parsed_json.strip():
-                corpus_list.append(parsed_json.strip())
-        except Exception:
-            for line in corpus_data.splitlines():
-                line = line.strip()
-                if line:
-                    corpus_list.append(line)
-
-        # From 365-ish long 神言 copy-pastas extract short trigger phrases that can be searched/activated.
-        stop_words = set(self._GENERIC_TERMS)
-        counter = {}
-        for text in corpus_list:
-            for quoted in re.findall(r"[\"“「『]([^\"”」』]{2,30})[\"”」』]", text):
-                self._add_phrase(phrases, quoted, "神言语料中的高频/标志性表达，用于理解群聊抽象语境。", from_corpus=True, kind="corpus_quote")
-            for phrase in re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{4,12}", text):
-                if phrase in stop_words:
-                    continue
-                if re.fullmatch(r"\d+", phrase):
-                    continue
-                counter[phrase] = counter.get(phrase, 0) + 1
-
-        for phrase, count in sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))[:300]:
-            if count < 4:
-                continue
-            if phrase in stop_words:
-                continue
-            self._add_phrase(
-                phrases,
-                phrase,
-                f"神言语料中出现 {count} 次的高频抽象表达/触发词。用于检索和理解 Holyman 原始语料语境。",
-                from_corpus=True,
-                kind="corpus_frequency",
+            req = urllib.request.Request(
+                "https://api.github.com/repos/ykdeso/holyman-skills/commits/main",
+                headers={"User-Agent": "WaveMemory-HolymanSync"},
             )
-        return corpus_list
+            with urllib.request.urlopen(req, timeout=5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+                sha = data.get("sha", "")[:7]
+                date = data.get("commit", {}).get("committer", {}).get("date", "")[:10]
+                return f"{date}-{sha}" if sha and date else ""
+        except Exception:
+            return ""
+
+    def _save_raw_snapshot(self, fetched: dict[str, str]) -> None:
+        raw_dir = self.assets_dir / "raw"
+        for rel_path, content in fetched.items():
+            target = raw_dir / rel_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content or "", encoding="utf-8")
+
+    def build_assets_from_fetched(self, fetched: dict[str, str], *, remote_version: str = "") -> dict[str, Any]:
+        """Build all layered Holyman assets from fetched raw files without writing them."""
+        existing_phrases = self._read_json("phrases.json", {})
+        phrases = self._parse_curated_phrases(fetched, existing_phrases=existing_phrases)
+        corpus = self._parse_corpus(fetched.get("神言.txt", ""))
+        concepts = self._parse_concepts(fetched)
+        examples = self._parse_examples(fetched, phrases)
+        candidates = self._generate_candidates(corpus, phrases)
+        blocked = dict(DEFAULT_BLOCKED)
+        manifest = build_manifest(fetched, remote_version=remote_version)
+        phrases = attach_content_metadata(phrases, version=f"sync-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+        if remote_version:
+            phrases["_remote_commit_version"] = remote_version
+        assets = {
+            "manifest": manifest,
+            "phrases": phrases,
+            "concepts": concepts,
+            "examples": examples,
+            "corpus": corpus,
+            "candidates": candidates,
+            "blocked": blocked,
+        }
+        assets["quality_report"] = self._build_quality_report(assets)
+        return assets
 
     def sync_from_github_sync(self, use_proxy: bool = True) -> dict:
-        """Synchronously download and parse Holyman-skills files from Github, then save them locally."""
+        """Synchronously download and parse Holyman-skills files from Github, then save layered assets locally."""
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
-
         try:
             fetched: dict[str, str] = {}
-
-            # 1. Fetch full Holyman skill repository materials, not just three markdown files.
             for path in self.SOURCE_PATHS:
                 logger.info(f"[HolymanSync] Downloading source file: {path}")
                 direct_url, proxy_url = self._source_urls(path)
-                fetched[path] = self._fetch_content(
-                    direct_url=direct_url,
-                    proxy_url=proxy_url,
-                    use_proxy=use_proxy,
-                    headers=headers,
-                )
+                fetched[path] = self._fetch_content(direct_url=direct_url, proxy_url=proxy_url, use_proxy=use_proxy, headers=headers)
 
-            # 2. Parse markdown/persona/quotes/readme into searchable phrase dictionary.
-            phrases_dict = {}
-            for path, content in fetched.items():
-                if path.endswith(".md") or path.endswith("SKILL.md") or path.endswith("README.md"):
-                    self._parse_markdown_phrases(content, path, phrases_dict)
+            remote_version = self._fetch_remote_version()
+            assets = self.build_assets_from_fetched(fetched, remote_version=remote_version)
+            report = assets["quality_report"]
 
-            # 3. Parse 神言.txt into full corpus and extract high-frequency trigger phrases.
-            corpus_list = self._parse_corpus(fetched.get("神言.txt", ""), phrases_dict)
-
-            # Ensure local directories exist
             self.assets_dir.mkdir(parents=True, exist_ok=True)
+            self._save_raw_snapshot(fetched)
+            self._write_json("manifest.json", assets["manifest"])
+            self._write_json("concepts.json", assets["concepts"])
+            self._write_json("examples.json", assets["examples"])
+            self._write_json("corpus.json", assets["corpus"])
+            self._write_json("candidates.json", assets["candidates"])
+            self._write_json("blocked.json", assets["blocked"])
+            self._write_json("quality_report.json", report)
 
-            phrases_file = self.assets_dir / "phrases.json"
-            corpus_file = self.assets_dir / "corpus.json"
+            if report.get("status") == "ready":
+                self._write_json("phrases.json", assets["phrases"])
+            else:
+                logger.warning(f"[HolymanSync] Generated assets are not ready; keeping previous phrases.json. errors={report.get('errors')}")
 
-            # Merge Protection (Additive Update):
-            # Load existing local phrases.json if it exists, then update it.
-            existing_phrases = {}
-            if phrases_file.exists():
-                try:
-                    with open(phrases_file, "r", encoding="utf-8") as f:
-                        existing_phrases = json.load(f)
-                except Exception as e:
-                    logger.warning(f"[HolymanSync] Failed to load existing phrases.json for merging: {e}")
-
-            if not isinstance(existing_phrases, dict):
-                existing_phrases = {}
-
-            # Prefer the current cleaned structured parse; fall back to additive merge only if parsing looks unhealthy.
-            phrases_to_save = self._merge_phrases_for_save(existing_phrases, phrases_dict)
-
-            # Ensure the version/content meta keys are updated correctly
-            remote_id = f"sync-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-            phrases_to_save = self.attach_content_metadata(phrases_to_save)
-            phrases_to_save["_version"] = remote_id
-            phrases_to_save["_update_time"] = int(time.time())
-            try:
-                req = urllib.request.Request(
-                    "https://api.github.com/repos/ykdeso/holyman-skills/commits/main",
-                    headers={"User-Agent": "WaveMemory-HolymanSync"},
-                )
-                with urllib.request.urlopen(req, timeout=5) as response:
-                    data = json.loads(response.read().decode("utf-8"))
-                    sha = data.get("sha", "")[:7]
-                    date = data.get("commit", {}).get("committer", {}).get("date", "")[:10]
-                    if sha and date:
-                        phrases_to_save["_remote_commit_version"] = f"{date}-{sha}"
-            except Exception:
-                pass
-
-            # Save phrases
-            with open(phrases_file, "w", encoding="utf-8") as f:
-                json.dump(phrases_to_save, f, ensure_ascii=False, indent=2)
-
-            # Save corpus
-            with open(corpus_file, "w", encoding="utf-8") as f:
-                json.dump(corpus_list, f, ensure_ascii=False, indent=2)
+            self._sync_runtime_snapshot(assets)
 
             return {
-                "ok": True,
-                "phrases_count": self.content_count(phrases_to_save),
-                "content_count": phrases_to_save.get("_content_count"),
-                "content_hash": phrases_to_save.get("_content_hash"),
-                "corpus_count": len(corpus_list)
+                "ok": report.get("status") == "ready",
+                "asset_status": report.get("status"),
+                "phrases_count": report.get("phrases_count"),
+                "content_count": len(content_entries(assets["phrases"])),
+                "content_hash": content_hash(assets["phrases"]),
+                "concepts_count": report.get("concepts_count"),
+                "examples_count": report.get("examples_count"),
+                "corpus_count": report.get("corpus_count"),
+                "candidates_count": report.get("candidates_count"),
+                "quality_report": report,
             }
-
         except Exception as e:
             logger.error(f"[HolymanSyncService] Sync failed: {e}")
-            return {
-                "ok": False,
-                "error": str(e)
-            }
+            return {"ok": False, "error": str(e)}
 
     async def sync_from_github(self, use_proxy: bool = True) -> dict:
         """Asynchronously run sync_from_github using asyncio.to_thread to avoid blocking main loop."""

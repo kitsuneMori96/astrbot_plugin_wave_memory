@@ -1,5 +1,26 @@
 # Changelog
 
+## v2.3.4 (2026-06-30)
+
+### WebUI 全局断流空指针与 SVG 嵌套循环热修
+
+- **内联状态补充**：修补 index.html 内联 dashboard() 缺少的 Holyman 状态和方法，解决第一帧变量 undefined 导致的 Alpine 全局初始化断流
+- **弹窗空指针防御**：重构信念/关切/时间线/情绪编辑弹窗标题，增加 existence 条件保护，避免默认没有编辑数据时 `Edit.id` 爆 null 指针
+- **SVG 兼容性去耦**：将指标趋势图 SVG 内的 `<template x-for>` 替换为平铺多指标连线，彻底绕过 Alpine 克隆原生 SVG 节点时的 `children` TypeError
+- **词法 SyntaxError 规避**：将 x-text 字符拼接中的双引号转义 `\"` 替换为中文免转义书名号 `「`，断绝 HTML 双引号提前切断导致的词法 SyntaxError
+- **测试覆盖**：扩展测试 `test_holyman_frontend_has_layered_tabs_search_and_batch_candidate_controls` 覆盖内联状态检测，保障后续改动绝不回退
+- **高真实验证**：通过 headless 浏览器对容器 9876 服务完成真实 fetch 验证，确认 console 达到完美 zero-error、黑话分层 tabs 运行无瑕疵
+
+## v2.3.3 (2026-06-30)
+
+### Holyman 黑话知识库分层与候选审核
+
+- **分层资产导入**：将 Holyman 从扁平词库升级为精选词条、文化概念、语录证据、原始语料、候选、屏蔽项与质量报告的知识库结构
+- **安全匹配收口**：仅精选词条与已确认 DB 条目参与 confirmed match，候选/语料/例句仅作为参考层，不再自动进入激活层
+- **WebUI 分层展示**：黑话页改为知识库 tabs，概念/例句/语料/候选/屏蔽项分区展示，候选支持搜索、全选、批量通过与批量拒绝并屏蔽
+- **候选审核回显**：新增批量候选审核 API，并让 `/api/jargon/holyman` 合并 DB 审核状态与 blocklist，刷新后立即可见
+- **验证覆盖**：新增 Holyman 导入回归测试，确保质量门禁、候选审核、上下文锚点与前端契约稳定
+
 ## v2.3.2 (2026-06-27)
 
 ### 注入指标时间序列分析

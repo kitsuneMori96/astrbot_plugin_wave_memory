@@ -652,6 +652,97 @@ git clone https://github.com/ykdeso/holyman-skills.git
         self.assertEqual(match["term"], "v我50")
         self.assertIn("常见荒诞转折梗", match["explanation"])
 
+    def test_jargon_service_requires_curated_holyman_layer_for_confirmation(self):
+        from services.jargon.service import JargonService
+
+        class FakeFilter:
+            def feed(self, *args, **kwargs):
+                pass
+            def get_candidates(self, *args, **kwargs):
+                return [{"word": "外层词", "frequency": 1, "contexts": ["外层词"], "source_contexts": [{"content": "外层词", "timestamp": 1.0, "sender_id": "u1"}]}]
+
+        class FakeHolyman:
+            def match(self, *args, **kwargs):
+                return {
+                    "matched": True,
+                    "classification": "global_abstract",
+                    "confidence": 0.9,
+                    "term": "外层词",
+                    "explanation": "证据层，不应直接确认",
+                    "source_layer": "examples",
+                }
+
+        conn, _ = self._connect()
+        self.addCleanup(conn.close)
+        conn.execute("""
+            CREATE TABLE jargon (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                word TEXT NOT NULL,
+                meaning TEXT DEFAULT '',
+                is_jargon INTEGER DEFAULT NULL,
+                frequency INTEGER DEFAULT 1,
+                confidence REAL DEFAULT 0,
+                is_global INTEGER DEFAULT 0,
+                group_id TEXT NOT NULL,
+                contexts TEXT DEFAULT '[]',
+                created_at INTEGER,
+                updated_at INTEGER,
+                status TEXT DEFAULT 'pending',
+                scope TEXT DEFAULT 'local',
+                source TEXT DEFAULT 'wave_memory',
+                last_infer_freq INTEGER DEFAULT 0,
+                reject_reason TEXT,
+                source_memory_id INTEGER,
+                source_message_ts REAL,
+                source_sender_id TEXT,
+                source_context TEXT DEFAULT '[]',
+                candidate_type TEXT DEFAULT 'jargon'
+            )
+        """)
+        conn.commit()
+
+        svc = JargonService(type('DB', (), {'conn': conn, 'insert_fact': lambda *a, **k: None})(), llm_client=None, enabled=True, config={"holyman_enabled": True, "holyman_reference_only": True})
+        svc._filter = FakeFilter()
+        svc._holyman = FakeHolyman()
+        svc._inference = None
+        svc._msg_count['g1'] = 0
+        result = asyncio.run(svc.mine('g1'))
+
+        self.assertEqual(result, [])
+        row = conn.execute("SELECT status, scope, source FROM jargon WHERE word='外层词'").fetchone()
+        self.assertEqual(row[0], 'pending')
+        self.assertEqual(row[1], 'local')
+        self.assertEqual(row[2], 'wave_memory')
+
+    def test_wave_memory_db_creates_holyman_knowledge_tables(self):
+        from engine.database import WaveMemoryDB
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = WaveMemoryDB(str(Path(tmp) / 'wave.db'))
+            try:
+                tables = {r[0] for r in db.conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+                self.assertTrue({"jargon_examples", "jargon_concepts", "jargon_candidates", "jargon_blocklist", "jargon_sources"}.issubset(tables))
+
+                db.upsert_jargon_knowledge_snapshot("holyman_skills", {
+                    "repo": "ykdeso/holyman-skills",
+                    "remote_version": "2026-06-28-abc1234",
+                    "local_version": "sync-local",
+                    "content_hash": "deadbeef",
+                    "asset_status": "ready",
+                    "manifest": {"files": []},
+                    "quality_report": {"status": "ready"},
+                })
+                db.replace_jargon_knowledge_table("jargon_candidates", [{"word": "外层词", "reason": "test", "count": 1, "source": "x", "status": "pending_review", "reject_reason": "", "metadata": "{}"}])
+                snapshot = db.conn.execute("SELECT source_key, asset_status, content_hash FROM jargon_sources WHERE source_key='holyman_skills'").fetchone()
+                candidate = db.conn.execute("SELECT word, status FROM jargon_candidates WHERE word='外层词'").fetchone()
+                self.assertEqual(snapshot[0], 'holyman_skills')
+                self.assertEqual(snapshot[1], 'ready')
+                self.assertEqual(snapshot[2], 'deadbeef')
+                self.assertEqual(candidate[0], '外层词')
+                self.assertEqual(candidate[1], 'pending_review')
+            finally:
+                db.close()
+
     def test_holyman_api_helpers_normalize_legacy_and_structured_categories(self):
         from webui.blueprints.jargon import _normalize_holyman_phrase, _build_holyman_categories
 
@@ -680,6 +771,11 @@ git clone https://github.com/ykdeso/holyman-skills.git
         self.assertIn("全部分类", html)
         self.assertIn("category_label", html)
         self.assertIn("h.category", html)
+        self.assertIn("Holyman 黑话知识库", html)
+        self.assertIn("文化概念", html)
+        self.assertIn("语录证据", html)
+        self.assertIn("待审核候选", html)
+        self.assertIn("屏蔽项", html)
 
     def test_holyman_reference_rejects_document_noise_and_generic_substrings(self):
         from services.jargon.holyman_reference import HolymanReference

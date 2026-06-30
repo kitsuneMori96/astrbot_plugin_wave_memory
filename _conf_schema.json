@@ -919,6 +919,24 @@
         "hint": "注入最近和此人的事件流，让 bot 有时间连续感",
         "type": "bool",
         "default": true
+      },
+      "recall_detail_log_enabled": {
+        "description": "启用召回明细日志",
+        "hint": "开启后每次 inject_memory 会在日志打印最终注入的 memory id、来源、群、发送者、分数和内容预览；用于排查 bot 到底被哪些记忆影响。内容可能较多，排查完建议关闭。",
+        "type": "bool",
+        "default": true
+      },
+      "recall_detail_log_max_items": {
+        "description": "召回明细最大条数",
+        "hint": "每次日志最多打印多少条最终注入记忆。只影响日志，不影响实际注入条数。",
+        "type": "int",
+        "default": 8
+      },
+      "recall_detail_log_preview_chars": {
+        "description": "召回明细预览长度",
+        "hint": "每条记忆在日志中显示的内容预览字符数。",
+        "type": "int",
+        "default": 120
       }
     }
   }

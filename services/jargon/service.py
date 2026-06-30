@@ -37,6 +37,7 @@ class JargonService:
         self._llm_validate = True if _llm_validate_cfg is None else bool(_llm_validate_cfg)
         self._confidence_threshold = float(self._config.get("confidence_threshold", 0.5))
         self._holyman = HolymanReference(self._config.get("holyman_path") or None) if self._config.get("holyman_enabled", True) else None
+        self._holyman_reference_only = True if self._config.get("holyman_reference_only", True) is None else bool(self._config.get("holyman_reference_only", True))
 
         # 递进推断阈值（改动1）
         thresholds_str = str(self._config.get("inference_thresholds", "3,6,10,20,40,60,100"))
@@ -297,12 +298,18 @@ class JargonService:
 
             holyman_match = self._holyman.match(word, "\n".join(contexts)) if self._holyman else {"matched": False}
             if holyman_match.get("matched"):
-                is_jargon = 1
                 meaning = holyman_match.get("explanation", "")
                 confidence = float(holyman_match.get("confidence", 0.0))
-                status = "confirmed"
-                scope = "global"
-                source = "holyman_skills"
+                if holyman_match.get("source_layer") == "curated" and not self._holyman_reference_only:
+                    is_jargon = 1
+                    status = "confirmed"
+                    scope = "global"
+                    source = "holyman_skills"
+                else:
+                    is_jargon = None
+                    status = "pending"
+                    scope = "local"
+                    source = "wave_memory"
 
             if is_jargon is None and self._inference and contexts:
                 try:

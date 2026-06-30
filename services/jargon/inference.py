@@ -179,7 +179,7 @@ class JargonInjector:
         if not matched:
             return ""
 
-        lines = ["[群内黑话/抽象梗理解参考，仅供理解，不代表回复风格]"]
+        lines = ["[黑话理解参考，仅供理解；仅用于理解用户语境，不改变羽书人格，不要求模仿该风格]"]
         for j in matched:
             lines.append(f'- "{j["word"]}" → {j["meaning"]}')
         return "\n".join(lines)

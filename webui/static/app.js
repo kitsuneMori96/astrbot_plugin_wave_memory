@@ -58,13 +58,27 @@ function app() {
 
         holymanItems: [],
         holymanCategories: [],
+        holymanConcepts: [],
+        holymanExamples: [],
+        holymanCandidates: [],
+        holymanBlocked: {},
+        holymanBlockedItems: [],
+        holymanCorpusSummary: { count: 0 },
+        holymanQualityReport: {},
+        holymanAssetStatus: 'unknown',
+        holymanUpdateAvailable: false,
+        holymanLocalCount: 0,
         holymanSearch: '',
+        holymanEvidenceSearch: '',
+        holymanCandidateSearch: '',
+        holymanKnowledgeTab: 'phrases',
         holymanCategory: '',
         holymanUseProxy: true,
         holymanSyncing: false,
         holymanLocalVersion: 'Unknown',
         holymanRemoteVersion: 'Unknown',
         selectedHolymanWords: [],
+        selectedHolymanCandidateIds: [],
         holymanFilter: '',
 
         // Stats
@@ -521,8 +535,19 @@ function app() {
         async loadJargonHolyman() {
             try {
                 const data = await this.api('/api/jargon/holyman');
-                this.holymanItems = data.items || [];
+                this.holymanItems = data.items || data.phrases || [];
                 this.holymanCategories = data.categories || [];
+                this.holymanConcepts = data.concepts || [];
+                this.holymanExamples = data.examples || [];
+                this.holymanCandidates = data.candidates || [];
+                this.selectedHolymanCandidateIds = [];
+                this.holymanBlocked = data.blocked || {};
+                this.holymanBlockedItems = Object.entries(this.holymanBlocked || {}).map(([word, reason]) => ({ word, reason }));
+                this.holymanCorpusSummary = data.corpus_summary || { count: 0 };
+                this.holymanQualityReport = data.quality_report || {};
+                this.holymanAssetStatus = data.asset_status || 'unknown';
+                this.holymanUpdateAvailable = !!data.is_update_available;
+                this.holymanLocalCount = data.local_count || this.holymanItems.length || 0;
                 this.holymanLocalVersion = data.local_version || 'Unknown';
                 this.holymanRemoteVersion = data.remote_version || 'Unknown';
                 if (this.holymanCategory && !this.holymanCategories.some(c => c.id === this.holymanCategory)) {
@@ -577,7 +602,7 @@ function app() {
                     })
                 });
                 if (data.ok) {
-                    alert(`同步完成，加载了 ${data.phrases_count || 0} 条词条，${data.corpus_count || 0} 条语料`);
+                    alert(`Holyman 黑话知识库同步完成：精选 ${data.phrases_count || 0} 条，语料 ${data.corpus_count || 0} 条，候选 ${data.candidates_count || 0} 条`);
                 } else {
                     alert(`同步失败: ${data.error || '未知错误'}`);
                 }
@@ -587,6 +612,90 @@ function app() {
             } finally {
                 this.holymanSyncing = false;
                 await this.loadJargonHolyman();
+            }
+        },
+
+        async reviewHolymanCandidate(candidate, action) {
+            try {
+                const r = await this.api(`/api/jargon/holyman/candidates/${candidate.id}/${action}`, { method: 'POST' });
+                if (r.ok) {
+                    await this.loadJargonHolyman();
+                }
+            } catch (e) {
+                console.error('Failed to review holyman candidate:', e);
+            }
+        },
+
+        async addHolymanBlock(word, reason = 'manual_block') {
+            try {
+                const r = await this.api('/api/jargon/holyman/blocklist', {
+                    method: 'POST',
+                    body: JSON.stringify({ word, reason })
+                });
+                if (r.ok) await this.loadJargonHolyman();
+            } catch (e) {
+                console.error('Failed to add holyman block:', e);
+            }
+        },
+
+        filteredHolymanCandidates() {
+            let items = this.holymanCandidates || [];
+            const search = (this.holymanCandidateSearch || this.holymanEvidenceSearch || '').trim().toLowerCase();
+            if (search) {
+                items = items.filter(item => {
+                    const word = (item.word || '').toLowerCase();
+                    const reason = (item.reason || '').toLowerCase();
+                    const source = (item.source || '').toLowerCase();
+                    const status = (item.status || '').toLowerCase();
+                    return word.includes(search) || reason.includes(search) || source.includes(search) || status.includes(search);
+                });
+            }
+            return items;
+        },
+
+        filteredHolymanConcepts() {
+            let items = this.holymanConcepts || [];
+            const search = (this.holymanEvidenceSearch || '').trim().toLowerCase();
+            if (search) {
+                items = items.filter(item => [item.title, item.summary, item.source, (item.tags || []).join(' ')].join(' ').toLowerCase().includes(search));
+            }
+            return items;
+        },
+
+        filteredHolymanExamples() {
+            let items = this.holymanExamples || [];
+            const search = (this.holymanEvidenceSearch || '').trim().toLowerCase();
+            if (search) {
+                items = items.filter(item => [item.text, item.category, item.source, (item.linked_terms || []).join(' ')].join(' ').toLowerCase().includes(search));
+            }
+            return items;
+        },
+
+        toggleSelectAllHolymanCandidates(e) {
+            if (e.target.checked) {
+                this.selectedHolymanCandidateIds = this.filteredHolymanCandidates().map(c => c.id).filter(id => id !== undefined && id !== null);
+            } else {
+                this.selectedHolymanCandidateIds = [];
+            }
+        },
+
+        async batchReviewHolymanCandidates(action) {
+            if (!this.selectedHolymanCandidateIds.length) return;
+            if (action === 'reject' && !confirm(`确认拒绝并屏蔽选中的 ${this.selectedHolymanCandidateIds.length} 个候选？`)) return;
+            try {
+                const r = await this.api('/api/jargon/holyman/candidates/batch-review', {
+                    method: 'POST',
+                    body: JSON.stringify({ ids: this.selectedHolymanCandidateIds, action })
+                });
+                if (r.ok) {
+                    alert(`✓ 已批量${action === 'approve' ? '通过' : '拒绝'} ${r.reviewed_count || 0} 个候选`);
+                    await this.loadJargonHolyman();
+                } else {
+                    alert(r.error || '候选批量审核失败');
+                }
+            } catch (e) {
+                console.error('Failed to batch review holyman candidates:', e);
+                alert('候选批量审核失败: ' + e.message);
             }
         },
 

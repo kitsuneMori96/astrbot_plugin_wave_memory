@@ -119,7 +119,7 @@ def _parse_bot_config(cfg: dict, fallback_db_id: str = "") -> BotProfile:
     "astrbot_plugin_wave_memory",
     "vivy1024",
     "高性能记忆 + 灵魂引擎 + 知识图谱插件。五阶段零 LLM 检索管线、BDI 心智架构（信念/欲望/关切）、黑话学习、风格范例注入、Three.js 3D 交互式知识图谱可视化。",
-    "2.3.2",
+    "2.3.4",
     "https://github.com/vivy1024/astrbot_plugin_wave_memory",
 )
 class WaveMemoryPlugin(Star):

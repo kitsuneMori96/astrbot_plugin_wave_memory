@@ -3,9 +3,10 @@
 对外保持所有 70+ 方法签名不变，内部委托给 repo。
 """
 
+import json
 import os
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 from astrbot.api import logger
@@ -43,6 +44,7 @@ class WaveMemoryDB:
         self._injection_metrics.ensure_schema()
         self._setup_fts5()
         self._setup_audit_table()
+        self._setup_jargon_knowledge_tables()
         self._backfill_tag_relations_created_at()
 
     @property
@@ -461,6 +463,117 @@ class WaveMemoryDB:
             self.conn.commit()
         except Exception:
             pass
+
+    def _setup_jargon_knowledge_tables(self):
+        """建立 Holyman 黑话知识库分层表，兼容旧版 jargon 记录。"""
+        try:
+            self.conn.executescript("""
+                CREATE TABLE IF NOT EXISTS jargon_examples (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    word TEXT,
+                    example TEXT NOT NULL,
+                    category TEXT,
+                    source TEXT,
+                    source_path TEXT,
+                    safe_for_prompt INTEGER DEFAULT 0,
+                    created_at REAL,
+                    updated_at REAL
+                );
+
+                CREATE TABLE IF NOT EXISTS jargon_concepts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    concept_id TEXT UNIQUE,
+                    title TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    source TEXT,
+                    tags TEXT DEFAULT '[]',
+                    confidence REAL DEFAULT 0.0,
+                    created_at REAL,
+                    updated_at REAL
+                );
+
+                CREATE TABLE IF NOT EXISTS jargon_candidates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    word TEXT NOT NULL,
+                    reason TEXT,
+                    count INTEGER DEFAULT 1,
+                    source TEXT,
+                    status TEXT DEFAULT 'pending_review',
+                    reject_reason TEXT,
+                    metadata TEXT DEFAULT '{}',
+                    created_at REAL,
+                    updated_at REAL
+                );
+
+                CREATE TABLE IF NOT EXISTS jargon_blocklist (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    word TEXT UNIQUE NOT NULL,
+                    reason TEXT NOT NULL,
+                    source TEXT,
+                    created_at REAL
+                );
+
+                CREATE TABLE IF NOT EXISTS jargon_sources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_key TEXT UNIQUE NOT NULL,
+                    repo TEXT,
+                    remote_version TEXT,
+                    local_version TEXT,
+                    content_hash TEXT,
+                    asset_status TEXT DEFAULT 'unknown',
+                    manifest_json TEXT,
+                    quality_json TEXT,
+                    created_at REAL,
+                    updated_at REAL
+                );
+            """)
+            self.conn.commit()
+        except Exception as e:
+            logger.debug(f"[WaveMemory] Jargon knowledge tables setup note: {e}")
+
+    def _upsert_jargon_knowledge_row(self, table: str, unique_col: str, unique_value: str, values: dict[str, Any]):
+        cols = list(values.keys())
+        placeholders = ", ".join(["?"] * len(cols))
+        update_assignments = ", ".join([f"{col}=excluded.{col}" for col in cols])
+        params = [values[col] for col in cols]
+        params.insert(0, unique_value)
+        sql = f"""
+            INSERT INTO {table} ({unique_col}, {', '.join(cols)})
+            VALUES (?, {placeholders})
+            ON CONFLICT({unique_col}) DO UPDATE SET {update_assignments}
+        """
+        self.conn.execute(sql, params)
+
+    def upsert_jargon_knowledge_snapshot(self, source_key: str, payload: dict[str, Any]):
+        now = time.time()
+        values = {
+            "repo": payload.get("repo"),
+            "remote_version": payload.get("remote_version"),
+            "local_version": payload.get("local_version"),
+            "content_hash": payload.get("content_hash"),
+            "asset_status": payload.get("asset_status") or "unknown",
+            "manifest_json": json.dumps(payload.get("manifest") or {}, ensure_ascii=False),
+            "quality_json": json.dumps(payload.get("quality_report") or {}, ensure_ascii=False),
+            "created_at": now,
+            "updated_at": now,
+        }
+        self._upsert_jargon_knowledge_row("jargon_sources", "source_key", source_key, values)
+        self.conn.commit()
+
+    def replace_jargon_knowledge_table(self, table: str, rows: list[dict[str, Any]], *, unique_col: str = "word"):
+        self.conn.execute(f"DELETE FROM {table}")
+        now = time.time()
+        for row in rows:
+            payload = dict(row)
+            payload.setdefault("created_at", now)
+            payload["updated_at"] = now
+            cols = list(payload.keys())
+            placeholders = ", ".join(["?"] * len(cols))
+            self.conn.execute(
+                f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders})",
+                [payload[col] for col in cols],
+            )
+        self.conn.commit()
 
     def _backfill_tag_relations_created_at(self):
         """一次性补全 tag_relations.created_at NULL 行 (v1.1.0 #4.2)。"""

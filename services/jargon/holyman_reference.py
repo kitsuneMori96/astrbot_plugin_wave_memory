@@ -10,6 +10,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .holyman_assets import DEFAULT_BLOCKED, content_entries
+
 
 _DEFAULT_PHRASES = {
     "v我50": "常见抽象文案结尾：用突然要钱制造荒诞转折。",
@@ -47,6 +49,7 @@ class HolymanReference:
         self.max_examples = max_examples
         self._phrases: dict[str, Any] = {}
         self._examples: list[str] = []
+        self._blocked: dict[str, str] = dict(DEFAULT_BLOCKED)
         self.reload()
 
     def reload(self) -> None:
@@ -54,11 +57,14 @@ class HolymanReference:
         # 1. Reset to baseline default phrases
         self._phrases = dict(_DEFAULT_PHRASES)
         self._examples = []
+        self._blocked = dict(DEFAULT_BLOCKED)
 
         # 2. Load local high-availability JSON assets (ground truth baseline)
         local_dir = Path(__file__).resolve().parent.parent.parent / "assets" / "holyman"
         phrases_file = local_dir / "phrases.json"
         corpus_file = local_dir / "corpus.json"
+        examples_file = local_dir / "examples.json"
+        blocked_file = local_dir / "blocked.json"
 
         # 符号链接/软链接绝对路径兜底（Docker/Host 统一路径安全保护）
         if not phrases_file.exists():
@@ -87,17 +93,38 @@ class HolymanReference:
             try:
                 local_phrases = json.loads(phrases_file.read_text(encoding="utf-8"))
                 if isinstance(local_phrases, dict):
-                    self._phrases.update(local_phrases)
+                    self._phrases.update(content_entries(local_phrases))
             except Exception:
                 pass
 
+        if blocked_file.exists():
+            try:
+                local_blocked = json.loads(blocked_file.read_text(encoding="utf-8"))
+                if isinstance(local_blocked, dict):
+                    self._blocked.update({str(k): str(v) for k, v in local_blocked.items()})
+            except Exception:
+                pass
+
+        if examples_file.exists():
+            try:
+                local_examples = json.loads(examples_file.read_text(encoding="utf-8"))
+                if isinstance(local_examples, list):
+                    for item in local_examples:
+                        text = item.get("text", "") if isinstance(item, dict) else str(item)
+                        if text:
+                            self._examples.append(text[:500])
+            except Exception:
+                pass
+
+        # corpus.json is raw evidence only. It must not create confirmed fallback matches.
         if corpus_file.exists():
             try:
                 local_corpus = json.loads(corpus_file.read_text(encoding="utf-8"))
                 if isinstance(local_corpus, list):
-                    for item in local_corpus:
-                        if isinstance(item, str) and item:
-                            self._examples.append(item[:500])
+                    for item in local_corpus[:50]:
+                        text = item.get("text", "") if isinstance(item, dict) else (item if isinstance(item, str) else "")
+                        if text:
+                            self._examples.append(text[:500])
             except Exception:
                 pass
 
@@ -111,7 +138,7 @@ class HolymanReference:
 
     def _is_matchable_phrase(self, phrase: str) -> bool:
         phrase = (phrase or "").strip()
-        if not phrase or phrase in self._MATCH_BLOCKLIST:
+        if not phrase or phrase in self._MATCH_BLOCKLIST or phrase in self._blocked:
             return False
         lowered = phrase.lower()
         if any(marker.lower() in lowered for marker in self._MATCH_NOISE_MARKERS):
@@ -152,7 +179,9 @@ class HolymanReference:
         context = context or ""
         if not term:
             return self._no_match()
-        term_matchable = term not in self._MATCH_BLOCKLIST and self._is_matchable_phrase(term)
+        if term in self._blocked:
+            return self._no_match(term)
+        term_matchable = term not in self._MATCH_BLOCKLIST and term not in self._blocked and self._is_matchable_phrase(term)
 
         if term_matchable:
             for phrase, explanation in self._phrases.items():
@@ -165,6 +194,7 @@ class HolymanReference:
                         "explanation": self._format_explanation(explanation),
                         "examples": self._find_examples(phrase),
                         "context_hint": False,
+                        "source_layer": "curated",
                     }
 
         context_hints = []
@@ -178,9 +208,10 @@ class HolymanReference:
                     "classification": "global_abstract",
                     "confidence": 0.85 if phrase == term else 0.7,
                     "term": phrase,
-                    "explanation": explanation + " 仅作为理解参考，不改变羽书人格或回复风格。",
+                    "explanation": self._format_explanation(explanation),
                     "examples": self._find_examples(phrase),
                     "context_hint": False,
+                    "source_layer": "curated",
                 }
             if phrase in context:
                 context_hints.append(phrase)
@@ -190,16 +221,7 @@ class HolymanReference:
             result.update({"context_hint": True, "hint_phrase": context_hints[0]})
             return result
 
-        examples = self._find_examples(term) if term_matchable else []
-        if examples:
-            return {
-                "matched": True,
-                "classification": "global_abstract",
-                "confidence": 0.55,
-                "term": term,
-                "explanation": "该表达出现在抽象文化参考语料中，可作为广域抽象梗理解参考，不改变羽书人格或回复风格。",
-                "examples": examples,
-            }
+        # examples/corpus are evidence only. They may hint in context, but never confirm a match.
         return self._no_match(term)
 
     def _no_match(self, term: str = "") -> dict[str, Any]:

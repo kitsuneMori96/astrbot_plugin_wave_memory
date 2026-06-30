@@ -1,0 +1,9 @@
+{
+  "你好。": "plain_sentence",
+  "对不起，我错了。": "plain_sentence",
+  "是/否": "anti_pattern",
+  "开发的未来是": "ngram_fragment",
+  "DeepSeek模型": "entity_only",
+  "DeepSeek": "entity_only",
+  "你妈死了": "toxic_or_sensitive"
+}

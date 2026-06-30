@@ -2,7 +2,7 @@
 
 # Wave Memory
 
-[![Version](https://img.shields.io/badge/version-v2.3.2-blue.svg)](https://github.com/vivy1024/astrbot_plugin_wave_memory/releases)
+[![Version](https://img.shields.io/badge/version-v2.3.4-blue.svg)](https://github.com/vivy1024/astrbot_plugin_wave_memory/releases)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-≥4.14-green.svg)](https://github.com/AstrBotDevs/AstrBot)
@@ -21,8 +21,8 @@
 
 - 🧠 **五阶段零 LLM 检索** — EPA → 残差金字塔 → 脉冲传播 → 向量融合 → 测地线重排，查询 < 50ms
 - 🌐 **有向共现矩阵** — 替代 Neo4j 的图关联能力，13 万节点 / 44 万有向边
-- 💬 **灵魂人格系统** — 信念涌现、情绪轨迹、好感度进化、做梦巩固、自省纠错
-- 🗣️ **文化融入** — 自动挖掘群内黑话 + 风格范例注入 + 绰号识别
+- 💬 **灵魂人格系统** — 自我人格编排、信念涌现、经历精选、情绪轨迹、做梦巩固、自省纠错
+- 🗣️ **文化融入** — 群内黑话 + Holyman 分层知识库 + 健康风格范例注入 + 绰号识别
 - ⏰ **记忆生命周期** — 时间衰减 + 重要性分级 + 自动淘汰，像人一样遗忘
 - 🔍 **时间感知检索** — 说"昨天/上周"自动加时间过滤，群隔离精确加权
 - 📊 **交互式知识图谱** — Three.js 3D 星图渲染，六层数据图层，多跳路径探索
@@ -34,6 +34,8 @@
 
 | 版本 | 日期 | 重点 |
 |------|------|------|
+| **v2.3.4** | 2026-06-30 | 修复 WebUI 全局断流空指针 · SVG 兼容平铺连线 · 词法双引号规避 · 完美无错 |
+| **v2.3.3** | 2026-06-30 | Holyman 黑话知识库分层 · 候选批量审核 · 证据层 tabs · 屏蔽项回显 |
 | **v2.3.2** | 2026-06-27 | 注入指标时间序列 · SVG 折线图 · 模块消耗排行榜 · 自定义日期筛选 |
 | **v2.3.1** | 2026-06-26 | Three.js 3D 知识图谱 · KG cache 预热 · WebGL 降级保护 · 运行时验证 |
 | **v2.3.0** | 2026-06-25 | 黑话上下文证据 · 原始 memory 锚点 · 动态窗口检索 · 人名/昵称分流 |
@@ -103,17 +105,20 @@
 
 ### 并行注入通道
 
-七通道并行，每通道 3s 独立超时：
+八通道并行，每通道 3s 独立超时。最终注入顺序由 `PersonaComposer` 收口：
 
 ```
 ├─ 主搜索（五阶段管线 · 群隔离加权 · 时间感知过滤）
 ├─ FTS5 精确召回（人名/专有名词）
 ├─ Facts 三元组（1-跳关联扩展）
-├─ 经历通道（bot 个人经历）
 ├─ 关系记忆（当前说话人）
 ├─ BookLore（世界观知识）
-└─ Soul 通道（人格/信念/关切/情绪/黑话/风格范例）
+├─ Timeline（最近 7 天相关事件）
+├─ Soul 通道（人格/信念/经历/关切/情绪/黑话/风格范例）
+└─ PersonaComposer（自我人格 → 信念 → 精选经历 → 健康风格样本）
 ```
+
+注入优先级：`self_persona` → `beliefs` → `self_experiences` → `persona_evolution` → timeline/facts/lore/concern/mood/jargon/few-shot/memories。
 
 ### Benchmark
 
@@ -138,8 +143,11 @@
 
 | 模块 | 功能 |
 |------|------|
-| PersonaEvolution | 认知+互动+facts 驱动的自然语言画像注入 |
-| BeliefEngine | 从对话中涌现稳定判断（信念），可被强化或动摇 |
+| PersonaComposer | 自我人格 / 信念 / 经历 / 风格样本分层编排，控制主 prompt 优先级 |
+| PersonaEvolution | 认知+互动+facts 驱动的对话对象画像注入 |
+| BeliefEngine | 从对话中涌现稳定判断（信念），只注入 active 信念 |
+| BeliefEmergenceService | 从关系事件与经历中生成待审核信念候选 |
+| ExperienceEpisodeService | 记录 bot 经历片段、回复、内心、结果和来源记忆 |
 | DesireEngine | 事件触发冲动 → 与信念博弈 → 决定行为 |
 | MoodTrajectory | valence/arousal 二维情绪轨迹，走势摘要注入对话 |
 | SubjectiveTime | 用重要事件锚定时间感，替代机械时间戳 |
@@ -153,8 +161,10 @@
 | Facts 画像 | 从 facts 表零 LLM 组装"关于他"（如"纠正 xxx / 计划 300小时学AI"） |
 | 跨群画像合并 | 同一用户在不同群的数据自动聚合 |
 | 绰号识别 | Consolidation 自动提取"A 被叫做 B"写入 facts + person_registry |
-| 多 Bot 支持 | 2+ Bot 共存，独立互动数据 |
+| 多 Bot 支持 | 2+ Bot 共存，独立互动数据，`bot_id` 使用 db_id 隔离 |
 | 防骚扰 | 辱骂 N 次 → 自动冷却静默（翻倍机制，上限 1 小时） |
+| 身份安全 | 拦截认爹/认主/契约/猫娘/RP 等身份污染，不写入长期人格 |
+| 攻击边界 | 极端辱骂只注入安全边界，不把“怼回去”当默认风格 |
 
 ### 自主学习
 
@@ -170,7 +180,8 @@
 | 模块 | 功能 |
 |------|------|
 | 黑话系统 | 统计预筛 → LLM 三步推断 → 自动挖掘群内梗 → 注入可用词汇 |
-| Few-Shot 风格 | 每天提取高代表性回复入库 → 注入 2-3 条范例稳定风格 |
+| Holyman 知识库 | 精选词条 / 文化概念 / 语录证据 / 原始语料 / 候选 / 屏蔽项分层管理 |
+| Few-Shot 风格 | 每天提取高代表性回复入库，仅注入已批准且无攻击/身份污染的健康范例 |
 | ConcernTracker | 维护当前在意的话题，影响主动插话决策 |
 
 ### 记忆生命周期
@@ -193,11 +204,13 @@ Quart + Hypercorn 守护线程，纯 HTML + Alpine.js（无需 npm build）。
 | 页面 | 功能 |
 |------|------|
 | 概览 | 系统健康 · 模块就绪度 · 依赖条件提示 · 错误监控 |
+| 注入指标 | token/字符/耗时趋势 · 模块消耗排行榜 · 1d/3d/7d/1mo/custom 筛选 |
 | 记忆管理 | 分页搜索 · 编辑 · 批量操作 |
-| 知识图谱 | Three.js 3D 交互式图谱 · 六层数据图层 · 时间线 · 多跳路径 |
+| 知识图谱 | Three.js 3D 交互式图谱 · 多层数据图层 · 时间线 · 多跳路径 |
 | 信念审核 | pending → active → archived 生命周期管理 |
-| 黑话审核 | 确认/拒绝/编辑释义 |
-| 灵魂状态 | 情绪轨迹 · 关切 · 好感度排行 |
+| 黑话审核 | 确认/拒绝/编辑释义 · 原始上下文证据窗口 |
+| Holyman 知识库 | 精选词条/概念/语录/语料/候选/屏蔽项 tabs · 候选批量审核 |
+| 灵魂状态 | 情绪轨迹 · 关切 · 互动/关系排行 |
 | 全量配置 | HotConfig 热参数实时调节 |
 
 ---
@@ -295,12 +308,20 @@ AstrBot >= 4.14.0 · Python 3.10+ · WebUI 默认端口 9876
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| enable_persona_evolution | true | 人格进化 |
+| enable_persona_evolution | true | 对话对象画像注入 |
 | enable_mood | true | Bot 情绪 |
 | enable_dream | true | 做梦系统 |
 | dream_interval_hours | 6.0 | 做梦间隔 |
 | enable_consolidation | true | LLM 摘要整合 |
 | consolidation_interval_hours | 4.0 | 整合间隔 |
+
+### 多 Bot / MetaThinking
+
+| 配置组 | 说明 |
+|--------|------|
+| MetaThinking_Bot1 / Bot2 | bot QQ、名称、db_id、别名、主动插话、排除 source |
+| MetaThinking_Settings | 规则过滤、主动插话频率、静默时段、Provider fallback |
+| PersonaComposer | 无单独配置；自动使用 bot registry、BeliefEngine、经历检索、Few-Shot |
 
 ### 记忆淘汰 (Eviction_Settings)
 
@@ -322,8 +343,10 @@ AstrBot >= 4.14.0 · Python 3.10+ · WebUI 默认端口 9876
 | LifecycleService | 30min | 互动统计 + 记忆衰减 |
 | EvictionService | 6h | noise/chat 过期清理 |
 | StudyService | 6h | 从 BookLore 主动学习 |
+| BeliefEmergence | 15min 触发 | 关系事件 → 待审核信念候选 |
 | JargonMining | 每 10 条消息 | 黑话候选挖掘 |
-| FewShot Extract | 每天 | 风格范例提取 |
+| FewShot Extract | 每天 | 健康风格范例提取 |
+| PersonaComposer | 每次注入 | 自我人格 / 信念 / 经历 / 风格样本排序编排 |
 
 ---
 
@@ -340,10 +363,15 @@ AstrBot >= 4.14.0 · Python 3.10+ · WebUI 默认端口 9876
 | 测地线重排 | 共现矩阵节点 > 1000 | 6185: enable_geodesic_rerank |
 | FTS5 召回 | 自动 | 无需配置 |
 | 记忆整合 | LLM Provider 可用 | 6185: enable_consolidation |
+| PersonaComposer | 自动 | 无需配置 |
 | 信念引擎 | 记忆整合就绪 | 自动 |
+| 经历片段 | v2.2 schema 已迁移 | 自动 |
 | 做梦系统 | enable_dream=true | 6185: enable_dream |
 | 黑话系统 | LLM + 聊天积累 | 6185: Jargon_Settings |
+| Holyman 知识库 | 内置 assets + WebUI | 9876: 黑话页 |
 | 风格学习 | LLM + bot 回复积累 | 6185: FewShot_Settings |
+| 注入指标 | 自动 | 9876: 概览页 |
+| 身份安全 | 自动 | 无需配置 |
 | 防骚扰 | 自动 | 6185/9876: Social_Settings |
 | 记忆淘汰 | 自动 | 9876: 淘汰天数参数 |
 
@@ -363,15 +391,21 @@ AstrBot >= 4.14.0 · Python 3.10+ · WebUI 默认端口 9876
 │   ├── semantic_gain.py         # 语义增益
 │   └── vector_index.py          # HNSW 索引
 ├── services/                    # 灵魂系统 + 业务服务
-│   ├── persona_evolution.py     # 人格进化
+│   ├── persona_composer.py      # 自我人格/信念/经历/风格编排
+│   ├── persona_evolution.py     # 对话对象画像
 │   ├── belief_engine.py         # 信念引擎
+│   ├── belief_emergence.py      # 信念涌现
+│   ├── experience_episodes.py   # 经历片段
+│   ├── identity_safety.py       # 身份污染防线
 │   ├── desire_engine.py         # 欲望引擎
 │   ├── mood_trajectory.py       # 情绪轨迹
+│   ├── subjective_time.py       # 主观时间
 │   ├── consolidation.py         # 记忆整合
 │   ├── dream.py                 # 做梦系统
 │   ├── self_reflect.py          # 自省系统
-│   ├── jargon/                  # 黑话系统
-│   └── few_shot/                # 风格学习
+│   ├── study_service.py         # 主动学习
+│   ├── jargon/                  # 黑话 / Holyman 分层知识库
+│   └── few_shot/                # 健康风格学习
 ├── tools/                       # 9 个 Agent 工具
 ├── webui/                       # Web 管理面板
 └── main.py                      # 插件入口

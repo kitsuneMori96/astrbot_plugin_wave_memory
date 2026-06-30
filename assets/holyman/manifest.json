@@ -1,0 +1,13 @@
+{
+  "source": "https://github.com/ykdeso/holyman-skills",
+  "remote_version": "local-regenerated",
+  "synced_at": "2026-06-30T07:15:09.469288+00:00",
+  "files": [
+    {
+      "path": "神言.txt",
+      "sha256": "43d8eb3b53c1e8fc927e56c10cad09fa45060b2cb472ee9935e526d4309aafb0",
+      "bytes": 305250,
+      "parse_status": "ok"
+    }
+  ]
+}
