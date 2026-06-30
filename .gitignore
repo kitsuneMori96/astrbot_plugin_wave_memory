@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .git/
 .engram/
+.kiro/
 .pytest_cache/
 *.db
 *.db-wal
