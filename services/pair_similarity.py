@@ -13,7 +13,7 @@ class PairSimilarityService:
     """标签对语义相似度预计算服务。
 
     定期从 tag 向量计算 pair similarity 并缓存到内存 map + DB。
-    查询时 O(1) dict 查表。
+    优化：内存使用受限大小的懒加载缓存，防200万条大表撑爆内存。
     """
 
     def __init__(self, db, refresh_interval: float = 1800.0):
@@ -26,13 +26,35 @@ class PairSimilarityService:
         self.refresh_interval = refresh_interval
         self._cache: dict[tuple[int, int], float] = {}
         self._last_refresh: float = 0
+        self._max_cache_size = 20000 # 限制内存字典最大容量，防止大数据下撑爆内存
 
     def get_similarity(self, tag_a: int, tag_b: int) -> float:
-        """O(1) 查表获取标签对相似度。未命中返回 0.0。"""
+        """查表获取标签对相似度。未命中从 DB 兜底。"""
         if tag_a == tag_b:
             return 1.0
         key = (min(tag_a, tag_b), max(tag_a, tag_b))
-        return self._cache.get(key, 0.0)
+        
+        # 1. 尝试从内存缓存获取
+        sim = self._cache.get(key, None)
+        if sim is not None:
+            return sim
+            
+        # 2. 缓存未命中，去 DB 查
+        try:
+            row = self.db.conn.execute(
+                "SELECT similarity FROM tag_pair_similarity WHERE tag_id_a=? AND tag_id_b=?",
+                (key[0], key[1])
+            ).fetchone()
+            sim = row[0] if row else 0.0
+        except Exception:
+            sim = 0.0
+            
+        # 3. 写入内存缓存并维护容量上限
+        if len(self._cache) >= self._max_cache_size:
+            pop_key = next(iter(self._cache))
+            self._cache.pop(pop_key, None)
+        self._cache[key] = sim
+        return sim
 
     def refresh_if_needed(self):
         """按需刷新缓存。"""
@@ -45,15 +67,13 @@ class PairSimilarityService:
         """从 DB 加载或重算相似度。"""
         start = time.time()
 
-        # 先尝试从 DB 加载
+        # 优化：不把 200 万行数据全拉到 Python 内存，只做轻量行数检测
         try:
-            rows = self.db.conn.execute(
-                "SELECT tag_id_a, tag_id_b, similarity FROM tag_pair_similarity"
-            ).fetchall()
-            if rows:
-                self._cache = {(r[0], r[1]): r[2] for r in rows}
+            row = self.db.conn.execute("SELECT COUNT(*) FROM tag_pair_similarity").fetchone()
+            if row and row[0] > 0:
+                self._cache.clear() # 依靠 get_similarity 中的懒加载，清空本地缓存以释放内存
                 self._last_refresh = time.time()
-                logger.debug(f"[WaveMemory] PairSimilarity loaded from DB: {len(rows)} pairs")
+                logger.info(f"[WaveMemory] PairSimilarity database checked (rows: {row[0]}), memory lazy loading enabled.")
                 return
         except Exception:
             pass
@@ -65,24 +85,11 @@ class PairSimilarityService:
         """计算 top-N 标签的 pair similarity 并持久化。"""
         start = time.time()
 
-        tag_data = self.db.get_all_tag_vectors()
+        # 优化：SQL 层做 Limit，不拉取 12 万条后再做过滤，极大减少临时内存和计算开销
+        tag_data = self.db.get_all_tag_vectors(limit=max_tags)
         if not tag_data or len(tag_data) < 2:
             self._last_refresh = time.time()
             return
-
-        # 只取频率最高的 max_tags 个
-        # tag_data: [(id, name, vector), ...]
-        if len(tag_data) > max_tags:
-            # 按 DB 中 frequency 排序取 top
-            try:
-                rows = self.db.conn.execute(
-                    "SELECT id FROM tags WHERE vector IS NOT NULL ORDER BY frequency DESC LIMIT ?",
-                    (max_tags,),
-                ).fetchall()
-                top_ids = {r[0] for r in rows}
-                tag_data = [(tid, name, vec) for tid, name, vec in tag_data if tid in top_ids]
-            except Exception:
-                tag_data = tag_data[:max_tags]
 
         # 构建向量矩阵
         ids = [t[0] for t in tag_data]

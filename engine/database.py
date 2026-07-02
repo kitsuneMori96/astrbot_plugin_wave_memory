@@ -184,8 +184,8 @@ class WaveMemoryDB:
     def get_tag_count(self):
         return self._tag_repo.get_tag_count()
 
-    def get_all_tag_vectors(self):
-        return self._tag_repo.get_all_tag_vectors()
+    def get_all_tag_vectors(self, limit: Optional[int] = None):
+        return self._tag_repo.get_all_tag_vectors(limit)
 
     def get_tag_vectors_by_ids(self, ids: list[int]) -> dict:
         return self._tag_repo.get_tag_vectors_by_ids(ids)
@@ -562,11 +562,14 @@ class WaveMemoryDB:
 
     def replace_jargon_knowledge_table(self, table: str, rows: list[dict[str, Any]], *, unique_col: str = "word"):
         self.conn.execute(f"DELETE FROM {table}")
+        table_cols = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
         now = time.time()
         for row in rows:
-            payload = dict(row)
-            payload.setdefault("created_at", now)
-            payload["updated_at"] = now
+            payload = {key: value for key, value in dict(row).items() if key in table_cols}
+            if "created_at" in table_cols:
+                payload.setdefault("created_at", now)
+            if "updated_at" in table_cols:
+                payload["updated_at"] = now
             cols = list(payload.keys())
             placeholders = ", ".join(["?"] * len(cols))
             self.conn.execute(

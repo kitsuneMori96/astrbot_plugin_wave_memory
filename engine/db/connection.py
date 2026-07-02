@@ -72,6 +72,7 @@ class ConnectionManager:
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=10000")  # 10s 等待锁释放
         conn.execute("PRAGMA wal_autocheckpoint=1000")
+        conn.execute("PRAGMA cache_size=-8192")    # 限制连接的缓存占用，最大8MB，防止大数据大JOIN时Page Cache无上限膨胀
         return conn
 
     def execute_write(self, sql, params=None):

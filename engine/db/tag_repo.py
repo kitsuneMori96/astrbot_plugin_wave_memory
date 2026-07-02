@@ -142,10 +142,16 @@ class TagRepo:
     def get_tag_count(self) -> int:
         return self.cm.execute_read("SELECT COUNT(*) FROM tags").fetchone()[0]
 
-    def get_all_tag_vectors(self) -> list:
-        rows = self.cm.execute_read(
-            "SELECT id, name, vector FROM tags WHERE vector IS NOT NULL"
-        ).fetchall()
+    def get_all_tag_vectors(self, limit: Optional[int] = None) -> list:
+        if limit is not None:
+            rows = self.cm.execute_read(
+                "SELECT id, name, vector FROM tags WHERE vector IS NOT NULL ORDER BY frequency DESC LIMIT ?",
+                (limit,)
+            ).fetchall()
+        else:
+            rows = self.cm.execute_read(
+                "SELECT id, name, vector FROM tags WHERE vector IS NOT NULL"
+            ).fetchall()
         return [(r[0], r[1], np.frombuffer(r[2], dtype=np.float32)) for r in rows]
 
     def get_tag_vectors_by_ids(self, ids: list[int]) -> dict[int, np.ndarray]:

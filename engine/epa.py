@@ -53,8 +53,8 @@ class EPAModule:
             except Exception:
                 pass
 
-        # 从 Tag 向量计算
-        tag_data = self.db.get_all_tag_vectors()
+        # 从 Tag 向量计算 (优化: 限制最多拿 10000 个最常出现的 tag vector 来做 PCA 降维，避免爆内存)
+        tag_data = self.db.get_all_tag_vectors(limit=10000)
         if len(tag_data) < self.min_tags:
             logger.debug(f"[WaveMemory] EPA: not enough tags ({len(tag_data)} < {self.min_tags})")
             return False
