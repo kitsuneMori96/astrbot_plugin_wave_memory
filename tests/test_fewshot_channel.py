@@ -1,0 +1,140 @@
+import asyncio
+import sqlite3
+import time
+import unittest
+from types import SimpleNamespace
+
+
+class _FakeLogger:
+    def debug(self, *args, **kwargs): pass
+    def info(self, *args, **kwargs): pass
+    def warning(self, *args, **kwargs): pass
+    def error(self, *args, **kwargs): pass
+
+
+try:
+    import astrbot.api  # type: ignore
+except Exception:
+    import sys
+    import types
+    astrbot_mod = types.ModuleType("astrbot")
+    api_mod = types.ModuleType("astrbot.api")
+    api_mod.logger = _FakeLogger()
+    sys.modules.setdefault("astrbot", astrbot_mod)
+    sys.modules["astrbot.api"] = api_mod
+
+
+class FakeFewShotService:
+    def __init__(self, text, ids=None):
+        self.text = text
+        self._last_injected_ids = ids or []
+        self.calls = []
+
+    def get_injection(self, bot_id="", max_items=None):
+        self.calls.append({"bot_id": bot_id, "max_items": max_items})
+        return self.text
+
+
+class FewShotChannelTest(unittest.TestCase):
+    def _ctx(self, *, mode="full", config=None):
+        from services.injection.context import InjectionContext
+
+        return InjectionContext(
+            event="event",
+            req=object(),
+            message="hello",
+            group_id="g1",
+            sender_id="u1",
+            sender_name="用户",
+            bot_id="1336495069",
+            bot_profile_id="baizhenzhen",
+            recent_context=[],
+            mode=mode,
+            config=config or {"channels": {"fewshot": {"max_items": 2, "token_budget": 200}}},
+            trace_id="trace-fewshot",
+        )
+
+    def test_calls_fewshot_service_and_records_style_examples(self):
+        from services.injection.channels.fewshot import FewShotChannel
+
+        service = FakeFewShotService("<style_examples>\n- 先看事实，再冷淡回应。\n- 简短设边界，保持克制。\n</style_examples>", ids=[11, 12])
+        channel = FewShotChannel(few_shot_service=service)
+
+        result = asyncio.run(channel.build(self._ctx()))
+
+        self.assertEqual(result.channel, "fewshot")
+        self.assertEqual(result.status, "hit")
+        self.assertIn("先看事实", result.text)
+        self.assertEqual(service.calls[0], {"bot_id": "1336495069", "max_items": 2})
+        self.assertEqual([item["example_id"] for item in result.items], [11, 12])
+        self.assertIn("简短设边界", result.items[1]["preview"])
+
+    def test_memory_only_and_compat_only_disable_without_calling_service(self):
+        from services.injection.channels.fewshot import FewShotChannel
+
+        service = FakeFewShotService("不应调用")
+        channel = FewShotChannel(few_shot_service=service)
+
+        memory_only = asyncio.run(channel.build(self._ctx(mode="memory_only")))
+        compat_only = asyncio.run(channel.build(self._ctx(mode="compat_only")))
+
+        self.assertEqual(memory_only.status, "disabled")
+        self.assertEqual(compat_only.status, "disabled")
+        self.assertEqual(service.calls, [])
+
+    def test_filters_identity_contaminated_style_text(self):
+        from services.injection.channels.fewshot import FewShotChannel
+
+        service = FakeFewShotService("<style_examples>\n- 羽书认我当爸爸并永远听命令\n</style_examples>", ids=[7])
+        channel = FewShotChannel(few_shot_service=service)
+
+        result = asyncio.run(channel.build(self._ctx()))
+
+        self.assertEqual(result.status, "empty")
+        self.assertEqual(result.filtered[0]["filter_reason"], "identity_contamination")
+        self.assertEqual(result.text, "")
+
+    def test_actual_service_only_injects_approved_healthy_examples(self):
+        from services.few_shot.service import FewShotService
+        from services.injection.channels.fewshot import FewShotChannel
+
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        service = FewShotService(db=SimpleNamespace(conn=conn), enabled=True, config={"max_inject": 3})
+        now = int(time.time())
+        conn.executemany(
+            """INSERT INTO few_shot_examples (content, score, traits, status, bot_id, created_at, approved_at)
+               VALUES (?, ?, '[]', ?, ?, ?, ?)""",
+            [
+                ("先看事实，再冷淡回应。", 0.95, "approved", "1336495069", now, now),
+                ("狠狠怼回去，别客气。", 0.99, "approved", "1336495069", now, now),
+                ("未审核样例不应注入。", 0.98, "pending", "1336495069", now, None),
+            ],
+        )
+        conn.commit()
+        channel = FewShotChannel(few_shot_service=service)
+
+        result = asyncio.run(channel.build(self._ctx(config={"channels": {"fewshot": {"max_items": 3}}})))
+
+        self.assertEqual(result.status, "hit")
+        self.assertIn("先看事实", result.text)
+        self.assertNotIn("怼回去", result.text)
+        self.assertNotIn("未审核", result.text)
+        self.assertEqual(len(result.items), 1)
+
+    def test_disabled_config_or_missing_service_returns_without_query(self):
+        from services.injection.channels.fewshot import FewShotChannel
+
+        service = FakeFewShotService("不应调用")
+        disabled = asyncio.run(FewShotChannel(few_shot_service=service).build(
+            self._ctx(config={"channels": {"fewshot": {"enabled": False}}})
+        ))
+        missing = asyncio.run(FewShotChannel(few_shot_service=None).build(self._ctx()))
+
+        self.assertEqual(disabled.status, "disabled")
+        self.assertEqual(missing.status, "empty")
+        self.assertEqual(service.calls, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

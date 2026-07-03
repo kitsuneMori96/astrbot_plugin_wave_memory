@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.2.0 (2026-07-03)
+
+### 通道化注入编排、Trace 存储与 Agent 权限反馈
+
+- **注入编排器**：移除原有 `main.py` 复杂的单体注入代码，用通道化 `InjectionOrchestrator` 代替，解耦 safety、memory、fts5、timeline、facts、persona、belief、jargon、fewshot、book_lore、affinity 等 11 个独立通道
+- **注入 Trace 数据库**：SQLite 物理设计 `injection_traces` 与 `injection_trace_channels` 两张持久表，全量承载注入性能、Latency、Hit / Filtered 审计与最终预览，支持自动 retention 保留清理
+- **Agent 控制边界**：新增 permission_policy 控制，Agent 可做只读 Trace 解释、Soft useful/useless 提升、提出热配置建议和提交学习候选词，禁止直接写操作、批量删除或修改核心安全配置
+- **测试覆盖**：新增 Trace 存储、反馈链路、解释器和 11 类独立召回通道的单元测试，总测试用例大幅扩充至 234 项
+
 ## v3.1.0 (2026-07-03)
 
 ### 运行模式、配置与学习对象登记表

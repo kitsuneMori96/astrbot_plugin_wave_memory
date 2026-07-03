@@ -23,6 +23,15 @@ TOKEN_KEYS = [
     "fewshot_tokens",
 ]
 
+ACTIVE_TOKEN_ALIASES = {
+    "memory_tokens": "memories_tokens",
+    "fts5_tokens": "memories_tokens",
+    "timeline_tokens": "exp_memories_tokens",
+    "book_lore_tokens": "lore_tokens",
+    "affinity_tokens": "relation_memories_tokens",
+}
+
+
 LABELS = {
     "memories_tokens": "主记忆",
     "exp_memories_tokens": "经历",
@@ -84,6 +93,9 @@ class InjectionMetricStore:
                 normalized[key] = _num(value)
             else:
                 normalized[key] = value
+        for active_key, legacy_key in ACTIVE_TOKEN_ALIASES.items():
+            if active_key in normalized:
+                normalized[legacy_key] = _num(normalized.get(legacy_key)) + _num(normalized.get(active_key))
         normalized["soul_tokens"] = _num(normalized.get("persona_tokens")) + _num(normalized.get("concern_tokens")) + _num(normalized.get("mood_tokens")) + _num(normalized.get("mood_traj_tokens"))
         self.conn.execute(
             "INSERT INTO injection_metrics (ts, sample_json) VALUES (?, ?)",

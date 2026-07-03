@@ -2,7 +2,7 @@
 
 # Wave Memory
 
-[![Version](https://img.shields.io/badge/version-v3.1.0-blue.svg)](https://github.com/vivy1024/astrbot_plugin_wave_memory/releases)
+[![Version](https://img.shields.io/badge/version-v3.2.0-blue.svg)](https://github.com/vivy1024/astrbot_plugin_wave_memory/releases)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-≥4.14-green.svg)](https://github.com/AstrBotDevs/AstrBot)
@@ -32,6 +32,7 @@
 
 | 版本 | 日期 | 重点 |
 |------|------|------|
+| **v3.2.0** | 2026-07-03 | 通道化注入编排器 · 注入 Trace 持久存储 · Agent 只读/受控反馈工具 |
 | **v3.1.0** | 2026-07-03 | 运行模式 · 通道配置热更新模型 · 学习对象审查登记表 |
 | **v3.0.1** | 2026-07-03 | 性能优化：优化 SQLite 缓存与 HNSWlib/EPA 内存消耗 |
 | **v3.0.0** | 2026-06-30 | PersonaComposer 分层人格 · 主动对话共用自我人格上下文 · few-shot 健康过滤 · 安全边界收口 |

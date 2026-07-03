@@ -50,6 +50,31 @@ class InjectionMetricStoreTest(unittest.TestCase):
         self.assertEqual(ranking[1]["key"], "belief_tokens")
         self.assertEqual(ranking[2]["key"], "jargon_tokens")
 
+    def test_record_maps_active_channel_token_aliases_to_legacy_metric_keys(self):
+        store = self._store()
+        base = 1_700_000_000
+        store.record({
+            "total_tokens": 200,
+            "memory_tokens": 60,
+            "fts5_tokens": 20,
+            "book_lore_tokens": 40,
+            "timeline_tokens": 30,
+            "affinity_tokens": 10,
+            "facts_tokens": 5,
+        }, ts=base)
+
+        result = store.query(base, base + 3600, bucket_seconds=3600)
+        summary = result["summary"]
+        ranking_keys = {item["key"] for item in result["ranking"]}
+
+        self.assertEqual(summary["memories_tokens"]["sum"], 80)
+        self.assertEqual(summary["lore_tokens"]["sum"], 40)
+        self.assertEqual(summary["exp_memories_tokens"]["sum"], 30)
+        self.assertEqual(summary["relation_memories_tokens"]["sum"], 10)
+        self.assertIn("memories_tokens", ranking_keys)
+        self.assertIn("lore_tokens", ranking_keys)
+        self.assertIn("relation_memories_tokens", ranking_keys)
+
     def test_cleanup_removes_rows_older_than_retention(self):
         store = self._store()
         now = 1_700_000_000

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
-from typing import Optional
+from dataclasses import dataclass
+from typing import Any, Optional
 
 import numpy as np
 
@@ -18,6 +20,85 @@ from .identity_safety import is_identity_contamination
 
 # noise 判定：这些消息不入向量索引
 _NOISE_MAX_LENGTH = 10
+
+
+@dataclass(frozen=True)
+class MemoryDedupPolicy:
+    """普通记忆写入统一去重策略。
+
+    覆盖 MessageWriter 队列入口，因此自动捕获、Agent remember 与
+    LivingMemory-compatible facade 都共享同一内容级去重规则。
+    """
+
+    window_seconds: float = 300.0
+    enabled: bool = True
+
+    def filter_batch(self, db: Any, batch: list[dict]) -> tuple[list[dict], int]:
+        if not self.enabled or not batch:
+            return batch, 0
+
+        unique_by_key: dict[tuple[str, str], dict] = {}
+        duplicate_count = 0
+        for item in batch:
+            normalized = self.normalize_content(item.get("content", ""))
+            if not normalized:
+                continue
+            candidate = dict(item)
+            candidate["content"] = normalized
+            candidate["_dedup_normalized_content"] = normalized
+            if self.find_recent_duplicate(db, candidate, normalized):
+                duplicate_count += 1
+                continue
+            key = (str(candidate.get("group_id", "") or ""), normalized)
+            existing = unique_by_key.get(key)
+            if existing is None:
+                unique_by_key[key] = candidate
+                continue
+            duplicate_count += 1
+            if self._importance(candidate) > self._importance(existing):
+                unique_by_key[key] = candidate
+        return list(unique_by_key.values()), duplicate_count
+
+    def find_recent_duplicate(self, db: Any, item: dict, normalized_content: str) -> Any:
+        group_id = str(item.get("group_id", "") or "")
+        try:
+            timestamp = float(item.get("timestamp") or time.time())
+        except (TypeError, ValueError):
+            timestamp = time.time()
+        since_ts = timestamp - max(float(self.window_seconds or 0), 0.0)
+
+        finder = getattr(db, "find_recent_duplicate_memory", None)
+        if callable(finder):
+            return finder(group_id=group_id, normalized_content=normalized_content, since_ts=since_ts)
+
+        conn = getattr(db, "conn", None)
+        if conn is None:
+            return None
+        try:
+            rows = conn.execute(
+                """SELECT id, content FROM memories
+                   WHERE group_id=? AND timestamp>=? AND memory_type='message'
+                   ORDER BY timestamp DESC LIMIT 100""",
+                (group_id, since_ts),
+            ).fetchall()
+            for row in rows:
+                if self.normalize_content(row[1] if len(row) > 1 else "") == normalized_content:
+                    return row[0]
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def normalize_content(content: Any) -> str:
+        text = str(content or "").strip()
+        return re.sub(r"\s+", " ", text)
+
+    @staticmethod
+    def _importance(item: dict) -> float:
+        try:
+            return float(item.get("importance", 1.0))
+        except (TypeError, ValueError):
+            return 1.0
 
 
 def classify_source(
@@ -64,6 +145,7 @@ class MessageWriter:
         noise_max_length: int = _NOISE_MAX_LENGTH,
         batch_size: int = 10,
         flush_interval: float = 30.0,
+        dedup_policy: MemoryDedupPolicy | None = None,
     ):
         self.db = db
         self.memory_index = memory_index
@@ -72,6 +154,7 @@ class MessageWriter:
         self.noise_max_length = noise_max_length
         self.batch_size = batch_size
         self.flush_interval = flush_interval
+        self.dedup_policy = dedup_policy or MemoryDedupPolicy()
 
         self._queue: asyncio.Queue = asyncio.Queue()
         self._task: Optional[asyncio.Task] = None
@@ -141,6 +224,9 @@ class MessageWriter:
 
         contaminated_items = [item for item in batch if is_identity_contamination(item.get("content", ""))]
         normal_batch = [item for item in batch if item not in contaminated_items]
+        normal_batch, duplicate_count = self.dedup_policy.filter_batch(self.db, normal_batch)
+        if duplicate_count:
+            self._stats["duplicate"] = self._stats.get("duplicate", 0) + duplicate_count
 
         # noise 不需要 embedding（省 API 调用）；身份接管污染不入向量索引，写入后归档，仅保留审计。
         need_embed = [item for item in normal_batch if item["source"] != "noise"]
@@ -163,6 +249,7 @@ class MessageWriter:
                     sender_id=item.get("sender_id", ""),
                     sender_name=item.get("sender_name", ""),
                     timestamp=item.get("timestamp", time.time()),
+                    importance=MemoryDedupPolicy._importance(item),
                     source=item["source"],
                 )
 
