@@ -1,10 +1,21 @@
 # Changelog
 
+## v3.1.0 (2026-07-03)
+
+### 运行模式、配置与学习对象登记表
+
+- **运行模式**：新增 `full`、`memory_only`、`compat_only` 三种运行模式，旧配置自动兼容，提供启动日志说明与自愈门控支持
+- **通道配置模型**：支持配置每个通道的 enabled、priority、top_k、token_budget、timeout_ms 与 min_score 热参数数据模型，旧配置参数自动映射为通道默认值
+- **学习对象登记表**：定义 `LearningObjectDescription` 结构并登记 9 类核心存储与学习对象，提供来源、写入路径、存储位置、去重与审核规则审查说明
+- **测试覆盖**：新增模式解析、通道配置与登记表完整性测试
+
 ## v3.0.1 (2026-07-03)
 
-### 引擎性能优化
-
-- **内存消耗优化**：对 SQLite 缓存和 HNSWlib/EPA 进行内存深度优化，提高多跳扩散的查询时效性并减轻后台守护常驻内存压力
+- **React 管理面板**：新增 `webui/frontend` Vite + React + TypeScript + Tailwind CSS v4 + shadcn/ui 前端工程，默认首页切换为 HashRouter 单页应用
+- **纯 Python 运行时托管**：生产构建输出到 `webui/static/app`，Quart 页面路由优先服务 React 静态产物，运行时无需 Node.js
+- **旧版回滚入口**：保留原 Alpine.js 首页并注册 `/legacy` 路由；React 产物缺失时 `/` 自动 fallback 到旧版页面
+- **业务页面迁移**：完成 Dashboard、Injection Observatory、Channel Config、Learning Objects、Agent Feedback 与 Compatibility 页面迁移，保持现有 API 契约不变
+- **测试与验证**：重写旧 WebUI 硬编码断言，覆盖 React 源码/API payload/静态构建产物；已通过 WebUI 路由、通道配置契约与前端 typecheck/build 验证
 
 ## v3.0.0 (2026-06-30)
 

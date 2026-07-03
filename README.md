@@ -2,7 +2,7 @@
 
 # Wave Memory
 
-[![Version](https://img.shields.io/badge/version-v3.0.1-blue.svg)](https://github.com/vivy1024/astrbot_plugin_wave_memory/releases)
+[![Version](https://img.shields.io/badge/version-v3.1.0-blue.svg)](https://github.com/vivy1024/astrbot_plugin_wave_memory/releases)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-≥4.14-green.svg)](https://github.com/AstrBotDevs/AstrBot)
@@ -28,38 +28,41 @@
 - 📊 **交互式知识图谱** — Three.js 3D 星图渲染，六层数据图层，多跳路径探索
 - 🔧 **零配置启动** — 填 2 个 Provider ID 即跑，所有子系统自动按条件就绪
 
----
-
 ### Recent Releases
 
 | 版本 | 日期 | 重点 |
 |------|------|------|
+| **v3.1.0** | 2026-07-03 | 运行模式 · 通道配置热更新模型 · 学习对象审查登记表 |
 | **v3.0.1** | 2026-07-03 | 性能优化：优化 SQLite 缓存与 HNSWlib/EPA 内存消耗 |
 | **v3.0.0** | 2026-06-30 | PersonaComposer 分层人格 · 主动对话共用自我人格上下文 · few-shot 健康过滤 · 安全边界收口 |
-| **v2.3.3** | 2026-06-30 | Holyman 黑话知识库分层 · 候选批量审核 · 证据层 tabs · 屏蔽项回显 |
+| **v2.3.4** | 2026-06-30 | Holyman 黑话知识库分层 · 候选批量审核 · 证据层 tabs · 屏蔽项回显 |
 | **v2.3.2** | 2026-06-27 | 注入指标时间序列 · SVG 折线图 · 模块消耗排行榜 · 自定义日期筛选 |
-| **v2.3.1** | 2026-06-26 | Three.js 3D 知识图谱 · KG cache 预热 · WebGL 降级保护 · 运行时验证 |
-| **v2.3.0** | 2026-06-25 | 黑话上下文证据 · 原始 memory 锚点 · 动态窗口检索 · 人名/昵称分流 |
-| **v2.2.0** | 2026-06-25 | 经历与关系事件重构 · 身份安全 · 数据治理 · Holyman 语料扩展 · 多 bot 防抖修复 |
-| **v2.1.0** | 2026-06-25 | 灵魂系统升级 · WebUI 管理面板 · soul/beliefs/jargon/kg API · 全选 2.0 |
-| **v2.0.1** | 2026-06-21 | bot_id 统一 · 黑话学习升级 · facts 时间衰减 · 启动自动备份 |
-| **v2.0.0** | 2026-06-19 | 认知架构升级 · 时间线记忆通道 · QQ 号统一身份 · /teach 命令 |
-| **v1.5.2** | 2026-06-19 | 废弃代码清理 + 索引性能修复 + 配置项清理 |
 
-<details>
-<summary>更早版本</summary>
+---
 
-| 版本 | 日期 | 重点 |
-|------|------|------|
-| v1.1.0 | 2026-06-15 | 知识图谱交互 · 学习系统审查 · 报错可视化 · HNSW 修复 |
-| v1.0.1 | 2026-06-14 | 显式记住/忘记 · 参与者加权 · 关系自动发现 · 来源追溯 |
-| v1.0.0 | 2026-06-13 | 首版发布 |
+## 定位与边界
 
-</details>
+WaveMemory 是 AstrBot 记忆插件：负责记录、整理、检索、注入、审计和反馈记忆。
+
+| 是 | 不是 |
+|----|------|
+| 记忆存储与召回后端 | 插件总线 |
+| 注入通道编排器 | 通用学习系统 |
+| 记忆/事实/信念/风格/黑话等学习对象审计 | 自动改其他插件配置的控制器 |
+| LivingMemory-compatible facade | `astrbot_plugin_livingmemory` 伪装 |
+
+### 运行模式
+
+| 模式 | 自动注入 | 默认能力 | 适用场景 |
+|------|----------|----------|----------|
+| `full` | 开 | 基础记忆 + 高级通道 + WebUI + Agent 反馈 | WaveMemory 独立承担记忆与人格增强 |
+| `memory_only` | 开 | 消息采集、writer、向量检索、基础记忆注入、trace、搜索/记住工具、兼容 facade | 只要记忆，不要人格/黑话/BookLore/few-shot/mood 等高级能力 |
+| `compat_only` | 关 | writer、query、LivingMemory-compatible facade、可选工具别名、最小 trace | 给 SelfLearning/ChatPlus 等外部插件当记忆后端，避免重复注入 |
 
 ---
 
 ## 🧠 检索引擎
+
 
 查询路径零 LLM 调用。五阶段纯计算管线，用算法替代外部基础设施。
 
@@ -106,20 +109,23 @@
 
 ### 并行注入通道
 
-八通道并行，每通道 3s 独立超时。最终注入顺序由 `PersonaComposer` 收口：
+`InjectionOrchestrator` 并发运行通道；每通道独立 `timeout_ms`，单通道 timeout/error 不阻塞整体注入。总耗时超过 500ms 输出通道耗时分解。
 
 ```
-├─ 主搜索（五阶段管线 · 群隔离加权 · 时间感知过滤）
-├─ FTS5 精确召回（人名/专有名词）
-├─ Facts 三元组（1-跳关联扩展）
-├─ 关系记忆（当前说话人）
-├─ BookLore（世界观知识）
-├─ Timeline（最近 7 天相关事件）
-├─ Soul 通道（人格/信念/经历/关切/情绪/黑话/风格范例）
-└─ PersonaComposer（自我人格 → 信念 → 精选经历 → 健康风格样本）
+├─ safety（近期上下文去重 · 身份污染过滤）
+├─ memory（五阶段语义召回）
+├─ fts5（人名/专有名词精确召回）
+├─ timeline（相关时间线事件）
+├─ facts（三元组事实）
+├─ persona（自我人格/经历/对象画像）
+├─ belief（已审核信念）
+├─ jargon（已确认黑话）
+├─ fewshot（已批准健康风格样本）
+├─ book_lore（世界观知识）
+└─ affinity（关系/互动摘要）
 ```
 
-注入优先级：`self_persona` → `beliefs` → `self_experiences` → `persona_evolution` → timeline/facts/lore/concern/mood/jargon/few-shot/memories。
+通道配置在 9876 WebUI「通道配置」热更新：`enabled`、`priority`、`top_k/max_items`、`token_budget`、`timeout_ms`、`min_score`。
 
 ### Benchmark
 
@@ -200,37 +206,52 @@
 
 ## 📊 WebUI 管理面板
 
-Quart + Hypercorn 守护线程，纯 HTML + Alpine.js（无需 npm build）。
+默认首页是 `webui/frontend` 的 Vite + React + TypeScript + Tailwind CSS v4 + shadcn/ui 单页应用，构建产物发布到 `webui/static/app`，运行时仍由 Quart + Hypercorn 纯 Python 托管静态文件，不依赖 Node.js。旧 Alpine.js 首页保留在 `/legacy`，用于安全回滚。
 
-| 页面 | 功能 |
-|------|------|
-| 概览 | 系统健康 · 模块就绪度 · 依赖条件提示 · 错误监控 |
-| 注入指标 | token/字符/耗时趋势 · 模块消耗排行榜 · 1d/3d/7d/1mo/custom 筛选 |
-| 记忆管理 | 分页搜索 · 编辑 · 批量操作 |
-| 知识图谱 | Three.js 3D 交互式图谱 · 多层数据图层 · 时间线 · 多跳路径 |
-| 信念审核 | pending → active → archived 生命周期管理 |
-| 黑话审核 | 确认/拒绝/编辑释义 · 原始上下文证据窗口 |
-| Holyman 知识库 | 精选词条/概念/语录/语料/候选/屏蔽项 tabs · 候选批量审核 |
-| 灵魂状态 | 情绪轨迹 · 关切 · 互动/关系排行 |
-| 全量配置 | HotConfig 热参数实时调节 |
+| 路由 | 页面 | 功能 |
+|------|------|------|
+| `/#/dashboard` | 概览 | 系统健康 · 模块就绪度 · 注入指标趋势 · 错误监控 |
+| `/#/injection` | 注入观察台 | trace 筛选 · 命中/过滤上下文 · Sheet 详情抽屉 · 最终注入预览 |
+| `/#/channels` | 通道配置 | enabled/priority/top_k/token_budget/timeout_ms/min_score 热更新 · validation diff 预览 |
+| `/#/learning` | 学习对象审查 | memory/facts/belief/jargon/few-shot/persona/affinity/timeline/operation memory 登记表 |
+| `/#/feedback` | Agent 反馈 | 记忆反馈 · 配置建议 · 审查候选 · 人工批准/拒绝/忽略 |
+| `/#/compatibility` | 兼容模式 | LivingMemory-compatible facade 状态 · 工具别名 · 重复记忆插件风险 |
+| `/legacy` | 旧版首页 | 原单文件 Alpine.js 面板，作为回滚入口 |
+
+开发命令：
+
+```bash
+cd webui/frontend && npm install
+cd webui/frontend && npm run dev
+cd webui/frontend && npm run typecheck
+cd webui/frontend && npm run build
+```
+
+发布约定：提交 `webui/static/app/index.html` 与 hashed JS/CSS 静态产物；后端 `/` 优先服务 React 构建产物，产物缺失时自动 fallback 到旧版首页。
 
 ---
 
 ## 🔧 Agent 工具
 
-LLM 可直接调用的 9 个工具函数：
+工具注册受运行模式门控；`compat_only` 默认只保留 LivingMemory-compatible 别名（开启时）。
 
-| 工具 | 功能 |
-|------|------|
-| wave_memory_search | 五阶段语义搜索 |
-| wave_memory_deep_search | FTS5 全文关键词搜索 |
-| wave_memory_person_search | 人物记忆/画像/社交关系 |
-| wave_memory_affinity | 好感度查询/排行榜 |
-| wave_memory_facts | 事实知识三元组 |
-| wave_memory_tag_graph | 标签共现图谱探索 |
-| wave_memory_remember | 主动存储重要信息 |
-| book_lore_search | 书设知识库语义搜索 |
-| book_lore_graph | 书设实体关系图谱 |
+| 工具 | 功能 | 权限 |
+|------|------|------|
+| wave_memory_search | 五阶段语义搜索 | allowed |
+| wave_memory_deep_search | FTS5 全文关键词搜索 | allowed |
+| wave_memory_person_search | 人物记忆/画像/社交关系 | full/memory_only |
+| wave_memory_affinity | 关系/互动查询 | full |
+| wave_memory_facts | 事实知识三元组 | allowed |
+| wave_memory_tag_graph | 标签共现图谱探索 | allowed |
+| wave_memory_remember | 主动存储重要信息 | allowed，走统一 writer 去重 |
+| wave_memory_explain_injection | 读取 trace，解释通道命中/过滤/预算/耗时 | read-only |
+| wave_memory_feedback_memory | 对 trace 中命中的 memory 记录 useful/useless/misleading/duplicate | 低风险 useful 可软提升 |
+| wave_memory_suggest_config | 基于 trace 证据提交配置建议 | pending_review，不自动应用 |
+| wave_memory_submit_review_candidate | 提交 memory/fact/belief/style/jargon 候选 | pending_review，不自动提升 |
+| book_lore_search | 书设知识库语义搜索 | full |
+| book_lore_graph | 书设实体关系图谱 | full |
+| recall_long_term_memory | LivingMemory 风格搜索别名 | 可选，默认关闭 |
+| memorize_long_term_memory | LivingMemory 风格写入别名 | 可选，默认关闭 |
 
 ---
 
@@ -264,17 +285,49 @@ AstrBot >= 4.14.0 · Python 3.10+ · WebUI 默认端口 9876
 | tag_llm_provider_id | （必填） | Tag/黑话/风格用 LLM |
 | embedding_dimension | 1024 | 向量维度 |
 
+### 运行模式 (Runtime_Settings)
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| runtime_mode | full | `full` / `memory_only` / `compat_only` |
+
 ### 记忆召回 (Query_Settings)
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| enable_auto_inject | true | 自动注入记忆到 prompt |
+| enable_auto_inject | true | 自动注入记忆到 prompt；`compat_only` 下默认忽略旧 true |
 | inject_top_k | 5 | 注入记忆条数 |
 | min_similarity | 0.35 | 最低相似度 |
-| enable_spike_routing | true | 脉冲传播（联想能力） |
-| enable_residual_pyramid | true | 残差金字塔 |
-| enable_epa | true | EPA 嵌入投影分析 |
-| enable_geodesic_rerank | true | 测地线重排 |
+| enable_spike_routing | true | 脉冲传播（`memory_only`/`compat_only` 默认关闭） |
+| enable_residual_pyramid | true | 残差金字塔（`memory_only`/`compat_only` 默认关闭） |
+| enable_epa | true | EPA 嵌入投影分析（`memory_only`/`compat_only` 默认关闭） |
+| enable_geodesic_rerank | true | 测地线重排（`memory_only`/`compat_only` 默认关闭） |
+
+### 注入通道 (Channel_Settings)
+
+| 字段 | 说明 |
+|------|------|
+| enabled | 是否启用通道；safety 不可关闭 |
+| priority | 注入排序优先级 |
+| top_k / max_items | 检索/输出条数 |
+| token_budget | 单通道预算；最终仍受全局预算裁剪 |
+| timeout_ms | 单通道超时；timeout 不阻塞其他通道 |
+| min_score | 通道最低分数阈值 |
+
+### Trace (Trace_Settings)
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| retention_days | 14 | 注入 trace 保留天数 |
+| max_rows | 5000 | trace 最大条数，超出仅保留最新 |
+| max_preview_chars | 1200 | 请求、最终注入、通道明细的单字段预览长度 |
+
+### 兼容模式 (Compatibility_Settings)
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| livingmemory_alias_tools_enabled | false | 注册 `recall_long_term_memory` / `memorize_long_term_memory` 别名 |
+| compat_only_auto_inject_enabled | false | `compat_only` 下显式允许 WaveMemory 原生自动注入 |
 
 ### 社交认知 (Social_Settings)
 
@@ -324,6 +377,14 @@ AstrBot >= 4.14.0 · Python 3.10+ · WebUI 默认端口 9876
 | MetaThinking_Settings | 规则过滤、主动插话频率、静默时段、Provider fallback |
 | PersonaComposer | 无单独配置；自动使用 bot registry、BeliefEngine、经历检索、Few-Shot |
 
+### 与 SelfLearning / ChatPlus 共存
+
+| 目标 | WaveMemory 推荐配置 | 外部插件建议 |
+|------|---------------------|--------------|
+| WaveMemory 独立注入 | `runtime_mode=full` | 关闭外部插件的重复记忆注入/长期记忆工具 |
+| WaveMemory 只做基础记忆 | `runtime_mode=memory_only` | 关闭外部插件的重复写入或重复注入能力 |
+| WaveMemory 做兼容后端 | `runtime_mode=compat_only` + `livingmemory_alias_tools_enabled=true` | 外部插件调用 `recall_long_term_memory` / `memorize_long_term_memory`；不要同时启用 WaveMemory 原生自动注入 |
+
 ### 记忆淘汰 (Eviction_Settings)
 
 | 配置项 | 默认值 | 说明 |
@@ -331,6 +392,78 @@ AstrBot >= 4.14.0 · Python 3.10+ · WebUI 默认端口 9876
 | enabled | true | 启用淘汰 |
 | noise_ttl_days | 7 | noise 保留天数 |
 | chat_stale_days | 30 | chat 闲置天数 |
+
+---
+
+## 运维排查
+
+### 查看一次注入 trace
+
+1. 打开 9876 WebUI → 注入观察台。
+2. 用时间、群聊/私聊、sender、bot、channel、status、has_error 筛选。
+3. 点开 trace 详情，检查：
+   - `request.message_preview`
+   - `final_preview`
+   - `budget.total_tokens / total_latency_ms`
+   - `channels[].status / latency_ms / tokens / hit_items / filtered_items`
+   - `feedback`
+
+只读 API：
+
+```text
+GET /api/injection/traces?limit=100&channel=memory&status=ok
+GET /api/injection/traces/<trace_id>
+```
+
+### 判断重复注入
+
+| 现象 | 看哪里 | 处理 |
+|------|--------|------|
+| 同一内容在最终 prompt 重复 | trace detail → `final_preview` + channel previews | 检查多个通道是否命中同一内容；调低重复通道 `priority/top_k/max_items` |
+| AstrBot 最近上下文又被记忆注入 | trace detail → `filtered_items.reason=recent_context_duplicate` | 调大 `Inject_Settings.skip_recent_minutes` 或确认 SafetyChannel 正常 |
+| SelfLearning/ChatPlus 与 WaveMemory 都注入 | 兼容模式页 → duplicate warnings | 改 `runtime_mode=compat_only` 或关闭外部插件重复注入 |
+| 写入重复记忆 | writer 统计 duplicate / 同内容同群近期重复 | 统一 writer 去重会跳过重复写入，不删除旧数据 |
+
+### 关闭高级通道，保留纯记忆
+
+6185 配置页：
+
+```text
+Runtime_Settings.runtime_mode = memory_only
+```
+
+效果：
+
+- 保留：消息采集、writer、向量检索、基础 memory 注入、trace、搜索/记住工具、兼容 facade。
+- 默认关闭：persona、belief、jargon、few-shot、BookLore、affinity、mood、dream、consolidation、Study、SelfReflect 等高级能力。
+- 验证：注入观察台 trace 只应出现 memory/safety/可选 timeline/facts/fts5 等基础通道，不应出现 persona/belief/jargon/fewshot/book_lore。
+
+### Agent 反馈安全边界
+
+| 工具 | 行为 |
+|------|------|
+| `wave_memory_explain_injection` | 只读 trace |
+| `wave_memory_feedback_memory` | 记录 useful/useless/misleading/duplicate；不删除记忆 |
+| `wave_memory_suggest_config` | 写入 pending 配置建议；不自动应用 |
+| `wave_memory_submit_review_candidate` | 写入 pending 候选；不自动提升 belief/style/jargon |
+
+禁止项：批量删除、关闭 safety、关闭 audit、改 Provider、改其他插件配置、改 AstrBot 人格、伪装插件身份。
+
+### 性能告警
+
+日志格式：
+
+```text
+[WaveMemory] inject_memory 耗时过长: <total_ms>ms > 500ms | channels=[{'channel': 'memory', 'status': 'hit', 'ms': 123.4}]
+```
+
+排查顺序：
+
+1. 找最大 `ms` 的通道。
+2. 如果 status=`timeout`：调低该通道 `top_k/max_items`，或适当调高 `timeout_ms`。
+3. 如果 status=`hit` 且 tokens/chars 高：调低 `token_budget/top_k/max_items`。
+4. 如果总耗时高但单通道都低：检查 Embedding Provider 延迟、SQLite/HNSW IO、宿主机负载。
+5. 用注入观察台确认调整后的 trace 耗时。
 
 ---
 
@@ -355,23 +488,28 @@ AstrBot >= 4.14.0 · Python 3.10+ · WebUI 默认端口 9876
 
 | 子系统 | 启用条件 | 配置位置 |
 |--------|----------|----------|
+| 运行模式 | 自动 | 6185: Runtime_Settings.runtime_mode |
 | 向量索引 | Embedding Provider 已配置 | 6185: embedding_provider_id |
 | Tag 提取 | Tag LLM Provider 已配置 | 6185: tag_llm_provider_id |
 | 共现矩阵 | Tag 覆盖率 > 20% | 自动 |
-| 脉冲传播 | 共现矩阵就绪 | 6185: enable_spike_routing |
-| 残差金字塔 | Embedding + 共现矩阵 | 6185: enable_residual_pyramid |
-| EPA 分析 | Tag 覆盖率 > 20% | 6185: enable_epa |
-| 测地线重排 | 共现矩阵节点 > 1000 | 6185: enable_geodesic_rerank |
-| FTS5 召回 | 自动 | 无需配置 |
-| 记忆整合 | LLM Provider 可用 | 6185: enable_consolidation |
-| PersonaComposer | 自动 | 无需配置 |
-| 信念引擎 | 记忆整合就绪 | 自动 |
-| 经历片段 | v2.2 schema 已迁移 | 自动 |
-| 做梦系统 | enable_dream=true | 6185: enable_dream |
-| 黑话系统 | LLM + 聊天积累 | 6185: Jargon_Settings |
-| Holyman 知识库 | 内置 assets + WebUI | 9876: 黑话页 |
-| 风格学习 | LLM + bot 回复积累 | 6185: FewShot_Settings |
-| 注入指标 | 自动 | 9876: 概览页 |
+| 脉冲传播 | 共现矩阵就绪且 full 模式 | 6185: enable_spike_routing |
+| 残差金字塔 | Embedding + 共现矩阵且 full 模式 | 6185: enable_residual_pyramid |
+| EPA 分析 | Tag 覆盖率 > 20% 且 full 模式 | 6185: enable_epa |
+| 测地线重排 | 共现矩阵节点 > 1000 且 full 模式 | 6185: enable_geodesic_rerank |
+| FTS5 召回 | full/memory_only | 通道配置 |
+| 注入编排器 | enable_auto_inject 且非默认 compat_only | 9876: 通道配置 / 注入观察台 |
+| Trace Store | 自动 | 6185: Trace_Settings / 9876: 注入观察台 |
+| Agent 反馈 | full/memory_only | 9876: Agent 反馈 |
+| LivingMemory-compatible facade | 自动 | 6185: Compatibility_Settings / 9876: 兼容模式 |
+| 记忆整合 | LLM Provider 可用且 full 模式 | 6185: enable_consolidation |
+| PersonaComposer | full 模式 | 自动 |
+| 信念引擎 | 记忆整合就绪且 full 模式 | 自动 |
+| 经历片段 | v2.2 schema 已迁移且 full 模式 | 自动 |
+| 做梦系统 | enable_dream=true 且 full 模式 | 6185: enable_dream |
+| 黑话系统 | LLM + 聊天积累且 full 模式 | 6185: Jargon_Settings |
+| Holyman 知识库 | 内置 assets + WebUI 且 full 模式 | 9876: 黑话页 |
+| 风格学习 | LLM + bot 回复积累且 full 模式 | 6185: FewShot_Settings |
+| 注入指标 | 自动 | 9876: 概览页 / 注入指标 |
 | 身份安全 | 自动 | 无需配置 |
 | 防骚扰 | 自动 | 6185/9876: Social_Settings |
 | 记忆淘汰 | 自动 | 9876: 淘汰天数参数 |

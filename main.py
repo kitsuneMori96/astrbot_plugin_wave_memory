@@ -32,6 +32,8 @@ from .services.tag_job import TagBackfillJob
 from .services.tag_worker import TagWorker
 from .services.pair_similarity import PairSimilarityService
 from .services.hot_config import HotConfig
+from .services.runtime_mode import effective_native_injection_enabled, effective_query_feature, resolve_runtime_mode, runtime_capability_enabled, should_self_heal_advanced_query
+from .services.compat import build_duplicate_memory_warnings, build_livingmemory_compat_surface, detect_memory_plugins
 from .services.lifecycle import LifecycleService
 from .services.consolidation import ConsolidationService
 from .services.persona_evolution import PersonaEvolution
@@ -40,6 +42,11 @@ from .tools.deep_search import WaveMemoryDeepSearchTool
 from .tools.person_search import WaveMemoryPersonSearchTool
 from .tools.extra_tools import WaveMemoryAffinityTool, WaveMemoryFactsTool, WaveMemoryTagGraphTool
 from .tools.book_lore_search import BookLoreSearchTool, BookLoreGraphTool
+from .tools.injection_explain import WaveMemoryExplainInjectionTool
+from .tools.memory_feedback import WaveMemoryFeedbackMemoryTool
+from .tools.config_suggestion import WaveMemorySuggestConfigTool
+from .tools.review_candidate import WaveMemorySubmitReviewCandidateTool
+from .tools.livingmemory_compat_tools import build_livingmemory_compat_tools
 from .engine.book_lore_index import BookLoreIndex
 from .services.meta_thinking import MetaThinking
 from .services.dream import DreamService
@@ -119,7 +126,7 @@ def _parse_bot_config(cfg: dict, fallback_db_id: str = "") -> BotProfile:
     "astrbot_plugin_wave_memory",
     "vivy1024",
     "高性能记忆 + 灵魂引擎 + 知识图谱插件。五阶段零 LLM 检索管线、BDI 心智架构（信念/欲望/关切）、黑话学习、风格范例注入、Three.js 3D 交互式知识图谱可视化。",
-    "3.0.1",
+    "3.1.0",
     "https://github.com/vivy1024/astrbot_plugin_wave_memory",
 )
 class WaveMemoryPlugin(Star):
@@ -146,6 +153,7 @@ class WaveMemoryPlugin(Star):
         self.tag_cfg = tag_cfg = self.config.get("Tag_Settings", {})
         storage_cfg = self.config.get("Storage_Settings", {})
         webui_cfg = self.config.get("WebUI_Settings", {})
+        runtime_cfg = self.config.get("Runtime_Settings", {})
         social_cfg = self.config.get("Social_Settings", {})
         inject_cfg = self.config.get("Inject_Settings", {})
         filter_cfg = self.config.get("Message_Filter", {})
@@ -153,13 +161,24 @@ class WaveMemoryPlugin(Star):
         lifecycle_cfg = self.config.get("Lifecycle_Settings", {})
         cross_group_cfg = self.config.get("Cross_Group_Settings", {})
         affinity_cfg = self.config.get("Affinity_Settings", {})
+        compat_cfg = self.config.get("Compatibility_Settings", {})
+        trace_cfg = self.config.get("Trace_Settings", {}) or {}
+
+        # 运行模式：旧配置缺失 Runtime_Settings 时默认 full，保持历史完整行为。
+        self.runtime_mode = resolve_runtime_mode(self.config)
+        self.runtime_mode_name = self.runtime_mode.mode
+        self.runtime_cfg = runtime_cfg
 
         self.embedding_provider_id = self.config.get("embedding_provider_id", "")
         self.dimension = int(self.config.get("embedding_dimension", 1024))
         self.tag_llm_provider_id = self.config.get("tag_llm_provider_id", "")
         self.tag_extraction_enabled = tag_cfg.get("tag_extraction_enabled", True)
         self.max_tags = int(tag_cfg.get("max_tags_per_message", 10))
-        self.enable_auto_inject = query_cfg.get("enable_auto_inject", True)
+        self.enable_auto_inject = effective_native_injection_enabled(
+            query_cfg,
+            self.runtime_mode,
+            compat_cfg=compat_cfg,
+        )
         self.inject_top_k = int(query_cfg.get("inject_top_k", 5))
         self.min_similarity = float(query_cfg.get("min_similarity", "0.35"))
         self.injection_format = query_cfg.get("injection_format", "[记忆] {sender}({time}): {content}")
@@ -168,25 +187,50 @@ class WaveMemoryPlugin(Star):
         self.timeline_max = int(inject_cfg.get("timeline_max", 5))
         self.facts_max = int(inject_cfg.get("facts_max", 5))
         self.enable_timeline = inject_cfg.get("enable_timeline", True)
-        self.enable_spike = query_cfg.get("enable_spike_routing", True)
-        self.enable_pyramid = query_cfg.get("enable_residual_pyramid", True)
-        self.enable_epa = query_cfg.get("enable_epa", True)
-        self.enable_geodesic = query_cfg.get("enable_geodesic_rerank", True)
+        self.enable_spike = effective_query_feature(query_cfg, "enable_spike_routing", self.runtime_mode)
+        self.enable_pyramid = effective_query_feature(query_cfg, "enable_residual_pyramid", self.runtime_mode)
+        self.enable_epa = effective_query_feature(query_cfg, "enable_epa", self.runtime_mode)
+        self.enable_geodesic = effective_query_feature(query_cfg, "enable_geodesic_rerank", self.runtime_mode)
         self.enable_shotgun = query_cfg.get("enable_shotgun", False)
+        self.injection_orchestrator_active_enabled = inject_cfg.get("orchestrator_active_enabled", True)
+        self.injection_shadow_enabled = inject_cfg.get("orchestrator_shadow_enabled", not self.injection_orchestrator_active_enabled)
+        self.livingmemory_alias_tools_enabled = bool(compat_cfg.get("livingmemory_alias_tools_enabled", False))
+
+        def _trace_int(key: str, default: int, minimum: int) -> int:
+            try:
+                return max(minimum, int(float(trace_cfg.get(key, default))))
+            except (TypeError, ValueError):
+                return default
+
+        self.injection_trace_retention_days = _trace_int("retention_days", 14, 1)
+        self.injection_trace_max_rows = _trace_int("max_rows", 5000, 100)
+        self.injection_trace_max_preview_chars = _trace_int("max_preview_chars", 1200, 120)
+        try:
+            from .services.config.channel_config import build_channel_config_from_plugin_config
+            self.injection_channel_config = build_channel_config_from_plugin_config(self.config)
+        except Exception as e:
+            logger.warning(f"[WaveMemory] injection channel config init failed: {e}")
+            self.injection_channel_config = None
 
         # ─── 配置自愈：核心开关被关则强制恢复 ───
-        # 根因：AstrBot 配置页保存是全量覆盖，未渲染的 bool 字段写 False
-        # enable_auto_inject 关了 = 插件完全不工作，不存在合理关闭场景
+        # 根因：AstrBot 配置页保存是全量覆盖，未渲染的 bool 字段写 False。
+        # compat_only 默认不主动注入；full/memory_only 则保留“纯记忆可用”的自愈行为。
         if not self.enable_auto_inject:
-            logger.warning("[WaveMemory] 🔧 enable_auto_inject=False，强制恢复（AstrBot 配置覆盖 bug）")
-            self.enable_auto_inject = True
-        # 高级检索全关也视为损坏
+            if self.runtime_mode.native_injection_default:
+                logger.warning("[WaveMemory] 🔧 enable_auto_inject=False，强制恢复（AstrBot 配置覆盖 bug）")
+                self.enable_auto_inject = True
+            else:
+                logger.info("[WaveMemory] 运行模式 compat_only：原生自动注入保持关闭")
+        # 高级检索全关在 full 中视为损坏；memory_only/compat_only 中是合法默认状态。
         if not any([self.enable_spike, self.enable_pyramid, self.enable_epa, self.enable_geodesic]):
-            logger.warning("[WaveMemory] 🔧 高级检索全部关闭，强制恢复")
-            self.enable_spike = True
-            self.enable_pyramid = True
-            self.enable_epa = True
-            self.enable_geodesic = True
+            if should_self_heal_advanced_query(self.runtime_mode):
+                logger.warning("[WaveMemory] 🔧 高级检索全部关闭，强制恢复")
+                self.enable_spike = True
+                self.enable_pyramid = True
+                self.enable_epa = True
+                self.enable_geodesic = True
+            else:
+                logger.info(f"[WaveMemory] 运行模式 {self.runtime_mode.mode}：高级检索默认关闭")
         # 持久化修复到 config.json
         _need_fix = False
         try:
@@ -196,13 +240,14 @@ class WaveMemoryPlugin(Star):
                 with open(config_path, "r", encoding="utf-8-sig") as f:
                     raw_cfg = _json.load(f)
                 qs = raw_cfg.get("Query_Settings", {})
-                if qs.get("enable_auto_inject") is False:
+                if qs.get("enable_auto_inject") is False and self.runtime_mode.native_injection_default:
                     qs["enable_auto_inject"] = True
                     _need_fix = True
-                for _k in ["enable_spike_routing", "enable_residual_pyramid", "enable_epa", "enable_geodesic_rerank"]:
-                    if qs.get(_k) is False:
-                        qs[_k] = True
-                        _need_fix = True
+                if should_self_heal_advanced_query(self.runtime_mode):
+                    for _k in ["enable_spike_routing", "enable_residual_pyramid", "enable_epa", "enable_geodesic_rerank"]:
+                        if qs.get(_k) is False:
+                            qs[_k] = True
+                            _need_fix = True
                 if _need_fix:
                     raw_cfg["Query_Settings"] = qs
                     with open(config_path, "w", encoding="utf-8") as f:
@@ -210,6 +255,12 @@ class WaveMemoryPlugin(Star):
                     logger.info("[WaveMemory] ✅ 配置自愈完成，已写回 config.json")
         except Exception as e:
             logger.debug(f"[WaveMemory] 配置自愈写回跳过: {e}")
+
+        disabled_caps = ", ".join(self.runtime_mode.disabled_capabilities) if self.runtime_mode.disabled_capabilities else "无"
+        logger.info(
+            f"[WaveMemory] 运行模式: {self.runtime_mode.mode} ({self.runtime_mode.label})；"
+            f"禁用高级能力: {disabled_caps}"
+        )
         self.max_memories = int(storage_cfg.get("max_memories", 100000))
 
         # WebUI 配置
@@ -236,21 +287,21 @@ class WaveMemoryPlugin(Star):
         # 好感度引擎配置
         self.affinity_cfg = affinity_cfg
 
-        # 生命周期配置
-        self.enable_affinity = lifecycle_cfg.get("enable_affinity", True)
-        self.enable_persona = lifecycle_cfg.get("enable_persona_evolution", True)
-        self.enable_mood = lifecycle_cfg.get("enable_mood", True)
+        # 生命周期配置：memory_only/compat_only 强制关闭高级社交/人格/情绪能力，避免旧 default=true 穿透模式边界。
+        self.enable_affinity = runtime_capability_enabled(self.runtime_mode, "affinity", lifecycle_cfg.get("enable_affinity", True))
+        self.enable_persona = runtime_capability_enabled(self.runtime_mode, "persona", lifecycle_cfg.get("enable_persona_evolution", True))
+        self.enable_mood = runtime_capability_enabled(self.runtime_mode, "mood", lifecycle_cfg.get("enable_mood", True))
         self.mood_duration_hours = float(lifecycle_cfg.get("mood_duration_hours", "2.0"))
         self.mood_msg_threshold = int(lifecycle_cfg.get("mood_msg_threshold", 30))
         self.positive_emotion_threshold = float(lifecycle_cfg.get("positive_emotion_threshold", "0.6"))
         self.negative_emotion_threshold = float(lifecycle_cfg.get("negative_emotion_threshold", "0.4"))
-        self.enable_dream = lifecycle_cfg.get("enable_dream", True)
+        self.enable_dream = runtime_capability_enabled(self.runtime_mode, "dream", lifecycle_cfg.get("enable_dream", True))
         self.dream_interval_hours = float(lifecycle_cfg.get("dream_interval_hours", "6.0"))
         self.dream_recent_seeds = int(lifecycle_cfg.get("dream_recent_seeds", 3))
         self.dream_recent_k = int(lifecycle_cfg.get("dream_recent_k", 5))
         self.dream_mid_seeds = int(lifecycle_cfg.get("dream_mid_seeds", 2))
         self.dream_mid_k = int(lifecycle_cfg.get("dream_mid_k", 3))
-        self.enable_consolidation = lifecycle_cfg.get("enable_consolidation", True)
+        self.enable_consolidation = runtime_capability_enabled(self.runtime_mode, "consolidation", lifecycle_cfg.get("enable_consolidation", True))
         self.consolidation_interval_hours = float(lifecycle_cfg.get("consolidation_interval_hours", "4.0"))
         self.consolidation_topic_backfill = lifecycle_cfg.get("consolidation_topic_backfill", True)
         self.consolidation_skip_topics = [t.strip() for t in tag_cfg.get("consolidation_skip_topics", "日常闲聊,日常灌水,闲聊,灌水,群聊,聊天,日常").split(",") if t.strip()]
@@ -369,16 +420,20 @@ class WaveMemoryPlugin(Star):
         # 测地线重排
         self.geodesic = GeodesicReranker(self.db) if self.enable_geodesic else None
 
-        # 书设知识索引
+        # 书设知识索引：memory_only/compat_only 默认关闭 BookLore，避免加载世界观/小说知识能力。
+        self.enable_book_lore = runtime_capability_enabled(self.runtime_mode, "book_lore", True)
         self.lore_db_path = os.path.join(self.data_dir, "book_lore.db")
-        try:
-            self.book_lore_index = BookLoreIndex(
-                dimension=self.dimension,
-                data_dir=self.data_dir,
-            )
-            self.book_lore_index.load_id_maps()
-        except Exception as e:
-            logger.debug(f"[WaveMemory] BookLoreIndex init skipped: {e}")
+        if self.enable_book_lore:
+            try:
+                self.book_lore_index = BookLoreIndex(
+                    dimension=self.dimension,
+                    data_dir=self.data_dir,
+                )
+                self.book_lore_index.load_id_maps()
+            except Exception as e:
+                logger.debug(f"[WaveMemory] BookLoreIndex init skipped: {e}")
+                self.book_lore_index = None
+        else:
             self.book_lore_index = None
 
         # 热配置
@@ -441,6 +496,18 @@ class WaveMemoryPlugin(Star):
             noise_max_length=int(self.config.get("Eviction_Settings", {}).get("noise_max_length", 10)),
         )
 
+        # LivingMemory-compatible surface（兼容已有记忆生态，不伪装插件名）
+        livingmemory_surface = build_livingmemory_compat_surface(
+            query_engine=self.query_engine,
+            writer=self.writer,
+        )
+        self.memory_engine = livingmemory_surface.memory_engine
+        self.initializer = livingmemory_surface.initializer
+        self.livingmemory_compat_enabled = True
+        self.detected_memory_plugins = detect_memory_plugins(context=self.context)
+        for warning in build_duplicate_memory_warnings(self.detected_memory_plugins):
+            logger.warning(f"[WaveMemory] {warning['message']} plugin={warning['plugin_id']} name={warning['name']}")
+
         # TagWorker（匀速后台标签提取）
         self.tag_worker = None
         if self.tag_extractor:
@@ -477,6 +544,8 @@ class WaveMemoryPlugin(Star):
         self.lifecycle = None
         self.persona_evolution = None
         self.webui = None
+        self.injection_trace_store = None
+        self.injection_shadow_channels = []
         self._terminated = False
 
         logger.info(
@@ -492,6 +561,10 @@ class WaveMemoryPlugin(Star):
         task = asyncio.create_task(coro)
         self._bg_tasks.append(task)
         return task
+
+    def _set_injection_channel_config(self, config) -> None:
+        """WebUI 热应用通道配置时更新运行时注入编排器配置。"""
+        self.injection_channel_config = config
 
     def _get_bot(self, bot_id: str) -> Optional[BotProfile]:
         """通过 QQ 号获取 Bot 配置，未找到返回 None。"""
@@ -514,6 +587,285 @@ class WaveMemoryPlugin(Star):
         """获取 bot 显示名，fallback 为 'bot'。"""
         p = self._bot_registry.get(bot_id)
         return p.name if p else "bot"
+
+    def _setup_injection_shadow_pipeline(self) -> None:
+        """初始化新注入编排器通道链；失败不影响旧 inject_memory fallback。"""
+        if not getattr(self, "injection_shadow_enabled", True) and not getattr(self, "injection_orchestrator_active_enabled", False):
+            logger.info("[WaveMemory] Injection orchestrator disabled")
+            return
+        if not getattr(self, "injection_channel_config", None):
+            logger.warning("[WaveMemory] Injection orchestrator shadow skipped: channel config unavailable")
+            return
+        try:
+            from .services.injection.trace_store import InjectionTraceStore
+            from .services.injection.channels.safety import SafetyChannel
+            from .services.injection.channels.memory_recall import MemoryRecallChannel
+            from .services.injection.channels.timeline import TimelineChannel
+            from .services.injection.channels.facts import FactsChannel
+            from .services.injection.channels.persona import PersonaChannel
+            from .services.injection.channels.belief import BeliefChannel
+            from .services.injection.channels.jargon import JargonChannel
+            from .services.injection.channels.fewshot import FewShotChannel
+            from .services.injection.channels.book_lore import BookLoreChannel
+            from .services.injection.channels.fts5 import FTS5Channel
+            from .services.persona_composer import PersonaComposer
+
+            self.injection_trace_store = InjectionTraceStore(
+                self.db.conn,
+                max_preview_chars=getattr(self, "injection_trace_max_preview_chars", 1200),
+                retention_days=getattr(self, "injection_trace_retention_days", 14),
+                max_rows=getattr(self, "injection_trace_max_rows", 5000),
+                cleanup_on_record=True,
+            )
+            self.injection_trace_store.ensure_schema()
+            safety = SafetyChannel()
+            default_bot = next(iter(self._bot_registry.values()), None) if self._bot_registry else None
+            persona_composer = PersonaComposer(
+                db=self.db,
+                query_engine=self.query_engine,
+                bot_profiles=self._bot_registry,
+                default_bot_db_id=(default_bot.db_id if default_bot else "bot"),
+            )
+            self.injection_shadow_channels = [
+                safety,
+                MemoryRecallChannel(query_engine=self.query_engine, safety_channel=safety),
+                FTS5Channel(db=self.db),
+                TimelineChannel(db=self.db, safety_channel=safety),
+                FactsChannel(db=self.db, facts_decay_rate=getattr(self, "_facts_decay_rate", 0.005)),
+                PersonaChannel(composer=persona_composer, persona_evolution=getattr(self, "persona_evolution", None)),
+                BeliefChannel(belief_engine=getattr(self, "belief_engine", None)),
+                JargonChannel(jargon_service=getattr(self, "jargon_service", None)),
+                FewShotChannel(few_shot_service=getattr(self, "few_shot_service", None)),
+                BookLoreChannel(
+                    book_lore_index=getattr(self, "book_lore_index", None),
+                    embedding_service=getattr(self, "embedding_service", None),
+                    lore_db_path=getattr(self, "lore_db_path", ""),
+                ),
+            ]
+            logger.info(f"[WaveMemory] Injection orchestrator shadow ready: {len(self.injection_shadow_channels)} channels")
+        except Exception as e:
+            logger.warning(f"[WaveMemory] Injection orchestrator shadow init failed: {e}")
+            _record_err("InjectionShadow", e)
+            self.injection_trace_store = None
+            self.injection_shadow_channels = []
+
+    def _build_shadow_persona_realtime_ctx(self, *, group_id: str, sender_id: str, sender_name: str) -> dict:
+        """复用旧 soul 通道的实时画像上下文。"""
+        realtime_ctx = {}
+        if hasattr(self, '_hourly_reply_count') and sender_id in self._hourly_reply_count:
+            realtime_ctx["hourly_at_count"] = self._hourly_reply_count[sender_id].get("count", 0)
+        try:
+            last_reply_row = self.db.conn.execute(
+                "SELECT content FROM memories WHERE sender_id='bot' AND group_id=? AND content LIKE ? ORDER BY timestamp DESC LIMIT 1",
+                (group_id, f"%{sender_name or sender_id}%"),
+            ).fetchone()
+            if not last_reply_row:
+                last_reply_row = self.db.conn.execute(
+                    "SELECT content FROM memories WHERE sender_id='bot' AND group_id=? ORDER BY timestamp DESC LIMIT 1",
+                    (group_id,),
+                ).fetchone()
+            if last_reply_row:
+                realtime_ctx["last_bot_reply"] = str(last_reply_row[0] or "")[:80]
+        except Exception:
+            pass
+        return realtime_ctx
+
+    def _build_shadow_context_config(self, *, exclude_sources, recent_context: list[str], realtime_ctx: dict) -> dict:
+        config = self.injection_channel_config.to_dict() if getattr(self, "injection_channel_config", None) else {}
+        config["memory_recall"] = {
+            "enable_shotgun": bool(getattr(self, "enable_shotgun", False)),
+            "context_messages": recent_context,
+            "exclude_sources": exclude_sources,
+            "skip_recent_minutes": getattr(self, "skip_recent_minutes", 30),
+        }
+        config["timeline"] = {"days": 7}
+        config["persona"] = {"realtime_ctx": realtime_ctx}
+        return config
+
+    async def _run_injection_shadow_trace(
+        self,
+        *,
+        event: AstrMessageEvent,
+        req,
+        message: str,
+        group_id: str,
+        sender_id: str,
+        sender_name: str,
+        bot_id: str,
+        bot_profile: Optional[BotProfile],
+        exclude_sources,
+        old_text: str,
+    ) -> None:
+        """运行新 Orchestrator 影子链路并写入 trace；绝不修改真实 req。"""
+        if not getattr(self, "injection_shadow_enabled", True):
+            return
+        if not getattr(self, "injection_shadow_channels", None) or not getattr(self, "injection_trace_store", None):
+            return
+        try:
+            from .services.injection.context import InjectionContext
+            from .services.injection.shadow import run_injection_shadow
+
+            recent_context = self._get_recent_messages(event, max_messages=8)
+            realtime_ctx = self._build_shadow_persona_realtime_ctx(
+                group_id=group_id,
+                sender_id=sender_id,
+                sender_name=sender_name,
+            )
+            bot_profile_id = bot_profile.db_id if bot_profile else (bot_id or "bot")
+            trace_id = f"shadow-{time.time_ns()}"
+            ctx = InjectionContext(
+                event=event,
+                req=req,
+                message=message,
+                group_id=group_id,
+                sender_id=sender_id,
+                sender_name=sender_name,
+                bot_id=bot_id,
+                bot_profile_id=bot_profile_id,
+                recent_context=recent_context,
+                mode=getattr(self, "runtime_mode_name", "full"),
+                config=self._build_shadow_context_config(
+                    exclude_sources=exclude_sources,
+                    recent_context=recent_context,
+                    realtime_ctx=realtime_ctx,
+                ),
+                now=time.time(),
+                trace_id=trace_id,
+            )
+            result = await run_injection_shadow(
+                ctx=ctx,
+                channels=self.injection_shadow_channels,
+                config=self.injection_channel_config,
+                trace_store=self.injection_trace_store,
+                old_text=old_text,
+            )
+            matched = old_text == result.final_text
+            logger.debug(
+                f"[WaveMemory] injection shadow {'MATCH' if matched else 'DIFF'}: "
+                f"trace={trace_id} old_chars={len(old_text or '')} new_chars={len(result.final_text or '')}"
+            )
+        except Exception as e:
+            logger.debug(f"[WaveMemory] injection shadow skipped: {e}")
+            _record_err("InjectionShadow", e)
+
+    async def _run_injection_active_trace(
+        self,
+        *,
+        event: AstrMessageEvent,
+        req,
+        message: str,
+        group_id: str,
+        sender_id: str,
+        sender_name: str,
+        bot_id: str,
+        bot_profile: Optional[BotProfile],
+        exclude_sources,
+    ) -> bool:
+        """主动模式：新 Orchestrator 直接写真实 ProviderRequest；失败返回 False 走旧逻辑。"""
+        if not getattr(self, "injection_orchestrator_active_enabled", False):
+            return False
+        if not getattr(self, "injection_shadow_channels", None):
+            return False
+        try:
+            from .services.injection.context import InjectionContext
+            from .services.injection.active import run_injection_active
+            from .utils.perf import get_perf_tracker
+
+            recent_context = self._get_recent_messages(event, max_messages=8)
+            realtime_ctx = self._build_shadow_persona_realtime_ctx(
+                group_id=group_id,
+                sender_id=sender_id,
+                sender_name=sender_name,
+            )
+            bot_profile_id = bot_profile.db_id if bot_profile else (bot_id or "bot")
+            trace_id = f"active-{time.time_ns()}"
+            ctx = InjectionContext(
+                event=event,
+                req=req,
+                message=message,
+                group_id=group_id,
+                sender_id=sender_id,
+                sender_name=sender_name,
+                bot_id=bot_id,
+                bot_profile_id=bot_profile_id,
+                recent_context=recent_context,
+                mode=getattr(self, "runtime_mode_name", "full"),
+                config=self._build_shadow_context_config(
+                    exclude_sources=exclude_sources,
+                    recent_context=recent_context,
+                    realtime_ctx=realtime_ctx,
+                ),
+                now=time.time(),
+                trace_id=trace_id,
+            )
+            result = await run_injection_active(
+                ctx=ctx,
+                channels=self.injection_shadow_channels,
+                config=self.injection_channel_config,
+                trace_store=getattr(self, "injection_trace_store", None),
+            )
+
+            hit_results = [r for r in result.channel_results if r.status == "hit" and r.text]
+            metric_sample = {
+                "total_ms": result.total_latency_ms,
+                "total_tokens": sum(r.tokens for r in hit_results),
+                "total_chars": len(result.final_text),
+                "parts_count": len(hit_results),
+            }
+            for channel_result in result.channel_results:
+                prefix = channel_result.channel
+                metric_sample[f"{prefix}_ms"] = channel_result.latency_ms
+                metric_sample[f"{prefix}_tokens"] = channel_result.tokens
+                metric_sample[f"{prefix}_chars"] = channel_result.chars
+            try:
+                get_perf_tracker().record_injection(metric_sample)
+                if getattr(self, "db", None):
+                    self.db.record_injection_metric(metric_sample)
+                    self.db.cleanup_injection_metrics()
+            except Exception as e:
+                logger.warning(f"[WaveMemory] record orchestrator injection metrics failed: {e}")
+
+            memory_ids = []
+            for channel_result in result.channel_results:
+                if channel_result.channel not in {"memory", "fts5"} or channel_result.status != "hit":
+                    continue
+                for item in channel_result.items or []:
+                    mid = item.get("id")
+                    if mid and mid not in memory_ids:
+                        memory_ids.append(mid)
+            for mid in memory_ids[:10]:
+                try:
+                    row = self.db.conn.execute("SELECT importance FROM memories WHERE id=?", (mid,)).fetchone()
+                    if row:
+                        cur_imp = float(row[0] if row[0] is not None else 1.0)
+                        if cur_imp < 3.0:
+                            self.db.update_memory(mid, importance=min(3.0, cur_imp + 0.02))
+                except Exception:
+                    pass
+
+            if result.injected:
+                parts_detail = []
+                for channel_result in hit_results:
+                    count = len(channel_result.items or [])
+                    parts_detail.append(f"{channel_result.channel}={count}" if count else channel_result.channel)
+                logger.info(
+                    f"[WaveMemory] inject_memory SUCCESS: orchestrator {len(hit_results)} parts "
+                    f"[{','.join(parts_detail)}], {len(result.final_text)} chars, "
+                    f"{result.total_latency_ms:.0f}ms | tokens={metric_sample['total_tokens']} trace={trace_id}"
+                )
+            else:
+                logger.info(f"[WaveMemory] inject_memory: no orchestrator memories found to inject | trace={trace_id}")
+
+            if result.total_latency_ms > 500:
+                logger.warning(
+                    f"[WaveMemory] inject_memory 耗时过长: {result.total_latency_ms:.0f}ms > 500ms | "
+                    f"channels={[{ 'channel': r.channel, 'status': r.status, 'ms': r.latency_ms } for r in result.channel_results]}"
+                )
+            return True
+        except Exception as e:
+            logger.warning(f"[WaveMemory] Injection orchestrator active failed, fallback to legacy: {e}", exc_info=True)
+            _record_err("InjectionActive", e)
+            return False
 
     async def initialize(self):
         """AstrBot 完成 handler 绑定后调用。"""
@@ -561,34 +913,47 @@ class WaveMemoryPlugin(Star):
         if self.epa:
             self._spawn(self._init_epa())
 
-        # 注册 LLM 工具
-        search_tool = WaveMemorySearchTool(query_engine=self.query_engine, db=self.db)
-        remember_tool = WaveMemoryRememberTool(writer=self.writer)
-        deep_search_tool = WaveMemoryDeepSearchTool(db=self.db)
-        person_search_tool = WaveMemoryPersonSearchTool(db=self.db)
-
-        # 扩展工具
-        affinity_tool = WaveMemoryAffinityTool(db=self.db)
-        facts_tool = WaveMemoryFactsTool(db=self.db)
-        tag_graph_tool = WaveMemoryTagGraphTool(db=self.db)
-
-        # 书设工具
-        book_search_tool = BookLoreSearchTool(
-            book_lore_index=self.book_lore_index,
-            embedding_service=self.embedding_service,
-            db=self.db,
-            lore_db_path=self.lore_db_path,
+        # 注册 LLM 工具：memory_only 保留纯记忆工具；compat_only 仅暴露 LivingMemory 风格别名（如已启用）。
+        livingmemory_alias_tools = build_livingmemory_compat_tools(
+            self.memory_engine,
+            enabled=self.livingmemory_alias_tools_enabled,
         )
-        book_graph_tool = BookLoreGraphTool(
-            db=self.db,
-            lore_db_path=self.lore_db_path,
-        )
+        self.livingmemory_alias_tools_registered = bool(livingmemory_alias_tools)
 
-        self.context.add_llm_tools(
-            search_tool, remember_tool, deep_search_tool, person_search_tool,
-            affinity_tool, facts_tool, tag_graph_tool,
-            book_search_tool, book_graph_tool,
-        )
+        llm_tools = [*livingmemory_alias_tools]
+        if runtime_capability_enabled(self.runtime_mode, "memory_tools", True):
+            llm_tools.extend([
+                WaveMemorySearchTool(query_engine=self.query_engine, db=self.db),
+                WaveMemoryRememberTool(writer=self.writer),
+                WaveMemoryDeepSearchTool(db=self.db),
+                WaveMemoryFactsTool(db=self.db),
+                WaveMemoryTagGraphTool(db=self.db),
+            ])
+        if runtime_capability_enabled(self.runtime_mode, "agent_feedback_tools", True):
+            llm_tools.extend([
+                WaveMemoryExplainInjectionTool(db=self.db),
+                WaveMemoryFeedbackMemoryTool(db=self.db),
+                WaveMemorySuggestConfigTool(db=self.db),
+                WaveMemorySubmitReviewCandidateTool(db=self.db),
+            ])
+        if runtime_capability_enabled(self.runtime_mode, "persona_tools", True):
+            llm_tools.append(WaveMemoryPersonSearchTool(db=self.db))
+        if runtime_capability_enabled(self.runtime_mode, "affinity_tools", True):
+            llm_tools.append(WaveMemoryAffinityTool(db=self.db))
+        if runtime_capability_enabled(self.runtime_mode, "book_lore_tools", True):
+            llm_tools.append(BookLoreSearchTool(
+                book_lore_index=self.book_lore_index,
+                embedding_service=self.embedding_service,
+                db=self.db,
+                lore_db_path=self.lore_db_path,
+            ))
+            llm_tools.append(BookLoreGraphTool(
+                db=self.db,
+                lore_db_path=self.lore_db_path,
+            ))
+
+        if llm_tools:
+            self.context.add_llm_tools(*llm_tools)
 
         # 启动 WebUI
         if self.webui_enabled:
@@ -611,6 +976,12 @@ class WaveMemoryPlugin(Star):
                     port=self.webui_port,
                     password=self.webui_password,
                     plugin_config=self.config,
+                    injection_channel_config=self.injection_channel_config,
+                    injection_channel_config_setter=self._set_injection_channel_config,
+                    livingmemory_facade=self.memory_engine,
+                    livingmemory_facade_enabled=self.livingmemory_compat_enabled,
+                    livingmemory_alias_tools_registered=self.livingmemory_alias_tools_registered,
+                    detected_memory_plugins=self.detected_memory_plugins,
                 )
                 await self.webui.start()
             except Exception as e:
@@ -708,9 +1079,9 @@ class WaveMemoryPlugin(Star):
             affinity_cfg=self.affinity_cfg,
         ) if self.enable_persona else None
 
-        # 黑话系统 (US-4.1~4.5)
+        # 黑话系统 (US-4.1~4.5)：memory_only/compat_only 强制关闭，避免黑话学习/注入越过纯记忆边界。
         jargon_cfg = self.config.get("Jargon_Settings", {})
-        if jargon_cfg.get("enabled", True) and self.tag_llm_provider_id:
+        if runtime_capability_enabled(self.runtime_mode, "jargon", jargon_cfg.get("enabled", True)) and self.tag_llm_provider_id:
             try:
                 jargon_llm = LLMFallbackClient(
                     context=self.context,
@@ -732,9 +1103,9 @@ class WaveMemoryPlugin(Star):
         else:
             self.jargon_service = None
 
-        # Few-Shot 风格学习 (US-5.1~5.4)
+        # Few-Shot 风格学习 (US-5.1~5.4)：纯记忆模式不启动风格学习服务。
         fewshot_cfg = self.config.get("FewShot_Settings", {})
-        if fewshot_cfg.get("enabled", True) and self.tag_llm_provider_id:
+        if runtime_capability_enabled(self.runtime_mode, "fewshot", fewshot_cfg.get("enabled", True)) and self.tag_llm_provider_id:
             try:
                 fewshot_llm = LLMFallbackClient(
                     context=self.context,
@@ -754,9 +1125,9 @@ class WaveMemoryPlugin(Star):
         else:
             self.few_shot_service = None
 
-        # MetaThinking（内心判断层）
+        # MetaThinking（内心判断层）：memory_only/compat_only 禁止启动独立判断层。
         meta_cfg = self.config.get("MetaThinking_Settings", {})
-        if meta_cfg.get("enabled", True):
+        if runtime_capability_enabled(self.runtime_mode, "metathinking", meta_cfg.get("enabled", True)):
             try:
                 # 从 bot registry 构建 prompt 映射（配置驱动）
                 bot_prompts = {}
@@ -810,7 +1181,7 @@ class WaveMemoryPlugin(Star):
             None
         )
         study_cfg = self.config.get("Study_Settings", {})
-        if study_cfg.get("enabled", True) and self.book_lore_index and self.tag_llm_provider_id and experience_bot:
+        if runtime_capability_enabled(self.runtime_mode, "study", study_cfg.get("enabled", True)) and self.book_lore_index and self.tag_llm_provider_id and experience_bot:
             try:
                 study_llm = LLMFallbackClient(
                     context=self.context,
@@ -841,9 +1212,9 @@ class WaveMemoryPlugin(Star):
         else:
             self.study_service = None
 
-        # 自省系统（检测纠正 → 学习，所有 bot 共用）
+        # 自省系统（检测纠正 → 学习，所有 bot 共用）：纯记忆模式关闭自省学习后台能力。
         reflect_bot = experience_bot or (list(_registry.values())[0] if _registry else None)
-        if study_cfg.get("self_reflect_enabled", True) and self.tag_llm_provider_id and reflect_bot:
+        if runtime_capability_enabled(self.runtime_mode, "self_reflect", study_cfg.get("self_reflect_enabled", True)) and self.tag_llm_provider_id and reflect_bot:
             try:
                 reflect_llm = LLMFallbackClient(
                     context=self.context,
@@ -878,7 +1249,7 @@ class WaveMemoryPlugin(Star):
         soul_bot_id = soul_bot.db_id if soul_bot else ""
         # 信念引擎（提取在 consolidation 内触发，注入在 on_llm_request）
         try:
-            if self.tag_llm_provider_id and soul_bot_id:
+            if runtime_capability_enabled(self.runtime_mode, "belief", True) and self.tag_llm_provider_id and soul_bot_id:
                 belief_llm = LLMFallbackClient(
                     context=self.context,
                     provider_ids=build_provider_chain(self.tag_llm_provider_id),
@@ -895,33 +1266,33 @@ class WaveMemoryPlugin(Star):
             _record_err("BeliefEngine", e)
             self.belief_engine = None
         try:
-            self.belief_emergence = BeliefEmergenceService(db=self.db, bot_id=soul_bot_id) if soul_bot_id else None
+            self.belief_emergence = BeliefEmergenceService(db=self.db, bot_id=soul_bot_id) if runtime_capability_enabled(self.runtime_mode, "belief_emergence", True) and soul_bot_id else None
         except Exception as e:
             logger.warning(f"[WaveMemory] BeliefEmergence init failed: {e}")
             _record_err("BeliefEmergence", e)
             self.belief_emergence = None
-        # 关切 / 情绪轨迹 / 时间锚点（纯 DB，无需 LLM）
+        # 关切 / 情绪轨迹 / 时间锚点：memory_only/compat_only 下属于高级灵魂状态能力，默认不实例化。
         try:
-            self.concern_tracker = ConcernTracker(db=self.db, bot_id=soul_bot_id)
+            self.concern_tracker = ConcernTracker(db=self.db, bot_id=soul_bot_id) if runtime_capability_enabled(self.runtime_mode, "concern", True) and soul_bot_id else None
         except Exception as e:
             logger.warning(f"[WaveMemory] ConcernTracker init failed: {e}")
             _record_err("ConcernTracker", e)
             self.concern_tracker = None
         try:
-            self.mood_trajectory = MoodTrajectory(db=self.db, bot_id=soul_bot_id)
+            self.mood_trajectory = MoodTrajectory(db=self.db, bot_id=soul_bot_id) if runtime_capability_enabled(self.runtime_mode, "mood_trajectory", True) and soul_bot_id else None
         except Exception as e:
             logger.warning(f"[WaveMemory] MoodTrajectory init failed: {e}")
             _record_err("MoodTrajectory", e)
             self.mood_trajectory = None
         try:
-            self.subjective_time = SubjectiveTime(db=self.db, bot_id=soul_bot_id)
+            self.subjective_time = SubjectiveTime(db=self.db, bot_id=soul_bot_id) if runtime_capability_enabled(self.runtime_mode, "subjective_time", True) and soul_bot_id else None
         except Exception as e:
             logger.warning(f"[WaveMemory] SubjectiveTime init failed: {e}")
             _record_err("SubjectiveTime", e)
             self.subjective_time = None
         # 欲望引擎（依赖信念引擎）
         try:
-            self.desire_engine = DesireEngine(belief_engine=self.belief_engine, bot_id=soul_bot_id)
+            self.desire_engine = DesireEngine(belief_engine=self.belief_engine, bot_id=soul_bot_id) if runtime_capability_enabled(self.runtime_mode, "desire", True) and soul_bot_id else None
         except Exception as e:
             logger.warning(f"[WaveMemory] DesireEngine init failed: {e}")
             _record_err("DesireEngine", e)
@@ -931,6 +1302,9 @@ class WaveMemoryPlugin(Star):
             f"concern={bool(self.concern_tracker)} mood_traj={bool(self.mood_trajectory)} "
             f"time_anchor={bool(self.subjective_time)} desire={bool(self.desire_engine)}"
         )
+
+        # 新编排器影子链路：只写 trace，不改真实 ProviderRequest。
+        self._setup_injection_shadow_pipeline()
 
         # ─── 注册所有服务状态到健康面板（WebUI 可视化）───
         from .utils.health_registry import register as _reg
@@ -1231,10 +1605,6 @@ class WaveMemoryPlugin(Star):
         req.system_prompt = prepend_identity_safety_system_prompt(
             getattr(req, "system_prompt", ""), message, always=True
         )
-        safety_injection = build_identity_safety_injection(message)
-        if safety_injection:
-            from astrbot.core.agent.message import TextPart
-            req.extra_user_content_parts.append(TextPart(text=safety_injection))
 
         group_id = event.get_group_id()
         bot_id = event.get_self_id() or ""
@@ -1245,6 +1615,24 @@ class WaveMemoryPlugin(Star):
 
         bot_profile = self._get_bot(bot_id)
         exclude_sources = bot_profile.exclude_sources if bot_profile and bot_profile.exclude_sources else None
+        if await self._run_injection_active_trace(
+            event=event,
+            req=req,
+            message=message,
+            group_id=group_id,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            bot_id=bot_id,
+            bot_profile=bot_profile,
+            exclude_sources=exclude_sources,
+        ):
+            return
+
+        safety_injection = build_identity_safety_injection(message)
+        if safety_injection:
+            from astrbot.core.agent.message import TextPart
+            req.extra_user_content_parts.append(TextPart(text=safety_injection))
+
         has_experience_channel = (bot_profile and not bot_profile.exclude_sources) or (not bot_profile)
 
         # ─── 通道超时配置 ───
@@ -1792,9 +2180,9 @@ class WaveMemoryPlugin(Star):
                 injection_parts.append(fewshot_text)
                 consumption["parts_count"] += 1
 
-            if injection_parts:
+            injection = "\n\n".join(injection_parts) if injection_parts else ""
+            if injection:
                 from astrbot.core.agent.message import TextPart
-                injection = "\n\n".join(injection_parts)
                 req.extra_user_content_parts.append(TextPart(text=injection))
                 consumption["total_chars"] = len(injection)
                 consumption["total_tokens"] = estimate_tokens(injection)
@@ -1847,6 +2235,19 @@ class WaveMemoryPlugin(Star):
                             self.db.update_memory(mid, importance=min(3.0, cur_imp + 0.02))
             else:
                 logger.info("[WaveMemory] inject_memory: no memories found to inject")
+
+            await self._run_injection_shadow_trace(
+                event=event,
+                req=req,
+                message=message,
+                group_id=group_id,
+                sender_id=sender_id,
+                sender_name=sender_name,
+                bot_id=bot_id,
+                bot_profile=bot_profile,
+                exclude_sources=exclude_sources,
+                old_text=injection,
+            )
 
             # 性能告警 (US-3.4)
             if timing["total_ms"] > 500:

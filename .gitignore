@@ -10,3 +10,5 @@ __pycache__/
 *.hnsw
 *.npz
 *.log
+webui/frontend/node_modules/
+webui/frontend/.vite/

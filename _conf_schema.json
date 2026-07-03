@@ -64,6 +64,69 @@
       }
     }
   },
+  "Runtime_Settings": {
+    "description": "运行模式",
+    "hint": "选择 WaveMemory 的能力边界：full=完整记忆+高级能力；memory_only=纯记忆模式，默认关闭高级检索和认知增强；compat_only=仅提供兼容接口，默认不主动注入。旧配置缺失该字段时自动按 full 处理。",
+    "type": "object",
+    "items": {
+      "runtime_mode": {
+        "description": "运行模式",
+        "hint": "可选值：full / memory_only / compat_only。full 保持旧版本完整行为；memory_only 保留采集、检索和注入但默认关闭高级能力；compat_only 只提供 LivingMemory 兼容接口，避免和 selflearning/chatplus 重复注入。",
+        "type": "string",
+        "default": "full",
+        "restart_required": true
+      }
+    }
+  },
+  "Compatibility_Settings": {
+    "description": "兼容模式",
+    "hint": "仅用于已有 LivingMemory 风格记忆生态适配。不会把 WaveMemory 伪装成 LivingMemory，也不会自动修改其他插件配置。",
+    "type": "object",
+    "items": {
+      "livingmemory_alias_tools_enabled": {
+        "description": "启用 LivingMemory 工具别名",
+        "hint": "开启后注册 recall_long_term_memory / memorize_long_term_memory，供已按 LivingMemory 工具名调用的插件或 Agent 使用。默认关闭，避免与真实 LivingMemory 同时加载时工具名冲突。",
+        "type": "bool",
+        "default": false,
+        "restart_required": true
+      },
+      "compat_only_auto_inject_enabled": {
+        "description": "compat_only 下允许原生自动注入",
+        "hint": "仅当你明确希望 WaveMemory 在 compat_only 兼容后端模式下也执行自身 on_llm_request 注入时开启。默认关闭，避免与 SelfLearning/ChatPlus 等生态插件重复注入。",
+        "type": "bool",
+        "default": false,
+        "restart_required": true
+      }
+    }
+  },
+  "Trace_Settings": {
+    "description": "注入 Trace 保留策略",
+    "hint": "控制注入观察台 trace 的保存体积。Trace 只保存预览和审计摘要，不保存无限全文；清理策略在写入 trace 后自动执行。",
+    "type": "object",
+    "items": {
+      "retention_days": {
+        "description": "Trace 保留天数",
+        "hint": "超过该天数的注入 trace 会被自动清理。旧配置缺失时默认 14 天。",
+        "type": "int",
+        "default": 14,
+        "restart_required": true
+      },
+      "max_rows": {
+        "description": "Trace 最大条数",
+        "hint": "超过该数量时只保留最新 trace，避免注入观察台一次性积累过多数据。旧配置缺失时默认 5000。",
+        "type": "int",
+        "default": 5000,
+        "restart_required": true
+      },
+      "max_preview_chars": {
+        "description": "Trace 单字段预览长度",
+        "hint": "请求、最终注入、通道文本、命中项和过滤项中的文本字段最多保存多少字符。旧配置缺失时默认 1200。",
+        "type": "int",
+        "default": 1200,
+        "restart_required": true
+      }
+    }
+  },
   "Query_Settings": {
     "description": "记忆召回配置",
     "hint": "控制记忆检索和注入行为",
