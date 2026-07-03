@@ -121,6 +121,36 @@ class HolymanJargonImportTest(unittest.TestCase):
         self.assertNotEqual(report["status"], "ready")
         self.assertGreater(report["errors"]["generic_meaning_in_phrases"], 0)
 
+    def test_quality_report_blocks_manifest_with_only_corpus_source(self):
+        from services.jargon.sync import HolymanSyncService
+
+        service = HolymanSyncService(assets_dir=tempfile.mkdtemp())
+        assets = {
+            "manifest": {
+                "files": [
+                    {"path": "神言.txt", "parse_status": "ok"},
+                ]
+            },
+            "phrases": {
+                "v我50": {
+                    "meaning": "长篇铺垫或煽情叙述后突然索要 50 元，常关联疯狂星期四，用来制造荒诞转折。",
+                    "kind": "curated_phrase",
+                    "category": "catchphrase",
+                    "source": "curated/core",
+                }
+            },
+            "concepts": [],
+            "examples": [],
+            "corpus": [],
+            "candidates": [],
+            "blocked": {},
+        }
+
+        report = service._build_quality_report(assets)
+
+        self.assertNotEqual(report["status"], "ready")
+        self.assertGreater(report["errors"].get("missing_layered_sources", 0), 0)
+
     def test_reference_substring_structured_value_is_safe(self):
         from services.jargon.holyman_reference import HolymanReference
 
@@ -174,6 +204,9 @@ class HolymanJargonImportTest(unittest.TestCase):
 ### 真诚是最大的弱点
 抽象社群中直接表达真实想法会被视为不设防。
 """,
+            "神人.skill/_persona/communication.md": "### 复制粘贴模式\n用长文案完成反串和传教式表达。\n",
+            "神人.skill/_knowledge/gaming.md": "### 游戏传教\n围绕游戏身份和社群归属展开夸张表达。\n",
+            "神人.skill/_knowledge/internet-culture.md": "### 抽象话术\n用反串、复读和夸张对抗正常语境。\n",
             "神人.skill/_quotes/iconic.md": "> 你说得对，但是这里是一段很长的复制粘贴文案。\n",
             "神言.txt": "v我50 今天疯狂星期四 v我50\n开发的未来是 AI DeepSeek模型\n",
         }
@@ -196,6 +229,73 @@ class HolymanJargonImportTest(unittest.TestCase):
         self.assertTrue(any(item["text"] == "v我50 今天疯狂星期四 v我50" for item in corpus))
         self.assertTrue(all(c["status"] == "pending_review" for c in candidates))
         self.assertEqual(assets["quality_report"]["status"], "ready")
+
+    def test_curated_phrases_do_not_include_skill_directives_or_concepts(self):
+        from services.jargon.sync import HolymanSyncService
+        from services.jargon.holyman_assets import content_entries
+
+        service = HolymanSyncService(assets_dir=tempfile.mkdtemp())
+        fetched = {
+            "神人.skill/SKILL.md": """
+### Core Rules
+- 存在方式: 用梗说话，用段子回复，用复制粘贴表达所有情感
+- 默认输出: 50-2000字长文案，使用复制粘贴/模板替换风格
+""",
+            "神人.skill/_knowledge/gaming.md": """
+### Core View
+- **游戏即信仰**: 游戏不是娱乐，是身份
+- **所有游戏都可以被缝合**: 跨游戏缝合是最高级的幽默
+""",
+            "神人.skill/_quotes/iconic.md": "> 疯狂星期四 v我50\n",
+            "神言.txt": "v我50 疯狂星期四\n",
+        }
+
+        entries = content_entries(service._parse_curated_phrases(fetched, existing_phrases={}))
+
+        for noise in ["存在方式", "默认输出", "游戏即信仰", "游戏即信仰：游戏不是娱乐，是身份", "所有游戏都可以被缝合"]:
+            self.assertNotIn(noise, entries)
+        for core in ["v我50", "叠甲", "不是哥们", "差不多得了", "疯狂星期四"]:
+            self.assertIn(core, entries)
+
+    def test_curated_phrases_do_not_inherit_legacy_corpus_quotes(self):
+        from services.jargon.sync import HolymanSyncService
+        from services.jargon.holyman_assets import content_entries
+
+        service = HolymanSyncService(assets_dir=tempfile.mkdtemp())
+        existing = {
+            "梁先生，你的算力从哪里来？": {
+                "meaning": "神言语料中的高频/标志性表达，用于理解群聊抽象语境。",
+                "category": "corpus",
+                "source": "神言.txt",
+                "kind": "corpus_quote",
+            },
+            "人工保留词": {
+                "meaning": "人工审核确认的安全黑话表达。",
+                "category": "manual",
+                "source": "manual_review",
+                "kind": "curated_phrase",
+            },
+        }
+
+        entries = content_entries(service._parse_curated_phrases({}, existing_phrases=existing))
+
+        self.assertNotIn("梁先生，你的算力从哪里来？", entries)
+        self.assertIn("人工保留词", entries)
+
+    def test_holyman_candidates_have_stable_ids_for_selection(self):
+        from services.jargon.sync import HolymanSyncService
+
+        service = HolymanSyncService(assets_dir=tempfile.mkdtemp())
+        corpus = [
+            {"text": "你说得对 你说得对 要么加入 要么落后"},
+            {"text": "你说得对 要么加入 要么落后"},
+        ]
+
+        candidates = service._generate_candidates(corpus, {})
+
+        self.assertTrue(candidates)
+        self.assertTrue(all(candidate.get("id") for candidate in candidates), candidates[:3])
+        self.assertEqual(len({candidate["id"] for candidate in candidates}), len(candidates))
 
     def test_jargon_context_with_anchor_returns_messages_not_review_payload(self):
         import asyncio
@@ -310,6 +410,51 @@ class HolymanJargonImportTest(unittest.TestCase):
         finally:
             jargon_bp_mod.get_container = original
 
+    def test_holyman_api_ignores_generic_legacy_activation_meaning(self):
+        from webui.blueprints.jargon import _normalize_holyman_phrase, _merge_holyman_db_activation
+
+        item = _normalize_holyman_phrase("v我50", {
+            "meaning": "长篇铺垫后突然索要 50 元，制造荒诞转折。",
+            "category": "catchphrase",
+            "source": "curated/core",
+            "kind": "curated_phrase",
+        })
+        _merge_holyman_db_activation(item, {"id": 1, "meaning": "典型语录/表达样本。仅作为理解参考。", "status": "confirmed"})
+
+        self.assertTrue(item["is_activated"])
+        self.assertIsNone(item["custom_meaning"])
+        self.assertIn("索要 50", item["meaning"])
+
+    def test_holyman_candidate_batch_review_accepts_word_fallback(self):
+        from webui.blueprints.jargon import _review_holyman_candidate_ids
+
+        class _Cursor:
+            def __init__(self, rows=None, rowcount=0):
+                self._rows = rows or []
+                self.rowcount = rowcount
+            def fetchall(self):
+                return self._rows
+
+        class _Conn:
+            def __init__(self):
+                self.blocked = []
+            def execute(self, sql, params=()):
+                if "FROM jargon_candidates" in sql:
+                    return _Cursor([])
+                if "INSERT OR IGNORE INTO jargon_blocklist" in sql:
+                    self.blocked.append(params[0])
+                    return _Cursor(rowcount=1)
+                return _Cursor([])
+            def commit(self):
+                pass
+
+        conn = _Conn()
+        result = _review_holyman_candidate_ids(conn, ["holyman-candidate-0001"], "reject", words=["资产候选词"])
+
+        self.assertEqual(result["reviewed_count"], 1)
+        self.assertEqual(result["blocked_count"], 1)
+        self.assertIn("资产候选词", conn.blocked)
+
     def test_holyman_candidate_batch_review_updates_selected_and_blocks_rejected(self):
         import asyncio
         from webui.blueprints import jargon as jargon_bp_mod
@@ -405,26 +550,183 @@ class HolymanJargonImportTest(unittest.TestCase):
             jargon_bp_mod.get_container = original_container
             jargon_bp_mod.request = original_request
 
-    def test_holyman_frontend_has_layered_tabs_search_and_batch_candidate_controls(self):
-        app_js = Path("webui/static/app.js").read_text(encoding="utf-8")
-        index_html = Path("webui/static/index.html").read_text(encoding="utf-8")
+    def test_holyman_api_contract_has_layered_tabs_search_and_batch_candidate_data(self):
+        import asyncio
+        from webui.blueprints import jargon as jargon_bp_mod
 
-        self.assertIn("holymanKnowledgeTab", app_js)
-        self.assertIn("selectedHolymanCandidateIds", app_js)
-        self.assertIn("filteredHolymanCandidates()", app_js)
-        self.assertIn("holymanKnowledgeTab", index_html)
-        self.assertIn("selectedHolymanCandidateIds", index_html)
-        self.assertIn("filteredHolymanCandidates()", index_html)
-        self.assertIn("batchReviewHolymanCandidates(action)", index_html)
-        self.assertIn("batchReviewHolymanCandidates('approve')", index_html)
-        self.assertIn("batchReviewHolymanCandidates('reject')", index_html)
-        self.assertIn("Holyman 精选词条", index_html)
-        self.assertIn("Holyman 文化概念", index_html)
-        self.assertIn("Holyman 语录证据", index_html)
-        self.assertIn("Holyman 原始语料", index_html)
-        self.assertIn("Holyman 待审核候选", index_html)
-        self.assertIn("Holyman 屏蔽项", index_html)
-        self.assertIn("不可一键激活", index_html)
+        class _Cursor:
+            def __init__(self, rows=None):
+                self._rows = rows or []
+            def fetchall(self):
+                return self._rows
+            def fetchone(self):
+                return self._rows[0] if self._rows else None
+
+        class _Conn:
+            def execute(self, sql, params=()):
+                if "sqlite_master" in sql:
+                    return _Cursor([])
+                return _Cursor([])
+
+        class _DB:
+            def __init__(self): self.conn = _Conn()
+        class _Container:
+            def __init__(self): self.db = _DB()
+
+        original_container = jargon_bp_mod.get_container
+        jargon_bp_mod.get_container = lambda: _Container()
+        try:
+            data = asyncio.run(jargon_bp_mod.get_holyman())
+        finally:
+            jargon_bp_mod.get_container = original_container
+
+        self.assertEqual(data["asset_type"], "persona_skill_reference")
+        self.assertEqual(data["runtime_policy"], "understanding_only")
+        self.assertIn("layers", data)
+        self.assertEqual(
+            set(data["layers"].keys()),
+            {"catchphrases", "persona", "quotes_knowledge", "corpus", "candidates", "blocked"},
+        )
+        self.assertIn("categories", data)
+        self.assertIn("candidates", data)
+        self.assertIn("blocked", data)
+        self.assertIn("corpus_counts", data)
+        self.assertTrue(any(item.get("layer") == "catchphrase" for item in data["items"]))
+        self.assertTrue(all("category_label" in item for item in data["items"]))
+        self.assertTrue(data["layers"]["corpus"]["reference_only"])
+
+    def test_persona_skill_reference_runtime_layer_is_explicit_and_conservative(self):
+        from services.jargon.holyman_assets import content_entries
+
+        phrases = json.loads(Path("assets/holyman/phrases.json").read_text(encoding="utf-8"))
+        entries = content_entries(phrases)
+        runtime_words = {word for word, value in entries.items() if isinstance(value, dict) and value.get("runtime_match") is True}
+        allowed_runtime = {"你说得对，但是", "不是哥们", "差不多得了", "动了XX的蛋糕", "别急", "那咋了", "又幻想了", "v我50", "疯狂星期四", "叠甲"}
+
+        self.assertTrue(allowed_runtime.issubset(runtime_words))
+        self.assertTrue(runtime_words.issubset(allowed_runtime), runtime_words - allowed_runtime)
+        for word in allowed_runtime:
+            self.assertEqual(entries[word].get("layer"), "catchphrase")
+            self.assertIs(entries[word].get("reference_only"), True)
+        self.assertFalse(entries.get("就很……你们懂吧？[捂脸]", {}).get("runtime_match"))
+
+    def test_persona_skill_markers_block_quality_report(self):
+        from services.jargon.sync import HolymanSyncService
+
+        service = HolymanSyncService(assets_dir=tempfile.mkdtemp())
+        assets = {
+            "manifest": {"files": [{"path": path, "parse_status": "ok"} for path in [
+                "神人.skill/SKILL.md",
+                "神人.skill/_persona/communication.md",
+                "神人.skill/_persona/values.md",
+                "神人.skill/_knowledge/gaming.md",
+                "神人.skill/_knowledge/internet-culture.md",
+                "神人.skill/_quotes/iconic.md",
+            ]]},
+            "phrases": {
+                "默认输出": {"meaning": "50-2000字长文案", "kind": "curated_phrase", "layer": "catchphrase", "runtime_match": True},
+                "Core Rules": {"meaning": "persona 指令", "kind": "curated_phrase", "layer": "catchphrase", "runtime_match": True},
+            },
+            "concepts": [],
+            "examples": [],
+            "corpus": [],
+            "candidates": [],
+            "blocked": {},
+            "raw_sources": {"README.md": "神言.txt（365条）", "神言.txt": json.dumps({"items": []}, ensure_ascii=False)},
+        }
+
+        report = service._build_quality_report(assets)
+
+        self.assertNotEqual(report["status"], "ready")
+        self.assertGreater(report["errors"].get("persona_instruction_in_phrases", 0), 0)
+
+    def test_corpus_count_audit_distinguishes_declared_source_and_parsed_counts(self):
+        from services.jargon.sync import HolymanSyncService
+
+        service = HolymanSyncService(assets_dir=tempfile.mkdtemp())
+        fetched = {
+            "README.md": "神言.txt（365条，~32万字）",
+            "神人.skill/SKILL.md": "### Catchphrases\n- 别急\n",
+            "神人.skill/_persona/communication.md": "### Expression DNA\n只读。",
+            "神人.skill/_persona/values.md": "### Values Priority\n只读。",
+            "神人.skill/_knowledge/gaming.md": "### 游戏文化\n只读。",
+            "神人.skill/_knowledge/internet-culture.md": "### 抽象话术\n只读。",
+            "神人.skill/_quotes/iconic.md": "> 别急\n",
+            "神言.txt": json.dumps({"items": [{"text": "样本一"}, {"text": "样本二"}]}, ensure_ascii=False),
+        }
+
+        assets = service.build_assets_from_fetched(fetched, remote_version="local-test")
+        report = assets["quality_report"]
+
+        self.assertEqual(report.get("declared_corpus_count"), 365)
+        self.assertEqual(report.get("source_corpus_items_count"), 2)
+        self.assertEqual(report.get("parsed_corpus_count"), 2)
+        self.assertTrue(report.get("corpus_count_mismatch"))
+        self.assertIn("declares 365", report.get("corpus_count_note", ""))
+        self.assertEqual(report["status"], "ready")
+
+    def test_holyman_reference_only_matches_runtime_catchphrases(self):
+        from services.jargon.holyman_reference import HolymanReference
+
+        ref = HolymanReference()
+        ref._phrases = {
+            "别急": {"meaning": "提醒对方不要急于反应。", "layer": "catchphrase", "runtime_match": True},
+            "动了XX的蛋糕": {"meaning": "反串阴谋化解释。", "layer": "catchphrase", "runtime_match": True},
+            "Expression DNA": {"meaning": "persona 语言基因", "layer": "persona", "runtime_match": False},
+        }
+        ref._examples = ["Expression DNA 是只读人格设定。"]
+        ref._blocked = {}
+
+        self.assertTrue(ref.match("别急")["matched"])
+        self.assertFalse(ref.match("Expression DNA")["matched"])
+        self.assertFalse(ref.match("动了")["matched"])
+        self.assertTrue(ref.match("动了游戏厂商的蛋糕")["matched"])
+
+    def test_holyman_api_returns_persona_skill_reference_metadata(self):
+        import asyncio
+        from webui.blueprints import jargon as jargon_bp_mod
+
+        class _Cursor:
+            def __init__(self, rows=None):
+                self._rows = rows or []
+            def fetchall(self):
+                return self._rows
+            def fetchone(self):
+                return self._rows[0] if self._rows else None
+
+        class _Conn:
+            def execute(self, sql, params=()):
+                if "sqlite_master" in sql:
+                    return _Cursor([])
+                return _Cursor([])
+
+        class _DB:
+            def __init__(self): self.conn = _Conn()
+        class _Container:
+            def __init__(self): self.db = _DB()
+
+        original_container = jargon_bp_mod.get_container
+        jargon_bp_mod.get_container = lambda: _Container()
+        try:
+            data = asyncio.run(jargon_bp_mod.get_holyman())
+        finally:
+            jargon_bp_mod.get_container = original_container
+
+        self.assertEqual(data["asset_type"], "persona_skill_reference")
+        self.assertEqual(data["runtime_policy"], "understanding_only")
+        self.assertIn("layers", data)
+        self.assertIn("corpus_counts", data)
+
+    def test_holyman_asset_contract_uses_persona_skill_reference_language(self):
+        phrases = json.loads(Path("assets/holyman/phrases.json").read_text(encoding="utf-8"))
+        concepts = json.loads(Path("assets/holyman/concepts.json").read_text(encoding="utf-8"))
+        examples = json.loads(Path("assets/holyman/examples.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(any(item.get("layer") == "catchphrase" for item in phrases.values() if isinstance(item, dict)))
+        self.assertTrue(any("summary" in item and "candidate_words" in item for item in concepts if isinstance(item, dict)))
+        self.assertTrue(any(item.get("reference_only") is True for item in examples if isinstance(item, dict)))
+        self.assertTrue(any(item.get("runtime_match") is True for item in phrases.values() if isinstance(item, dict)))
+        self.assertTrue(all(item.get("runtime_match") is not True for item in concepts if isinstance(item, dict)))
 
 
 if __name__ == "__main__":

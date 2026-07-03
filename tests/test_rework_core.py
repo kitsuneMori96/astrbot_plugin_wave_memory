@@ -733,13 +733,17 @@ git clone https://github.com/ykdeso/holyman-skills.git
                     "quality_report": {"status": "ready"},
                 })
                 db.replace_jargon_knowledge_table("jargon_candidates", [{"word": "外层词", "reason": "test", "count": 1, "source": "x", "status": "pending_review", "reject_reason": "", "metadata": "{}"}])
+                db.replace_jargon_knowledge_table("jargon_blocklist", [{"word": "屏蔽词", "reason": "test", "source": "x"}])
                 snapshot = db.conn.execute("SELECT source_key, asset_status, content_hash FROM jargon_sources WHERE source_key='holyman_skills'").fetchone()
                 candidate = db.conn.execute("SELECT word, status FROM jargon_candidates WHERE word='外层词'").fetchone()
+                blocked = db.conn.execute("SELECT word, reason FROM jargon_blocklist WHERE word='屏蔽词'").fetchone()
                 self.assertEqual(snapshot[0], 'holyman_skills')
                 self.assertEqual(snapshot[1], 'ready')
                 self.assertEqual(snapshot[2], 'deadbeef')
                 self.assertEqual(candidate[0], '外层词')
                 self.assertEqual(candidate[1], 'pending_review')
+                self.assertEqual(blocked[0], '屏蔽词')
+                self.assertEqual(blocked[1], 'test')
             finally:
                 db.close()
 
@@ -763,19 +767,19 @@ git clone https://github.com/ykdeso/holyman-skills.git
         self.assertEqual(categories[0], {"id": "gaming", "label": "游戏文化", "count": 2})
         self.assertIn({"id": "legacy", "label": "旧版内置", "count": 1}, categories)
 
-    def test_holyman_frontend_exposes_category_filter_and_badges(self):
-        html = (Path(__file__).resolve().parent.parent / "webui" / "static" / "index.html").read_text(encoding="utf-8")
+    def test_holyman_api_exposes_category_filter_payload_and_badges(self):
+        from webui.blueprints.jargon import _build_holyman_categories
 
-        self.assertIn("holymanCategory", html)
-        self.assertIn("holymanCategories", html)
-        self.assertIn("全部分类", html)
-        self.assertIn("category_label", html)
-        self.assertIn("h.category", html)
-        self.assertIn("Holyman 黑话知识库", html)
-        self.assertIn("文化概念", html)
-        self.assertIn("语录证据", html)
-        self.assertIn("待审核候选", html)
-        self.assertIn("屏蔽项", html)
+        items = [
+            {"word": "游戏即信仰", "category": "gaming", "category_label": "游戏文化"},
+            {"word": "抽象话术", "category": "internet_culture", "category_label": "互联网文化"},
+            {"word": "二次元", "category": "gaming", "category_label": "游戏文化"},
+        ]
+        categories = _build_holyman_categories(items)
+
+        self.assertEqual(categories[0], {"id": "gaming", "label": "游戏文化", "count": 2})
+        self.assertIn({"id": "internet_culture", "label": "互联网文化", "count": 1}, categories)
+        self.assertTrue(all("category_label" in item for item in items))
 
     def test_holyman_reference_rejects_document_noise_and_generic_substrings(self):
         from services.jargon.holyman_reference import HolymanReference

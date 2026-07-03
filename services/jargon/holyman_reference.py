@@ -14,15 +14,16 @@ from .holyman_assets import DEFAULT_BLOCKED, content_entries
 
 
 _DEFAULT_PHRASES = {
-    "v我50": "常见抽象文案结尾：用突然要钱制造荒诞转折。",
-    "你说得对但是": "常见反串起手式：表面承认，随后切入夸张传教或长文。",
-    "就很": "抽象文案中常用的含混评价/装懂式结尾。",
-    "动了": "常见阴谋化/反串归因模板的一部分，如“动了XX的蛋糕”。",
-    "差不多得了": "互联网语境中制止复读、玩梗或过度争论的短句。",
-    "不是哥们": "对荒谬内容的吐槽起手式。",
-    "又幻想了": "对自我代入、恋爱脑、过度脑补的调侃。",
-    "叠甲": "提前声明立场或免责，以避免被攻击。",
-    "疯狂星期四": "常见复制粘贴/要钱文案触发词。",
+    "v我50": {"meaning": "常见抽象文案结尾：用突然要钱制造荒诞转折。", "layer": "catchphrase", "runtime_match": True},
+    "你说得对，但是": {"meaning": "常见反串起手式：表面承认，随后切入夸张传教或长文。", "layer": "catchphrase", "runtime_match": True},
+    "差不多得了": {"meaning": "互联网语境中制止复读、玩梗或过度争论的短句。", "layer": "catchphrase", "runtime_match": True},
+    "不是哥们": {"meaning": "对荒谬内容的吐槽起手式。", "layer": "catchphrase", "runtime_match": True},
+    "又幻想了": {"meaning": "对自我代入、恋爱脑、过度脑补的调侃。", "layer": "catchphrase", "runtime_match": True},
+    "叠甲": {"meaning": "提前声明立场或免责，以避免被攻击。", "layer": "catchphrase", "runtime_match": True},
+    "疯狂星期四": {"meaning": "常见复制粘贴/要钱文案触发词。", "layer": "catchphrase", "runtime_match": True},
+    "别急": {"meaning": "让对方不要急于反应或破防。", "layer": "catchphrase", "runtime_match": True},
+    "那咋了": {"meaning": "用冷处理方式回应质疑，表达不在乎或摆烂态度。", "layer": "catchphrase", "runtime_match": True},
+    "动了XX的蛋糕": {"meaning": "反串式阴谋化归因模板。", "layer": "catchphrase", "runtime_match": True},
 }
 
 
@@ -147,15 +148,31 @@ class HolymanReference:
             return False
         if re.fullmatch(r"[A-Za-z0-9 /_().~↑↓<>=*:-]+", phrase) and phrase not in self._ENGLISH_ALLOWLIST:
             return False
-        if re.fullmatch(r"[\u4e00-\u9fff]{2,3}", phrase) and phrase not in {"急了", "典", "绷", "鼠鼠", "叠甲", "丁真", "原神", "黄油", "神人", "抽象", "狗粉丝", "孙笑川"}:
+        if re.fullmatch(r"[\u4e00-\u9fff]{2,3}", phrase) and phrase not in {"急了", "典", "绷", "鼠鼠", "叠甲", "丁真", "原神", "黄油", "神人", "抽象", "狗粉丝", "孙笑川", "别急", "那咋了"}:
             return False
         if len(phrase) > 30:
             return False
         return True
 
+    def _is_runtime_phrase(self, phrase: str, value: Any) -> bool:
+        if isinstance(value, dict):
+            layer = value.get("layer", "catchphrase")
+            if layer != "catchphrase":
+                return False
+            if "runtime_match" in value:
+                return value.get("runtime_match") is True
+            return value.get("kind") in {"curated_phrase", "manual"} or phrase in _DEFAULT_PHRASES
+        # Legacy phrases.json used plain string values for curated catchphrases.
+        # Keep those assets matchable while _is_matchable_phrase filters document noise.
+        return self._is_matchable_phrase(phrase)
+
     def _term_hits_phrase(self, term: str, phrase: str) -> bool:
         if phrase == term:
             return True
+        if phrase == "v我50":
+            return "v我50" in term or "疯狂星期四" in term or "疯狂星期四" in phrase
+        if phrase == "动了XX的蛋糕":
+            return bool(re.search(r"动了.{1,12}的蛋糕", term or ""))
         if len(phrase) <= 3:
             return False
         if len(term) <= 3:
@@ -185,6 +202,8 @@ class HolymanReference:
 
         if term_matchable:
             for phrase, explanation in self._phrases.items():
+                if not self._is_runtime_phrase(phrase, explanation):
+                    continue
                 if phrase == term and self._is_matchable_phrase(phrase):
                     return {
                         "matched": True,
@@ -199,6 +218,8 @@ class HolymanReference:
 
         context_hints = []
         for phrase, explanation in self._phrases.items():
+            if not self._is_runtime_phrase(phrase, explanation):
+                continue
             if not self._is_matchable_phrase(phrase):
                 continue
             term_hit = term_matchable and self._term_hits_phrase(term, phrase)

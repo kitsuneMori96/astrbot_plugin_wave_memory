@@ -29,9 +29,12 @@ from .holyman_assets import (
 )
 
 try:
-    from engine.database import WaveMemoryDB
-except ImportError:  # tests may import services.* as top-level modules
-    WaveMemoryDB = None
+    from ...engine.database import WaveMemoryDB
+except ImportError:
+    try:
+        from engine.database import WaveMemoryDB
+    except ImportError:  # tests may import services.* as top-level modules
+        WaveMemoryDB = None
 
 
 class HolymanSyncService:
@@ -109,8 +112,13 @@ class HolymanSyncService:
         if WaveMemoryDB is None:
             return
         try:
-            db_path = self.assets_dir.parent / "wave_memory.db"
-            if not db_path.exists():
+            db_candidates = [
+                self.assets_dir.parent / "wave_memory.db",
+                self.assets_dir.parent.parent / "wave_memory.db",
+                Path("/AstrBot/data/plugin_data/astrbot_plugin_wave_memory/wave_memory.db"),
+            ]
+            db_path = next((path for path in db_candidates if path.exists() and path.stat().st_size > 0), None)
+            if db_path is None:
                 return
             db = WaveMemoryDB(str(db_path))
             try:
@@ -287,6 +295,9 @@ class HolymanSyncService:
             "corpus": corpus,
             "candidates": candidates,
             "blocked": blocked,
+            "raw_sources": fetched,
+            "asset_type": "persona_skill_reference",
+            "runtime_policy": "understanding_only",
         }
         assets["quality_report"] = self._build_quality_report(assets)
         return assets
@@ -327,6 +338,8 @@ class HolymanSyncService:
             return {
                 "ok": report.get("status") == "ready",
                 "asset_status": report.get("status"),
+                "asset_type": "persona_skill_reference",
+                "runtime_policy": "understanding_only",
                 "phrases_count": report.get("phrases_count"),
                 "content_count": len(content_entries(assets["phrases"])),
                 "content_hash": content_hash(assets["phrases"]),

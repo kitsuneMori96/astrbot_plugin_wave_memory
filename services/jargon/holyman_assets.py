@@ -16,63 +16,31 @@ from typing import Any
 
 HOLYMAN_SOURCE = "holyman_skills"
 
+def make_runtime_catchphrase(meaning: str, *, category: str = "catchphrase", confidence: float = 0.92) -> dict[str, Any]:
+    return {
+        "meaning": meaning,
+        "category": category,
+        "source": "curated/core",
+        "kind": "curated_phrase",
+        "confidence": confidence,
+        "safety_level": "safe_reference",
+        "layer": "catchphrase",
+        "reference_only": True,
+        "runtime_match": True,
+    }
+
+
 CORE_CURATED_PHRASES: dict[str, dict[str, Any]] = {
-    "v我50": {
-        "meaning": "长篇铺垫或煽情叙述后突然索要 50 元，常关联疯狂星期四，用来制造荒诞转折。",
-        "category": "catchphrase",
-        "source": "curated/core",
-        "kind": "curated_phrase",
-        "confidence": 0.98,
-        "safety_level": "safe_reference",
-    },
-    "叠甲": {
-        "meaning": "提前声明立场、限制讨论范围或自我免责，以避免被攻击或误解。",
-        "category": "internet-culture",
-        "source": "curated/core",
-        "kind": "curated_phrase",
-        "confidence": 0.96,
-        "safety_level": "safe_reference",
-    },
-    "不是哥们": {
-        "meaning": "面对离谱、荒谬或难以接受的内容时使用的吐槽起手式，语气偏惊讶和无语。",
-        "category": "catchphrase",
-        "source": "curated/core",
-        "kind": "curated_phrase",
-        "confidence": 0.95,
-        "safety_level": "safe_reference",
-    },
-    "差不多得了": {
-        "meaning": "用于制止过度复读、争论、玩梗或情绪输出，意思是提醒对方适可而止。",
-        "category": "catchphrase",
-        "source": "curated/core",
-        "kind": "curated_phrase",
-        "confidence": 0.95,
-        "safety_level": "safe_reference",
-    },
-    "疯狂星期四": {
-        "meaning": "肯德基星期四促销梗，常出现在长篇故事结尾并转向借钱或求 V 的荒诞文案。",
-        "category": "copypasta",
-        "source": "curated/core",
-        "kind": "curated_phrase",
-        "confidence": 0.96,
-        "safety_level": "safe_reference",
-    },
-    "你说得对，但是": {
-        "meaning": "常见反串或复制粘贴起手式，表面认可对方，随后突然切入夸张传教或长文。",
-        "category": "copypasta",
-        "source": "curated/core",
-        "kind": "curated_phrase",
-        "confidence": 0.9,
-        "safety_level": "safe_reference",
-    },
-    "动了XX的蛋糕": {
-        "meaning": "把失败或冲突荒诞地归因于触碰了某个群体利益，用于反串阴谋化解释。",
-        "category": "abstract-rhetoric",
-        "source": "curated/core",
-        "kind": "curated_phrase",
-        "confidence": 0.86,
-        "safety_level": "safe_reference",
-    },
+    "v我50": make_runtime_catchphrase("长篇铺垫或煽情叙述后突然索要 50 元，常关联疯狂星期四，用来制造荒诞转折。", category="catchphrase", confidence=0.98),
+    "叠甲": make_runtime_catchphrase("提前声明立场、限制讨论范围或自我免责，以避免被攻击或误解。", category="internet-culture", confidence=0.96),
+    "不是哥们": make_runtime_catchphrase("面对离谱、荒谬或难以接受的内容时使用的吐槽起手式，语气偏惊讶和无语。", confidence=0.95),
+    "差不多得了": make_runtime_catchphrase("用于制止过度复读、争论、玩梗或情绪输出，意思是提醒对方适可而止。", confidence=0.95),
+    "疯狂星期四": make_runtime_catchphrase("肯德基星期四促销梗，常出现在长篇故事结尾并转向借钱或求 V 的荒诞文案。", category="copypasta", confidence=0.96),
+    "你说得对，但是": make_runtime_catchphrase("常见反串或复制粘贴起手式，表面认可对方，随后突然切入夸张传教或长文。", category="copypasta", confidence=0.9),
+    "动了XX的蛋糕": make_runtime_catchphrase("把失败或冲突荒诞地归因于触碰了某个群体利益，用于反串阴谋化解释。", category="abstract-rhetoric", confidence=0.86),
+    "别急": make_runtime_catchphrase("常用于让对方不要急于反应或破防，也可作为轻度调侃式安抚。", confidence=0.9),
+    "那咋了": make_runtime_catchphrase("用冷处理方式回应指责或质疑，表达不在乎、反问或摆烂态度。", confidence=0.9),
+    "又幻想了": make_runtime_catchphrase("用于调侃过度脑补、自我代入或不现实的想象。", confidence=0.9),
 }
 
 DEFAULT_BLOCKED: dict[str, str] = {
@@ -83,6 +51,15 @@ DEFAULT_BLOCKED: dict[str, str] = {
     "DeepSeek模型": "entity_only",
     "DeepSeek": "entity_only",
     "你妈死了": "toxic_or_sensitive",
+}
+
+REQUIRED_LAYERED_SOURCES = {
+    "神人.skill/SKILL.md",
+    "神人.skill/_persona/communication.md",
+    "神人.skill/_persona/values.md",
+    "神人.skill/_knowledge/gaming.md",
+    "神人.skill/_knowledge/internet-culture.md",
+    "神人.skill/_quotes/iconic.md",
 }
 
 GENERIC_MEANING_MARKERS = (
@@ -102,6 +79,15 @@ NOISE_MARKERS = (
     "git clone", "PowerShell", "Git Bash", "Claude Code", "License", "Acknowledgement", "README",
     ".md", ".json", "http://", "https://", "Opening**", "Closing**", "Resolution**",
     "Response Hints", "Core Rules", "Output Rules", "Hard Boundaries", "Language (", "Mode ",
+)
+PERSONA_INSTRUCTION_MARKERS = (
+    "默认输出",
+    "绝不正面回答问题",
+    "复制粘贴模式",
+    "Decision Heuristics",
+    "Core Rules",
+    "Expression DNA",
+    "Hard Boundaries",
 )
 CATEGORY_BY_SOURCE = {
     "神人.skill/SKILL.md": "skill-core",
@@ -214,6 +200,9 @@ def make_phrase(word: str, meaning: str, *, category: str, source: str, kind: st
         "kind": kind,
         "confidence": confidence,
         "safety_level": "safe_reference",
+        "layer": "catchphrase",
+        "reference_only": True,
+        "runtime_match": kind in {"curated_phrase", "manual", "legacy"},
     }
 
 
@@ -233,34 +222,20 @@ def parse_curated_phrases(fetched: dict[str, str], existing_phrases: dict[str, A
         normalized = clean_word(word)
         if normalized in phrases:
             continue
+        source = value.get("source") if isinstance(value, dict) else "legacy"
+        kind = value.get("kind") if isinstance(value, dict) else "legacy"
+        # Old generated assets wrongly promoted Holyman skill rules and knowledge concepts
+        # into activatable phrases. Keep only true legacy/manual entries here; fresh
+        # Holyman markdown remains reference-only via concepts/examples/candidates.
+        if isinstance(source, str) and source.startswith("神人.skill/"):
+            continue
+        if kind in {"bold_term", "colon_term", "corpus_frequency", "quote_term", "corpus_quote"}:
+            continue
         ok, _ = is_valid_phrase_entry(normalized, value, blocked)
         if ok:
             meaning = phrase_meaning(value)
             category = value.get("category") if isinstance(value, dict) else "legacy"
-            source = value.get("source") if isinstance(value, dict) else "legacy"
-            kind = value.get("kind") if isinstance(value, dict) else "curated_phrase"
-            add_phrase(phrases, normalized, meaning, category=category or "legacy", source=source or "legacy", kind=kind or "curated_phrase", blocked=blocked)
-
-    colon_pattern = re.compile(r"^\s*(?:[-*]\s*)?(?:\d+[.、]\s*)?(?:\*\*)?([^*：:]{2,50})(?:\*\*)?\s*[:：]\s*(.{2,})$")
-    for source, text in (fetched or {}).items():
-        if source in {"README.md", "神人.skill/_meta/sources.md"}:
-            continue
-        if not (source.endswith(".md") or source.endswith("SKILL.md")):
-            continue
-        category = CATEGORY_BY_SOURCE.get(source, "unknown")
-        in_code = False
-        for raw in (text or "").splitlines():
-            line = raw.strip()
-            if line.startswith("```"):
-                in_code = not in_code
-                continue
-            if in_code or not line or line.startswith(("#", "topic:", "last_updated:", "sources:")):
-                continue
-            match = colon_pattern.match(line)
-            if not match:
-                continue
-            word, meaning = match.group(1), match.group(2)
-            add_phrase(phrases, word, meaning, category=category, source=source, kind="curated_phrase", blocked=blocked)
+            add_phrase(phrases, normalized, meaning, category=category or "legacy", source=source or "legacy", kind=kind or "legacy", blocked=blocked)
 
     for word, value in CORE_CURATED_PHRASES.items():
         phrases[word] = dict(value)
@@ -294,6 +269,9 @@ def parse_concepts(fetched: dict[str, str]) -> list[dict[str, Any]]:
                 "source": source,
                 "tags": [CATEGORY_BY_SOURCE.get(source, "unknown")],
                 "confidence": 0.78,
+                "layer": "persona" if source.startswith("神人.skill/_persona/") or source == "神人.skill/SKILL.md" else "knowledge",
+                "reference_only": True,
+                "runtime_match": False,
             })
     return concepts
 
@@ -322,6 +300,9 @@ def parse_examples(fetched: dict[str, str], phrases: dict[str, Any]) -> list[dic
                 "category": category,
                 "source": source,
                 "safe_for_prompt": len(line) <= 80,
+                "layer": "quotes_knowledge",
+                "reference_only": True,
+                "runtime_match": False,
             })
     return examples[:200]
 
@@ -349,6 +330,9 @@ def parse_corpus(corpus_data: str) -> list[dict[str, Any]]:
             "tags": ["corpus"],
             "risk_flags": ["reference_only"] + (["long_text"] if len(text) > 120 else []),
             "safe_for_prompt": False,
+            "layer": "corpus",
+            "reference_only": True,
+            "runtime_match": False,
         }
         for idx, text in enumerate(texts, start=1)
     ]
@@ -369,8 +353,19 @@ def generate_candidates(corpus: list[Any], phrases: dict[str, Any], blocked: dic
             if word not in phrase_words and is_valid_phrase_entry(word, {"meaning": "候选", "kind": "candidate"}, blocked)[0]:
                 counter[word] = counter.get(word, 0) + 1
     return [
-        {"word": word, "reason": "corpus_candidate", "count": count, "source": "神言.txt", "status": "pending_review", "reject_reason": ""}
-        for word, count in sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))[:300]
+        {
+            "id": f"holyman-candidate-{idx:04d}",
+            "word": word,
+            "reason": "corpus_candidate",
+            "count": count,
+            "source": "神言.txt",
+            "status": "pending_review",
+            "reject_reason": "",
+            "layer": "candidate",
+            "reference_only": True,
+            "runtime_match": False,
+        }
+        for idx, (word, count) in enumerate(sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))[:300], start=1)
     ]
 
 
@@ -392,9 +387,38 @@ def build_manifest(fetched: dict[str, str], *, remote_version: str = "") -> dict
     }
 
 
+def _declared_corpus_count(raw_sources: dict[str, str]) -> int | None:
+    for name in ("README.md", "神人.skill/_meta/sources.md"):
+        text = raw_sources.get(name, "") if isinstance(raw_sources, dict) else ""
+        match = re.search(r"神言\.txt[（(]\s*(\d+)\s*条", text or "")
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _source_corpus_items_count(raw_sources: dict[str, str]) -> int | None:
+    raw = raw_sources.get("神言.txt", "") if isinstance(raw_sources, dict) else ""
+    if not raw:
+        return None
+    parsed = json.loads(raw)
+    items = parsed.get("items", []) if isinstance(parsed, dict) else parsed
+    if not isinstance(items, list):
+        return None
+    return sum(1 for item in items if ((item.get("text", "") if isinstance(item, dict) else str(item)).strip()))
+
+
 def quality_report(assets: dict[str, Any]) -> dict[str, Any]:
     phrases = content_entries(assets.get("phrases") or {})
     blocked = assets.get("blocked") or DEFAULT_BLOCKED
+    raw_sources = assets.get("raw_sources") or {}
+    declared_corpus_count = _declared_corpus_count(raw_sources)
+    try:
+        source_corpus_items_count = _source_corpus_items_count(raw_sources)
+    except Exception:
+        source_corpus_items_count = None
+    parsed_corpus_count = len(assets.get("corpus") or [])
+    raw_parsed_mismatch = source_corpus_items_count is not None and source_corpus_items_count != parsed_corpus_count
+    declared_source_mismatch = declared_corpus_count is not None and source_corpus_items_count is not None and declared_corpus_count != source_corpus_items_count
     errors = {
         "corpus_frequency_in_phrases": 0,
         "generic_meaning_in_phrases": 0,
@@ -403,10 +427,16 @@ def quality_report(assets: dict[str, Any]) -> dict[str, Any]:
         "blocked_phrase_in_phrases": 0,
         "entity_only_in_phrases": 0,
         "missing_core_terms": 0,
+        "missing_layered_sources": 0,
+        "persona_instruction_in_phrases": 0,
+        "raw_parsed_corpus_mismatch": 1 if raw_parsed_mismatch else 0,
     }
     for word, value in phrases.items():
         meaning = phrase_meaning(value)
         kind = value.get("kind") if isinstance(value, dict) else "legacy"
+        haystack = f"{word} {meaning}"
+        if any(marker in haystack for marker in PERSONA_INSTRUCTION_MARKERS):
+            errors["persona_instruction_in_phrases"] += 1
         if kind == "corpus_frequency":
             errors["corpus_frequency_in_phrases"] += 1
         if is_generic_meaning(meaning):
@@ -422,15 +452,37 @@ def quality_report(assets: dict[str, Any]) -> dict[str, Any]:
     for word, value in CORE_CURATED_PHRASES.items():
         if word not in phrases or is_generic_meaning(phrase_meaning(phrases.get(word))) or len(phrase_meaning(phrases.get(word))) < 12:
             errors["missing_core_terms"] += 1
+    manifest = assets.get("manifest") or {}
+    manifest_files = manifest.get("files") if isinstance(manifest, dict) else []
+    if manifest_files:
+        ok_paths = {
+            item.get("path")
+            for item in manifest_files
+            if isinstance(item, dict) and item.get("parse_status") == "ok"
+        }
+        errors["missing_layered_sources"] = len(REQUIRED_LAYERED_SOURCES - ok_paths)
     status = "ready" if phrases and all(count == 0 for count in errors.values()) else "blocked"
+    if raw_parsed_mismatch:
+        corpus_count_note = f"Raw 神言.txt contains {source_corpus_items_count} non-empty items, but corpus.json parsed {parsed_corpus_count}."
+    elif declared_source_mismatch:
+        corpus_count_note = f"README declares {declared_corpus_count} items; current raw JSON contains {source_corpus_items_count} non-empty items and all were parsed."
+    elif source_corpus_items_count is not None:
+        corpus_count_note = f"Raw JSON contains {source_corpus_items_count} non-empty items and all were parsed."
+    else:
+        corpus_count_note = "Corpus source count unavailable; using parsed corpus count only."
     return {
         "status": status,
         "phrases_count": len(phrases),
         "concepts_count": len(assets.get("concepts") or []),
         "examples_count": len(assets.get("examples") or []),
-        "corpus_count": len(assets.get("corpus") or []),
+        "corpus_count": parsed_corpus_count,
         "candidates_count": len(assets.get("candidates") or []),
         "blocked_count": len(blocked),
+        "declared_corpus_count": declared_corpus_count,
+        "source_corpus_items_count": source_corpus_items_count,
+        "parsed_corpus_count": parsed_corpus_count,
+        "corpus_count_mismatch": bool(raw_parsed_mismatch or declared_source_mismatch),
+        "corpus_count_note": corpus_count_note,
         "errors": errors,
         "generated_at": int(time.time()),
     }

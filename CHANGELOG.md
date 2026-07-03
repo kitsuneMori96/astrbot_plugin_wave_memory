@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.3.0 (2026-07-03)
+
+### Holyman 黑话分层资产重建
+
+- **资产分层物理重构**：重构并解耦 Holyman 词库，拆分为精选口癖（catchphrases）、文化概念（concepts）、语录证据（examples）、原始语料（corpus/raw）与质量报告，运行时仅允许匹配明确使能的 catchphrase 精选层，避免人设指令混入运行时干扰人格
+- **本地自愈匹配**：同步了本地 assets 资产 JSON、sync 导入服务和 reference 处理机制
+- **测试验证**：新增了分层口癖提取噪声过滤测试、重叠引用屏蔽测试，与 API layers 结构断言测试
+
 ## v3.2.0 (2026-07-03)
 
 ### 通道化注入编排、Trace 存储与 Agent 权限反馈
