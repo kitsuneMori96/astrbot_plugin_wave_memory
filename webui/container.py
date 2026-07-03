@@ -40,6 +40,12 @@ class ServiceContainer:
         self.writer: Any = None
         self.jargon_service: Any = None
         self.plugin_config: dict = {}
+        self.injection_channel_config: Any = None
+        self.injection_channel_config_setter: Any = None
+        self.livingmemory_facade: Any = None
+        self.livingmemory_facade_enabled: bool = False
+        self.livingmemory_alias_tools_registered: bool = False
+        self.detected_memory_plugins: list[dict[str, Any]] = []
 
         # ─── 认证 ───
         self.password: str = ""
@@ -62,6 +68,12 @@ class ServiceContainer:
         writer=None,
         password: str = "",
         plugin_config: dict = None,
+        injection_channel_config=None,
+        injection_channel_config_setter=None,
+        livingmemory_facade=None,
+        livingmemory_facade_enabled: bool | None = None,
+        livingmemory_alias_tools_registered: bool = False,
+        detected_memory_plugins: list[dict[str, Any]] | None = None,
     ) -> None:
         """注入所有服务引用。"""
         self.db = db
@@ -79,6 +91,12 @@ class ServiceContainer:
         self.jargon_service = None
         self.password = password
         self.plugin_config = plugin_config or {}
+        self.injection_channel_config = injection_channel_config
+        self.injection_channel_config_setter = injection_channel_config_setter
+        self.livingmemory_facade = livingmemory_facade
+        self.livingmemory_facade_enabled = bool(livingmemory_facade if livingmemory_facade_enabled is None else livingmemory_facade_enabled)
+        self.livingmemory_alias_tools_registered = bool(livingmemory_alias_tools_registered)
+        self.detected_memory_plugins = list(detected_memory_plugins or [])
 
     @classmethod
     def reset(cls) -> None:

@@ -12,10 +12,20 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Optional
 
-from astrbot.api import logger
+try:
+    from astrbot.api import logger
+except Exception:  # pragma: no cover - 本地单测未安装 AstrBot SDK 时的轻量兜底
+    class _Logger:
+        def info(self, *args, **kwargs): pass
+        def warning(self, *args, **kwargs): pass
+        def debug(self, *args, **kwargs): pass
+    logger = _Logger()
 
 from .container import ServiceContainer, get_container
-from .server import Server
+try:
+    from .server import Server
+except Exception:  # pragma: no cover - 仅允许蓝图 helper 在缺少 WebUI 运行依赖时被导入测试
+    Server = None
 
 
 class WaveMemoryWebUI:
@@ -39,6 +49,12 @@ class WaveMemoryWebUI:
         port: int = 7890,
         password: str = "",
         plugin_config: dict = None,
+        injection_channel_config=None,
+        injection_channel_config_setter=None,
+        livingmemory_facade=None,
+        livingmemory_facade_enabled: bool | None = None,
+        livingmemory_alias_tools_registered: bool = False,
+        detected_memory_plugins: list[dict[str, Any]] | None = None,
     ):
         # 注入所有服务到全局容器
         container = get_container()
@@ -57,9 +73,17 @@ class WaveMemoryWebUI:
             writer=writer,
             password=password,
             plugin_config=plugin_config,
+            injection_channel_config=injection_channel_config,
+            injection_channel_config_setter=injection_channel_config_setter,
+            livingmemory_facade=livingmemory_facade,
+            livingmemory_facade_enabled=livingmemory_facade_enabled,
+            livingmemory_alias_tools_registered=livingmemory_alias_tools_registered,
+            detected_memory_plugins=detected_memory_plugins,
         )
 
         # 创建服务器实例
+        if Server is None:
+            raise RuntimeError("WebUI runtime dependencies are unavailable")
         self._server = Server(host=host, port=port)
         self._kg_warmup_task: asyncio.Task | None = None
 

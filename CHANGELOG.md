@@ -1,5 +1,15 @@
 # Changelog
 
+## v4.0.0 (2026-07-03)
+
+### React WebUI 前端工程化迁移
+
+- **React 管理面板**：新增 `webui/frontend` Vite + React + TypeScript + Tailwind CSS v4 + shadcn/ui 前端工程，默认首页切换为单页应用（HashRouter）
+- **纯 Python 运行时静态托管**：生产构建静态产物打包发布至 `webui/static/app`，Quart 优先路由托管 React 静态输出，运行时零 Node.js 外部依赖
+- **旧版安全回滚**：保留原单文件 Alpine.js index.html 并独立注册 `/legacy` 路由；当前端产物缺失时，`/` 自动自愈 fallback 到旧版页面
+- **业务管理模块重组**：完成 Dashboard、Injection Observatory（trace 细节 Sheet 侧拉页）、Channel Config（多参数配置及差异预览）、Learning Objects（学习对象全量登记表）、Agent Feedback（反馈历史审计）与 Compatibility（LivingMemory Facade 状态）页面迁移与数据绑定，保持后端 API 契约完全稳定不变
+- **测试回归**：重写旧 WebUI 硬编码断言，覆盖 React 页面路由与 API 返回契约，确保全系列发版前后向兼容
+
 ## v3.3.0 (2026-07-03)
 
 ### Holyman 黑话分层资产重建

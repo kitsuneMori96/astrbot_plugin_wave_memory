@@ -178,6 +178,11 @@
         <nav class="flex gap-1 ml-4">
             <button class="tab-btn px-3 py-1.5 text-xs rounded-md" :class="tab==='overview' && 'active'" @click="tab='overview'">概览</button>
             <button class="tab-btn px-3 py-1.5 text-xs rounded-md" :class="tab==='memories' && 'active'" @click="tab='memories'; loadMemories()">记忆管理</button>
+            <button class="tab-btn px-3 py-1.5 text-xs rounded-md" :class="tab==='injectionObservatory' && 'active'" @click="tab='injectionObservatory'; loadInjectionTraces()">注入观察台</button>
+            <button class="tab-btn px-3 py-1.5 text-xs rounded-md" :class="tab==='channelConfig' && 'active'" @click="tab='channelConfig'; loadChannelConfig()">通道配置</button>
+            <button class="tab-btn px-3 py-1.5 text-xs rounded-md" :class="tab==='learningObjects' && 'active'" @click="tab='learningObjects'; loadLearningObjects()">学习对象审查</button>
+            <button class="tab-btn px-3 py-1.5 text-xs rounded-md" :class="tab==='agentFeedback' && 'active'" @click="tab='agentFeedback'; loadAgentFeedback()">Agent 反馈</button>
+            <button class="tab-btn px-3 py-1.5 text-xs rounded-md" :class="tab==='compatibility' && 'active'" @click="tab='compatibility'; loadCompatibilityStatus()">兼容模式</button>
             <button class="tab-btn px-3 py-1.5 text-xs rounded-md" :class="tab==='import' && 'active'" @click="tab='import'; loadProviders()">智能导入</button>
             <button class="tab-btn px-3 py-1.5 text-xs rounded-md" :class="tab==='beliefs' && 'active'" @click="tab='beliefs'; loadBeliefs()">
                 信念<span x-show="beliefPending>0" class="ml-1 pill pill-pending" x-text="beliefPending"></span>
@@ -248,6 +253,7 @@
         <div class="card mt-4">
             <div class="flex flex-wrap items-center gap-2 mb-3">
                 <h3 class="text-sm font-medium mr-auto">注入消耗趋势</h3>
+                <button @click="openTraceRangeFromMetrics()" class="btn btn-ghost text-xs">查看该范围 trace</button>
                 <template x-for="opt in [{k:'1d',t:'1天'},{k:'3d',t:'3天'},{k:'7d',t:'7天'},{k:'1mo',t:'1月'}]" :key="opt.k">
                     <button @click="setInjectionRange(opt.k)" class="btn btn-muted text-xs" :class="injectionRange===opt.k && 'btn-primary'" x-text="opt.t"></button>
                 </template>
@@ -775,7 +781,7 @@
             </div>
             <!-- 一键选择全部符合条件的提示 (SaaS 2.0 级交互) -->
             <div x-show="selectedBeliefIds.length === beliefs.length && beliefTotal > beliefs.length" class="text-[11px] text-slate-400 pl-1 border-t border-white/5 pt-1.5 flex items-center gap-1">
-                <span x-show="!beliefAllMatching">已选择当前页的 <span class="font-mono text-white" x-text="beliefs.length"></span> 条记录。想要 <span class="text-primary font-semibold underline cursor-pointer hover:text-white" @click="beliefAllMatching = true">选择全部符合条件的 ${beliefTotal} 条记录</span> 吗？</span>
+                <span x-show="!beliefAllMatching">已选择当前页的 <span class="font-mono text-white" x-text="beliefs.length"></span> 条记录。想要 <span class="text-primary font-semibold underline cursor-pointer hover:text-white" @click="beliefAllMatching = true" x-text="`选择全部符合条件的 ${beliefTotal} 条记录`"></span> 吗？</span>
                 <span x-show="beliefAllMatching" class="text-emerald-400">✓ 已成功锁定全部符合条件的 <span class="font-mono font-bold" x-text="beliefTotal"></span> 条记录，接下来的批量动作将应用到全量数据！ <span class="text-slate-400 underline cursor-pointer ml-1 hover:text-white" @click="beliefAllMatching = false">撤销为仅当页</span></span>
             </div>
         </div>
@@ -971,7 +977,7 @@
         <!-- Sub-tabs Toggle -->
         <div class="flex border-b mb-4 gap-6 text-xs select-none" style="border-color:var(--border)">
             <button @click="jargonSubTab='local'; loadJargon()" class="pb-2 font-semibold transition" :class="jargonSubTab==='local' ? 'border-b-2 border-[var(--primary)] text-[var(--primary)]' : 'text-[var(--muted-fg)] hover:text-[var(--fg)]'">群聊本地黑话</button>
-            <button @click="jargonSubTab='global'; loadJargonHolyman()" class="pb-2 font-semibold transition" :class="jargonSubTab==='global' ? 'border-b-2 border-[var(--primary)] text-[var(--primary)]' : 'text-[var(--muted-fg)] hover:text-[var(--fg)]'">Holyman 黑话知识库</button>
+            <button @click="jargonSubTab='global'; loadJargonHolyman()" class="pb-2 font-semibold transition" :class="jargonSubTab==='global' ? 'border-b-2 border-[var(--primary)] text-[var(--primary)]' : 'text-[var(--muted-fg)] hover:text-[var(--fg)]'">Holyman Persona Skill 参考（原 Holyman 黑话知识库）</button>
         </div>
 
         <!-- Sub-Tab 1: Local Jargon -->
@@ -1016,7 +1022,7 @@
                 </div>
                 <!-- 一键选择全部符合条件的提示 -->
                 <div x-show="selectedJargonIds.length === jargonItems.length && jargonTotal > jargonItems.length" class="text-[11px] text-slate-400 pl-1 border-t border-white/5 pt-1.5 flex items-center gap-1">
-                    <span x-show="!jargonAllMatching">已选择当前页的 <span class="font-mono text-white" x-text="jargonItems.length"></span> 条记录。想要 <span class="text-primary font-semibold underline cursor-pointer hover:text-white" @click="jargonAllMatching = true">选择全部符合条件的 ${jargonTotal} 条记录</span> 吗？</span>
+                    <span x-show="!jargonAllMatching">已选择当前页的 <span class="font-mono text-white" x-text="jargonItems.length"></span> 条记录。想要 <span class="text-primary font-semibold underline cursor-pointer hover:text-white" @click="jargonAllMatching = true" x-text="`选择全部符合条件的 ${jargonTotal} 条记录`"></span> 吗？</span>
                     <span x-show="jargonAllMatching" class="text-emerald-400">✓ 已成功锁定全部符合条件的 <span class="font-mono font-bold" x-text="jargonTotal"></span> 条记录，接下来的批量动作将应用到全量数据！ <span class="text-slate-400 underline cursor-pointer ml-1 hover:text-white" @click="jargonAllMatching = false">撤销为仅当页</span></span>
                 </div>
             </div>
@@ -1189,13 +1195,13 @@
             <!-- Control Panel -->
             <div class="flex flex-wrap items-center gap-3 bg-[var(--muted)] p-3 rounded-lg border border-[var(--border)] text-xs justify-between">
                 <div class="flex flex-wrap items-center gap-3">
-                    <input type="text" x-model="holymanSearch" placeholder="过滤广域黑话..." class="input w-48">
-                    <select x-model="holymanFilter" class="select w-32">
+                    <input type="text" x-model="holymanSearch" @input="selectedHolymanWords=[]" placeholder="过滤广域黑话..." class="input w-48">
+                    <select x-model="holymanFilter" @change="selectedHolymanWords=[]" class="select w-32">
                         <option value="">全部状态</option>
                         <option value="active">仅已激活</option>
                         <option value="inactive">仅未激活</option>
                     </select>
-                    <select x-model="holymanCategory" class="select w-40">
+                    <select x-model="holymanCategory" @change="selectedHolymanWords=[]" class="select w-40">
                         <option value="">全部分类</option>
                         <template x-for="cat in holymanCategories" :key="cat.id">
                             <option :value="cat.id" x-text="`${cat.label} (${cat.count})`"></option>
@@ -1210,7 +1216,7 @@
             </div>
             
             <div class="text-xs px-1 text-[var(--muted-fg)] leading-relaxed flex flex-wrap items-center gap-3 justify-between">
-                <span x-text="`Holyman 黑话知识库：精选 ${holymanItems.length || 0} 条 · 概念 ${holymanConcepts.length || 0} · 例句 ${holymanExamples.length || 0} · 语料 ${holymanCorpusSummary?.count || 0} · 候选 ${holymanCandidates.length || 0}`"></span>
+                <span x-text="`Holyman Persona Skill 参考：精选口癖 ${holymanItems.length || 0} 条 · 人格设定 ${holymanConcepts.length || 0} 条 · 语录证据 ${holymanExamples.length || 0} 条 · 语料 ${holymanCorpusSummary?.count || 0} 条 · 候选 ${holymanCandidates.length || 0} 条`"></span>
                 <span class="font-mono text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded" x-text="`本地版本: ${holymanLocalVersion} / 状态: ${holymanAssetStatus}`"></span>
             </div>
 
@@ -1219,7 +1225,7 @@
                 <div class="flex items-center gap-2">
                     <span x-text="holymanAssetStatus === 'ready' ? `💡 Holyman 知识库有更新：本地版本 ${holymanLocalVersion}，线上最新 ${holymanRemoteVersion}` : `⚠ Holyman 知识库当前为 ${holymanAssetStatus}，建议先同步原始资料并重新生成分层资产`"></span>
                 </div>
-                <button @click="syncJargonHolyman()" class="btn btn-xs !py-1 !px-2.5" style="background:var(--warning); color:black; font-weight:600">同步原始资料/更新知识库</button>
+                <button @click="syncJargonHolyman()" class="btn btn-xs !py-1 !px-2.5" style="background:var(--warning); color:black; font-weight:600">同步 Holyman 原始 Skill 资料</button>
             </div>
 
             <div class="grid grid-cols-1 md:grid-cols-4 gap-2 text-[11px]">
@@ -1237,8 +1243,8 @@
                 </label>
                 <div x-show="selectedHolymanWords.length > 0" class="flex items-center gap-2">
                     <span class="text-xs font-medium text-[var(--primary)]" x-text="`已选 ${selectedHolymanWords.length} 条`"></span>
-                    <button @click="batchToggleHolyman(true)" class="btn btn-success btn-xs">✓ 批量激活注入</button>
-                    <button @click="batchToggleHolyman(false)" class="btn btn-outline btn-xs" style="color:var(--danger)">✕ 批量禁用不注入</button>
+                    <button @click="batchToggleHolyman(true)" class="btn btn-success btn-xs">✓ 批量启用理解提示</button>
+                    <button @click="batchToggleHolyman(false)" class="btn btn-outline btn-xs" style="color:var(--danger)">✕ 批量停用理解提示</button>
                 </div>
                 <div x-show="selectedHolymanWords.length === 0" class="text-[11px] text-[var(--muted-fg)]">
                     提示: 选择词条后可进行批量激活/去激活操作。
@@ -1249,22 +1255,23 @@
             <div class="card !p-3 space-y-3">
                 <div class="flex flex-wrap items-center gap-2 justify-between">
                     <div class="flex flex-wrap gap-1.5 text-[11px]">
-                        <button @click="holymanKnowledgeTab='phrases'" class="btn btn-xs" :class="holymanKnowledgeTab==='phrases' ? 'btn-primary' : 'btn-outline'">Holyman 精选词条</button>
-                        <button @click="holymanKnowledgeTab='concepts'" class="btn btn-xs" :class="holymanKnowledgeTab==='concepts' ? 'btn-primary' : 'btn-outline'">Holyman 文化概念</button>
-                        <button @click="holymanKnowledgeTab='examples'" class="btn btn-xs" :class="holymanKnowledgeTab==='examples' ? 'btn-primary' : 'btn-outline'">Holyman 语录证据</button>
-                        <button @click="holymanKnowledgeTab='corpus'" class="btn btn-xs" :class="holymanKnowledgeTab==='corpus' ? 'btn-primary' : 'btn-outline'">Holyman 原始语料</button>
-                        <button @click="holymanKnowledgeTab='candidates'" class="btn btn-xs" :class="holymanKnowledgeTab==='candidates' ? 'btn-primary' : 'btn-outline'">Holyman 待审核候选</button>
-                        <button @click="holymanKnowledgeTab='blocked'" class="btn btn-xs" :class="holymanKnowledgeTab==='blocked' ? 'btn-primary' : 'btn-outline'">Holyman 屏蔽项</button>
+                        <button @click="holymanKnowledgeTab='phrases'; selectedHolymanCandidateIds=[]" class="btn btn-xs" :class="holymanKnowledgeTab==='phrases' ? 'btn-primary' : 'btn-outline'">精选口癖（运行时理解触发）</button>
+                        <button @click="holymanKnowledgeTab='concepts'; selectedHolymanWords=[]; selectedHolymanCandidateIds=[]" class="btn btn-xs" :class="holymanKnowledgeTab==='concepts' ? 'btn-primary' : 'btn-outline'">人格设定 / Communication DNA</button>
+                        <button @click="holymanKnowledgeTab='examples'; selectedHolymanWords=[]; selectedHolymanCandidateIds=[]" class="btn btn-xs" :class="holymanKnowledgeTab==='examples' ? 'btn-primary' : 'btn-outline'">声音样本与知识</button>
+                        <button @click="holymanKnowledgeTab='corpus'; selectedHolymanWords=[]; selectedHolymanCandidateIds=[]" class="btn btn-xs" :class="holymanKnowledgeTab==='corpus' ? 'btn-primary' : 'btn-outline'">原始语料（只读）</button>
+                        <button @click="holymanKnowledgeTab='candidates'; selectedHolymanWords=[]" class="btn btn-xs" :class="holymanKnowledgeTab==='candidates' ? 'btn-primary' : 'btn-outline'">待审核候选</button>
+                        <button @click="holymanKnowledgeTab='blocked'; selectedHolymanWords=[]; selectedHolymanCandidateIds=[]" class="btn btn-xs" :class="holymanKnowledgeTab==='blocked' ? 'btn-primary' : 'btn-outline'">屏蔽项</button>
                     </div>
-                    <input x-show="holymanKnowledgeTab !== 'phrases'" type="text" x-model="holymanEvidenceSearch" placeholder="搜索概念 / 例句 / 候选 / 屏蔽..." class="input w-64 text-xs">
+                    <input x-show="holymanKnowledgeTab !== 'phrases'" type="text" x-model="holymanEvidenceSearch" @input="selectedHolymanCandidateIds=[]" placeholder="搜索概念 / 例句 / 候选 / 屏蔽..." class="input w-64 text-xs">
                 </div>
                 <div class="text-[11px] text-[var(--muted-fg)] bg-white/[0.03] border border-white/5 rounded p-2">
-                    证据层只读展示，文化概念、语录证据、原始语料不可一键激活；只有精选词条和人工通过的候选才能进入激活层。
+                    证据层只读展示，人物设定（旧称文化概念）、声音样本与知识（旧称语录证据）、原始语料不可一键激活；只有精选口癖和人工通过的候选才能进入理解提示层。
                 </div>
 
                 <div x-show="holymanKnowledgeTab==='concepts'" class="space-y-2">
-                    <div class="flex items-center justify-between"><h4 class="text-xs font-semibold">Holyman 文化概念</h4><span class="text-[10px] font-mono text-[var(--muted-fg)]" x-text="filteredHolymanConcepts().length"></span></div>
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-72 overflow-y-auto pr-1">
+                    <div class="flex items-center justify-between"><h4 class="text-xs font-semibold">人格设定 / Communication DNA</h4><span class="text-[10px] font-mono text-[var(--muted-fg)]" x-text="filteredHolymanConcepts().length"></span></div>
+                    <div x-show="filteredHolymanConcepts().length === 0" class="empty-state !py-8">没有符合当前搜索条件的人格设定 / Communication DNA</div>
+                    <div x-show="filteredHolymanConcepts().length > 0" class="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-72 overflow-y-auto pr-1">
                         <template x-for="c in filteredHolymanConcepts().slice(0, 80)" :key="c.id || c.title">
                             <div class="p-2 rounded bg-white/[0.03] border border-white/5">
                                 <div class="text-xs font-medium" x-text="c.title"></div>
@@ -1276,8 +1283,9 @@
                 </div>
 
                 <div x-show="holymanKnowledgeTab==='examples'" class="space-y-2">
-                    <div class="flex items-center justify-between"><h4 class="text-xs font-semibold">Holyman 语录证据</h4><span class="text-[10px] font-mono text-[var(--muted-fg)]" x-text="filteredHolymanExamples().length"></span></div>
-                    <div class="space-y-1.5 max-h-72 overflow-y-auto pr-1">
+                    <div class="flex items-center justify-between"><h4 class="text-xs font-semibold">声音样本与知识</h4><span class="text-[10px] font-mono text-[var(--muted-fg)]" x-text="filteredHolymanExamples().length"></span></div>
+                    <div x-show="filteredHolymanExamples().length === 0" class="empty-state !py-8">没有符合当前搜索条件的声音样本与知识</div>
+                    <div x-show="filteredHolymanExamples().length > 0" class="space-y-1.5 max-h-72 overflow-y-auto pr-1">
                         <template x-for="e in filteredHolymanExamples().slice(0, 120)" :key="e.text">
                             <div class="p-2 rounded bg-white/[0.03] border border-white/5">
                                 <div class="text-[11px] text-[var(--fg)]" x-text="e.text"></div>
@@ -1288,7 +1296,7 @@
                 </div>
 
                 <div x-show="holymanKnowledgeTab==='corpus'" class="space-y-2">
-                    <div class="flex items-center justify-between"><h4 class="text-xs font-semibold">Holyman 原始语料</h4><span class="text-[10px] font-mono text-[var(--muted-fg)]" x-text="holymanCorpusSummary?.count || 0"></span></div>
+                    <div class="flex items-center justify-between"><h4 class="text-xs font-semibold">原始语料（只读）</h4><span class="text-[10px] font-mono text-[var(--muted-fg)]" x-text="holymanCorpusSummary?.count || 0"></span></div>
                     <div class="p-3 rounded bg-white/[0.03] border border-white/5 text-xs text-[var(--muted-fg)] leading-relaxed">
                         原始语料保存在 corpus 层，当前共 <span class="font-mono" x-text="holymanCorpusSummary?.count || 0"></span> 条；该层 reference_only，不直接注入 prompt，也不参与 confirmed 匹配。
                     </div>
@@ -1297,27 +1305,32 @@
                 <div x-show="holymanKnowledgeTab==='candidates'" class="space-y-2">
                     <div class="flex flex-wrap items-center justify-between gap-2">
                         <div class="flex items-center gap-2">
-                            <h4 class="text-xs font-semibold">Holyman 待审核候选</h4>
+                            <h4 class="text-xs font-semibold">待审核候选</h4>
                             <span class="text-[10px] font-mono text-[var(--muted-fg)]" x-text="filteredHolymanCandidates().length"></span>
                         </div>
-                        <div class="flex items-center gap-2">
-                            <input type="text" x-model="holymanCandidateSearch" placeholder="筛选候选..." class="input w-40 text-xs">
-                            <label class="flex items-center gap-1 text-[11px]"><input type="checkbox" @change="toggleSelectAllHolymanCandidates($event)" :checked="selectedHolymanCandidateIds.length === filteredHolymanCandidates().length && filteredHolymanCandidates().length > 0">全选</label>
+                        <div class="flex flex-wrap items-center gap-2">
+                            <input type="text" x-model="holymanCandidateSearch" @input="selectedHolymanCandidateIds=[]" placeholder="筛选候选..." class="input w-40 text-xs">
+                            <label class="flex items-center gap-1.5 cursor-pointer select-none bg-white/5 px-2.5 py-1 rounded border border-white/5 hover:bg-white/10 transition text-[11px]"><input type="checkbox" @change="toggleSelectAllHolymanCandidates($event)" :checked="selectedHolymanCandidateIds.length === filteredHolymanCandidates().map(c => candidateKey(c)).filter(Boolean).length && filteredHolymanCandidates().length > 0">全选</label>
+                            <span x-show="selectedHolymanCandidateIds.length > 0" class="text-[11px] font-medium text-[var(--primary)]" x-text="`已选 ${selectedHolymanCandidateIds.length} 条`"></span>
                             <button @click="batchReviewHolymanCandidates('approve')" x-show="selectedHolymanCandidateIds.length > 0" class="btn btn-success btn-xs">✓ 批量通过</button>
                             <button @click="batchReviewHolymanCandidates('reject')" x-show="selectedHolymanCandidateIds.length > 0" class="btn btn-outline btn-xs" style="color:var(--danger)">✕ 批量拒绝并屏蔽</button>
                         </div>
                     </div>
-                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 max-h-72 overflow-y-auto pr-1">
-                        <template x-for="c in filteredHolymanCandidates().slice(0, 180)" :key="c.id || c.word">
-                            <div class="p-2 rounded bg-white/[0.03] border border-white/5 text-xs">
-                                <div class="flex items-center justify-between gap-2">
-                                    <label class="flex items-center gap-1.5"><input type="checkbox" :value="c.id" x-model="selectedHolymanCandidateIds"><span class="font-medium" x-text="c.word"></span></label>
-                                    <span class="badge text-[10px]" x-text="c.status || 'pending_review'"></span>
+                    <div x-show="filteredHolymanCandidates().length === 0" class="empty-state !py-8">没有符合当前筛选条件的 Holyman 待审核候选</div>
+                    <div x-show="filteredHolymanCandidates().length > 0" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 max-h-[58vh] overflow-y-auto pr-1">
+                        <template x-for="c in filteredHolymanCandidates().slice(0, 180)" :key="candidateKey(c)">
+                            <div class="card !p-3 flex flex-col justify-between transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-primary/5 bg-white/5 border-white/5 hover:border-white/10" style="border-radius:10px">
+                                <div class="flex items-start justify-between gap-2 mb-2">
+                                    <label class="flex items-start gap-1.5 min-w-0 cursor-pointer">
+                                        <input type="checkbox" :value="candidateKey(c)" x-model="selectedHolymanCandidateIds" class="w-3.5 h-3.5 mt-0.5 rounded text-[var(--primary)] focus:ring-[var(--primary)]/30 bg-[var(--muted)] border-[var(--border)] cursor-pointer">
+                                        <span class="badge badge-keyword font-bold text-xs whitespace-normal break-all" x-text="c.word" style="border:1px solid var(--border)"></span>
+                                    </label>
+                                    <span class="pill" :class="c.status === 'approved' ? 'pill-active' : (c.status === 'rejected' ? 'pill-rejected' : 'pill-pending')" x-text="c.status || 'pending_review'"></span>
                                 </div>
-                                <div class="text-[10px] text-[var(--muted-fg)] mt-1" x-text="`${c.reason || 'candidate'} · count=${c.count || 1} · ${c.source || 'holyman_skills'}`"></div>
+                                <div class="bg-black/10 p-2 rounded text-[11px] text-[var(--muted-fg)]" style="border:1px solid rgba(255,255,255,0.03)" x-text="`${c.reason || 'candidate'} · count=${c.count || 1} · ${c.source || 'holyman_skills'}`"></div>
                                 <div class="flex gap-1 mt-2">
                                     <button @click="reviewHolymanCandidate(c, 'approve')" class="btn btn-success btn-xs">通过</button>
-                                    <button @click="reviewHolymanCandidate(c, 'reject')" class="btn btn-outline btn-xs" style="color:var(--danger)">拒绝</button>
+                                    <button @click="reviewHolymanCandidate(c, 'reject')" class="btn btn-outline btn-xs" style="color:var(--danger)">拒绝并屏蔽</button>
                                 </div>
                             </div>
                         </template>
@@ -1325,7 +1338,7 @@
                 </div>
 
                 <div x-show="holymanKnowledgeTab==='blocked'" class="space-y-2">
-                    <div class="flex items-center justify-between"><h4 class="text-xs font-semibold">Holyman 屏蔽项</h4><span class="text-[10px] font-mono text-[var(--muted-fg)]" x-text="Object.keys(holymanBlocked || {}).length"></span></div>
+                    <div class="flex items-center justify-between"><h4 class="text-xs font-semibold">屏蔽项</h4><span class="text-[10px] font-mono text-[var(--muted-fg)]" x-text="Object.keys(holymanBlocked || {}).length"></span></div>
                     <div class="flex flex-wrap gap-1.5 max-h-48 overflow-y-auto pr-1">
                         <template x-for="item in holymanBlockedItems.filter(i => !holymanEvidenceSearch || [i.word, i.reason].join(' ').toLowerCase().includes(holymanEvidenceSearch.toLowerCase())).slice(0, 160)" :key="item.word">
                             <span class="badge text-[10px]" style="background:rgba(239,68,68,0.1); color:#fca5a5; border:1px solid rgba(239,68,68,0.18)" :title="item.reason" x-text="item.word"></span>
@@ -1335,10 +1348,11 @@
             </div>
 
             <!-- Empty State -->
-            <div x-show="holymanKnowledgeTab==='phrases' && holymanItems.length === 0" class="empty-state">未加载到 Holyman 精选词条，请点击右上角同步原始资料/更新知识库</div>
+            <div x-show="holymanKnowledgeTab==='phrases' && holymanItems.length === 0" class="empty-state">未加载到精选口癖，请点击右上角同步 Holyman 原始 Skill 资料</div>
+            <div x-show="holymanKnowledgeTab==='phrases' && holymanItems.length > 0 && filteredHolymanItems().length === 0" class="empty-state">没有符合当前搜索 / 分类 / 状态筛选的 Holyman 精选词条</div>
 
             <!-- Grid Card List -->
-            <div x-show="holymanKnowledgeTab==='phrases' && holymanItems.length > 0" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mt-3 max-h-[58vh] overflow-y-auto pr-1">
+            <div x-show="holymanKnowledgeTab==='phrases' && filteredHolymanItems().length > 0" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mt-3 max-h-[58vh] overflow-y-auto pr-1">
                 <template x-for="h in filteredHolymanItems()" :key="h.word">
                     <div class="card !p-3 flex flex-col justify-between border border-transparent transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-primary/5" 
                          :class="h.is_activated ? 'border-emerald-500/20 bg-emerald-500/5' : 'bg-white/5 border-white/5 hover:border-white/10'" style="border-radius:10px">
@@ -1600,6 +1614,589 @@
         </div>
     </div>
 
+    <!-- ═══ 注入观察台 Tab ═══ -->
+    <div x-show="tab==='injectionObservatory'" x-cloak>
+        <div class="flex flex-wrap items-center gap-2 mt-4 mb-3">
+            <input type="datetime-local" x-model="traceFilters.from" class="input text-xs w-44" title="开始时间">
+            <input type="datetime-local" x-model="traceFilters.to" class="input text-xs w-44" title="结束时间">
+            <select x-model="traceFilters.scope" class="input w-28">
+                <option value="">群/私聊</option>
+                <option value="group">群聊</option>
+                <option value="private">私聊</option>
+            </select>
+            <input type="text" x-model="traceFilters.group_id" @keyup.enter="loadInjectionTraces()" placeholder="群 ID" class="input w-28">
+            <input type="text" x-model="traceFilters.sender_id" @keyup.enter="loadInjectionTraces()" placeholder="发送者 ID" class="input w-32">
+            <input type="text" x-model="traceFilters.bot_id" @keyup.enter="loadInjectionTraces()" placeholder="Bot ID" class="input w-28">
+            <input type="text" x-model="traceFilters.channel" @keyup.enter="loadInjectionTraces()" placeholder="通道" class="input w-28">
+            <select x-model="traceFilters.status" class="input w-28">
+                <option value="">全部状态</option>
+                <option value="ok">ok</option>
+                <option value="shadow">shadow</option>
+                <option value="error">error</option>
+                <option value="fallback">fallback</option>
+            </select>
+            <select x-model="traceFilters.has_error" class="input w-28">
+                <option value="">错误状态</option>
+                <option value="true">有错误</option>
+                <option value="false">无错误</option>
+            </select>
+            <select x-model.number="traceFilters.limit" class="input w-24">
+                <option :value="50">50 条</option>
+                <option :value="100">100 条</option>
+                <option :value="200">200 条</option>
+            </select>
+            <button @click="loadInjectionTraces()" class="btn btn-ghost">查询 trace</button>
+            <button @click="resetTraceFilters()" class="btn btn-muted text-xs">重置</button>
+            <div class="ml-auto text-xs" style="color:var(--muted-fg)">
+                <span x-show="traceLoading">加载中...</span>
+                <span x-show="!traceLoading">共 <span class="font-mono" x-text="traceCount"></span> 条</span>
+            </div>
+        </div>
+
+        <div x-show="traceError" class="text-xs mb-3 p-2.5 rounded-lg" style="background:var(--muted); color:var(--danger)" x-text="traceError"></div>
+
+        <div class="card !p-0 overflow-hidden">
+            <table class="w-full text-xs">
+                <thead style="background:var(--muted); color:var(--muted-fg)">
+                    <tr>
+                        <th class="px-3 py-2.5 text-left font-medium">trace_id</th>
+                        <th class="px-3 py-2.5 text-left w-36 font-medium">时间</th>
+                        <th class="px-3 py-2.5 text-left w-24 font-medium">模式</th>
+                        <th class="px-3 py-2.5 text-left w-24 font-medium">状态</th>
+                        <th class="px-3 py-2.5 text-left w-36 font-medium">会话</th>
+                        <th class="px-3 py-2.5 text-left font-medium">请求预览</th>
+                        <th class="px-3 py-2.5 text-left w-24 font-medium">token</th>
+                        <th class="px-3 py-2.5 text-left w-24 font-medium">耗时</th>
+                        <th class="px-3 py-2.5 text-left w-20 font-medium">操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <template x-for="trace in traces" :key="trace.trace_id">
+                        <tr class="table-row" style="border-bottom:1px solid var(--border)">
+                            <td class="px-3 py-2 font-mono max-w-[180px] truncate" style="color:var(--primary)" x-text="trace.trace_id"></td>
+                            <td class="px-3 py-2 font-mono" style="color:var(--muted-fg)" x-text="formatTime(trace.timestamp)"></td>
+                            <td class="px-3 py-2"><span class="pill pill-global" x-text="trace.mode || '-' "></span></td>
+                            <td class="px-3 py-2"><span class="pill" :class="traceStatusClass(trace.status, trace.error)" x-text="trace.error ? 'error' : (trace.status || '-')"></span></td>
+                            <td class="px-3 py-2">
+                                <div class="font-mono" x-text="trace.group_id ? ('群 ' + trace.group_id) : '私聊'"></div>
+                                <div style="color:var(--muted-fg)" x-text="`${trace.sender_name || trace.sender_id || '-'} / ${trace.bot_id || '-'}`"></div>
+                            </td>
+                            <td class="px-3 py-2 max-w-sm truncate" x-text="trace.message_preview || '-' "></td>
+                            <td class="px-3 py-2 font-mono" x-text="trace.total_tokens || 0"></td>
+                            <td class="px-3 py-2 font-mono" x-text="formatMs(trace.total_latency_ms)"></td>
+                            <td class="px-3 py-2"><button @click="openInjectionTraceDetail(trace.trace_id)" class="btn btn-muted btn-xs">详情</button></td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+            <div x-show="!traceLoading && traces.length === 0" class="empty-state">暂无注入 trace</div>
+            <div x-show="traceLoading" class="empty-state">正在加载注入 trace...</div>
+        </div>
+
+        <div x-show="traceDetailOpen" x-cloak class="fixed inset-0 z-50 flex items-center justify-center" style="background:rgba(0,0,0,0.55)" @click.self="closeInjectionTraceDetail()">
+            <div class="w-full max-w-5xl mx-4 rounded-xl shadow-2xl" style="background:var(--card); border:1px solid var(--border); max-height:88vh; overflow-y:auto">
+                <div class="flex items-start justify-between gap-4 p-5" style="border-bottom:1px solid var(--border)">
+                    <div class="min-w-0">
+                        <h3 class="text-sm font-medium">注入 trace 详情</h3>
+                        <div class="text-xs font-mono mt-1 truncate" style="color:var(--primary)" x-text="injectionTraceDetail?.trace_id || '-' "></div>
+                    </div>
+                    <button @click="closeInjectionTraceDetail()" class="btn btn-muted btn-xs">关闭</button>
+                </div>
+
+                <div x-show="traceDetailLoading" class="empty-state">正在加载 trace 详情...</div>
+                <div x-show="!traceDetailLoading && injectionTraceDetail" class="p-5 space-y-4 text-xs">
+                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                        <div class="card !p-3 lg:col-span-2">
+                            <h4 class="font-medium mb-2">请求上下文</h4>
+                            <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3" style="color:var(--muted-fg)">
+                                <div>模式 <span class="font-mono" style="color:var(--primary)" x-text="injectionTraceDetail?.mode || '-' "></span></div>
+                                <div>状态 <span class="font-mono" :style="`color:var(${injectionTraceDetail?.status==='ok' ? '--success' : '--warning'})`" x-text="injectionTraceDetail?.status || '-' "></span></div>
+                                <div>群 <span class="font-mono" x-text="injectionTraceDetail?.request?.group_id || '私聊'"></span></div>
+                                <div>Bot <span class="font-mono" x-text="injectionTraceDetail?.request?.bot_id || '-' "></span></div>
+                            </div>
+                            <div class="p-3 rounded-lg whitespace-pre-wrap" style="background:var(--muted)" x-text="injectionTraceDetail?.request?.message_preview || '-' "></div>
+                        </div>
+                        <div class="card !p-3">
+                            <h4 class="font-medium mb-2">预算使用</h4>
+                            <div class="space-y-2" style="color:var(--muted-fg)">
+                                <div class="flex justify-between"><span>total_tokens</span><span class="font-mono" style="color:var(--primary)" x-text="injectionTraceDetail?.budget?.total_tokens || 0"></span></div>
+                                <div class="flex justify-between"><span>total_chars</span><span class="font-mono" style="color:var(--primary)" x-text="injectionTraceDetail?.budget?.total_chars || 0"></span></div>
+                                <div class="flex justify-between"><span>latency</span><span class="font-mono" style="color:var(--primary)" x-text="formatMs(injectionTraceDetail?.budget?.total_latency_ms)"></span></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card !p-3">
+                        <h4 class="font-medium mb-2">最终注入预览</h4>
+                        <div class="p-3 rounded-lg whitespace-pre-wrap max-h-56 overflow-y-auto" style="background:var(--muted)" x-text="injectionTraceDetail?.final_preview || '无注入文本'"></div>
+                    </div>
+
+                    <!-- channel_waterfall -->
+                    <div class="card !p-3">
+                        <div class="flex items-center justify-between mb-3">
+                            <h4 class="font-medium">通道瀑布</h4>
+                            <span style="color:var(--muted-fg)" x-text="`${(injectionTraceDetail?.channels || []).length} 个通道`"></span>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-xs">
+                                <thead style="color:var(--muted-fg)">
+                                    <tr>
+                                        <th class="px-2 py-2 text-left">通道</th>
+                                        <th class="px-2 py-2 text-left">状态</th>
+                                        <th class="px-2 py-2 text-left">耗时</th>
+                                        <th class="px-2 py-2 text-left">token</th>
+                                        <th class="px-2 py-2 text-left">命中</th>
+                                        <th class="px-2 py-2 text-left">过滤</th>
+                                        <th class="px-2 py-2 text-left">预览</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <template x-for="ch in (injectionTraceDetail?.channels || [])" :key="ch.channel">
+                                        <tr style="border-top:1px solid var(--border)">
+                                            <td class="px-2 py-2 font-mono" style="color:var(--primary)" x-text="ch.channel"></td>
+                                            <td class="px-2 py-2"><span class="pill" :class="channelStatusClass(ch.status, ch.error)" x-text="ch.error ? 'error' : ch.status"></span></td>
+                                            <td class="px-2 py-2 font-mono" x-text="formatMs(ch.latency_ms)"></td>
+                                            <td class="px-2 py-2 font-mono" x-text="ch.tokens || 0"></td>
+                                            <td class="px-2 py-2 font-mono" x-text="ch.hit_count || 0"></td>
+                                            <td class="px-2 py-2 font-mono" x-text="ch.filtered_count || 0"></td>
+                                            <td class="px-2 py-2 max-w-sm truncate" x-text="ch.preview || '-' "></td>
+                                        </tr>
+                                    </template>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                        <div class="card !p-3">
+                            <h4 class="font-medium mb-2">命中项与分数</h4>
+                            <template x-for="ch in (injectionTraceDetail?.channels || [])" :key="'hit-'+ch.channel">
+                                <div class="mb-3">
+                                    <div class="font-mono mb-1" style="color:var(--primary)" x-text="ch.channel"></div>
+                                    <div x-show="!(ch.hit_items || []).length" style="color:var(--muted-fg)">无命中</div>
+                                    <template x-for="item in (ch.hit_items || [])" :key="`${ch.channel}-${item.id || item.preview}`">
+                                        <div class="p-2 rounded-lg mb-1" style="background:var(--muted)">
+                                            <div class="flex justify-between gap-2"><span class="font-mono" x-text="item.id || item.source || '-' "></span><span class="font-mono" style="color:var(--primary)" x-text="item.score ?? '-' "></span></div>
+                                            <div class="mt-1" x-text="item.preview || '-' "></div>
+                                        </div>
+                                    </template>
+                                </div>
+                            </template>
+                        </div>
+                        <div class="card !p-3">
+                            <h4 class="font-medium mb-2">过滤项与原因</h4>
+                            <template x-for="ch in (injectionTraceDetail?.channels || [])" :key="'filtered-'+ch.channel">
+                                <div class="mb-3">
+                                    <div class="font-mono mb-1" style="color:var(--primary)" x-text="ch.channel"></div>
+                                    <div x-show="!(ch.filtered_items || []).length" style="color:var(--muted-fg)">无过滤项</div>
+                                    <template x-for="item in (ch.filtered_items || [])" :key="`${ch.channel}-${item.id || item.preview}-${item.reason}`">
+                                        <div class="p-2 rounded-lg mb-1" style="background:var(--muted)">
+                                            <div class="flex justify-between gap-2"><span class="font-mono" x-text="item.id || '-' "></span><span class="pill pill-pending" x-text="item.reason || 'filtered'"></span></div>
+                                            <div class="mt-1" x-text="item.preview || '-' "></div>
+                                        </div>
+                                    </template>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+
+                    <div class="card !p-3">
+                        <h4 class="font-medium mb-2">反馈记录</h4>
+                        <div x-show="!(injectionTraceDetail?.feedback || []).length" style="color:var(--muted-fg)">暂无 Agent / 用户反馈</div>
+                        <template x-for="fb in (injectionTraceDetail?.feedback || [])" :key="fb.id || `${fb.memory_id}-${fb.feedback}`">
+                            <div class="p-2 rounded-lg mb-1" style="background:var(--muted)">
+                                <div class="flex justify-between gap-2"><span class="font-mono" x-text="`memory ${fb.memory_id}`"></span><span class="pill pill-active" x-text="fb.feedback"></span></div>
+                                <div class="mt-1" x-text="fb.reason || '-' "></div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══ 通道配置 Tab ═══ -->
+    <div x-show="tab==='channelConfig'" x-cloak>
+        <div class="flex flex-wrap items-center gap-2 mt-4 mb-3">
+            <div class="mr-auto">
+                <h3 class="text-sm font-medium">通道配置</h3>
+                <p class="text-xs mt-1" style="color:var(--muted-fg)">
+                    当前模式：<span class="font-mono" style="color:var(--primary)" x-text="channelConfigRuntime?.mode || '-' "></span>
+                    <span x-text="channelConfigRuntime?.label ? `· ${channelConfigRuntime.label}` : ''"></span>
+                </p>
+            </div>
+            <button @click="loadChannelConfig()" class="btn btn-muted text-xs">刷新</button>
+            <button @click="validateChannelConfig()" class="btn btn-ghost text-xs">预览差异/校验</button>
+            <button @click="applyChannelConfig()" class="btn btn-primary text-xs" :disabled="channelConfigSaving">应用热配置</button>
+            <button @click="resetChannelConfigToDefaults()" class="btn btn-outline text-xs">恢复当前模式默认值</button>
+        </div>
+
+        <div x-show="channelConfigMessage" class="text-xs mb-3 p-2.5 rounded-lg" :style="`background:var(--muted); color:var(${channelConfigOk ? '--success' : '--danger'})`" x-text="channelConfigMessage"></div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+            <div class="card !p-3">
+                <label class="field-label">近期上下文去重（分钟）</label>
+                <input type="number" min="0" x-model.number="channelDraft.recent_dedup_minutes" class="input w-full">
+                <p class="field-hint">避免把 AstrBot 已可见的近期上下文重复注入。</p>
+            </div>
+            <label class="card !p-3 cursor-pointer flex items-start justify-between gap-3">
+                <div>
+                    <div class="text-xs font-medium">trace 持久化</div>
+                    <p class="field-hint">关闭后观察台无法看到新的注入明细。</p>
+                </div>
+                <input type="checkbox" class="toggle shrink-0" x-model="channelDraft.trace_enabled">
+            </label>
+            <div class="card !p-3">
+                <div class="text-xs font-medium mb-1">模式禁用说明</div>
+                <p class="field-hint" x-text="(channelConfigRuntime?.disabled_capabilities || []).length ? channelConfigRuntime.disabled_capabilities.join('、') : '当前模式未声明禁用能力'"></p>
+            </div>
+        </div>
+
+        <div x-show="channelConfigLoading" class="empty-state">正在加载通道配置...</div>
+        <div x-show="!channelConfigLoading" class="card !p-0 overflow-x-auto">
+            <table class="w-full text-xs min-w-[980px]">
+                <thead style="background:var(--muted); color:var(--muted-fg)">
+                    <tr>
+                        <th class="px-3 py-2.5 text-left font-medium">通道</th>
+                        <th class="px-3 py-2.5 text-left font-medium">模式可用</th>
+                        <th class="px-3 py-2.5 text-left font-medium">enabled</th>
+                        <th class="px-3 py-2.5 text-left font-medium">priority</th>
+                        <th class="px-3 py-2.5 text-left font-medium">top_k</th>
+                        <th class="px-3 py-2.5 text-left font-medium">max_items</th>
+                        <th class="px-3 py-2.5 text-left font-medium">token_budget</th>
+                        <th class="px-3 py-2.5 text-left font-medium">timeout_ms</th>
+                        <th class="px-3 py-2.5 text-left font-medium">min_score</th>
+                        <th class="px-3 py-2.5 text-left font-medium">modes</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <template x-for="row in channelRows()" :key="row.name">
+                        <tr class="table-row" style="border-bottom:1px solid var(--border)">
+                            <td class="px-3 py-2 font-mono" style="color:var(--primary)" x-text="row.name"></td>
+                            <td class="px-3 py-2">
+                                <span class="pill" :class="channelAvailable(row) ? 'pill-active' : 'pill-archived'" x-text="channelAvailable(row) ? '可用' : '当前模式禁用'"></span>
+                            </td>
+                            <td class="px-3 py-2"><input type="checkbox" class="toggle" x-model="row.enabled" :disabled="row.name==='safety'"></td>
+                            <td class="px-3 py-2"><input type="number" min="0" x-model.number="row.priority" class="input w-20"></td>
+                            <td class="px-3 py-2"><input type="number" min="0" x-model.number="row.top_k" :placeholder="row.top_k === null ? '—' : ''" class="input w-20"></td>
+                            <td class="px-3 py-2"><input type="number" min="0" x-model.number="row.max_items" :placeholder="row.max_items === null ? '—' : ''" class="input w-24"></td>
+                            <td class="px-3 py-2"><input type="number" min="0" x-model.number="row.token_budget" class="input w-24"></td>
+                            <td class="px-3 py-2"><input type="number" min="0" :max="channelConfigLimits.timeout_ms_max || 5000" x-model.number="row.timeout_ms" class="input w-24"></td>
+                            <td class="px-3 py-2"><input type="number" min="0" max="1" step="0.01" x-model.number="row.min_score" :placeholder="row.min_score === null ? '—' : ''" class="input w-24"></td>
+                            <td class="px-3 py-2 max-w-[160px] truncate" style="color:var(--muted-fg)" x-text="(row.modes || []).join(', ')"></td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 mt-3">
+            <div class="card !p-3">
+                <div class="flex items-center justify-between mb-2">
+                    <h4 class="text-xs font-medium">配置差异</h4>
+                    <span class="text-xs" style="color:var(--muted-fg)" x-text="`${channelConfigDiff.length} 项变更`"></span>
+                </div>
+                <div x-show="channelConfigDiff.length === 0" class="empty-state !py-6">暂无差异；点击“预览差异/校验”刷新</div>
+                <div class="space-y-1.5 max-h-72 overflow-y-auto">
+                    <template x-for="d in channelConfigDiff" :key="d.path">
+                        <div class="p-2 rounded-lg" style="background:var(--muted)">
+                            <div class="font-mono" style="color:var(--primary)" x-text="d.path"></div>
+                            <div class="mt-1 flex gap-2" style="color:var(--muted-fg)">
+                                <span class="line-through" x-text="displayConfigValue(d.before)"></span>
+                                <span>→</span>
+                                <span style="color:var(--fg)" x-text="displayConfigValue(d.after)"></span>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+            <div class="card !p-3">
+                <h4 class="text-xs font-medium mb-2">校验结果</h4>
+                <div x-show="channelConfigValidation?.ok" class="p-2 rounded-lg" style="background:rgba(16,185,129,0.12); color:var(--success)">配置校验通过，可热应用。</div>
+                <div x-show="channelConfigValidation && !channelConfigValidation.ok" class="space-y-1.5">
+                    <template x-for="err in (channelConfigValidation.errors || [])" :key="err">
+                        <div class="p-2 rounded-lg" style="background:rgba(239,68,68,0.12); color:var(--danger)" x-text="err"></div>
+                    </template>
+                </div>
+                <p class="field-hint mt-3">非法配置不会应用到运行中聊天；安全通道不能关闭，timeout 不得超过后端上限。</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══ 学习对象审查 Tab ═══ -->
+    <div x-show="tab==='learningObjects'" x-cloak>
+        <div class="flex flex-wrap items-center gap-2 mt-4 mb-3">
+            <div class="mr-auto">
+                <h3 class="text-sm font-medium">学习对象审查</h3>
+                <p class="text-xs mt-1" style="color:var(--muted-fg)">
+                    当前模式：<span class="font-mono" style="color:var(--primary)" x-text="learningObjectRuntime?.mode || '-' "></span>
+                    <span x-text="learningObjectRuntime?.label ? `· ${learningObjectRuntime.label}` : ''"></span>
+                </p>
+            </div>
+            <select x-model="learningObjectRiskFilter" class="input w-28">
+                <option value="">全部风险</option>
+                <option value="high">high</option>
+                <option value="medium">medium</option>
+                <option value="low">low</option>
+            </select>
+            <select x-model="learningObjectModeFilter" class="input w-32">
+                <option value="">全部模式状态</option>
+                <option value="enabled">当前模式可用</option>
+                <option value="disabled">当前模式禁用</option>
+            </select>
+            <button @click="loadLearningObjects()" class="btn btn-muted text-xs">刷新</button>
+        </div>
+
+        <div x-show="learningObjectError" class="text-xs mb-3 p-2.5 rounded-lg" style="background:var(--muted); color:var(--danger)" x-text="learningObjectError"></div>
+
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-3">
+            <div class="card !p-3"><div class="text-xs" style="color:var(--muted-fg)">登记对象</div><div class="text-xl font-bold" x-text="learningObjectSummary.objects || 0"></div></div>
+            <div class="card !p-3"><div class="text-xs" style="color:var(--muted-fg)">高风险对象</div><div class="text-xl font-bold" style="color:var(--danger)" x-text="learningObjectSummary.high_risk_objects || 0"></div></div>
+            <div class="card !p-3"><div class="text-xs" style="color:var(--muted-fg)">当前模式禁用</div><div class="text-xl font-bold" style="color:var(--warning)" x-text="learningObjectSummary.mode_disabled_objects || 0"></div></div>
+            <div class="card !p-3"><div class="text-xs" style="color:var(--muted-fg)">待审候选</div><div class="text-xl font-bold" style="color:var(--primary)" x-text="learningObjectSummary.pending_candidates || 0"></div></div>
+            <div class="card !p-3"><div class="text-xs" style="color:var(--muted-fg)">风险候选</div><div class="text-xl font-bold" style="color:var(--danger)" x-text="learningObjectSummary.risky_candidates || 0"></div></div>
+        </div>
+
+        <div x-show="learningObjectLoading" class="empty-state">正在加载学习对象登记表...</div>
+        <div x-show="!learningObjectLoading" class="card !p-0 overflow-x-auto">
+            <table class="w-full text-xs min-w-[1120px]">
+                <thead style="background:var(--muted); color:var(--muted-fg)">
+                    <tr>
+                        <th class="px-3 py-2.5 text-left font-medium">对象</th>
+                        <th class="px-3 py-2.5 text-left font-medium">风险</th>
+                        <th class="px-3 py-2.5 text-left font-medium">当前模式</th>
+                        <th class="px-3 py-2.5 text-left font-medium">写入路径</th>
+                        <th class="px-3 py-2.5 text-left font-medium">存储位置</th>
+                        <th class="px-3 py-2.5 text-left font-medium">注入通道</th>
+                        <th class="px-3 py-2.5 text-left font-medium">可用模式</th>
+                        <th class="px-3 py-2.5 text-left font-medium">关闭路径</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <template x-for="obj in learningObjectRows()" :key="obj.key">
+                        <tr class="table-row align-top" style="border-bottom:1px solid var(--border)">
+                            <td class="px-3 py-2 font-mono" style="color:var(--primary)" x-text="obj.key"></td>
+                            <td class="px-3 py-2"><span class="pill" :class="learningRiskClass(obj.risk)" x-text="obj.risk"></span></td>
+                            <td class="px-3 py-2">
+                                <span class="pill" :class="obj.mode_enabled ? 'pill-active' : 'pill-archived'" x-text="obj.mode_enabled ? '可用' : '当前模式禁用'"></span>
+                                <div x-show="obj.mode_disabled_reason" class="mt-1" style="color:var(--muted-fg)" x-text="obj.mode_disabled_reason"></div>
+                            </td>
+                            <td class="px-3 py-2 max-w-[220px] leading-relaxed" x-text="obj.write_path"></td>
+                            <td class="px-3 py-2 max-w-[220px] leading-relaxed" x-text="obj.storage_location"></td>
+                            <td class="px-3 py-2 font-mono" x-text="obj.injection_channel"></td>
+                            <td class="px-3 py-2" x-text="(obj.available_modes || []).join(', ')"></td>
+                            <td class="px-3 py-2 max-w-[220px] leading-relaxed" x-text="obj.close_path"></td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+            <div x-show="learningObjectRows().length === 0" class="empty-state">没有符合筛选条件的学习对象</div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 mt-3">
+            <div class="card !p-3">
+                <h4 class="text-xs font-medium mb-2">未审核候选入口</h4>
+                <div x-show="pendingLearningCandidates.length === 0" class="empty-state !py-6">暂无待审候选</div>
+                <div class="space-y-1.5 max-h-72 overflow-y-auto">
+                    <template x-for="c in pendingLearningCandidates" :key="c.id">
+                        <div class="p-2 rounded-lg" style="background:var(--muted)">
+                            <div class="flex justify-between gap-2"><span class="font-mono" style="color:var(--primary)" x-text="`${c.candidate_type} #${c.id}`"></span><span class="pill" :class="learningRiskClass(c.object_risk)" x-text="c.object_risk"></span></div>
+                            <div class="mt-1" x-text="c.content"></div>
+                            <div class="mt-1" style="color:var(--muted-fg)" x-text="c.reason"></div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+            <div class="card !p-3">
+                <h4 class="text-xs font-medium mb-2">风险候选入口</h4>
+                <div x-show="riskyLearningCandidates.length === 0" class="empty-state !py-6">暂无高风险或模式禁用候选</div>
+                <div class="space-y-1.5 max-h-72 overflow-y-auto">
+                    <template x-for="c in riskyLearningCandidates" :key="'risk-'+c.id">
+                        <div class="p-2 rounded-lg" style="background:rgba(239,68,68,0.10)">
+                            <div class="font-mono" style="color:var(--danger)" x-text="`${c.object_key} · ${c.candidate_type} #${c.id}`"></div>
+                            <div class="mt-1" x-text="c.content"></div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+            <div class="card !p-3">
+                <h4 class="text-xs font-medium mb-2">重复候选入口</h4>
+                <div x-show="duplicateLearningEntries.length === 0" class="empty-state !py-6">暂无重复写入风险条目</div>
+                <div class="space-y-1.5 max-h-72 overflow-y-auto">
+                    <template x-for="entry in duplicateLearningEntries" :key="entry.key">
+                        <div class="p-2 rounded-lg" style="background:var(--muted)">
+                            <div class="flex justify-between"><span class="font-mono" style="color:var(--primary)" x-text="entry.key"></span><span class="pill" :class="learningRiskClass(entry.risk)" x-text="entry.risk"></span></div>
+                            <ul class="mt-1 list-disc pl-4" style="color:var(--muted-fg)">
+                                <template x-for="finding in (entry.findings || [])" :key="finding">
+                                    <li x-text="finding"></li>
+                                </template>
+                            </ul>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══ Agent 反馈 Tab ═══ -->
+    <div x-show="tab==='agentFeedback'" x-cloak>
+        <div class="flex flex-wrap items-center gap-2 mt-4 mb-3">
+            <div class="mr-auto">
+                <h3 class="text-sm font-medium">Agent 反馈</h3>
+                <p class="text-xs mt-1" style="color:var(--muted-fg)">危险建议不会自动生效；批准只记录人工状态，实际配置仍需显式应用。</p>
+            </div>
+            <button @click="loadAgentFeedback()" class="btn btn-muted text-xs">刷新</button>
+        </div>
+
+        <div x-show="agentFeedbackError" class="text-xs mb-3 p-2.5 rounded-lg" style="background:var(--muted); color:var(--danger)" x-text="agentFeedbackError"></div>
+
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+            <div class="card !p-3"><div class="text-xs" style="color:var(--muted-fg)">反馈记录</div><div class="text-xl font-bold" x-text="agentFeedbackSummary.feedback_records || 0"></div></div>
+            <div class="card !p-3"><div class="text-xs" style="color:var(--muted-fg)">待审配置建议</div><div class="text-xl font-bold" style="color:var(--primary)" x-text="agentFeedbackSummary.pending_suggestions || 0"></div></div>
+            <div class="card !p-3"><div class="text-xs" style="color:var(--muted-fg)">待审候选</div><div class="text-xl font-bold" style="color:var(--warning)" x-text="agentFeedbackSummary.pending_candidates || 0"></div></div>
+            <div class="card !p-3"><div class="text-xs" style="color:var(--muted-fg)">历史记录</div><div class="text-xl font-bold" x-text="agentFeedbackSummary.history_items || 0"></div></div>
+        </div>
+
+        <div x-show="agentFeedbackLoading" class="empty-state">正在加载 Agent 反馈...</div>
+        <div x-show="!agentFeedbackLoading" class="grid grid-cols-1 xl:grid-cols-3 gap-3">
+            <div class="card !p-3">
+                <h4 class="text-xs font-medium mb-2">记忆反馈记录</h4>
+                <div x-show="agentFeedbackRecords.length === 0" class="empty-state !py-6">暂无反馈记录</div>
+                <div class="space-y-1.5 max-h-96 overflow-y-auto">
+                    <template x-for="fb in agentFeedbackRecords" :key="fb.id">
+                        <div class="p-2 rounded-lg" style="background:var(--muted)">
+                            <div class="flex justify-between gap-2"><span class="font-mono" style="color:var(--primary)" x-text="`memory ${fb.memory_id}`"></span><span class="pill" :class="feedbackPillClass(fb.feedback)" x-text="fb.feedback"></span></div>
+                            <div class="mt-1" x-text="fb.reason || '-' "></div>
+                            <div class="mt-1 font-mono" style="color:var(--muted-fg)" x-text="fb.trace_id"></div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+
+            <div class="card !p-3">
+                <h4 class="text-xs font-medium mb-2">配置建议</h4>
+                <div x-show="configSuggestions.length === 0" class="empty-state !py-6">暂无待审配置建议</div>
+                <div class="space-y-1.5 max-h-96 overflow-y-auto">
+                    <template x-for="item in configSuggestions" :key="item.id">
+                        <div class="p-2 rounded-lg" style="background:var(--muted)">
+                            <div class="flex justify-between gap-2"><span class="font-mono" style="color:var(--primary)" x-text="`${item.scope}:${item.channel || 'global'} #${item.id}`"></span><span class="pill pill-pending" x-text="item.problem"></span></div>
+                            <div class="mt-1" x-text="item.suggestion || '-' "></div>
+                            <div class="mt-1" style="color:var(--muted-fg)" x-text="`证据 ${(item.evidence_trace_ids || []).join(', ')}`"></div>
+                            <div class="flex gap-1 mt-2">
+                                <button @click="approveAgentFeedbackItem('suggestion', item.id)" class="btn btn-success btn-xs">批准</button>
+                                <button @click="rejectAgentFeedbackItem('suggestion', item.id)" class="btn btn-destructive btn-xs">拒绝</button>
+                                <button @click="ignoreAgentFeedbackItem('suggestion', item.id)" class="btn btn-muted btn-xs">忽略</button>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+
+            <div class="card !p-3">
+                <h4 class="text-xs font-medium mb-2">审查候选</h4>
+                <div x-show="reviewCandidates.length === 0" class="empty-state !py-6">暂无待审候选</div>
+                <div class="space-y-1.5 max-h-96 overflow-y-auto">
+                    <template x-for="item in reviewCandidates" :key="item.id">
+                        <div class="p-2 rounded-lg" style="background:var(--muted)">
+                            <div class="flex justify-between gap-2"><span class="font-mono" style="color:var(--primary)" x-text="`${item.candidate_type} #${item.id}`"></span><span class="pill pill-pending" x-text="item.review_status"></span></div>
+                            <div class="mt-1" x-text="item.content"></div>
+                            <div class="mt-1" style="color:var(--muted-fg)" x-text="item.reason || '-' "></div>
+                            <div class="flex gap-1 mt-2">
+                                <button @click="approveAgentFeedbackItem('candidate', item.id)" class="btn btn-success btn-xs">批准</button>
+                                <button @click="rejectAgentFeedbackItem('candidate', item.id)" class="btn btn-destructive btn-xs">拒绝</button>
+                                <button @click="ignoreAgentFeedbackItem('candidate', item.id)" class="btn btn-muted btn-xs">忽略</button>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+
+        <div class="card !p-3 mt-3">
+            <h4 class="text-xs font-medium mb-2">应用 / 拒绝 / 忽略历史</h4>
+            <div x-show="agentFeedbackHistoryItems().length === 0" class="empty-state !py-6">暂无历史记录</div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+                <template x-for="item in agentFeedbackHistoryItems()" :key="item.kind + '-' + item.id">
+                    <div class="p-2 rounded-lg text-xs" style="background:var(--muted)">
+                        <div class="flex justify-between gap-2"><span class="font-mono" style="color:var(--primary)" x-text="`${item.kind} #${item.id}`"></span><span class="pill" :class="agentReviewStatusClass(item.review_status)" x-text="item.review_status"></span></div>
+                        <div class="mt-1" x-text="item.suggestion || item.content || '-' "></div>
+                        <div class="mt-1" style="color:var(--muted-fg)" x-text="item.applied ? '已应用' : '未自动应用'"></div>
+                    </div>
+                </template>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══ 兼容模式 Tab ═══ -->
+    <div x-show="tab==='compatibility'" x-cloak>
+        <div class="flex flex-wrap items-center gap-2 mt-4 mb-3">
+            <div class="mr-auto">
+                <h3 class="text-sm font-medium">兼容模式</h3>
+                <p class="text-xs mt-1" style="color:var(--muted-fg)">
+                    当前模式：<span class="font-mono" style="color:var(--primary)" x-text="compatibilityRuntime?.mode || '-' "></span>
+                    <span x-text="compatibilityRuntime?.label ? `· ${compatibilityRuntime.label}` : ''"></span>
+                </p>
+            </div>
+            <button @click="loadCompatibilityStatus()" class="btn btn-muted text-xs">刷新</button>
+        </div>
+
+        <div x-show="compatibilityError" class="text-xs mb-3 p-2.5 rounded-lg" style="background:var(--muted); color:var(--danger)" x-text="compatibilityError"></div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+            <div class="card !p-3">
+                <div class="text-xs" style="color:var(--muted-fg)">LivingMemory-compatible facade</div>
+                <div class="text-xl font-bold mt-1" :style="`color:var(${compatibilityFacade.enabled ? '--success' : '--warning'})`" x-text="compatibilityFacade.enabled ? '已启用' : '未初始化'"></div>
+                <div class="field-hint" x-text="compatibilityFacade.status || '-' "></div>
+            </div>
+            <div class="card !p-3">
+                <div class="text-xs" style="color:var(--muted-fg)">recall_long_term_memory</div>
+                <div class="text-xl font-bold mt-1" :style="`color:var(${compatibilityAliasEnabled('recall_long_term_memory') ? '--success' : '--muted-fg'})`" x-text="compatibilityAliasEnabled('recall_long_term_memory') ? '已注册' : '未注册'"></div>
+                <div class="field-hint">LivingMemory 风格检索别名</div>
+            </div>
+            <div class="card !p-3">
+                <div class="text-xs" style="color:var(--muted-fg)">memorize_long_term_memory</div>
+                <div class="text-xl font-bold mt-1" :style="`color:var(${compatibilityAliasEnabled('memorize_long_term_memory') ? '--success' : '--muted-fg'})`" x-text="compatibilityAliasEnabled('memorize_long_term_memory') ? '已注册' : '未注册'"></div>
+                <div class="field-hint">LivingMemory 风格写入别名</div>
+            </div>
+        </div>
+
+        <div x-show="duplicateCompatibilityWarnings.length" class="card !p-3 mb-3" style="border-color:rgba(239,68,68,0.35)">
+            <h4 class="text-xs font-medium mb-2" style="color:var(--danger)">重复记忆插件 / 重复注入风险</h4>
+            <div class="space-y-1.5">
+                <template x-for="warning in duplicateCompatibilityWarnings" :key="warning.plugin_id || warning.name">
+                    <div class="p-2 rounded-lg" style="background:rgba(239,68,68,0.10)">
+                        <div class="font-mono" x-text="warning.name || warning.plugin_id"></div>
+                        <div class="mt-1" x-text="warning.message"></div>
+                    </div>
+                </template>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <div class="card !p-3">
+                <h4 class="text-xs font-medium mb-2">检测到的记忆插件</h4>
+                <div x-show="detectedCompatibilityPlugins.length === 0" class="empty-state !py-6">未检测到其他记忆插件</div>
+                <div class="space-y-1.5">
+                    <template x-for="plugin in detectedCompatibilityPlugins" :key="plugin.id || plugin.name">
+                        <div class="p-2 rounded-lg flex items-center gap-2" style="background:var(--muted)">
+                            <span class="font-mono" style="color:var(--primary)" x-text="plugin.name || plugin.id"></span>
+                            <span class="pill" :class="plugin.active ? 'pill-active' : 'pill-archived'" x-text="plugin.active ? 'active' : 'inactive'"></span>
+                            <span class="ml-auto" style="color:var(--muted-fg)" x-text="plugin.id || '-' "></span>
+                        </div>
+                    </template>
+                </div>
+            </div>
+            <div class="card !p-3">
+                <h4 class="text-xs font-medium mb-2">推荐配置方向</h4>
+                <ul class="space-y-2 list-disc pl-4 text-xs" style="color:var(--muted-fg)">
+                    <template x-for="item in compatibilityRecommendations" :key="item">
+                        <li x-text="item"></li>
+                    </template>
+                </ul>
+            </div>
+        </div>
+    </div>
+
     <!-- ═══ 配置 Tab ═══ -->
     <div x-show="tab==='config'" x-cloak>
         <div class="flex items-center justify-between mt-4 mb-3">
@@ -1751,6 +2348,57 @@ function dashboard() {
             relation_memories_tokens: true,
             jargon_tokens: true,
         },
+        // 注入观察台
+        traces: [],
+        traceCount: 0,
+        traceLoading: false,
+        traceError: '',
+        traceFilters: {
+            from: '', to: '', scope: '', group_id: '', sender_id: '', bot_id: '',
+            channel: '', status: '', has_error: '', limit: 100,
+        },
+        traceDetailOpen: false,
+        traceDetailLoading: false,
+        injectionTraceDetail: null,
+        // 通道配置
+        channelConfigLoading: false,
+        channelConfigSaving: false,
+        channelConfigOk: true,
+        channelConfigMessage: '',
+        channelConfigRuntime: null,
+        channelConfigDefaults: { channels: {} },
+        channelDraft: { channels: {}, recent_dedup_minutes: 30, trace_enabled: true },
+        channelConfigDiff: [],
+        channelConfigValidation: null,
+        channelConfigLimits: {},
+        // 学习对象审查
+        learningObjectLoading: false,
+        learningObjectError: '',
+        learningObjectRuntime: null,
+        learningObjectSummary: {},
+        learningObjects: [],
+        pendingLearningCandidates: [],
+        riskyLearningCandidates: [],
+        duplicateLearningEntries: [],
+        learningObjectRiskFilter: '',
+        learningObjectModeFilter: '',
+        // Agent 反馈
+        agentFeedbackLoading: false,
+        agentFeedbackError: '',
+        agentFeedbackSummary: {},
+        agentFeedbackRecords: [],
+        configSuggestions: [],
+        reviewCandidates: [],
+        agentFeedbackHistory: { config_suggestions: [], review_candidates: [] },
+        // 兼容模式
+        compatibilityLoading: false,
+        compatibilityError: '',
+        compatibilityRuntime: null,
+        compatibilityFacade: {},
+        compatibilityToolAliases: {},
+        detectedCompatibilityPlugins: [],
+        duplicateCompatibilityWarnings: [],
+        compatibilityRecommendations: [],
         // 记忆管理
         memories: [],
         memSearch: '',
@@ -1778,7 +2426,7 @@ function dashboard() {
         selectedJargonIds: [],
         jargonAllMatching: false,
         jargonPage: 1,
-        jargonPageSize: 15,
+        jargonPageSize: 10,
         jargonSearch: '',
         jargonHasMore: false,
         jargonTotalPages: 1,
@@ -1945,6 +2593,10 @@ function dashboard() {
         holymanUpdateAvailable: false,
         selectedHolymanWords: [],
         selectedHolymanCandidateIds: [],
+        candidateKey(c) {
+            if (!c) return '';
+            return c.id !== undefined && c.id !== null ? String(c.id) : String(c.word || '');
+        },
 
         // ─── 灵魂状态 ───
         concerns: [],
@@ -2042,6 +2694,341 @@ function dashboard() {
             if (this.injectionFrom > this.injectionTo) { alert('开始日期不能晚于结束日期'); return; }
             this.injectionRange = 'custom';
             await this.loadInjectionMetrics();
+        },
+        toDatetimeLocal(ts) {
+            if (!ts) return '';
+            const d = new Date(Number(ts) * 1000);
+            const pad = (n) => String(n).padStart(2, '0');
+            return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        },
+        dateTimeLocalToTs(value) {
+            if (!value) return '';
+            const ms = new Date(value).getTime();
+            return Number.isFinite(ms) ? Math.floor(ms / 1000) : '';
+        },
+        traceQueryParams() {
+            const params = new URLSearchParams();
+            const fromTs = this.dateTimeLocalToTs(this.traceFilters.from);
+            const toTs = this.dateTimeLocalToTs(this.traceFilters.to);
+            if (fromTs) params.set('from_ts', fromTs);
+            if (toTs) params.set('to_ts', toTs);
+            for (const key of ['scope', 'group_id', 'sender_id', 'bot_id', 'channel', 'status', 'has_error']) {
+                const value = this.traceFilters[key];
+                if (value !== undefined && value !== null && value !== '') params.set(key, value);
+            }
+            params.set('limit', this.traceFilters.limit || 100);
+            return params;
+        },
+        async loadInjectionTraces() {
+            this.traceLoading = true;
+            this.traceError = '';
+            try {
+                const r = await fetch('/api/injection/traces?' + this.traceQueryParams());
+                const d = await r.json();
+                if (!r.ok || d.error) throw new Error(d.error || `trace API ${r.status}`);
+                this.traces = d.traces || [];
+                this.traceCount = d.count ?? this.traces.length;
+            } catch(e) {
+                console.error('loadInjectionTraces:', e);
+                this.traces = [];
+                this.traceCount = 0;
+                this.traceError = e.message || '注入 trace 加载失败';
+            }
+            this.traceLoading = false;
+        },
+        resetTraceFilters() {
+            this.traceFilters = { from: '', to: '', scope: '', group_id: '', sender_id: '', bot_id: '', channel: '', status: '', has_error: '', limit: 100 };
+            this.loadInjectionTraces();
+        },
+        async openTraceRangeFromMetrics() {
+            const from = this.sys.injection?.from || '';
+            const to = this.sys.injection?.to || '';
+            this.traceFilters.from = this.toDatetimeLocal(from);
+            this.traceFilters.to = this.toDatetimeLocal(to);
+            this.tab = 'injectionObservatory';
+            await this.loadInjectionTraces();
+        },
+        async openInjectionTraceDetail(traceId) {
+            if (!traceId) return;
+            this.traceDetailOpen = true;
+            this.traceDetailLoading = true;
+            this.injectionTraceDetail = null;
+            try {
+                const r = await fetch(`/api/injection/traces/${encodeURIComponent(traceId)}`);
+                const d = await r.json();
+                if (!r.ok || d.error) throw new Error(d.error || `trace detail API ${r.status}`);
+                this.injectionTraceDetail = d;
+            } catch(e) {
+                console.error('openInjectionTraceDetail:', e);
+                this.traceError = e.message || 'trace 详情加载失败';
+                this.traceDetailOpen = false;
+            }
+            this.traceDetailLoading = false;
+        },
+        closeInjectionTraceDetail() {
+            this.traceDetailOpen = false;
+            this.traceDetailLoading = false;
+            this.injectionTraceDetail = null;
+        },
+        cloneConfig(value) {
+            return JSON.parse(JSON.stringify(value || {}));
+        },
+        channelRows() {
+            const channels = this.channelDraft?.channels || {};
+            return Object.keys(channels)
+                .map(name => channels[name])
+                .sort((a, b) => Number(b.priority || 0) - Number(a.priority || 0));
+        },
+        channelAvailable(row) {
+            const mode = this.channelConfigRuntime?.mode || this.channelDraft?.mode;
+            return !mode || (row.modes || []).includes(mode);
+        },
+        optionalNumber(value) {
+            if (value === '' || value === null || value === undefined) return null;
+            const n = Number(value);
+            return Number.isFinite(n) ? n : null;
+        },
+        normalizeChannelConfigPayload() {
+            const payload = {
+                recent_dedup_minutes: Math.max(0, Number(this.channelDraft.recent_dedup_minutes || 0)),
+                trace_enabled: !!this.channelDraft.trace_enabled,
+                channels: {},
+            };
+            for (const row of this.channelRows()) {
+                payload.channels[row.name] = {
+                    enabled: !!row.enabled,
+                    priority: Math.max(0, Number(row.priority || 0)),
+                    top_k: this.optionalNumber(row.top_k),
+                    max_items: this.optionalNumber(row.max_items),
+                    token_budget: Math.max(0, Number(row.token_budget || 0)),
+                    timeout_ms: Math.max(0, Number(row.timeout_ms || 0)),
+                    min_score: this.optionalNumber(row.min_score),
+                    modes: row.modes || [],
+                };
+            }
+            return payload;
+        },
+        async loadChannelConfig() {
+            this.channelConfigLoading = true;
+            this.channelConfigMessage = '';
+            try {
+                const r = await fetch('/api/config/channels');
+                const d = await r.json();
+                if (!r.ok || d.error) throw new Error(d.error || `channel config API ${r.status}`);
+                this.channelConfigRuntime = d.runtime || null;
+                this.channelConfigDefaults = d.defaults || { channels: {} };
+                this.channelDraft = this.cloneConfig(d.current || { channels: {} });
+                this.channelConfigDiff = d.diff || [];
+                this.channelConfigLimits = d.limits || {};
+                this.channelConfigValidation = null;
+            } catch(e) {
+                console.error('loadChannelConfig:', e);
+                this.channelConfigMessage = e.message || '通道配置加载失败';
+                this.channelConfigOk = false;
+            }
+            this.channelConfigLoading = false;
+        },
+        async validateChannelConfig() {
+            const payload = this.normalizeChannelConfigPayload();
+            try {
+                const r = await fetch('/api/config/channels/validate', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload),
+                });
+                const d = await r.json();
+                this.channelConfigValidation = d;
+                this.channelConfigDiff = d.diff || [];
+                this.channelConfigOk = !!d.ok;
+                this.channelConfigMessage = d.ok ? '配置校验通过' : '配置校验失败';
+                return d;
+            } catch(e) {
+                this.channelConfigValidation = { ok: false, errors: [e.message] };
+                this.channelConfigOk = false;
+                this.channelConfigMessage = e.message || '通道配置校验失败';
+                return this.channelConfigValidation;
+            }
+        },
+        async applyChannelConfig() {
+            this.channelConfigSaving = true;
+            const preview = await this.validateChannelConfig();
+            if (!preview.ok) {
+                this.channelConfigSaving = false;
+                return;
+            }
+            try {
+                const r = await fetch('/api/config/channels', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(this.normalizeChannelConfigPayload()),
+                });
+                const d = await r.json();
+                this.channelConfigValidation = d;
+                this.channelConfigDiff = d.diff || [];
+                this.channelConfigOk = !!d.ok;
+                this.channelConfigMessage = d.message || (d.ok ? '通道配置已应用' : '通道配置应用失败');
+                if (d.ok) await this.loadChannelConfig();
+            } catch(e) {
+                this.channelConfigOk = false;
+                this.channelConfigMessage = e.message || '通道配置应用失败';
+            }
+            this.channelConfigSaving = false;
+        },
+        async resetChannelConfigToDefaults() {
+            this.channelConfigSaving = true;
+            try {
+                const r = await fetch('/api/config/channels/defaults', { method: 'POST' });
+                const d = await r.json();
+                this.channelConfigValidation = d;
+                this.channelConfigDiff = d.diff || [];
+                this.channelConfigOk = !!d.ok;
+                this.channelConfigMessage = d.message || '已恢复默认值';
+                if (d.ok) await this.loadChannelConfig();
+            } catch(e) {
+                this.channelConfigOk = false;
+                this.channelConfigMessage = e.message || '恢复默认值失败';
+            }
+            this.channelConfigSaving = false;
+        },
+        displayConfigValue(value) {
+            if (value === null || value === undefined || value === '') return '—';
+            if (Array.isArray(value)) return value.join(', ');
+            if (typeof value === 'object') return JSON.stringify(value);
+            return String(value);
+        },
+        async loadLearningObjects() {
+            this.learningObjectLoading = true;
+            this.learningObjectError = '';
+            try {
+                const r = await fetch('/api/learning-objects/review');
+                const d = await r.json();
+                if (!r.ok || d.error) throw new Error(d.error || `learning object API ${r.status}`);
+                this.learningObjectRuntime = d.runtime || null;
+                this.learningObjectSummary = d.summary || {};
+                this.learningObjects = d.objects || [];
+                this.pendingLearningCandidates = d.pending_candidates || [];
+                this.riskyLearningCandidates = d.risky_candidates || [];
+                this.duplicateLearningEntries = d.duplicate_entries || [];
+            } catch(e) {
+                console.error('loadLearningObjects:', e);
+                this.learningObjectError = e.message || '学习对象审查数据加载失败';
+                this.learningObjects = [];
+                this.pendingLearningCandidates = [];
+                this.riskyLearningCandidates = [];
+                this.duplicateLearningEntries = [];
+            }
+            this.learningObjectLoading = false;
+        },
+        learningObjectRows() {
+            return (this.learningObjects || []).filter(obj => {
+                if (this.learningObjectRiskFilter && obj.risk !== this.learningObjectRiskFilter) return false;
+                if (this.learningObjectModeFilter === 'enabled' && !obj.mode_enabled) return false;
+                if (this.learningObjectModeFilter === 'disabled' && obj.mode_enabled) return false;
+                return true;
+            });
+        },
+        learningRiskClass(risk) {
+            if (risk === 'high') return 'pill-rejected';
+            if (risk === 'medium') return 'pill-pending';
+            return 'pill-active';
+        },
+        async loadAgentFeedback() {
+            this.agentFeedbackLoading = true;
+            this.agentFeedbackError = '';
+            try {
+                const r = await fetch('/api/agent-feedback');
+                const d = await r.json();
+                if (!r.ok || d.error) throw new Error(d.error || `agent feedback API ${r.status}`);
+                this.agentFeedbackSummary = d.summary || {};
+                this.agentFeedbackRecords = d.feedback_records || [];
+                this.configSuggestions = d.config_suggestions || [];
+                this.reviewCandidates = d.review_candidates || [];
+                this.agentFeedbackHistory = d.history || { config_suggestions: [], review_candidates: [] };
+            } catch(e) {
+                console.error('loadAgentFeedback:', e);
+                this.agentFeedbackError = e.message || 'Agent 反馈加载失败';
+                this.agentFeedbackRecords = [];
+                this.configSuggestions = [];
+                this.reviewCandidates = [];
+                this.agentFeedbackHistory = { config_suggestions: [], review_candidates: [] };
+            }
+            this.agentFeedbackLoading = false;
+        },
+        async postAgentFeedbackAction(kind, id, action) {
+            const base = kind === 'suggestion' ? '/api/agent-feedback/config-suggestions' : '/api/agent-feedback/review-candidates';
+            try {
+                const r = await fetch(`${base}/${id}/${action}`, { method: 'POST' });
+                const d = await r.json();
+                if (!r.ok || d.error) throw new Error(d.error || `agent feedback action ${r.status}`);
+                await this.loadAgentFeedback();
+            } catch(e) {
+                this.agentFeedbackError = e.message || '人工处理失败';
+            }
+        },
+        approveAgentFeedbackItem(kind, id) { return this.postAgentFeedbackAction(kind, id, 'approve'); },
+        rejectAgentFeedbackItem(kind, id) { return this.postAgentFeedbackAction(kind, id, 'reject'); },
+        ignoreAgentFeedbackItem(kind, id) { return this.postAgentFeedbackAction(kind, id, 'ignore'); },
+        agentFeedbackHistoryItems() {
+            const suggestions = (this.agentFeedbackHistory?.config_suggestions || []).map(item => ({ ...item, kind: 'config_suggestion' }));
+            const candidates = (this.agentFeedbackHistory?.review_candidates || []).map(item => ({ ...item, kind: 'review_candidate' }));
+            return [...suggestions, ...candidates].sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0));
+        },
+        feedbackPillClass(feedback) {
+            if (feedback === 'useful') return 'pill-active';
+            if (feedback === 'misleading') return 'pill-rejected';
+            if (feedback === 'duplicate') return 'pill-pending';
+            return 'pill-archived';
+        },
+        agentReviewStatusClass(status) {
+            if (status === 'approved') return 'pill-active';
+            if (status === 'rejected') return 'pill-rejected';
+            if (status === 'ignored') return 'pill-archived';
+            return 'pill-pending';
+        },
+        async loadCompatibilityStatus() {
+            this.compatibilityLoading = true;
+            this.compatibilityError = '';
+            try {
+                const r = await fetch('/api/compat/status');
+                const d = await r.json();
+                if (!r.ok || d.error) throw new Error(d.error || `compat API ${r.status}`);
+                this.compatibilityRuntime = d.runtime || null;
+                this.compatibilityFacade = d.facade || {};
+                this.compatibilityToolAliases = d.tool_aliases || {};
+                this.detectedCompatibilityPlugins = d.detected_plugins || [];
+                this.duplicateCompatibilityWarnings = d.duplicate_warnings || [];
+                this.compatibilityRecommendations = d.recommended_settings || [];
+            } catch(e) {
+                console.error('loadCompatibilityStatus:', e);
+                this.compatibilityError = e.message || '兼容模式状态加载失败';
+                this.compatibilityFacade = {};
+                this.compatibilityToolAliases = {};
+                this.detectedCompatibilityPlugins = [];
+                this.duplicateCompatibilityWarnings = [];
+                this.compatibilityRecommendations = [];
+            }
+            this.compatibilityLoading = false;
+        },
+        compatibilityAliasEnabled(name) {
+            return !!(this.compatibilityToolAliases?.[name]?.enabled);
+        },
+        traceStatusClass(status, error) {
+            if (error) return 'pill-rejected';
+            if (status === 'ok') return 'pill-active';
+            if (status === 'error' || status === 'fallback') return 'pill-rejected';
+            if (status === 'shadow') return 'pill-global';
+            return 'pill-pending';
+        },
+        channelStatusClass(status, error) {
+            if (error) return 'pill-rejected';
+            if (status === 'hit' || status === 'ok') return 'pill-active';
+            if (status === 'error' || status === 'timeout') return 'pill-rejected';
+            if (status === 'filtered') return 'pill-pending';
+            return 'pill-archived';
+        },
+        formatMs(value) {
+            const n = Number(value || 0);
+            return `${Math.round(n)}ms`;
         },
         formatBucket(seconds) {
             const s = Number(seconds || 0);
@@ -2691,9 +3678,14 @@ function dashboard() {
             }
         },
         async reviewHolymanCandidate(candidate, action) {
-            if (!candidate || candidate.id === undefined || candidate.id === null) return;
+            const key = this.candidateKey(candidate);
+            if (!candidate || !key) return;
             try {
-                const r = await fetch(`/api/jargon/holyman/candidates/${candidate.id}/${action}`, { method: 'POST' });
+                const r = await fetch('/api/jargon/holyman/candidates/batch-review', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ ids: [key], words: [candidate.word], action })
+                });
                 const d = await r.json();
                 if (d.ok) await this.loadJargonHolyman();
                 else alert(d.error || '候选审核失败');
@@ -2725,17 +3717,22 @@ function dashboard() {
         },
         toggleSelectAllHolymanCandidates(e) {
             this.selectedHolymanCandidateIds = e.target.checked
-                ? this.filteredHolymanCandidates().map(c => c.id).filter(id => id !== undefined && id !== null)
+                ? this.filteredHolymanCandidates().map(c => this.candidateKey(c)).filter(Boolean)
                 : [];
         },
         async batchReviewHolymanCandidates(action) {
             if (!this.selectedHolymanCandidateIds.length) return;
             if (action === 'reject' && !confirm(`确认拒绝并屏蔽选中的 ${this.selectedHolymanCandidateIds.length} 个候选？`)) return;
+            const selectedSet = new Set(this.selectedHolymanCandidateIds.map(String));
+            const words = this.filteredHolymanCandidates()
+                .filter(c => selectedSet.has(this.candidateKey(c)))
+                .map(c => c.word)
+                .filter(Boolean);
             try {
                 const r = await fetch('/api/jargon/holyman/candidates/batch-review', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ ids: this.selectedHolymanCandidateIds, action })
+                    body: JSON.stringify({ ids: this.selectedHolymanCandidateIds, words, action })
                 });
                 const d = await r.json();
                 if (d.ok) {

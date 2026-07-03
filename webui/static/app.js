@@ -80,6 +80,10 @@ function app() {
         selectedHolymanWords: [],
         selectedHolymanCandidateIds: [],
         holymanFilter: '',
+        candidateKey(c) {
+            if (!c) return '';
+            return c.id !== undefined && c.id !== null ? String(c.id) : String(c.word || '');
+        },
 
         // Stats
         stats: {},
@@ -616,8 +620,13 @@ function app() {
         },
 
         async reviewHolymanCandidate(candidate, action) {
+            const key = this.candidateKey(candidate);
+            if (!candidate || !key) return;
             try {
-                const r = await this.api(`/api/jargon/holyman/candidates/${candidate.id}/${action}`, { method: 'POST' });
+                const r = await this.api('/api/jargon/holyman/candidates/batch-review', {
+                    method: 'POST',
+                    body: JSON.stringify({ ids: [key], words: [candidate.word], action })
+                });
                 if (r.ok) {
                     await this.loadJargonHolyman();
                 }
@@ -673,7 +682,7 @@ function app() {
 
         toggleSelectAllHolymanCandidates(e) {
             if (e.target.checked) {
-                this.selectedHolymanCandidateIds = this.filteredHolymanCandidates().map(c => c.id).filter(id => id !== undefined && id !== null);
+                this.selectedHolymanCandidateIds = this.filteredHolymanCandidates().map(c => this.candidateKey(c)).filter(Boolean);
             } else {
                 this.selectedHolymanCandidateIds = [];
             }
@@ -682,10 +691,15 @@ function app() {
         async batchReviewHolymanCandidates(action) {
             if (!this.selectedHolymanCandidateIds.length) return;
             if (action === 'reject' && !confirm(`确认拒绝并屏蔽选中的 ${this.selectedHolymanCandidateIds.length} 个候选？`)) return;
+            const selectedSet = new Set(this.selectedHolymanCandidateIds.map(String));
+            const words = this.filteredHolymanCandidates()
+                .filter(c => selectedSet.has(this.candidateKey(c)))
+                .map(c => c.word)
+                .filter(Boolean);
             try {
                 const r = await this.api('/api/jargon/holyman/candidates/batch-review', {
                     method: 'POST',
-                    body: JSON.stringify({ ids: this.selectedHolymanCandidateIds, action })
+                    body: JSON.stringify({ ids: this.selectedHolymanCandidateIds, words, action })
                 });
                 if (r.ok) {
                     alert(`✓ 已批量${action === 'approve' ? '通过' : '拒绝'} ${r.reviewed_count || 0} 个候选`);

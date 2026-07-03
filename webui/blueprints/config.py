@@ -91,9 +91,13 @@ def _coerce(value, type_name: str):
 @require_auth
 async def get_config():
     """返回当前插件运行配置。"""
+    from ...services.runtime_mode import resolve_runtime_mode
+
     c = get_container()
     cfg = c.plugin_config
+    runtime_mode = resolve_runtime_mode(cfg)
     return jsonify({
+        "runtime": runtime_mode.to_web_payload(),
         "embedding_provider_id": cfg.get("embedding_provider_id", ""),
         "embedding_dimension": cfg.get("embedding_dimension", 1024),
         "tag_llm_provider_id": cfg.get("tag_llm_provider_id", ""),
@@ -120,6 +124,7 @@ async def update_config():
     cfg = c.plugin_config
 
     field_map = {
+        "runtime": "Runtime_Settings",
         "embedding_provider_id": "embedding_provider_id",
         "embedding_dimension": "embedding_dimension",
         "tag_llm_provider_id": "tag_llm_provider_id",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 
 from quart import Blueprint, jsonify, request
@@ -12,9 +13,9 @@ from ..container import get_container
 from ..middleware.auth import require_auth
 
 try:
-    from ...services.jargon.holyman_assets import content_entries
+    from ...services.jargon.holyman_assets import content_entries, is_generic_meaning
 except ImportError:  # test/runtime fallback when plugin root is on sys.path
-    from services.jargon.holyman_assets import content_entries
+    from services.jargon.holyman_assets import content_entries, is_generic_meaning
 
 jargon_bp = Blueprint("jargon", __name__, url_prefix="/api/jargon")
 
@@ -41,11 +42,17 @@ def _normalize_holyman_phrase(word: str, value) -> dict:
         meaning = str(value.get("meaning") or value.get("explanation") or "")
         source = str(value.get("source") or "")
         kind = str(value.get("kind") or "phrase")
+        layer = str(value.get("layer") or "catchphrase")
+        reference_only = bool(value.get("reference_only", True))
+        runtime_match = value.get("runtime_match") is True
     else:
         category = "legacy"
         meaning = str(value or "")
         source = ""
         kind = "legacy"
+        layer = "catchphrase"
+        reference_only = True
+        runtime_match = True
     return {
         "word": word,
         "meaning": meaning,
@@ -53,7 +60,29 @@ def _normalize_holyman_phrase(word: str, value) -> dict:
         "category_label": HOLYMAN_CATEGORY_LABELS.get(category, category),
         "source": source,
         "kind": kind,
+        "layer": layer,
+        "reference_only": reference_only,
+        "runtime_match": runtime_match,
+        "is_activated": False,
+        "db_id": None,
+        "custom_meaning": None,
     }
+
+
+def _merge_holyman_db_activation(item: dict, db_item: dict | None) -> dict:
+    if not db_item:
+        return item
+    meaning = str(db_item.get("meaning") or "")
+    item["is_activated"] = True
+    item["db_id"] = db_item.get("id")
+    if is_generic_meaning(meaning) or len(meaning.strip()) < 8:
+        return item
+    item.update({
+        "custom_meaning": meaning,
+    })
+    if item.get("kind") in {"curated_phrase", "manual"} and str(item.get("source") or "").startswith("curated/"):
+        item["meaning"] = meaning
+    return item
 
 
 def _build_holyman_categories(items: list[dict]) -> list[dict]:
@@ -110,6 +139,8 @@ def _holyman_content_status(phrases: dict, local_count: int, remote_version: str
         "remote_commit_version": remote_commit_version,
         "is_update_available": is_update_available,
         "asset_status": asset_status,
+        "asset_type": "persona_skill_reference",
+        "runtime_policy": "understanding_only",
     }
 
 
@@ -371,55 +402,92 @@ async def batch_review_holyman_candidates():
         return jsonify({"ok": False, "error": "jargon_candidates table not found"}), 500
     body = await request.get_json() or {}
     ids = body.get("ids", [])
+    words = body.get("words", [])
     action = str(body.get("action", "approve"))
     if action not in {"approve", "reject"}:
         return jsonify({"ok": False, "error": "action must be approve or reject"}), 400
-    if not isinstance(ids, list) or not ids:
-        return jsonify({"ok": False, "error": "ids list is required"}), 400
-    result = _review_holyman_candidate_ids(c.db.conn, ids, action)
+    if not isinstance(ids, list):
+        ids = []
+    if not isinstance(words, list):
+        words = []
+    if not ids and not words:
+        return jsonify({"ok": False, "error": "ids or words list is required"}), 400
+    result = _review_holyman_candidate_ids(c.db.conn, ids, action, words=words)
     return jsonify({"ok": True, "reviewed_count": result["reviewed_count"], "action": action, "blocked_count": result["blocked_count"]})
 
 
-def _review_holyman_candidate_ids(conn, ids, action: str) -> dict:
+def _review_holyman_candidate_ids(conn, ids, action: str, words: list | None = None) -> dict:
     normalized_ids = []
     for candidate_id in ids:
         try:
             normalized_ids.append(int(candidate_id))
         except (TypeError, ValueError):
             continue
-    if not normalized_ids:
+    normalized_words = []
+    for word in words or []:
+        word = str(word or "").strip()
+        if word and word not in normalized_words:
+            normalized_words.append(word)
+    if not normalized_ids and not normalized_words:
         return {"reviewed_count": 0, "blocked_count": 0, "missing_ids": []}
-    placeholders = ",".join("?" * len(normalized_ids))
+
+    clauses = []
+    params = []
+    if normalized_ids:
+        clauses.append(f"id IN ({','.join('?' * len(normalized_ids))})")
+        params.extend(normalized_ids)
+    if normalized_words:
+        clauses.append(f"word IN ({','.join('?' * len(normalized_words))})")
+        params.extend(normalized_words)
+    where_clause = " OR ".join(clauses)
     rows = conn.execute(
-        f"SELECT id, word, reason, count, source, status, reject_reason FROM jargon_candidates WHERE id IN ({placeholders})",
-        normalized_ids,
+        f"SELECT id, word, reason, count, source, status, reject_reason FROM jargon_candidates WHERE {where_clause}",
+        params,
     ).fetchall()
     found_ids = {int(r[0]) for r in rows}
     missing_ids = [candidate_id for candidate_id in normalized_ids if candidate_id not in found_ids]
-    if missing_ids:
+    if normalized_ids and missing_ids and not normalized_words:
         return {"reviewed_count": 0, "blocked_count": 0, "missing_ids": missing_ids}
 
     now = int(time.time())
-    if action == "approve":
-        cur = conn.execute(
-            f"UPDATE jargon_candidates SET status = 'approved', updated_at = ? WHERE id IN ({placeholders})",
-            [now] + normalized_ids,
-        )
-        blocked_count = 0
+    row_ids = [int(r[0]) for r in rows]
+    if row_ids:
+        row_placeholders = ",".join("?" * len(row_ids))
+        if action == "approve":
+            cur = conn.execute(
+                f"UPDATE jargon_candidates SET status = 'approved', updated_at = ? WHERE id IN ({row_placeholders})",
+                [now] + row_ids,
+            )
+            blocked_count = 0
+        else:
+            cur = conn.execute(
+                f"UPDATE jargon_candidates SET status = 'rejected', reject_reason = 'manual_reject', updated_at = ? WHERE id IN ({row_placeholders})",
+                [now] + row_ids,
+            )
+            blocked_count = 0
+            for row in rows:
+                conn.execute(
+                    "INSERT OR IGNORE INTO jargon_blocklist (word, reason, source, created_at) VALUES (?, ?, ?, ?)",
+                    (row[1], "manual_reject", "holyman_review", now),
+                )
+                blocked_count += 1
+        reviewed_count = getattr(cur, "rowcount", len(row_ids))
     else:
-        cur = conn.execute(
-            f"UPDATE jargon_candidates SET status = 'rejected', reject_reason = 'manual_reject', updated_at = ? WHERE id IN ({placeholders})",
-            [now] + normalized_ids,
-        )
+        reviewed_count = len(normalized_words)
         blocked_count = 0
-        for row in rows:
+
+    if action == "reject":
+        existing_words = {str(r[1]) for r in rows}
+        for word in normalized_words:
+            if word in existing_words:
+                continue
             conn.execute(
                 "INSERT OR IGNORE INTO jargon_blocklist (word, reason, source, created_at) VALUES (?, ?, ?, ?)",
-                (row[1], "manual_reject", "holyman_review", now),
+                (word, "manual_reject", "holyman_review", now),
             )
             blocked_count += 1
     conn.commit()
-    return {"reviewed_count": getattr(cur, "rowcount", len(normalized_ids)), "blocked_count": blocked_count, "missing_ids": []}
+    return {"reviewed_count": reviewed_count, "blocked_count": blocked_count, "missing_ids": []}
 
 
 @jargon_bp.route("/holyman/blocklist", methods=["GET", "POST"])
@@ -657,6 +725,8 @@ async def get_holyman():
     candidates = _load_asset_json("candidates.json", [])
     blocked = _load_asset_json("blocked.json", {})
     quality_report = _load_asset_json("quality_report.json", {})
+    raw_readme = (local_dir / "raw" / "README.md").read_text(encoding="utf-8", errors="ignore") if (local_dir / "raw" / "README.md").exists() else ""
+    raw_corpus = (local_dir / "raw" / "神言.txt").read_text(encoding="utf-8", errors="ignore") if (local_dir / "raw" / "神言.txt").exists() else ""
     if not isinstance(candidates, list):
         candidates = []
     if not isinstance(blocked, dict):
@@ -712,18 +782,7 @@ async def get_holyman():
                 break
 
         item["example"] = example
-        if word in db_items:
-            item.update({
-                "is_activated": True,
-                "db_id": db_items[word]["id"],
-                "custom_meaning": db_items[word]["meaning"],
-            })
-        else:
-            item.update({
-                "is_activated": False,
-                "db_id": None,
-                "custom_meaning": None,
-            })
+        _merge_holyman_db_activation(item, db_items.get(word))
         items.append(item)
 
     categories = _build_holyman_categories(items)
@@ -746,10 +805,36 @@ async def get_holyman():
         pass
 
     content_status = _holyman_content_status(phrases, local_count, remote_version, quality_report)
+    declared_match = re.search(r"神言\.txt[（(]\s*(\d+)\s*条", raw_readme or "")
+    try:
+        declared_count = int(declared_match.group(1)) if declared_match else None
+    except Exception:
+        declared_count = None
+    try:
+        raw_corpus_items = json.loads(raw_corpus)
+        source_items = raw_corpus_items.get("items", []) if isinstance(raw_corpus_items, dict) else raw_corpus_items
+        source_count = sum(1 for item in source_items if ((item.get("text", "") if isinstance(item, dict) else str(item)).strip())) if isinstance(source_items, list) else 0
+    except Exception:
+        source_count = len(corpus) if isinstance(corpus, list) else 0
     corpus_summary = {
         "count": len(corpus) if isinstance(corpus, list) else 0,
         "safe_for_prompt": False,
         "reference_only": True,
+    }
+    layers = {
+        "catchphrases": items,
+        "persona": concepts if isinstance(concepts, list) else [],
+        "quotes_knowledge": examples if isinstance(examples, list) else [],
+        "corpus": corpus_summary,
+        "candidates": candidates if isinstance(candidates, list) else [],
+        "blocked": blocked if isinstance(blocked, dict) else {},
+    }
+    corpus_counts = {
+        "declared": declared_count if declared_count is not None else (quality_report.get("declared_corpus_count") if isinstance(quality_report, dict) else None),
+        "source_items": source_count,
+        "parsed": quality_report.get("parsed_corpus_count") if isinstance(quality_report, dict) else (len(corpus) if isinstance(corpus, list) else 0),
+        "mismatch": quality_report.get("corpus_count_mismatch") if isinstance(quality_report, dict) else False,
+        "note": quality_report.get("corpus_count_note") if isinstance(quality_report, dict) else "",
     }
 
     return jsonify({
@@ -762,6 +847,10 @@ async def get_holyman():
         "blocked": blocked if isinstance(blocked, dict) else {},
         "quality_report": quality_report if isinstance(quality_report, dict) else {},
         "categories": categories,
+        "layers": layers,
+        "corpus_counts": corpus_counts,
+        "asset_type": "persona_skill_reference",
+        "runtime_policy": "understanding_only",
         "local_count": local_count,
         "local_version": local_version,
         "remote_version": remote_version,
@@ -792,6 +881,10 @@ async def toggle_holyman():
     now = int(time.time())
     
     if activate:
+        phrases = _load_asset_json("phrases.json", {})
+        phrase_item = phrases.get(word) if isinstance(phrases, dict) else None
+        if not (isinstance(phrase_item, dict) and phrase_item.get("runtime_match") is True and phrase_item.get("layer") == "catchphrase"):
+            return jsonify({"ok": False, "error": "only runtime-match catchphrases can be enabled"}), 400
         # 双重检查是否已存在
         dup = c.db.conn.execute(
             "SELECT id FROM jargon WHERE word = ? AND scope = 'global' AND source = 'holyman_skills'", 
