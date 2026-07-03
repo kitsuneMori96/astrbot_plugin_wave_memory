@@ -2,7 +2,7 @@
 
 # Wave Memory
 
-[![Version](https://img.shields.io/badge/version-v3.0.0-blue.svg)](https://github.com/vivy1024/astrbot_plugin_wave_memory/releases)
+[![Version](https://img.shields.io/badge/version-v3.0.1-blue.svg)](https://github.com/vivy1024/astrbot_plugin_wave_memory/releases)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-≥4.14-green.svg)](https://github.com/AstrBotDevs/AstrBot)
@@ -34,6 +34,7 @@
 
 | 版本 | 日期 | 重点 |
 |------|------|------|
+| **v3.0.1** | 2026-07-03 | 性能优化：优化 SQLite 缓存与 HNSWlib/EPA 内存消耗 |
 | **v3.0.0** | 2026-06-30 | PersonaComposer 分层人格 · 主动对话共用自我人格上下文 · few-shot 健康过滤 · 安全边界收口 |
 | **v2.3.3** | 2026-06-30 | Holyman 黑话知识库分层 · 候选批量审核 · 证据层 tabs · 屏蔽项回显 |
 | **v2.3.2** | 2026-06-27 | 注入指标时间序列 · SVG 折线图 · 模块消耗排行榜 · 自定义日期筛选 |
