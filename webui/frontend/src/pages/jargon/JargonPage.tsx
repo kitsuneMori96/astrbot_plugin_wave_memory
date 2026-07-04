@@ -1,5 +1,17 @@
 import { useEffect, useState } from 'react'
-import { AlertCircleIcon, CheckCircle2Icon, Loader2Icon, RefreshCwIcon } from 'lucide-react'
+import {
+  AlertCircleIcon,
+  CheckCircle2Icon,
+  Loader2Icon,
+  RefreshCwIcon,
+  SearchIcon,
+  Undo2Icon,
+  LayersIcon,
+  EyeIcon,
+  Trash2Icon,
+  GlobeIcon,
+  Edit2Icon,
+} from 'lucide-react'
 import { toast } from 'sonner'
 
 import {
@@ -17,6 +29,7 @@ import {
   type HolymanStatusPayload,
 } from '@/api/jargon'
 import { runPostStream, type StreamProgress } from '@/api/memories'
+import { getStoredToken } from '@/api/client'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -49,13 +62,14 @@ export function JargonPage() {
   const [groupId, setGroupId] = useState('')
   const [status, setStatus] = useState('')
   const [page, setPage] = useState(1)
-  const size = 15
+  const [size, setSize] = useState(15) // 单页行数持久化
 
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
 
-  // 多选勾选
+  // 多选勾选与跨页全选全部匹配
   const [selectedIds, setSelectedIds] = useState<number[]>([])
+  const [selectAllMatching, setSelectAllMatching] = useState(false)
 
   // 双击单元格内嵌快捷编辑
   const [editingId, setEditingId] = useState<number | null>(null)
@@ -78,15 +92,16 @@ export function JargonPage() {
   })
   const [isEditNew, setIsEditNew] = useState(true)
 
-  // 2. 广域 Holyman 同步状态
+  // 2. 广域 Holyman 同步与列表展示
   const [holyman, setHolyman] = useState<HolymanStatusPayload | null>(null)
   const [holymanLoading, setHolymanLoading] = useState(false)
   const [streamOpen, setStreamOpen] = useState(false)
   const [streamProgress, setStreamProgress] = useState<StreamProgress | null>(null)
   const [streamLog, setStreamLog] = useState<string[]>([])
 
-  // 全选控制
+  // 全选控制（当页全选与跨页全选联动）
   function handleToggleSelectAll(checked: boolean) {
+    setSelectAllMatching(false)
     if (checked) {
       setSelectedIds(jargons.map((j) => j.id))
     } else {
@@ -95,11 +110,19 @@ export function JargonPage() {
   }
 
   function handleRowCheckChange(id: number, checked: boolean) {
+    setSelectAllMatching(false)
     if (checked) {
       setSelectedIds((prev) => [...prev, id])
     } else {
       setSelectedIds((prev) => prev.filter((item) => item !== id))
     }
+  }
+
+  // 跨页全选全部
+  function handleSelectAllMatching() {
+    setSelectAllMatching(true)
+    setSelectedIds(jargons.map((j) => j.id)) // 视觉高亮当前行
+    toast.info(`已选中全部符合检索条件的 ${total} 条黑话（跨页全选已激活）`)
   }
 
   async function loadLocalJargons(nextPage = page) {
@@ -117,6 +140,7 @@ export function JargonPage() {
       setPendingCount(res.pending_count ?? 0)
       setPage(nextPage)
       setSelectedIds([])
+      setSelectAllMatching(false)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '加载黑话失败')
       setJargons([])
@@ -143,7 +167,7 @@ export function JargonPage() {
     } else {
       void loadHolyman()
     }
-  }, [activeTab, status])
+  }, [activeTab, status, size])
 
   // 本地检索提交
   function handleSearchSubmit(e?: React.FormEvent) {
@@ -181,7 +205,7 @@ export function JargonPage() {
   async function handleReviewSingle(id: number, action: 'approve' | 'reject') {
     try {
       await reviewJargon(id, action)
-      toast.success(action === 'approve' ? `黑话 #${id} 已审核确认` : `已否决该黑话`)
+      toast.success(action === 'approve' ? `黑话已通过审核并确认` : `已否决并拉黑该黑话`)
       await loadLocalJargons(page)
     } catch (err) {
       toast.error('审核失败')
@@ -217,8 +241,29 @@ export function JargonPage() {
     if (!count) return
     setLoading(true)
     try {
-      await batchReviewJargons(selectedIds, action)
-      toast.success(`已批量审核并[${action === 'approve' ? '确认' : '否决'}] ${count} 条黑话`)
+      if (selectAllMatching) {
+        // 跨页全选，传 all_matching 告诉后端全量操作
+        const token = getStoredToken()
+        const headers: HeadersInit = token 
+          ? { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } 
+          : { 'Content-Type': 'application/json' }
+        const res = await fetch('/api/jargon/batch-review', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            all_matching: true,
+            action,
+            status: status === 'all' ? '' : status,
+            group_id: groupId,
+            search,
+          })
+        })
+        const data = await res.json() as any
+        toast.success(`一键成功批量审核了 ${data.reviewed_count} 条黑话记录`)
+      } else {
+        await batchReviewJargons(selectedIds, action)
+        toast.success(`已批量审核并[${action === 'approve' ? '确认' : '否决'}] ${count} 条黑话`)
+      }
       await loadLocalJargons(page)
     } catch (err) {
       toast.error('操作失败')
@@ -232,8 +277,27 @@ export function JargonPage() {
     if (!confirm(`确定要批量物理删除这 ${count} 条黑话记录吗？`)) return
     setLoading(true)
     try {
-      await batchDeleteJargons(selectedIds)
-      toast.success(`成功批量删除了 ${count} 条黑话`)
+      if (selectAllMatching) {
+        const token = getStoredToken()
+        const headers: HeadersInit = token 
+          ? { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } 
+          : { 'Content-Type': 'application/json' }
+        const res = await fetch('/api/jargon/batch-delete', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            all_matching: true,
+            status: status === 'all' ? '' : status,
+            group_id: groupId,
+            search,
+          })
+        })
+        const data = await res.json() as any
+        toast.success(`一键批量物理删除了全部 ${data.deleted_count} 条匹配黑话`)
+      } else {
+        await batchDeleteJargons(selectedIds)
+        toast.success(`成功批量删除了 ${count} 条黑话`)
+      }
       await loadLocalJargons(page)
     } catch (err) {
       toast.error('操作失败')
@@ -328,10 +392,10 @@ export function JargonPage() {
   return (
     <div className="flex flex-col gap-6">
       <Card>
-        <CardHeader className="py-4 shrink-0">
+        <CardHeader className="py-4 shrink-0 border-b bg-muted/10">
           <CardTitle>黑话与口癖审核</CardTitle>
           <CardDescription>
-            灵魂引擎交互层：对群内自动习得的“黑话”释义进行审核，或者同步激活官方/官方团队精选的“广域 Holyman 人格口癖与语料库”。
+            对聊天中自动捕获、清洗的待审黑话词条进行人工裁决核对，并支持一键通过 API 导入广域人格口癖语料同步。
           </CardDescription>
         </CardHeader>
       </Card>
@@ -339,7 +403,7 @@ export function JargonPage() {
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="grid w-full grid-cols-2 max-w-md shrink-0">
           <TabsTrigger value="local">群聊本地黑话</TabsTrigger>
-          <TabsTrigger value="global">广域 Holyman 语料库</TabsTrigger>
+          <TabsTrigger value="global">广域人设语料库 (Holyman)</TabsTrigger>
         </TabsList>
 
         {/* ═══ Tab 1: 本地群黑话 ═══ */}
@@ -348,19 +412,19 @@ export function JargonPage() {
             <CardContent className="pt-6">
               <form className="flex flex-wrap items-center gap-2 mb-4" onSubmit={handleSearchSubmit}>
                 <Input
-                  className="max-w-xs"
+                  className="max-w-xs h-9 text-xs"
                   placeholder="搜索词条/释义..."
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                 />
                 <Input
-                  className="w-36"
+                  className="w-32 h-9 text-xs"
                   placeholder="过滤群号..."
                   value={groupId}
                   onChange={(e) => setGroupId(e.target.value)}
                 />
                 <Select value={status || 'all'} onValueChange={(val) => setStatus(val === 'all' ? '' : val)}>
-                  <SelectTrigger className="w-32">
+                  <SelectTrigger className="w-32 h-9 text-xs">
                     <SelectValue placeholder="全部状态" />
                   </SelectTrigger>
                   <SelectContent>
@@ -370,29 +434,36 @@ export function JargonPage() {
                     <SelectItem value="rejected">已否决</SelectItem>
                   </SelectContent>
                 </Select>
-                <Button disabled={loading} type="submit">
+                <Button disabled={loading} type="submit" size="sm">
+                  <SearchIcon className="size-3.5 mr-1" />
                   搜索
                 </Button>
-                <Button disabled={loading} variant="outline" type="button" onClick={handleResetFilters}>
+                <Button disabled={loading} variant="outline" size="sm" type="button" onClick={handleResetFilters}>
+                  <Undo2Icon className="size-3.5 mr-1" />
                   重置
                 </Button>
-                <Button disabled={loading} type="button" variant="outline" onClick={handleOpenCreate}>
-                  ➕ 新建黑话
+                <Button disabled={loading} type="button" size="sm" variant="outline" onClick={handleOpenCreate}>
+                  ➕ 手动新建
                 </Button>
                 <div className="ml-auto text-xs text-muted-foreground font-mono">
-                  待确认：<span className="text-amber-500 font-bold">{pendingCount}</span> 条 · 共 {total} 条
+                  待审：<span className="text-amber-500 font-bold">{pendingCount}</span> 条 · 累计：{total} 条
                 </div>
               </form>
 
-              {/* 批量控制 */}
+              {/* 批量操作控制条 */}
               {selectedIds.length > 0 ? (
                 <div className="flex flex-wrap items-center gap-3 rounded-lg border border-primary bg-primary/5 p-3 mb-4 animate-in slide-in-from-top duration-200">
                   <Badge variant="secondary" className="bg-primary/10 text-primary border-primary/20 hover:bg-primary/10">
-                    已选 {selectedIds.length} 项
+                    {selectAllMatching ? `已跨页勾选了全部 ${total} 条黑话` : `已勾选当页 ${selectedIds.length} 条黑话`}
                   </Badge>
-                  <Button size="xs" onClick={() => void handleBatchReview('approve')}>✓ 批量通过</Button>
-                  <Button size="xs" variant="outline" className="border-red-500/20 text-destructive hover:bg-destructive/10" onClick={() => void handleBatchReview('reject')}>✕ 批量否决</Button>
-                  <Button size="xs" variant="destructive" onClick={() => void handleBatchDelete()}>🗑 批量删除</Button>
+                  <Button size="xs" onClick={() => void handleBatchReview('approve')}>✓ 批量确认通过</Button>
+                  <Button size="xs" variant="outline" className="border-red-500/20 text-destructive hover:bg-destructive/10" onClick={() => void handleBatchReview('reject')}>✕ 批量否决拉黑</Button>
+                  <Button size="xs" variant="destructive" onClick={() => void handleBatchDelete()}>🗑 一键物理删除</Button>
+                  {!selectAllMatching && total > size ? (
+                    <Button size="xs" variant="ghost" className="text-primary hover:bg-primary/10" onClick={handleSelectAllMatching}>
+                      🌌 跨页全选全部 {total} 条匹配
+                    </Button>
+                  ) : null}
                   <Button size="xs" variant="ghost" className="ml-auto" onClick={() => setSelectedIds([])}>取消</Button>
                 </div>
               ) : null}
@@ -416,12 +487,12 @@ export function JargonPage() {
                             onChange={(e) => handleToggleSelectAll(e.target.checked)}
                           />
                         </TableHead>
-                        <TableHead>词条</TableHead>
-                        <TableHead>释义 (双击可快捷修改)</TableHead>
-                        <TableHead className="w-20 text-center">学成频次</TableHead>
-                        <TableHead className="w-24">当前状态</TableHead>
-                        <TableHead className="w-24">作用域</TableHead>
-                        <TableHead className="w-56 text-right">操作</TableHead>
+                        <TableHead className="w-36">词条</TableHead>
+                        <TableHead>释义 (双击快捷修改)</TableHead>
+                        <TableHead className="w-24 text-center">学成频次</TableHead>
+                        <TableHead className="w-24 text-center">当前状态</TableHead>
+                        <TableHead className="w-28 text-center">作用域</TableHead>
+                        <TableHead className="w-48 text-right pr-4">操作</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -434,7 +505,7 @@ export function JargonPage() {
                             <TableCell>
                               <input
                                 type="checkbox"
-                                checked={isRowChecked}
+                                checked={isRowChecked || selectAllMatching}
                                 onChange={(e) => handleRowCheckChange(j.id, e.target.checked)}
                               />
                             </TableCell>
@@ -453,27 +524,27 @@ export function JargonPage() {
                                   }}
                                 />
                               ) : (
-                                <span className="text-muted-foreground text-xs cursor-pointer hover:underline" title="双击直接内嵌快捷修改释义">
+                                <span className="text-muted-foreground text-xs cursor-pointer hover:underline block truncate max-w-md" title="双击直接内嵌快捷修改释义">
                                   {j.meaning || '—'}
                                 </span>
                               )}
                             </TableCell>
-                            <TableCell className="text-center font-mono text-xs">{j.frequency}</TableCell>
-                            <TableCell>
-                              <Badge className={j.status === 'confirmed' ? 'bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/10' : j.status === 'rejected' ? 'bg-destructive/10 text-destructive hover:bg-destructive/10' : 'bg-amber-500/10 text-amber-500 hover:bg-amber-500/10'}>
+                            <TableCell className="text-center font-mono text-xs">{j.frequency} 次</TableCell>
+                            <TableCell className="text-center">
+                              <Badge className={j.status === 'confirmed' ? 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/10 hover:bg-emerald-500/10' : j.status === 'rejected' ? 'bg-destructive/10 text-destructive border border-destructive/10 hover:bg-destructive/10' : 'bg-amber-500/10 text-amber-500 border border-amber-500/10 hover:bg-amber-500/10'} variant="outline">
                                 {j.status === 'confirmed' ? '已确认' : j.status === 'rejected' ? '已否决' : '待确认'}
                               </Badge>
                             </TableCell>
-                            <TableCell>
-                              <Badge variant={j.is_global ? 'secondary' : 'outline'}>
-                                {j.is_global ? '全局' : j.group_id || '群专用'}
+                            <TableCell className="text-center">
+                              <Badge variant={j.is_global ? 'secondary' : 'outline'} className="text-[10px]">
+                                {j.is_global ? '全局可用' : `群 ${j.group_id}`}
                               </Badge>
                             </TableCell>
-                            <TableCell className="text-right whitespace-nowrap">
+                            <TableCell className="text-right pr-4 whitespace-nowrap">
                               <div className="flex justify-end gap-1.5">
                                 {j.status !== 'confirmed' ? (
                                   <Button size="xs" variant="secondary" className="bg-emerald-500/10 text-emerald-500 border border-emerald-500/10 hover:bg-emerald-500/20" onClick={() => void handleReviewSingle(j.id, 'approve')}>
-                                    确认
+                                    通过
                                   </Button>
                                 ) : null}
                                 {j.status !== 'rejected' ? (
@@ -481,17 +552,18 @@ export function JargonPage() {
                                     否决
                                   </Button>
                                 ) : null}
-                                <Button variant="ghost" className="h-7 text-xs px-2" onClick={() => void handleOpenEvidence(j.id)}>
+                                <Button variant="ghost" className="h-7 text-xs px-2 flex items-center gap-1" onClick={() => void handleOpenEvidence(j.id)}>
+                                  <EyeIcon className="size-3" />
                                   证据
                                 </Button>
-                                <Button variant="ghost" className="size-7 p-0" onClick={() => handleOpenEdit(j)} title="编辑">
-                                  ✎
+                                <Button variant="ghost" className="size-7 p-0" onClick={() => handleOpenEdit(j)} title="编辑词条">
+                                  <Edit2Icon className="size-3.5 text-muted-foreground" />
                                 </Button>
-                                <Button variant="ghost" className="size-7 p-0" onClick={() => void handleToggleGlobalSingle(j.id)} title={j.is_global ? '设为群专' : '设为全局'}>
-                                  🌐
+                                <Button variant="ghost" className="size-7 p-0" onClick={() => void handleToggleGlobalSingle(j.id)} title={j.is_global ? '设为群专' : '设为全局可用'}>
+                                  <GlobeIcon className="size-3.5 text-muted-foreground" />
                                 </Button>
                                 <Button variant="ghost" className="size-7 p-0 text-destructive hover:text-destructive hover:bg-destructive/10" onClick={() => void handleDeleteSingle(j.id)}>
-                                  🗑
+                                  <Trash2Icon className="size-3.5" />
                                 </Button>
                               </div>
                             </TableCell>
@@ -503,18 +575,34 @@ export function JargonPage() {
                 </div>
               )}
 
-              {/* 分页 */}
+              {/* 分页控制栏 */}
               {jargons.length > 0 ? (
-                <div className="mt-4 flex items-center justify-center gap-4">
-                  <Button disabled={loading || page <= 1} variant="outline" size="sm" onClick={() => void loadLocalJargons(page - 1)}>
-                    上一页
-                  </Button>
-                  <span className="font-mono text-xs text-muted-foreground">
-                    第 {page} / {totalPages} 页
-                  </span>
-                  <Button disabled={loading || page >= totalPages} variant="outline" size="sm" onClick={() => void loadLocalJargons(page + 1)}>
-                    下一页
-                  </Button>
+                <div className="mt-4 flex items-center justify-between gap-4 border-t pt-3">
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <span>每页显示</span>
+                    <Select value={String(size)} onValueChange={(val) => setSize(Number(val))}>
+                      <SelectTrigger className="w-18 h-7 text-xs py-0.5">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="15">15 行</SelectItem>
+                        <SelectItem value="30">30 行</SelectItem>
+                        <SelectItem value="50">50 行</SelectItem>
+                        <SelectItem value="100">100 行</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <Button disabled={loading || page <= 1} variant="outline" size="sm" onClick={() => void loadLocalJargons(page - 1)}>
+                      上一页
+                    </Button>
+                    <span className="font-mono text-xs text-muted-foreground">
+                      第 {page} / {totalPages} 页
+                    </span>
+                    <Button disabled={loading || page >= totalPages} variant="outline" size="sm" onClick={() => void loadLocalJargons(page + 1)}>
+                      下一页
+                    </Button>
+                  </div>
                 </div>
               ) : null}
             </CardContent>
@@ -526,31 +614,33 @@ export function JargonPage() {
           <Card>
             <CardHeader className="py-4 flex flex-row items-center justify-between gap-4 border-b shrink-0 bg-muted/20">
               <div className="flex flex-col gap-1">
-                <CardTitle className="text-sm font-semibold">🌌 Holyman 灵魂设定库</CardTitle>
+                <CardTitle className="text-sm font-semibold">🌌 广域人设自适应口癖库 (Holyman)</CardTitle>
                 <CardDescription>
-                  内置广域人设资料，包含精选口癖、人格语录与语料，激活后机器人在对应情境下会自动映射。
+                  内置广域人设资料与经典黑话语料，无需手工采集，一键同步更新后即可使机器人具备广域理解基础。
                 </CardDescription>
               </div>
               <Button disabled={holymanLoading} onClick={handleSyncHolyman}>
                 {holymanLoading ? <Loader2Icon className="animate-spin" data-icon="inline-start" /> : <RefreshCwIcon data-icon="inline-start" />}
-                🔄 在线同步 (GitHub)
+                🔄 在线同步更新 (GitHub)
               </Button>
             </CardHeader>
             <CardContent className="pt-6">
-              {holyman ? (
-                <div className="flex flex-col gap-4">
+              {holymanLoading ? (
+                <div className="py-12 flex justify-center"><Loader2Icon className="animate-spin text-primary size-6" /></div>
+              ) : holyman ? (
+                <div className="flex flex-col gap-6">
                   {holyman.update_available ? (
                     <Alert className="bg-amber-500/10 border-amber-500/20 text-amber-500">
                       <AlertCircleIcon />
-                      <AlertTitle>Holyman 语料库有更新可用</AlertTitle>
+                      <AlertTitle>语料资产有可用更新</AlertTitle>
                       <AlertDescription>
-                        本地版本：{holyman.local_version}，线上最新：{holyman.remote_version}。建议立即点击右上角同步。
+                        本地版本：{holyman.local_version}，最新版本：{holyman.remote_version}。建议立即点击同步覆盖。
                       </AlertDescription>
                     </Alert>
                   ) : (
-                    <Alert>
+                    <Alert className="bg-emerald-500/10 border-emerald-500/20 text-emerald-500">
                       <CheckCircle2Icon className="text-emerald-500" />
-                      <AlertTitle>语料资产最新</AlertTitle>
+                      <AlertTitle>本地人设语料库为最新</AlertTitle>
                       <AlertDescription>
                         本地 Holyman 版本为最新的 {holyman.local_version}，无需更新。
                       </AlertDescription>
@@ -558,14 +648,53 @@ export function JargonPage() {
                   )}
 
                   <div className="grid gap-4 sm:grid-cols-4">
-                    <Card><CardHeader className="py-3"><CardDescription>精选口癖 (quotes)</CardDescription><CardTitle className="text-xl font-mono text-primary">{holyman.items_count}</CardTitle></CardHeader></Card>
-                    <Card><CardHeader className="py-3"><CardDescription>人格设定 (concepts)</CardDescription><CardTitle className="text-xl font-mono text-primary">{holyman.concepts_count}</CardTitle></CardHeader></Card>
-                    <Card><CardHeader className="py-3"><CardDescription>语录例句 (examples)</CardDescription><CardTitle className="text-xl font-mono text-primary">{holyman.examples_count}</CardTitle></CardHeader></Card>
-                    <Card><CardHeader className="py-3"><CardDescription>分层总料 (corpus)</CardDescription><CardTitle className="text-xl font-mono text-primary">{holyman.corpus_count}</CardTitle></CardHeader></Card>
+                    <Card className="bg-muted/10 border-border/50"><CardHeader className="py-3"><CardDescription className="text-xs">精选口癖 (quotes)</CardDescription><CardTitle className="text-xl font-mono text-primary">{holyman.items_count} 条</CardTitle></CardHeader></Card>
+                    <Card className="bg-muted/10 border-border/50"><CardHeader className="py-3"><CardDescription className="text-xs">人格设定 (concepts)</CardDescription><CardTitle className="text-xl font-mono text-primary">{holyman.concepts_count} 组</CardTitle></CardHeader></Card>
+                    <Card className="bg-muted/10 border-border/50"><CardHeader className="py-3"><CardDescription className="text-xs">语录例句 (examples)</CardDescription><CardTitle className="text-xl font-mono text-primary">{holyman.examples_count} 句</CardTitle></CardHeader></Card>
+                    <Card className="bg-muted/10 border-border/50"><CardHeader className="py-3"><CardDescription className="text-xs">分层语料 (corpus)</CardDescription><CardTitle className="text-xl font-mono text-primary">{holyman.corpus_count} 段</CardTitle></CardHeader></Card>
+                  </div>
+
+                  {/* 广域黑话口癖列表展示 */}
+                  <div className="mt-2">
+                    <h4 className="text-sm font-semibold text-foreground mb-3 flex items-center gap-1.5">
+                      <LayersIcon className="size-4 text-primary" />
+                      已加载的广域口癖参考列表
+                    </h4>
+                    <div className="overflow-auto rounded-lg border max-h-96">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead className="w-36">词条</TableHead>
+                            <TableHead>释义 / 心智映射</TableHead>
+                            <TableHead className="w-24 text-center">分类</TableHead>
+                            <TableHead className="w-24 text-center">动作状态</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {(holyman.phrases ?? []).slice(0, 150).map((item: any, idx: number) => (
+                            <TableRow key={idx}>
+                              <TableCell className="font-semibold text-xs text-foreground font-mono">{item.word}</TableCell>
+                              <TableCell className="text-xs text-muted-foreground">{item.meaning || '—'}</TableCell>
+                              <TableCell className="text-center">
+                                <Badge variant="secondary" className="text-[9px] whitespace-nowrap">{item.category_label || item.category}</Badge>
+                              </TableCell>
+                              <TableCell className="text-center">
+                                <Badge variant={item.is_activated ? 'default' : 'outline'} className="text-[9px] bg-primary/10 text-primary border-primary/20">
+                                  {item.is_activated ? '已激活' : '内置理解'}
+                                </Badge>
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+                    <div className="text-[10px] text-muted-foreground mt-2 text-right">
+                      * 仅展示前 150 条内置语料。所有语料均已写入后台理解矩阵，在聊天时自然起效。
+                    </div>
                   </div>
                 </div>
               ) : (
-                <div className="py-12 flex justify-center"><Loader2Icon className="animate-spin text-primary size-6" /></div>
+                <div className="py-12 flex justify-center text-xs text-muted-foreground">无法获取广域语料资产库。</div>
               )}
             </CardContent>
           </Card>
@@ -616,7 +745,7 @@ export function JargonPage() {
                   ) : (
                     evidenceData.messages.map((msg: any, index: number) => {
                       const isAnchor = msg.role === 'anchor'
-                      const isBot = msg.sender_id === '2500447291' || msg.sender_id === '1336495069' || String(msg.sender_name).includes('羽书') || String(msg.sender_name).includes('白真真')
+                      const isBot = msg.sender_id === '2500447291' || msg.sender_id === '1336495069' || String(msg.sender_name).includes('AI') || String(msg.sender_name).includes('Bot')
                       
                       return (
                         <div key={`${msg.id}-${index}`} className={`flex flex-col max-w-[85%] ${isBot ? 'ml-auto items-end' : 'mr-auto items-start'}`}>

@@ -1,5 +1,12 @@
 import { useEffect, useState } from 'react'
-import { FileEdit, Loader2, Search, Trash2, Undo2 } from 'lucide-react'
+import {
+  FileEdit,
+  Loader2,
+  Search,
+  Trash2,
+  Undo2,
+  EyeIcon,
+} from 'lucide-react'
 import { toast } from 'sonner'
 
 import {
@@ -17,6 +24,7 @@ import {
   type BeliefItem,
   type EvidencePayload,
 } from '@/api/beliefs'
+import { getStoredToken } from '@/api/client'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -68,26 +76,27 @@ export function BeliefsPage() {
   const [total, setTotal] = useState(0)
   const [pendingCount, setPendingCount] = useState(0)
   
-  // 筛选检索
+  // 筛选检索与单页大小
   const [search, setSearch] = useState('')
   const [type, setType] = useState('')
   const [status, setStatus] = useState('')
   const [botId, setBotId] = useState('')
   const [page, setPage] = useState(1)
-  const size = 15
+  const [size, setSize] = useState(15) // 单页行数
 
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
 
-  // 多选勾选管理
+  // 多选勾选与跨页全选全部匹配
   const [selectedIds, setSelectedIds] = useState<number[]>([])
+  const [selectAllMatching, setSelectAllMatching] = useState(false)
 
   // 证据追溯 Dialog 弹窗
   const [evidenceOpen, setEvidenceOpen] = useState(false)
   const [evidenceId, setEvidenceId] = useState<number | null>(null)
   const [evidenceData, setEvidenceData] = useState<EvidencePayload | null>(null)
-  const [evidenceBefore, setEvidenceBefore] = useState(5)
-  const [evidenceAfter, setEvidenceAfter] = useState(5)
+  const [evidenceBefore, setEvidenceBefore] = useState(15) // 上下文数默认拓宽
+  const [evidenceAfter, setEvidenceAfter] = useState(15)
   const [evidenceLoading, setEvidenceLoading] = useState(false)
 
   // 新增/编辑信念弹窗
@@ -96,7 +105,7 @@ export function BeliefsPage() {
     content: '',
     type: 'self',
     status: 'pending',
-    bot_id: 'yushu',
+    bot_id: 'bot',
     confidence: 1.0,
   })
   const [isEditNew, setIsEditNew] = useState(true)
@@ -117,6 +126,7 @@ export function BeliefsPage() {
       setPendingCount(res.pending_count ?? 0)
       setPage(nextPage)
       setSelectedIds([])
+      setSelectAllMatching(false)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '信念数据加载失败')
       setBeliefs([])
@@ -127,7 +137,7 @@ export function BeliefsPage() {
 
   useEffect(() => {
     void loadData(1)
-  }, [type, status, botId])
+  }, [type, status, botId, size])
 
   // 执行搜索
   function handleSearchSubmit(e?: React.FormEvent) {
@@ -146,6 +156,7 @@ export function BeliefsPage() {
 
   // 全选/反选当页
   function handleToggleSelectAll(checked: boolean) {
+    setSelectAllMatching(false)
     if (checked) {
       setSelectedIds(beliefs.map((b) => b.id))
     } else {
@@ -154,6 +165,7 @@ export function BeliefsPage() {
   }
 
   function handleRowCheckChange(id: number, checked: boolean) {
+    setSelectAllMatching(false)
     if (checked) {
       setSelectedIds((prev) => [...prev, id])
     } else {
@@ -161,11 +173,18 @@ export function BeliefsPage() {
     }
   }
 
+  // 跨页全选全部匹配
+  function handleSelectAllMatching() {
+    setSelectAllMatching(true)
+    setSelectedIds(beliefs.map((b) => b.id))
+    toast.info(`已选中全部符合检索条件的 ${total} 条心智信念（跨页全选已激活）`)
+  }
+
   // 1. 通过审核
   async function handleApproveSingle(id: number) {
     try {
       await approveBelief(id)
-      toast.success(`信念 #${id} 已通过审核，正式生效并投入长期记忆召回`)
+      toast.success(`信念 #${id} 已确认通过，正式生效投入长期回忆`)
       await loadData(page)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '审核失败')
@@ -195,14 +214,34 @@ export function BeliefsPage() {
     }
   }
 
-  // 4. 批量通过
+  // 4. 批量通过 (支持跨页全选匹配)
   async function handleBatchApprove() {
     const count = selectedIds.length
     if (!count) return
     setLoading(true)
     try {
-      await batchApproveBeliefs(selectedIds)
-      toast.success(`成功批量审核通过 ${count} 条信念`)
+      if (selectAllMatching) {
+        const token = getStoredToken()
+        const headers: HeadersInit = token 
+          ? { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } 
+          : { 'Content-Type': 'application/json' }
+        const res = await fetch('/api/beliefs/batch-approve', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            all_matching: true,
+            type: type === 'all' ? '' : type,
+            status: status === 'all' ? '' : status,
+            bot_id: botId === 'all' ? '' : botId,
+            search,
+          })
+        })
+        const data = await res.json() as any
+        toast.success(`一键批量审核通过了全部 ${data.approved_count ?? 0} 条心智信念`)
+      } else {
+        await batchApproveBeliefs(selectedIds)
+        toast.success(`成功批量审核通过 ${count} 条信念`)
+      }
       await loadData(page)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '操作失败')
@@ -210,14 +249,34 @@ export function BeliefsPage() {
     }
   }
 
-  // 5. 批量归档
+  // 5. 批量归档 (支持跨页全选匹配)
   async function handleBatchArchive() {
     const count = selectedIds.length
     if (!count) return
     setLoading(true)
     try {
-      await batchArchiveSelectedBeliefs(selectedIds)
-      toast.success(`成功批量归档了 ${count} 条信念`)
+      if (selectAllMatching) {
+        const token = getStoredToken()
+        const headers: HeadersInit = token 
+          ? { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } 
+          : { 'Content-Type': 'application/json' }
+        const res = await fetch('/api/beliefs/batch-archive-selected', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            all_matching: true,
+            type: type === 'all' ? '' : type,
+            status: status === 'all' ? '' : status,
+            bot_id: botId === 'all' ? '' : botId,
+            search,
+          })
+        })
+        const data = await res.json() as any
+        toast.success(`一键批量归档了全部 ${data.archived_count ?? 0} 条匹配信念`)
+      } else {
+        await batchArchiveSelectedBeliefs(selectedIds)
+        toast.success(`成功批量归档了 ${count} 条信念`)
+      }
       await loadData(page)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '操作失败')
@@ -225,15 +284,35 @@ export function BeliefsPage() {
     }
   }
 
-  // 6. 批量删除
+  // 6. 批量删除 (支持跨页全选匹配)
   async function handleBatchDelete() {
     const count = selectedIds.length
     if (!count) return
     if (!confirm(`确定要批量删除选中的这 ${count} 条信念吗？`)) return
     setLoading(true)
     try {
-      await batchDeleteBeliefs(selectedIds)
-      toast.success(`成功批量删除了 ${count} 条信念`)
+      if (selectAllMatching) {
+        const token = getStoredToken()
+        const headers: HeadersInit = token 
+          ? { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } 
+          : { 'Content-Type': 'application/json' }
+        const res = await fetch('/api/beliefs/batch-delete', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            all_matching: true,
+            type: type === 'all' ? '' : type,
+            status: status === 'all' ? '' : status,
+            bot_id: botId === 'all' ? '' : botId,
+            search,
+          })
+        })
+        const data = await res.json() as any
+        toast.success(`一键批量彻底删除了全部 ${data.deleted_count ?? 0} 条心智信念`)
+      } else {
+        await batchDeleteBeliefs(selectedIds)
+        toast.success(`成功批量删除了 ${count} 条信念`)
+      }
       await loadData(page)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '操作失败')
@@ -299,7 +378,7 @@ export function BeliefsPage() {
       content: '',
       type: 'self',
       status: 'pending',
-      bot_id: 'yushu',
+      bot_id: 'bot',
       confidence: 1.0,
     })
     setEditOpen(true)
@@ -318,15 +397,15 @@ export function BeliefsPage() {
     <div className="flex flex-col gap-6">
       {/* ─── 过滤器卡片 ─── */}
       <Card>
-        <CardHeader className="py-4 shrink-0">
+        <CardHeader className="py-4 shrink-0 border-b bg-muted/10">
           <CardTitle>信念审核管理</CardTitle>
           <CardDescription>
-            BDI 心智架构核心：人工审核、编辑 Bot 对客观世界、对自我及对特定群友的信念感知（Beliefs）。支持一键追溯和 QQ 聊天气泡对话还原。
+            统一审核、编辑 Bot 对客观世界、对自我及外部关系的心智信念（Beliefs）。支持一键追溯和 QQ 聊天气泡对话还原。
           </CardDescription>
         </CardHeader>
-        <CardContent className="pt-0">
+        <CardContent className="pt-6">
           <form className="flex flex-col gap-4" onSubmit={handleSearchSubmit}>
-            <FieldGroup className="grid gap-4 md:grid-cols-5">
+            <FieldGroup className="grid gap-4 md:grid-cols-4">
               <Field>
                 <FieldLabel htmlFor="belief-search">搜索词</FieldLabel>
                 <Input
@@ -374,26 +453,26 @@ export function BeliefsPage() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">全部 Bot</SelectItem>
-                    <SelectItem value="yushu">羽书 (yushu)</SelectItem>
-                    <SelectItem value="baizz">白真真 (baizz)</SelectItem>
+                    <SelectItem value="bot">主 Bot 人格 (bot)</SelectItem>
+                    <SelectItem value="assistant">备用 Bot 人格 (assistant)</SelectItem>
                   </SelectContent>
                 </Select>
               </Field>
             </FieldGroup>
 
             <div className="flex flex-wrap items-center gap-2">
-              <Button disabled={loading} type="submit">
-                <Search data-icon="inline-start" />
+              <Button disabled={loading} type="submit" size="sm">
+                <Search className="size-3.5 mr-1" />
                 搜索
               </Button>
-              <Button disabled={loading} variant="outline" type="button" onClick={handleResetFilters}>
-                <Undo2 data-icon="inline-start" />
+              <Button disabled={loading} variant="outline" size="sm" type="button" onClick={handleResetFilters}>
+                <Undo2 className="size-3.5 mr-1" />
                 重置
               </Button>
-              <Button disabled={loading} type="button" variant="outline" onClick={handleOpenCreate}>
+              <Button disabled={loading} type="button" size="sm" variant="outline" onClick={handleOpenCreate}>
                 ➕ 新增信念
               </Button>
-              <Button disabled={loading} type="button" variant="outline" className="border-amber-500/20 hover:bg-amber-500/5 text-amber-500" onClick={handleArchiveLegacy}>
+              <Button disabled={loading} type="button" size="sm" variant="outline" className="border-amber-500/20 hover:bg-amber-500/5 text-amber-500" onClick={handleArchiveLegacy}>
                 📦 一键归档旧遗产信念
               </Button>
               <div className="ml-auto text-xs text-muted-foreground font-mono">
@@ -408,17 +487,22 @@ export function BeliefsPage() {
       {selectedIds.length > 0 ? (
         <div className="flex flex-wrap items-center gap-3 rounded-lg border border-primary bg-primary/5 p-3.5 animate-in slide-in-from-top duration-200">
           <Badge variant="secondary" className="bg-primary/10 text-primary border-primary/20 hover:bg-primary/10">
-            已选当页 {selectedIds.length} 条信念记录
+            {selectAllMatching ? `已跨页全选了全部 ${total} 条信念` : `已选当页 ${selectedIds.length} 条信念`}
           </Badge>
           <Button size="sm" onClick={() => void handleBatchApprove()}>
-            ✓ 批量审核通过
+            ✓ 批量确认通过
           </Button>
           <Button variant="outline" size="sm" className="border-primary/20 hover:bg-primary/5" onClick={() => void handleBatchArchive()}>
             批量归档
           </Button>
           <Button variant="destructive" size="sm" onClick={() => void handleBatchDelete()}>
-            🗑 批量删除
+            🗑 批量物理删除
           </Button>
+          {!selectAllMatching && total > size ? (
+            <Button size="xs" variant="ghost" className="text-primary hover:bg-primary/10" onClick={handleSelectAllMatching}>
+              🌌 跨页全选全部 {total} 条信念匹配
+            </Button>
+          ) : null}
           <Button variant="ghost" size="sm" className="ml-auto" onClick={() => setSelectedIds([])}>
             取消选择
           </Button>
@@ -448,14 +532,14 @@ export function BeliefsPage() {
                       />
                     </TableHead>
                     <TableHead className="w-16">ID</TableHead>
-                    <TableHead className="w-24">状态</TableHead>
-                    <TableHead className="w-24">类型</TableHead>
+                    <TableHead className="w-24 text-center">状态</TableHead>
+                    <TableHead className="w-24 text-center">类型</TableHead>
                     <TableHead>信念内容</TableHead>
-                    <TableHead className="w-28">Bot 对象</TableHead>
+                    <TableHead className="w-28 text-center">Bot 归属</TableHead>
                     <TableHead className="w-24 text-center">置信度</TableHead>
-                    <TableHead className="w-20 text-center">证据链</TableHead>
+                    <TableHead className="w-24 text-center">关联证据链</TableHead>
                     <TableHead className="w-32">更新时间</TableHead>
-                    <TableHead className="w-40 text-right">操作</TableHead>
+                    <TableHead className="w-40 text-right pr-4">操作</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -467,54 +551,55 @@ export function BeliefsPage() {
                         <TableCell>
                           <input
                             type="checkbox"
-                            checked={isRowChecked}
+                            checked={isRowChecked || selectAllMatching}
                             onChange={(e) => handleRowCheckChange(b.id, e.target.checked)}
                           />
                         </TableCell>
                         <TableCell className="font-mono text-xs text-muted-foreground">#{b.id}</TableCell>
-                        <TableCell>
+                        <TableCell className="text-center">
                           <Badge className={beliefStatusBadge(b.status)} variant="outline">
                             {b.status === 'pending' ? '待审核' : b.status === 'active' ? '已生效' : b.status === 'archived' ? '已归档' : '旧遗产'}
                           </Badge>
                         </TableCell>
-                        <TableCell>
+                        <TableCell className="text-center">
                           <Badge className={beliefTypeBadge(b.type)} variant="outline">
                             {b.type === 'self' ? '自我' : b.type === 'world' ? '世界' : b.type === 'value' ? '价值' : '外部'}
                           </Badge>
                         </TableCell>
                         <TableCell className="font-medium max-w-sm truncate" title={b.content}>{b.content}</TableCell>
-                        <TableCell className="font-mono text-xs text-muted-foreground">{b.bot_id || '—'}</TableCell>
-                        <TableCell className="text-center font-mono text-xs text-primary">
+                        <TableCell className="font-mono text-xs text-muted-foreground text-center">{b.bot_id || '—'}</TableCell>
+                        <TableCell className="text-center font-mono text-xs text-primary font-bold">
                           {b.confidence != null ? `${Math.round(b.confidence * 100)}%` : '—'}
                         </TableCell>
                         <TableCell className="text-center">
-                          <Button variant="ghost" className="h-7 text-xs px-2" onClick={() => void handleOpenEvidence(b.id)} disabled={countEvidence === 0}>
-                            {countEvidence > 0 ? `证据 (${countEvidence})` : '无证据'}
+                          <Button variant="ghost" className="h-7 text-xs px-2 flex items-center gap-1 mx-auto" onClick={() => void handleOpenEvidence(b.id)} disabled={countEvidence === 0}>
+                            <EyeIcon className="size-3" />
+                            {countEvidence > 0 ? `证据 (${countEvidence})` : '无'}
                           </Button>
                         </TableCell>
                         <TableCell className="text-muted-foreground font-mono text-xs whitespace-nowrap">
                           {formatTime(b.timestamp ?? b.last_reinforced)}
                         </TableCell>
-                            <TableCell className="text-right">
-                              <div className="flex justify-end gap-1.5">
-                                {b.status === 'pending' ? (
-                                  <Button size="xs" variant="secondary" className="bg-emerald-500/10 text-emerald-500 border border-emerald-500/10 hover:bg-emerald-500/20" onClick={() => void handleApproveSingle(b.id)}>
-                                    确认通过
-                                  </Button>
-                                ) : null}
-                                <Button variant="ghost" className="size-7 p-0" onClick={() => handleOpenEdit(b)} title="编辑">
-                                  <FileEdit className="size-3.5" />
-                                </Button>
-                                {b.status !== 'archived' ? (
-                                  <Button variant="ghost" className="size-7 p-0" onClick={() => void handleArchiveSingle(b.id)} title="归档">
-                                    <Undo2 className="size-3.5" />
-                                  </Button>
-                                ) : null}
-                                <Button variant="ghost" className="size-7 p-0 text-destructive hover:text-destructive hover:bg-destructive/10" onClick={() => void handleDeleteSingle(b.id)} title="物理删除">
-                                  <Trash2 className="size-3.5" />
-                                </Button>
-                              </div>
-                            </TableCell>
+                        <TableCell className="text-right pr-4">
+                          <div className="flex justify-end gap-1.5">
+                            {b.status === 'pending' ? (
+                              <Button size="xs" variant="secondary" className="bg-emerald-500/10 text-emerald-500 border border-emerald-500/10 hover:bg-emerald-500/20" onClick={() => void handleApproveSingle(b.id)}>
+                                确认
+                              </Button>
+                            ) : null}
+                            {b.status !== 'archived' ? (
+                              <Button size="xs" variant="outline" className="border-amber-500/20 text-amber-500 hover:bg-amber-500/10" onClick={() => void handleArchiveSingle(b.id)}>
+                                归档
+                              </Button>
+                            ) : null}
+                            <Button variant="ghost" className="size-7 p-0" onClick={() => handleOpenEdit(b)} title="编辑">
+                              <FileEdit className="size-3.5" />
+                            </Button>
+                            <Button variant="ghost" className="size-7 p-0 text-destructive hover:text-destructive hover:bg-destructive/10" onClick={() => void handleDeleteSingle(b.id)} title="物理删除">
+                              <Trash2 className="size-3.5" />
+                            </Button>
+                          </div>
+                        </TableCell>
                       </TableRow>
                     )
                   })}
@@ -525,16 +610,32 @@ export function BeliefsPage() {
 
           {/* ─── 分页器 ─── */}
           {beliefs.length > 0 ? (
-            <div className="mt-4 flex items-center justify-center gap-4">
-              <Button disabled={loading || page <= 1} variant="outline" size="sm" onClick={() => void loadData(page - 1)}>
-                上一页
-              </Button>
-              <span className="font-mono text-xs text-muted-foreground">
-                第 {page} / {totalPages} 页
-              </span>
-              <Button disabled={loading || page >= totalPages} variant="outline" size="sm" onClick={() => void loadData(page + 1)}>
-                下一页
-              </Button>
+            <div className="mt-4 flex items-center justify-between gap-4 border-t pt-3">
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <span>每页显示</span>
+                <Select value={String(size)} onValueChange={(val) => setSize(Number(val))}>
+                  <SelectTrigger className="w-18 h-7 text-xs py-0.5">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="15">15 行</SelectItem>
+                    <SelectItem value="30">30 行</SelectItem>
+                    <SelectItem value="50">50 行</SelectItem>
+                    <SelectItem value="100">100 行</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex items-center gap-4">
+                <Button disabled={loading || page <= 1} variant="outline" size="sm" onClick={() => void loadData(page - 1)}>
+                  上一页
+                </Button>
+                <span className="font-mono text-xs text-muted-foreground">
+                  第 {page} / {totalPages} 页
+                </span>
+                <Button disabled={loading || page >= totalPages} variant="outline" size="sm" onClick={() => void loadData(page + 1)}>
+                  下一页
+                </Button>
+              </div>
             </div>
           ) : null}
         </CardContent>
@@ -587,7 +688,7 @@ export function BeliefsPage() {
                   ) : (
                     evidenceData.messages.map((msg, index) => {
                       const isAnchor = msg.role === 'anchor'
-                      const isBot = msg.sender_id === '2500447291' || msg.sender_id === '1336495069' || String(msg.sender_name).includes('羽书') || String(msg.sender_name).includes('白真真')
+                      const isBot = msg.sender_id === '2500447291' || msg.sender_id === '1336495069' || String(msg.sender_name).includes('AI') || String(msg.sender_name).includes('Bot')
                       
                       return (
                         <div key={`${msg.id}-${index}`} className={`flex flex-col max-w-[85%] ${isBot ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
@@ -619,88 +720,73 @@ export function BeliefsPage() {
         </DialogContent>
       </Dialog>
 
-      {/* ─── 弹出弹窗 B：新建/编辑信念表单 ─── */}
+      {/* 新增/编辑信念弹窗 */}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>{isEditNew ? '新建自定义信念' : `编辑信念 #${editForm.id}`}</DialogTitle>
-            <DialogDescription>
-              直接人工注入世界观、价值观或关系倾向信念。注：手动新增信念置信度默认 100%。
-            </DialogDescription>
+            <DialogTitle>{isEditNew ? '新建心智信念' : `编辑信念 #${editForm.id}`}</DialogTitle>
           </DialogHeader>
 
           <form className="flex flex-col gap-4 py-4" onSubmit={(e) => { e.preventDefault(); void handleSaveEdit(); }}>
             <FieldGroup className="grid gap-4">
               <Field>
+                <FieldLabel>信念内容</FieldLabel>
+                <Textarea
+                  rows={3}
+                  value={editForm.content || ''}
+                  onChange={(e) => setEditForm({ ...editForm, content: e.target.value })}
+                  placeholder="如：用户是非常值得信任和守护的群友..."
+                />
+              </Field>
+
+              <Field>
                 <FieldLabel>信念类型</FieldLabel>
-                <Select value={editForm.type || 'self'} onValueChange={(val) => setEditForm({ ...editForm, type: val as never })}>
+                <Select value={editForm.type || 'self'} onValueChange={(val: any) => setEditForm({ ...editForm, type: val })}>
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="self">self（自我认知）</SelectItem>
-                    <SelectItem value="other">other（外部关系）</SelectItem>
-                    <SelectItem value="world">world（世界观）</SelectItem>
-                    <SelectItem value="value">value（价值观）</SelectItem>
+                    <SelectItem value="self">self (自我认知)</SelectItem>
+                    <SelectItem value="other">other (外部关系)</SelectItem>
+                    <SelectItem value="world">world (世界观)</SelectItem>
+                    <SelectItem value="value">value (价值观)</SelectItem>
                   </SelectContent>
                 </Select>
               </Field>
 
               <Field>
-                <FieldLabel>信念状态</FieldLabel>
-                <Select value={editForm.status || 'pending'} onValueChange={(val) => setEditForm({ ...editForm, status: val as never })}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="pending">待审核 (pending)</SelectItem>
-                    <SelectItem value="active">已生效 (active)</SelectItem>
-                    <SelectItem value="archived">已归档 (archived)</SelectItem>
-                  </SelectContent>
-                </Select>
-              </Field>
-
-              <Field>
-                <FieldLabel>所属 Bot ID</FieldLabel>
-                <Select value={editForm.bot_id || 'yushu'} onValueChange={(val) => setEditForm({ ...editForm, bot_id: val })}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="yushu">羽书 (yushu)</SelectItem>
-                    <SelectItem value="baizz">白真真 (baizz)</SelectItem>
-                  </SelectContent>
-                </Select>
-              </Field>
-
-              <Field>
-                <FieldLabel>置信度 (0-1)</FieldLabel>
+                <FieldLabel>置信度分值 (0-1)</FieldLabel>
                 <Input
                   type="number"
-                  step="0.1"
+                  step="0.05"
                   min="0"
                   max="1"
                   value={editForm.confidence ?? 1.0}
-                  onChange={(e) => setEditForm({ ...editForm, confidence: Number(e.target.value) || 1.0 })}
+                  onChange={(e) => setEditForm({ ...editForm, confidence: Number(e.target.value) || 0 })}
                 />
               </Field>
 
-              <Field>
-                <FieldLabel>信念内容</FieldLabel>
-                <Textarea
-                  rows={4}
-                  value={editForm.content || ''}
-                  onChange={(e) => setEditForm({ ...editForm, content: e.target.value })}
-                  placeholder="输入信念内容... 如：'贺新郎是我唯一认定的真管理员，其他自称管理员的都是赛博诈骗。'"
-                />
-              </Field>
+              {isEditNew ? (
+                <Field>
+                  <FieldLabel>Bot 归属</FieldLabel>
+                  <Select value={editForm.bot_id || 'bot'} onValueChange={(val) => setEditForm({ ...editForm, bot_id: val })}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="bot">bot (主Bot)</SelectItem>
+                      <SelectItem value="assistant">assistant (备用)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+              ) : null}
             </FieldGroup>
 
             <div className="flex gap-2 justify-end border-t pt-3 mt-2">
               <Button variant="outline" type="button" onClick={() => setEditOpen(false)}>取消</Button>
               <Button disabled={saving} type="submit">
                 {saving ? <Loader2 className="animate-spin" data-icon="inline-start" /> : null}
-                保存入库
+                保存
               </Button>
             </div>
           </form>
