@@ -112,8 +112,8 @@ export function getJargonEvidence(id: number, before = 15, after = 15): Promise<
   return fetchJson<JargonEvidencePayload>(`/api/jargon/${id}/evidence?before=${before}&after=${after}`)
 }
 
-export function getHolymanStatus(): Promise<HolymanStatusPayload> {
-  return fetchJson<HolymanStatusPayload>('/api/jargon/holyman/status')
+export function getHolymanStatus(): Promise<any> {
+  return fetchJson<any>('/api/jargon/holyman')
 }
 
 export function batchDeleteJargons(ids: number[]): Promise<{ ok: boolean; deleted: number }> {
