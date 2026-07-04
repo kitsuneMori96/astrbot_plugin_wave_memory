@@ -19,7 +19,7 @@ pages_bp = Blueprint("pages", __name__)
 
 _STATIC_DIR = Path(__file__).parent.parent / "static"
 _HTML_HEADERS = {"Content-Type": "text/html"}
-_APP_MISSING = "<h1>Wave Memory WebUI</h1><p>React WebUI build not found</p>"
+_INDEX_MISSING = "<h1>Wave Memory WebUI</h1><p>static/index.html not found</p>"
 
 
 def _html_response(path: Path, fallback: str) -> tuple[str, int, dict[str, str]]:
@@ -28,9 +28,21 @@ def _html_response(path: Path, fallback: str) -> tuple[str, int, dict[str, str]]
     return fallback, 200, _HTML_HEADERS
 
 
+def _legacy_index_body() -> str:
+    legacy_path = _STATIC_DIR / "index.html"
+    if legacy_path.exists():
+        return legacy_path.read_text(encoding="utf-8")
+    return _INDEX_MISSING
+
+
 @pages_bp.route("/")
 async def index():
-    return _html_response(_STATIC_DIR / "app" / "index.html", _APP_MISSING)
+    return _html_response(_STATIC_DIR / "app" / "index.html", _legacy_index_body())
+
+
+@pages_bp.route("/legacy")
+async def legacy():
+    return _html_response(_STATIC_DIR / "index.html", _INDEX_MISSING)
 
 
 @pages_bp.route("/explore")
