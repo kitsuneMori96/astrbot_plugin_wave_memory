@@ -59,6 +59,9 @@ export interface HolymanStatusPayload {
   corpus_count: number
   candidates_count: number
   phrases?: any[] // 新增用于 TAB 下列出广域语料
+  concepts?: any[] // 新增分层
+  examples?: any[]
+  candidates?: any[]
 }
 
 export function listJargons(filters: JargonsFilters): Promise<JargonsResponse> {

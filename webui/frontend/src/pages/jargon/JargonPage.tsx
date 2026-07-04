@@ -26,10 +26,9 @@ import {
   toggleJargonGlobal,
   updateJargon,
   type JargonItem,
-  type HolymanStatusPayload,
 } from '@/api/jargon'
 import { runPostStream, type StreamProgress } from '@/api/memories'
-import { getStoredToken } from '@/api/client'
+import { getStoredToken, fetchJson } from '@/api/client'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -92,12 +91,15 @@ export function JargonPage() {
   })
   const [isEditNew, setIsEditNew] = useState(true)
 
-  // 2. 广域 Holyman 同步与列表展示
-  const [holyman, setHolyman] = useState<HolymanStatusPayload | null>(null)
+  // 2. 广域 Holyman 同步与列表分层展示（词条、概念人设、例句、待审、Blocked）
+  const [holyman, setHolyman] = useState<any | null>(null)
   const [holymanLoading, setHolymanLoading] = useState(false)
   const [streamOpen, setStreamOpen] = useState(false)
   const [streamProgress, setStreamProgress] = useState<StreamProgress | null>(null)
   const [streamLog, setStreamLog] = useState<string[]>([])
+  
+  // 广域 Mini子选项卡
+  const [globalSubTab, setGlobalSubTab] = useState<'catchphrases' | 'persona' | 'examples' | 'candidates' | 'blocked'>('catchphrases')
 
   // 全选控制（当页全选与跨页全选联动）
   function handleToggleSelectAll(checked: boolean) {
@@ -386,6 +388,59 @@ export function JargonPage() {
     })
   }
 
+  // 广域语料一键激活/去激活切换
+  async function handleToggleHolymanActivation(word: string, meaning: string, currentActivated: boolean) {
+    try {
+      const res = await fetchJson<any>('/api/jargon/holyman/toggle', {
+        method: 'POST',
+        body: JSON.stringify({ word, meaning, activate: !currentActivated }),
+      })
+      if (res.ok) {
+        toast.success(!currentActivated ? `已成功将口癖 「${word}」 激活载入本地理解库` : `已取消该口癖的本地映射`)
+        void loadHolyman()
+      } else {
+        throw new Error(res.error || '激活失败')
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '操作失败')
+    }
+  }
+
+  // 广域待审候选词/抓取候选审核通过或否决
+  async function handleReviewCandidateSingle(id: number, action: 'approve' | 'reject') {
+    try {
+      const res = await fetchJson<any>(`/api/jargon/holyman/candidates/${id}/${action}`, {
+        method: 'POST',
+      })
+      if (res.ok) {
+        toast.success(action === 'approve' ? '已通过候选加入黑话库' : '已拒绝该候选词条')
+        void loadHolyman()
+      } else {
+        throw new Error(res.error || '审核失败')
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '操作失败')
+    }
+  }
+
+  // 广域屏蔽词手动封禁
+  async function handleAddBlocklist(word: string) {
+    const val = word.trim()
+    if (!val) return
+    try {
+      const res = await fetchJson<any>('/api/jargon/holyman/blocklist', {
+        method: 'POST',
+        body: JSON.stringify({ word: val, reason: 'manual_block' }),
+      })
+      if (res.ok) {
+        toast.success(`已成功将 「${val}」 手动列入黑话过滤屏蔽名单`)
+        void loadHolyman()
+      }
+    } catch (e) {
+      toast.error('添加失败')
+    }
+  }
+
   const isAllSelected = jargons.length > 0 && selectedIds.length === jargons.length
   const totalPages = Math.ceil(total / size) || 1
 
@@ -628,7 +683,7 @@ export function JargonPage() {
               {holymanLoading ? (
                 <div className="py-12 flex justify-center"><Loader2Icon className="animate-spin text-primary size-6" /></div>
               ) : holyman ? (
-                <div className="flex flex-col gap-6">
+                <div className="flex flex-col gap-6 animate-in fade-in duration-200">
                   {holyman.update_available ? (
                     <Alert className="bg-amber-500/10 border-amber-500/20 text-amber-500">
                       <AlertCircleIcon />
@@ -649,49 +704,209 @@ export function JargonPage() {
 
                   <div className="grid gap-4 sm:grid-cols-4">
                     <Card className="bg-muted/10 border-border/50"><CardHeader className="py-3"><CardDescription className="text-xs">精选口癖 (quotes)</CardDescription><CardTitle className="text-xl font-mono text-primary">{holyman.items_count} 条</CardTitle></CardHeader></Card>
-                    <Card className="bg-muted/10 border-border/50"><CardHeader className="py-3"><CardDescription className="text-xs">人格设定 (concepts)</CardDescription><CardTitle className="text-xl font-mono text-primary">{holyman.concepts_count} 组</CardTitle></CardHeader></Card>
-                    <Card className="bg-muted/10 border-border/50"><CardHeader className="py-3"><CardDescription className="text-xs">语录例句 (examples)</CardDescription><CardTitle className="text-xl font-mono text-primary">{holyman.examples_count} 句</CardTitle></CardHeader></Card>
+                    <Card className="bg-muted/10 border-border/50"><CardHeader className="py-3"><CardDescription className="text-xs">人设定位 (concepts)</CardDescription><CardTitle className="text-xl font-mono text-primary">{holyman.concepts_count} 组</CardTitle></CardHeader></Card>
+                    <Card className="bg-muted/10 border-border/50"><CardHeader className="py-3"><CardDescription className="text-xs">经典例句 (examples)</CardDescription><CardTitle className="text-xl font-mono text-primary">{holyman.examples_count} 句</CardTitle></CardHeader></Card>
                     <Card className="bg-muted/10 border-border/50"><CardHeader className="py-3"><CardDescription className="text-xs">分层语料 (corpus)</CardDescription><CardTitle className="text-xl font-mono text-primary">{holyman.corpus_count} 段</CardTitle></CardHeader></Card>
                   </div>
 
-                  {/* 广域黑话口癖列表展示 */}
-                  <div className="mt-2">
-                    <h4 className="text-sm font-semibold text-foreground mb-3 flex items-center gap-1.5">
-                      <LayersIcon className="size-4 text-primary" />
-                      已加载的广域口癖参考列表
-                    </h4>
-                    <div className="overflow-auto rounded-lg border max-h-96">
-                      <Table>
-                        <TableHeader>
-                          <TableRow>
-                            <TableHead className="w-36">词条</TableHead>
-                            <TableHead>释义 / 心智映射</TableHead>
-                            <TableHead className="w-24 text-center">分类</TableHead>
-                            <TableHead className="w-24 text-center">动作状态</TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {(holyman.phrases ?? []).slice(0, 150).map((item: any, idx: number) => (
-                            <TableRow key={idx}>
-                              <TableCell className="font-semibold text-xs text-foreground font-mono">{item.word}</TableCell>
-                              <TableCell className="text-xs text-muted-foreground">{item.meaning || '—'}</TableCell>
-                              <TableCell className="text-center">
-                                <Badge variant="secondary" className="text-[9px] whitespace-nowrap">{item.category_label || item.category}</Badge>
-                              </TableCell>
-                              <TableCell className="text-center">
-                                <Badge variant={item.is_activated ? 'default' : 'outline'} className="text-[9px] bg-primary/10 text-primary border-primary/20">
-                                  {item.is_activated ? '已激活' : '内置理解'}
-                                </Badge>
-                              </TableCell>
+                  {/* 广域分层 Sub-Tabs 子分类过滤器 */}
+                  <Tabs value={globalSubTab} onValueChange={(val: any) => setGlobalSubTab(val)} className="border rounded-xl p-4 bg-muted/5 mt-2">
+                    <div className="flex flex-wrap items-center justify-between border-b pb-3 mb-4 gap-3">
+                      <div className="flex items-center gap-1.5">
+                        <LayersIcon className="size-4 text-primary" />
+                        <span className="text-sm font-semibold text-foreground">分层语料透视配置</span>
+                      </div>
+                      <TabsList className="grid grid-cols-5 h-8 w-full max-w-lg">
+                        <TabsTrigger value="catchphrases" className="text-xs">精选词条</TabsTrigger>
+                        <TabsTrigger value="persona" className="text-xs">人设设定</TabsTrigger>
+                        <TabsTrigger value="examples" className="text-xs">经典例句</TabsTrigger>
+                        <TabsTrigger value="candidates" className="text-xs">待审候选</TabsTrigger>
+                        <TabsTrigger value="blocked" className="text-xs">已禁黑名单</TabsTrigger>
+                      </TabsList>
+                    </div>
+
+                    {/* Sub-Tab 1: 精选口癖词条 */}
+                    <TabsContent value="catchphrases" className="mt-0">
+                      <div className="overflow-auto rounded-lg border max-h-[340px]">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead className="w-36">词条/口癖</TableHead>
+                              <TableHead>心智映射含义 (Meaning)</TableHead>
+                              <TableHead className="w-28 text-center">二级分类</TableHead>
+                              <TableHead className="w-32 text-right pr-4">物理激活操作</TableHead>
                             </TableRow>
-                          ))}
-                        </TableBody>
-                      </Table>
-                    </div>
-                    <div className="text-[10px] text-muted-foreground mt-2 text-right">
-                      * 仅展示前 150 条内置语料。所有语料均已写入后台理解矩阵，在聊天时自然起效。
-                    </div>
-                  </div>
+                          </TableHeader>
+                          <TableBody>
+                            {(holyman.phrases ?? []).map((item: any, idx: number) => (
+                              <TableRow key={idx}>
+                                <TableCell className="font-semibold text-xs text-foreground font-mono">{item.word}</TableCell>
+                                <TableCell className="text-xs text-muted-foreground leading-relaxed">{item.meaning || '—'}</TableCell>
+                                <TableCell className="text-center">
+                                  <Badge variant="secondary" className="text-[9px] font-mono">{item.category_label || item.category}</Badge>
+                                </TableCell>
+                                <TableCell className="text-right pr-4">
+                                  <Button
+                                    size="xs"
+                                    variant={item.is_activated ? 'destructive' : 'secondary'}
+                                    className="h-6 text-[10px]"
+                                    onClick={() => void handleToggleHolymanActivation(item.word, item.meaning, item.is_activated)}
+                                  >
+                                    {item.is_activated ? '✕ 取消激活' : '✓ 激活生效'}
+                                  </Button>
+                                </TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </TabsContent>
+
+                    {/* Sub-Tab 2: 人设设定 / Concepts */}
+                    <TabsContent value="persona" className="mt-0">
+                      <div className="overflow-auto rounded-lg border max-h-[340px]">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead className="w-32">设定键 (Key)</TableHead>
+                              <TableHead>人格设定内容与边界契约</TableHead>
+                              <TableHead className="w-24 text-center">分类</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {(holyman.concepts ?? []).length === 0 ? (
+                              <TableRow><TableCell colSpan={3} className="text-center text-xs text-muted-foreground p-6">暂无核心人设设定数据。</TableCell></TableRow>
+                            ) : (
+                              (holyman.concepts ?? []).map((item: any, idx: number) => (
+                                <TableRow key={idx}>
+                                  <TableCell className="font-semibold text-xs text-primary font-mono">{item.key || item.word || 'core'}</TableCell>
+                                  <TableCell className="text-xs text-muted-foreground leading-relaxed">{item.content || item.meaning || '—'}</TableCell>
+                                  <TableCell className="text-center">
+                                    <Badge variant="outline" className="text-[9px]">{item.category_label || '核心人设'}</Badge>
+                                  </TableCell>
+                                </TableRow>
+                              ))
+                            )}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </TabsContent>
+
+                    {/* Sub-Tab 3: 经典例句 / Examples */}
+                    <TabsContent value="examples" className="mt-0">
+                      <div className="overflow-auto rounded-lg border max-h-[340px]">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead className="w-12 text-center">编号</TableHead>
+                              <TableHead>经典对话/语录例句 (Examples)</TableHead>
+                              <TableHead className="w-28 text-center">关联口癖</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {(holyman.examples ?? []).length === 0 ? (
+                              <TableRow><TableCell colSpan={3} className="text-center text-xs text-muted-foreground p-6">暂无内置语录例句数据。</TableCell></TableRow>
+                            ) : (
+                              (holyman.examples ?? []).map((item: any, idx: number) => (
+                                <TableRow key={idx}>
+                                  <TableCell className="text-center font-mono text-xs text-slate-500">#{idx + 1}</TableCell>
+                                  <TableCell className="text-xs text-muted-foreground leading-relaxed italic">“{item.text || String(item)}”</TableCell>
+                                  <TableCell className="text-center">
+                                    {item.linked_terms && item.linked_terms.length > 0 ? (
+                                      <div className="flex flex-wrap gap-0.5 justify-center">
+                                        {item.linked_terms.map((term: string, sIdx: number) => (
+                                          <Badge key={sIdx} variant="secondary" className="text-[8px] font-mono">{term}</Badge>
+                                        ))}
+                                      </div>
+                                    ) : <span className="text-[10px] text-slate-500">—</span>}
+                                  </TableCell>
+                                </TableRow>
+                              ))
+                            )}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </TabsContent>
+
+                    {/* Sub-Tab 4: 待审候选词 / Candidates */}
+                    <TabsContent value="candidates" className="mt-0">
+                      <div className="overflow-auto rounded-lg border max-h-[340px]">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead className="w-36">候选词条 (Word)</TableHead>
+                              <TableHead>触发自省频次</TableHead>
+                              <TableHead>捕获原因 (Reason)</TableHead>
+                              <TableHead className="w-24 text-center">审核状态</TableHead>
+                              <TableHead className="w-28 text-right pr-4">操作</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {(holyman.candidates ?? []).length === 0 ? (
+                              <TableRow><TableCell colSpan={5} className="text-center text-xs text-muted-foreground p-6">💡 暂无自省候选词。系统在群聊中探测到突发高频词时会自动推送至此进行待审。</TableCell></TableRow>
+                            ) : (
+                              (holyman.candidates ?? []).map((item: any, idx: number) => (
+                                <TableRow key={idx}>
+                                  <TableCell className="font-semibold text-xs text-foreground font-mono">{item.word}</TableCell>
+                                  <TableCell className="font-mono text-xs text-primary">{item.count || 1} 次</TableCell>
+                                  <TableCell className="text-xs text-muted-foreground truncate max-w-xs" title={item.reason}>{item.reason || '自动捕获'}</TableCell>
+                                  <TableCell className="text-center">
+                                    <Badge variant="outline" className="text-[9px] bg-amber-500/10 text-amber-500 border-amber-500/20">{item.status === 'pending' ? '待审核' : item.status}</Badge>
+                                  </TableCell>
+                                  <TableCell className="text-right pr-4">
+                                    <div className="flex justify-end gap-1.5">
+                                      <Button size="xs" variant="secondary" className="bg-emerald-500/10 text-emerald-500 border border-emerald-500/10 hover:bg-emerald-500/20" onClick={() => void handleReviewCandidateSingle(item.id, 'approve')}>通过</Button>
+                                      <Button size="xs" variant="outline" className="border-red-500/20 text-destructive hover:bg-destructive/10" onClick={() => void handleReviewCandidateSingle(item.id, 'reject')}>拒绝</Button>
+                                    </div>
+                                  </TableCell>
+                                </TableRow>
+                              ))
+                            )}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </TabsContent>
+
+                    {/* Sub-Tab 5: 已封禁黑名单 */}
+                    <TabsContent value="blocked" className="mt-0">
+                      <div className="space-y-4">
+                        <div className="flex items-center gap-2 max-w-md">
+                          <Input id="new-block-word" placeholder="手动添加要过滤拦截屏蔽的敏感黑话词..." className="h-9 text-xs" />
+                          <Button size="sm" onClick={() => {
+                            const input = document.getElementById('new-block-word') as HTMLInputElement;
+                            if (input && input.value) {
+                              void handleAddBlocklist(input.value);
+                              input.value = '';
+                            }
+                          }}>🚫 添加拦截</Button>
+                        </div>
+                        <div className="overflow-auto rounded-lg border max-h-[300px]">
+                          <Table>
+                            <TableHeader>
+                              <TableRow>
+                                <TableHead className="w-36">已被过滤屏蔽词条</TableHead>
+                                <TableHead>封禁理由 (Reason)</TableHead>
+                                <TableHead className="w-32">封禁源</TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {Object.keys(holyman.blocked ?? {}).length === 0 ? (
+                                <TableRow><TableCell colSpan={3} className="text-center text-xs text-muted-foreground p-6">黑名单干干净净，没有词条被屏蔽过滤。</TableCell></TableRow>
+                              ) : (
+                                Object.entries(holyman.blocked ?? {}).map(([word, reason]: any, idx: number) => (
+                                  <TableRow key={idx}>
+                                    <TableCell className="font-semibold text-xs text-destructive font-mono">{word}</TableCell>
+                                    <TableCell className="text-xs text-muted-foreground">{reason || '手动封禁'}</TableCell>
+                                    <TableCell className="text-xs text-slate-500 font-mono">holyman_blocklist</TableCell>
+                                  </TableRow>
+                                ))
+                              )}
+                            </TableBody>
+                          </Table>
+                        </div>
+                      </div>
+                    </TabsContent>
+                  </Tabs>
                 </div>
               ) : (
                 <div className="py-12 flex justify-center text-xs text-muted-foreground">无法获取广域语料资产库。</div>
