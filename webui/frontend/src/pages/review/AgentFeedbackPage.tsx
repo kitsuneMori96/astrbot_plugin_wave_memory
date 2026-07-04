@@ -10,9 +10,13 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 
-function recordId(record: Record<string, unknown>): number | null {
-  const value = Number(record.id ?? record.suggestion_id ?? record.candidate_id)
-  return Number.isFinite(value) ? value : null
+function recordId(record: Record<string, unknown>): string | number | null {
+  const value = record.id ?? record.suggestion_id ?? record.candidate_id
+  if (value === undefined || value === null) {
+    return null
+  }
+  // 兼容数字和 UUID 字符串
+  return typeof value === 'number' || typeof value === 'string' ? value : String(value)
 }
 
 function titleOf(record: Record<string, unknown>): string {
@@ -41,10 +45,13 @@ export function AgentFeedbackPage() {
     }
   }
 
-  async function act(kind: 'suggestion' | 'candidate', id: number, action: AgentAction) {
+  async function act(kind: 'suggestion' | 'candidate', id: string | number, action: AgentAction) {
     setBusy(true)
     try {
-      const result = kind === 'suggestion' ? await reviewConfigSuggestion(id, action) : await reviewCandidate(id, action)
+      // 显式转为 Number 给后端，如果是 UUID 等非数结构则转为 String
+      const numId = Number(id)
+      const finalId = Number.isFinite(numId) ? numId : id as number
+      const result = kind === 'suggestion' ? await reviewConfigSuggestion(finalId, action) : await reviewCandidate(finalId, action)
       if (!result.ok) {
         throw new Error(result.error ?? '操作失败')
       }
@@ -103,12 +110,28 @@ export function AgentFeedbackPage() {
           <CardTitle>反馈记录</CardTitle>
           <CardDescription>最近 trace/memory 反馈</CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="px-6 pb-6">
           {feedback.length === 0 ? <p className="text-sm text-muted-foreground">暂无反馈。</p> : (
             <div className="overflow-auto rounded-lg border">
               <Table>
-                <TableHeader><TableRow><TableHead>ID</TableHead><TableHead>Feedback</TableHead><TableHead>Trace</TableHead><TableHead>内容</TableHead></TableRow></TableHeader>
-                <TableBody>{feedback.slice(0, 20).map((item) => <TableRow key={String(item.id ?? JSON.stringify(item))}><TableCell>{String(item.id ?? '-')}</TableCell><TableCell><Badge variant="secondary">{String(item.feedback ?? '-')}</Badge></TableCell><TableCell>{String(item.trace_id ?? '-')}</TableCell><TableCell className="max-w-lg truncate">{titleOf(item)}</TableCell></TableRow>)}</TableBody>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="pl-4">ID</TableHead>
+                    <TableHead>Feedback</TableHead>
+                    <TableHead>Trace</TableHead>
+                    <TableHead className="pr-4">内容</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {feedback.slice(0, 20).map((item, index) => (
+                    <TableRow key={`feedback-row-${String(item.id ?? index)}-${index}`}>
+                      <TableCell className="pl-4 font-mono text-xs">{String(item.id ?? '-')}</TableCell>
+                      <TableCell><Badge variant="secondary">{String(item.feedback ?? '-')}</Badge></TableCell>
+                      <TableCell className="font-mono text-xs">{String(item.trace_id ?? '-')}</TableCell>
+                      <TableCell className="max-w-lg truncate pr-4">{titleOf(item)}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
               </Table>
             </div>
           )}
@@ -119,14 +142,24 @@ export function AgentFeedbackPage() {
         <Card>
           <CardHeader><CardTitle>配置建议</CardTitle><CardDescription>批准只记录状态，不自动改配置</CardDescription></CardHeader>
           <CardContent className="flex flex-col gap-3">
-            {suggestions.length === 0 ? <p className="text-sm text-muted-foreground">暂无待审配置建议。</p> : suggestions.map((item) => {
+            {suggestions.length === 0 ? <p className="text-sm text-muted-foreground">暂无待审配置建议。</p> : suggestions.map((item, index) => {
               const id = recordId(item)
               return (
-                <div key={String(item.id ?? JSON.stringify(item))} className="flex flex-col gap-3 rounded-lg border p-3">
+                <div key={`suggestion-card-${String(id ?? index)}-${index}`} className="flex flex-col gap-3 rounded-lg border p-3">
                   <div className="flex items-start justify-between gap-3"><span className="font-medium">{titleOf(item)}</span><Badge>{String(item.review_status ?? 'pending')}</Badge></div>
-                  <pre className="overflow-auto rounded-md bg-muted p-2 text-xs">{JSON.stringify(item, null, 2)}</pre>
+                  <pre className="overflow-auto rounded-md bg-muted p-2 text-xs font-mono">{JSON.stringify(item, null, 2)}</pre>
                   <div className="flex flex-wrap gap-2">
-                    {(['approve', 'reject', 'ignore'] as const).map((action) => <Button key={action} disabled={busy || id === null} size="sm" variant={action === 'approve' ? 'default' : 'outline'} onClick={() => id !== null && void act('suggestion', id, action)}>{action}</Button>)}
+                    {(['approve', 'reject', 'ignore'] as const).map((action) => (
+                      <Button
+                        key={action}
+                        disabled={busy || id === null}
+                        size="sm"
+                        variant={action === 'approve' ? 'default' : action === 'reject' ? 'destructive' : 'secondary'}
+                        onClick={() => id !== null && void act('suggestion', id, action)}
+                      >
+                        {action === 'approve' ? '批准 (approve)' : action === 'reject' ? '拒绝 (reject)' : '忽略 (ignore)'}
+                      </Button>
+                    ))}
                   </div>
                 </div>
               )
@@ -136,14 +169,24 @@ export function AgentFeedbackPage() {
         <Card>
           <CardHeader><CardTitle>审查候选</CardTitle><CardDescription>候选不会自动提升到高风险对象</CardDescription></CardHeader>
           <CardContent className="flex flex-col gap-3">
-            {candidates.length === 0 ? <p className="text-sm text-muted-foreground">暂无待审候选。</p> : candidates.map((item) => {
-              const id = Number(item.id)
+            {candidates.length === 0 ? <p className="text-sm text-muted-foreground">暂无待审候选。</p> : candidates.map((item, index) => {
+              const id = recordId(item)
               return (
-                <div key={String(item.id ?? item.content)} className="flex flex-col gap-3 rounded-lg border p-3">
+                <div key={`candidate-card-${String(id ?? index)}-${index}`} className="flex flex-col gap-3 rounded-lg border p-3">
                   <div className="flex items-start justify-between gap-3"><span className="font-medium">{String(item.candidate_type ?? item.object_key ?? 'candidate')}</span><Badge>{String(item.review_status ?? 'pending')}</Badge></div>
-                  <pre className="overflow-auto rounded-md bg-muted p-2 text-xs">{JSON.stringify(item, null, 2)}</pre>
+                  <pre className="overflow-auto rounded-md bg-muted p-2 text-xs font-mono">{JSON.stringify(item, null, 2)}</pre>
                   <div className="flex flex-wrap gap-2">
-                    {(['approve', 'reject', 'ignore'] as const).map((action) => <Button key={action} disabled={busy || !Number.isFinite(id)} size="sm" variant={action === 'approve' ? 'default' : 'outline'} onClick={() => Number.isFinite(id) && void act('candidate', id, action)}>{action}</Button>)}
+                    {(['approve', 'reject', 'ignore'] as const).map((action) => (
+                      <Button
+                        key={action}
+                        disabled={busy || id === null}
+                        size="sm"
+                        variant={action === 'approve' ? 'default' : action === 'reject' ? 'destructive' : 'secondary'}
+                        onClick={() => id !== null && void act('candidate', id, action)}
+                      >
+                        {action === 'approve' ? '批准 (approve)' : action === 'reject' ? '拒绝 (reject)' : '忽略 (ignore)'}
+                      </Button>
+                    ))}
                   </div>
                 </div>
               )

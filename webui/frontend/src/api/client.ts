@@ -76,7 +76,7 @@ function createApiError(response: Response, payload: unknown): ApiError {
 }
 
 export async function fetchJson<T>(path: string, init: ApiRequestInit = {}): Promise<T> {
-  const { noAuth, headers, body, ...fetchInit } = init
+  const { noAuth, headers, body, signal, ...fetchInit } = init
   const requestHeaders = new Headers(headers)
   const token = getStoredToken()
 
@@ -87,20 +87,39 @@ export async function fetchJson<T>(path: string, init: ApiRequestInit = {}): Pro
     requestHeaders.set('Authorization', `Bearer ${token}`)
   }
 
-  const response = await fetch(toApiPath(path), {
-    ...fetchInit,
-    body,
-    headers: requestHeaders,
-  })
-  const payload = await parseResponse(response)
+  // 15 秒超时控制器
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => {
+    controller.abort()
+  }, 15000)
 
-  if (!response.ok) {
-    if (response.status === 401) {
-      clearStoredToken()
-      authFailureHandler?.()
+  try {
+    const response = await fetch(toApiPath(path), {
+      ...fetchInit,
+      body,
+      headers: requestHeaders,
+      signal: signal || controller.signal,
+    })
+    const payload = await parseResponse(response)
+
+    if (!response.ok) {
+      if (response.status === 401) {
+        clearStoredToken()
+        authFailureHandler?.()
+        if (typeof window !== 'undefined') {
+          window.location.hash = '#/login'
+        }
+      }
+      throw createApiError(response, payload)
     }
-    throw createApiError(response, payload)
-  }
 
-  return payload as T
+    return payload as T
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('API 请求超时（15 秒上限），请检查网络或服务端响应健康。')
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId)
+  }
 }

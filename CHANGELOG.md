@@ -1,48 +1,33 @@
 # Changelog
 
+## v4.1.0 (2026-07-03)
+
+### 3D 神经云图星空版重塑与前端 Console 全量自愈
+
+- **3D 神经云图契约自愈**：打通了 V3.x 后端异构关系图谱层，兼容 `relationship` 到 `affinity`、`holyman` 到 `jargon`、`belief_emergence` 到 `belief` 的自愈映射。彻底解决了“信念/灵魂/黑话”图谱连线与筛选不工作的缺陷
+- **3D 物理与运动特效**：
+  - 粒子数据流（Data Flow Trails）：生成沿样条曲线连线流动发光的 3D 能量粒子流。
+  - 节点激活呼吸（Glow Waves）：实现选定或悬停节点高亮发光波纹。
+  - 视差星海（Nebula Parallax）：构建了双层自转星海微粒（1000 颗星），具有极强 3D Parallax 空间深度。
+  - 3D 弹簧力学布局（Spring-Force）：引入质点弹簧物理，提供拖拽回弹手感，社区自动引力聚成星系。
+  - 4K高分屏拾取：自适应 devicePixelRatio，消灭了高分屏或浏览器缩放时 Raycaster 点不准的隐患。
+  - WebGL 防崩销毁：重写 `disposeGraph` 对 Scene / Material / Texture 进行严苛显存销毁，杜绝 Context Lost 导致的浏览器黑屏崩溃。
+- **React Console 全量自愈**：
+  - 12 项潜在 Bug 自愈：包括数字表单类型强制Number转换、Recharts 图表 NaN 保护、15s 超时 AbortController、Token 过期 location hash 自动重定向登录、巨型 trace 50kb 截断保护、LoginPage 乐观刷新等。
+  - 11 项美学抛光：包括 Module 排行 `min-w-0` 挤压防护、KPI卡高度对齐、Traceback 等宽 mono 代码框、Approved / Destructive 按钮语义着色等。
+
 ## v4.0.0 (2026-07-03)
 
-### React WebUI 前端工程化迁移
+### 记忆基础设施、受控反馈与 React WebUI 首发
 
-- **React 管理面板**：新增 `webui/frontend` Vite + React + TypeScript + Tailwind CSS v4 + shadcn/ui 前端工程，默认首页切换为单页应用（HashRouter）
-- **纯 Python 运行时静态托管**：生产构建静态产物打包发布至 `webui/static/app`，Quart 优先路由托管 React 静态输出，运行时零 Node.js 外部依赖
-- **旧版安全回滚**：保留原单文件 Alpine.js index.html 并独立注册 `/legacy` 路由；当前端产物缺失时，`/` 自动自愈 fallback 到旧版页面
-- **业务管理模块重组**：完成 Dashboard、Injection Observatory（trace 细节 Sheet 侧拉页）、Channel Config（多参数配置及差异预览）、Learning Objects（学习对象全量登记表）、Agent Feedback（反馈历史审计）与 Compatibility（LivingMemory Facade 状态）页面迁移与数据绑定，保持后端 API 契约完全稳定不变
-- **测试回归**：重写旧 WebUI 硬编码断言，覆盖 React 页面路由与 API 返回契约，确保全系列发版前后向兼容
-
-## v3.3.0 (2026-07-03)
-
-### Holyman 黑话分层资产重建
-
-- **资产分层物理重构**：重构并解耦 Holyman 词库，拆分为精选口癖（catchphrases）、文化概念（concepts）、语录证据（examples）、原始语料（corpus/raw）与质量报告，运行时仅允许匹配明确使能的 catchphrase 精选层，避免人设指令混入运行时干扰人格
-- **本地自愈匹配**：同步了本地 assets 资产 JSON、sync 导入服务和 reference 处理机制
-- **测试验证**：新增了分层口癖提取噪声过滤测试、重叠引用屏蔽测试，与 API layers 结构断言测试
-
-## v3.2.0 (2026-07-03)
-
-### 通道化注入编排、Trace 存储与 Agent 权限反馈
-
-- **注入编排器**：移除原有 `main.py` 复杂的单体注入代码，用通道化 `InjectionOrchestrator` 代替，解耦 safety、memory、fts5、timeline、facts、persona、belief、jargon、fewshot、book_lore、affinity 等 11 个独立通道
+- **运行模式**：新增 `full`、`memory_only`、`compat_only` 三种运行模式，旧配置自动兼容，提供启动日志说明与自愈门控，避免与外部记忆插件重复注入
+- **通道化注入编排**：移除原有 `main.py` 复杂的单体注入代码，由全新 `InjectionOrchestrator` 通道编排器接管（支持 safety, memory, fts5, timeline, facts, persona, belief, jargon, fewshot, book_lore, affinity 11个独立通道的并发执行、优先级排序与预算裁剪）
 - **注入 Trace 数据库**：SQLite 物理设计 `injection_traces` 与 `injection_trace_channels` 两张持久表，全量承载注入性能、Latency、Hit / Filtered 审计与最终预览，支持自动 retention 保留清理
-- **Agent 控制边界**：新增 permission_policy 控制，Agent 可做只读 Trace 解释、Soft useful/useless 提升、提出热配置建议和提交学习候选词，禁止直接写操作、批量删除或修改核心安全配置
-- **测试覆盖**：新增 Trace 存储、反馈链路、解释器和 11 类独立召回通道的单元测试，总测试用例大幅扩充至 234 项
-
-## v3.1.0 (2026-07-03)
-
-### 运行模式、配置与学习对象登记表
-
-- **运行模式**：新增 `full`、`memory_only`、`compat_only` 三种运行模式，旧配置自动兼容，提供启动日志说明与自愈门控支持
-- **通道配置模型**：支持配置每个通道的 enabled、priority、top_k、token_budget、timeout_ms 与 min_score 热参数数据模型，旧配置参数自动映射为通道默认值
-- **学习对象登记表**：定义 `LearningObjectDescription` 结构并登记 9 类核心存储与学习对象，提供来源、写入路径、存储位置、去重与审核规则审查说明
-- **测试覆盖**：新增模式解析、通道配置与登记表完整性测试
-
-## v3.0.1 (2026-07-03)
-
-- **React 管理面板**：新增 `webui/frontend` Vite + React + TypeScript + Tailwind CSS v4 + shadcn/ui 前端工程，默认首页切换为 HashRouter 单页应用
-- **纯 Python 运行时托管**：生产构建输出到 `webui/static/app`，Quart 页面路由优先服务 React 静态产物，运行时无需 Node.js
-- **旧版回滚入口**：保留原 Alpine.js 首页并注册 `/legacy` 路由；React 产物缺失时 `/` 自动 fallback 到旧版页面
-- **业务页面迁移**：完成 Dashboard、Injection Observatory、Channel Config、Learning Objects、Agent Feedback 与 Compatibility 页面迁移，保持现有 API 契约不变
-- **测试与验证**：重写旧 WebUI 硬编码断言，覆盖 React 源码/API payload/静态构建产物；已通过 WebUI 路由、通道配置契约与前端 typecheck/build 验证
+- **Agent 审核与控制边界**：新增 permission_policy 权限控制，Agent 可做只读 Trace 解释、Soft useful/useless 提升、提出热配置建议和提交学习候选词，禁止直接写操作、批量删除或修改核心安全配置
+- **LivingMemory 兼容层**：新增兼容 facade、可选 `recall_long_term_memory` 与 `memorize_long_term_memory` 工具别名
+- **Holyman 黑话分层重建**：重构并解耦 Holyman 词库，拆分为精选口癖（catchphrases）、文化概念（concepts）、语录证据（examples）、原始语料（corpus/raw）与质量报告，运行时仅允许匹配明确使能的 catchphrase 精选层，避免人设指令混入运行时干扰人格
+- **React 管理面板**：新增 `webui/frontend` Vite + React + TypeScript + Tailwind CSS v4 + shadcn/ui 前端工程，默认首页切换为单页应用（HashRouter）并发布静态产物，支持 `/legacy` 回滚与自愈 fallback
+- **性能优化**：合入 SQLite cache、HNSWlib/EPA、pair similarity 相关内存优化，降低大规模索引运行压力
 
 ## v3.0.0 (2026-06-30)
 

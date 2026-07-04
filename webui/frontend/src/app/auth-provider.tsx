@@ -19,7 +19,16 @@ interface AuthContextValue {
 const AuthContext = createContext<AuthContextValue | null>(null)
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<AuthState>({ status: 'checking' })
+  // 乐观假定：本地已存 Token 时前置设为 ready，防止初始化阶段瞬间闪烁 LoginPage 影响美观
+  const [state, setState] = useState<AuthState>(() => {
+    if (typeof window !== 'undefined') {
+      const token = window.localStorage.getItem('wavememory.webui.token')
+      if (token && token !== 'no-auth') {
+        return { status: 'ready', token, requiresAuth: true }
+      }
+    }
+    return { status: 'checking' }
+  })
 
   const logout = useCallback(() => {
     clearStoredToken()

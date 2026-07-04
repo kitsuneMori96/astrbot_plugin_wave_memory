@@ -5,6 +5,7 @@ let selectedNodeTypes = new Set();
 
 function toggleKgConfig() {
     const panel = document.getElementById('kg-config');
+    if (!panel) return;
     const hidden = panel.classList.contains('hidden');
     panel.classList.toggle('hidden');
     if (hidden && !kgConfigLoaded) loadKgConfig();
@@ -17,23 +18,32 @@ async function loadKgConfig() {
     try {
         const r = await fetch('/api/kg/config');
         const d = await r.json();
-        // 关系类型 pills（默认全选=全部显示，用户取消某个=那类消失）
+        
+        // 标准化节点类型白名单
+        const nodeTypes = d.node_types || ['person', 'topic', 'event', 'emotion', 'entity', 'keyword', 'fact', 'location', 'time', 'memory', 'source', 'belief', 'concern', 'jargon', 'community'];
+        selectedNodeTypes = new Set(nodeTypes);
+        const nodeDiv = document.getElementById('cfg-node-types');
+        if (nodeDiv) {
+            nodeDiv.innerHTML = nodeTypes.map(t => {
+                const color = TYPE_COLORS[t] || '#94a3b8';
+                return `<button class="px-2 py-0.5 rounded text-[9px] border transition cfg-pill" style="border-color:${color}; color:${color}; background:${color}20" data-type="${t}" onclick="toggleCfgPill(this,'node')">${TYPE_LABELS[t]||t}</button>`;
+            }).join('');
+        }
+
+        // 关系类型 pills
         const relTypes = d.relation_types || [];
         selectedRelTypes = new Set(relTypes); // 默认全选
         const relDiv = document.getElementById('cfg-rel-types');
-        relDiv.innerHTML = relTypes.map(t =>
-            `<button class="px-2 py-0.5 rounded text-[9px] border transition cfg-pill" data-type="${t}" onclick="toggleCfgPill(this,'rel')" style="background:rgba(139,92,246,0.25); border-color:#8b5cf6; color:#c4b5fd">${t}</button>`
-        ).join('');
-        // 节点类型 pills（默认全选）
-        const nodeTypes = d.node_types || [];
-        selectedNodeTypes = new Set(nodeTypes); // 默认全选
-        const nodeDiv = document.getElementById('cfg-node-types');
-        nodeDiv.innerHTML = nodeTypes.map(t => {
-            const color = TYPE_COLORS[t] || '#94a3b8';
-            return `<button class="px-2 py-0.5 rounded text-[9px] border transition cfg-pill" style="border-color:${color}; color:${color}; background:${color}20" data-type="${t}" onclick="toggleCfgPill(this,'node')">${TYPE_LABELS[t]||t}</button>`;
-        }).join('');
+        if (relDiv) {
+            relDiv.innerHTML = relTypes.map(t =>
+                `<button class="px-2 py-0.5 rounded text-[9px] border transition cfg-pill" data-type="${t}" onclick="toggleCfgPill(this,'rel')" style="background:rgba(139,92,246,0.25); border-color:#8b5cf6; color:#c4b5fd">${t}</button>`
+            ).join('');
+        }
+        
         kgConfigLoaded = true;
-    } catch(e) { console.error('loadKgConfig:', e); }
+    } catch(e) { 
+        console.error('[WaveMemory] loadKgConfig failed:', e); 
+    }
 }
 
 function toggleCfgPill(btn, kind) {

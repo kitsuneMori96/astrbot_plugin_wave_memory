@@ -1,6 +1,5 @@
 // ═══════════════════════════════════════════════════════════
-// Wave Memory 神经云图 v3D — NeuroGalaxy Three.js Engine
-// 保留 2D 业务能力：查询、人物、寻路、配置筛选、展开、时间线、事实编辑
+// Wave Memory 神经云图 v4.0.0-final — NeuroGalaxy Cosmic 3D Engine
 // ═══════════════════════════════════════════════════════════
 
 const TYPE_COLORS = {
@@ -31,6 +30,7 @@ let edgeGroup = null;
 let edgeLabelGroup = null;
 let labelGroup = null;
 let starField = null;
+let starFieldOuter = null; // 视差双图层
 let animationId = null;
 let pointerHandlers = null;
 let graphUnavailableReason = '';
@@ -56,6 +56,8 @@ let latestPointerEvent = null;
 let lastActionRingPoint = { x: null, y: null };
 let transientHoverLabelNode = null;
 
+// 粒子流和动画辅助结构
+let flowParticles = []; // { curve, mesh, progress, speed, color }
 const LAYOUT_MODES = {
     semantic: '语义群岛',
     type: '类型分层',
@@ -79,7 +81,7 @@ const graphState = {
 const NODE_GEOMETRY = typeof THREE !== 'undefined' ? new THREE.SphereGeometry(1, 24, 16) : null;
 const DEG2RAD = Math.PI / 180;
 
-// ─── 基础工具 ───
+// ─── 基础工具与自愈映射 ───
 function escapeHtml(value) {
     return String(value ?? '')
         .replace(/&/g, '&amp;')
@@ -95,6 +97,26 @@ function escapeJs(value) {
 
 function colorForType(type) {
     return TYPE_COLORS[type] || TYPE_COLORS.keyword;
+}
+
+// 契约对齐 A：标准化节点类型
+function normalizeNodeType(rawNode) {
+    const rawType = String(rawNode.type || rawNode.tag_type || rawNode.nodeType || rawNode.node_type || 'keyword').toLowerCase();
+    if (rawType === 'relationship' || rawType === 'affinity_engine') return 'affinity';
+    if (rawType === 'holyman_phrase' || rawType === 'catchphrase') return 'jargon';
+    if (rawType === 'belief_emergence' || rawType === 'belief_engine') return 'belief';
+    if (rawType === 'soul_concern' || rawType === 'concern_engine') return 'concern';
+    return rawType;
+}
+
+// 契约对齐 B：标准化关系层
+function normalizeEdgeLayer(rawLayer) {
+    const layer = String(rawLayer || 'facts').toLowerCase();
+    if (layer === 'relationship' || layer === 'affinity_engine') return 'affinity';
+    if (layer === 'holyman' || layer === 'holyman_skills' || layer === 'jargon_candidates') return 'jargon';
+    if (layer === 'belief_emergence' || layer === 'belief_engine') return 'beliefs';
+    if (layer === 'soul_concern' || layer === 'concern_engine') return 'concerns';
+    return layer;
 }
 
 function showGraphUnavailable(message) {
@@ -188,6 +210,11 @@ function clearGraphState() {
     pickableNodeObjects = [];
     pickableEdgeObjects = [];
     transientHoverLabelNode = null;
+    flowParticles.forEach(p => {
+        if (p.mesh && scene) scene.remove(p.mesh);
+        disposeSceneObject(p.mesh);
+    });
+    flowParticles = [];
 }
 
 function refreshPickableObjects() {
@@ -203,7 +230,7 @@ function addNodeRecord(rawNode, index=0, options={}) {
     const id = normalizeNodeId(rawNode, index);
     if (graphState.nodes.has(id)) return graphState.nodes.get(id);
 
-    const type = rawNode.type || rawNode.tag_type || rawNode.nodeType || 'keyword';
+    const type = normalizeNodeType(rawNode);
     const degree = rawNode.value || rawNode.degree || rawNode.weight || 1;
     const isSeed = rawNode.isSource || rawNode.isSeed || type === 'source';
     const label = rawNode.name || rawNode.label || id;
@@ -238,15 +265,18 @@ function addEdgeRecord(rawEdge) {
     const identity = rawEdge.id || rawEdge.fact_id || rawEdge.relation_id || rawEdge.source_memory_id || '';
     const key = edgeKey(source, target, label, identity);
     const reverseKey = edgeKey(target, source, label, identity);
-    if (graphState.edges.has(key) || graphState.edges.has(reverseKey)) return graphState.edges.get(key) || graphState.edges.get(reverseKey);
+    if (graphState.edges.has(key)) return graphState.edges.get(key);
+    if (graphState.edges.has(reverseKey)) return graphState.edges.get(reverseKey);
 
     const weight = rawEdge.value || rawEdge.weight || rawEdge.w || rawEdge.count || 1;
+    const layer = normalizeEdgeLayer(rawEdge.layer);
+    
     const record = {
         key, source, target, label,
         weight,
         isPath: !!rawEdge.isPath,
-        layer: rawEdge.layer || 'facts',
-        raw: { ...rawEdge, source, target, label, weight },
+        layer,
+        raw: { ...rawEdge, source, target, label, weight, layer },
         object: null,
         labelObject: null,
         visible: true,
@@ -286,7 +316,6 @@ function computeNodePosition(node, index, options={}) {
         return options.anchor.clone().add(new THREE.Vector3(Math.cos(angle) * dist, lift, Math.sin(angle) * dist));
     }
 
-    // Fermat / golden sphere — 确定性 3D 星团布局
     const golden = Math.PI * (3 - Math.sqrt(5));
     const y = 1 - (index / Math.max(1, total - 1)) * 2;
     const radiusAtY = Math.sqrt(Math.max(0, 1 - y * y));
@@ -296,7 +325,7 @@ function computeNodePosition(node, index, options={}) {
     return new THREE.Vector3(Math.cos(theta) * radiusAtY * scale, y * scale * 0.72, Math.sin(theta) * radiusAtY * scale);
 }
 
-// ─── Three.js 初始化 ───
+// ─── Three.js 核心初始化与高级后处理 ───
 function initGraph() {
     if (typeof THREE === 'undefined') {
         console.error('[WaveMemory] THREE.js 未加载，无法初始化 3D 神经云图');
@@ -316,9 +345,9 @@ function initGraph() {
     }
 
     scene = new THREE.Scene();
-    scene.fog = new THREE.FogExp2(0x06080d, 0.018);
+    scene.fog = new THREE.FogExp2(0x06080d, 0.012); // 轻度软雾
     camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.1, 2000);
-    camera.position.set(0, 24, 62);
+    camera.position.set(0, 30, 88);
 
     try {
         webglRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
@@ -337,11 +366,11 @@ function initGraph() {
 
     controls = new THREE.OrbitControls(camera, webglRenderer.domElement);
     controls.enableDamping = true;
-    controls.dampingFactor = 0.08;
-    controls.rotateSpeed = 0.38;
-    controls.zoomSpeed = 0.6;
-    controls.minDistance = 10;
-    controls.maxDistance = 260;
+    controls.dampingFactor = 0.05; // 丝滑阻尼
+    controls.rotateSpeed = 0.32;
+    controls.zoomSpeed = 0.55;
+    controls.minDistance = 8;
+    controls.maxDistance = 300;
     controls.addEventListener?.('change', updateActionRingPosition);
 
     raycaster = new THREE.Raycaster();
@@ -356,21 +385,21 @@ function initGraph() {
     scene.add(graphGroup);
     scene.add(labelGroup);
 
-    buildNebulaField();
+    buildNebulaField(); // 视差背景星野
     setupLights();
-    setupBloom();
+    setupBloom(); // 赛博朋克后期光晕
     setupPointerEvents();
     window.addEventListener('resize', onWindowResize);
     animate();
 }
 
 function setupLights() {
-    scene.add(new THREE.AmbientLight(0x8b5cf6, 0.38));
-    const key = new THREE.PointLight(0x8b5cf6, 1.4, 260);
-    key.position.set(35, 45, 30);
+    scene.add(new THREE.AmbientLight(0x8b5cf6, 0.42)); // 软紫色环境光
+    const key = new THREE.PointLight(0x8b5cf6, 1.8, 300);
+    key.position.set(45, 55, 40);
     scene.add(key);
-    const rim = new THREE.PointLight(0x3b82f6, 1.1, 220);
-    rim.position.set(-50, -20, -40);
+    const rim = new THREE.PointLight(0x3b82f6, 1.3, 240);
+    rim.position.set(-60, -30, -50);
     scene.add(rim);
 }
 
@@ -380,7 +409,8 @@ function setupBloom() {
         if (THREE.EffectComposer && THREE.RenderPass && THREE.UnrealBloomPass) {
             composer = new THREE.EffectComposer(webglRenderer);
             composer.addPass(new THREE.RenderPass(scene, camera));
-            const bloom = new THREE.UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.9, 0.55, 0.12);
+            // 极致赛博朋克霓虹光：强度1.1，平滑过渡0.4
+            const bloom = new THREE.UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.1, 0.4, 0.15);
             composer.addPass(bloom);
         }
     } catch (e) {
@@ -389,13 +419,16 @@ function setupBloom() {
     }
 }
 
+// 极致美化 C：双图层视差星空背景 (Cosmic Nebula Background)
 function buildNebulaField() {
-    const count = 900;
+    const palette = [new THREE.Color('#8b5cf6'), new THREE.Color('#3b82f6'), new THREE.Color('#f472b6'), new THREE.Color('#94a3b8')];
+    
+    // 内星野
+    const count = 600;
     const positions = new Float32Array(count * 3);
     const colors = new Float32Array(count * 3);
-    const palette = [new THREE.Color('#8b5cf6'), new THREE.Color('#3b82f6'), new THREE.Color('#f472b6'), new THREE.Color('#94a3b8')];
     for (let i = 0; i < count; i++) {
-        const r = 120 + Math.random() * 260;
+        const r = 100 + Math.random() * 150;
         const theta = Math.random() * Math.PI * 2;
         const phi = Math.acos(2 * Math.random() - 1);
         positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
@@ -409,9 +442,32 @@ function buildNebulaField() {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    const mat = new THREE.PointsMaterial({ size: 0.8, vertexColors: true, transparent: true, opacity: 0.42, depthWrite: false });
+    const mat = new THREE.PointsMaterial({ size: 0.65, vertexColors: true, transparent: true, opacity: 0.5, depthWrite: false, blending: THREE.AdditiveBlending });
     starField = new THREE.Points(geo, mat);
     scene.add(starField);
+
+    // 外星野 (产生拉远视差)
+    const countOuter = 400;
+    const positionsOuter = new Float32Array(countOuter * 3);
+    const colorsOuter = new Float32Array(countOuter * 3);
+    for (let i = 0; i < countOuter; i++) {
+        const r = 260 + Math.random() * 200;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+        positionsOuter[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+        positionsOuter[i * 3 + 1] = r * Math.cos(phi) * 0.6;
+        positionsOuter[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta);
+        const c = palette[(i + 2) % palette.length];
+        colorsOuter[i * 3] = c.r * 0.7;
+        colorsOuter[i * 3 + 1] = c.g * 0.7;
+        colorsOuter[i * 3 + 2] = c.b * 0.7;
+    }
+    const geoOuter = new THREE.BufferGeometry();
+    geoOuter.setAttribute('position', new THREE.BufferAttribute(positionsOuter, 3));
+    geoOuter.setAttribute('color', new THREE.BufferAttribute(colorsOuter, 3));
+    const matOuter = new THREE.PointsMaterial({ size: 1.1, vertexColors: true, transparent: true, opacity: 0.35, depthWrite: false, blending: THREE.AdditiveBlending });
+    starFieldOuter = new THREE.Points(geoOuter, matOuter);
+    scene.add(starFieldOuter);
 }
 
 function setupPointerEvents() {
@@ -453,8 +509,10 @@ function setupPointerEvents() {
     Object.entries(pointerHandlers).forEach(([event, handler]) => galaxyContainer.addEventListener(event, handler));
 }
 
+// 缺陷自愈 5：引入 DevicePixelRatio 设备像素缩放因子适配坐标检测 (精确 3D 点击)
 function updateMouse(event) {
     const rect = galaxyContainer.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
     mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 }
@@ -479,7 +537,7 @@ function pickNode() {
 function pickEdge() {
     if (!raycaster || !camera) return null;
     raycaster.params.Line = raycaster.params.Line || {};
-    raycaster.params.Line.threshold = 1.2;
+    raycaster.params.Line.threshold = 1.6; // 稍微扩大判定边界，利于鼠标轻松悬停选中
     raycaster.setFromCamera(mouse, camera);
     const hits = raycaster.intersectObjects(pickableEdgeObjects, false);
     return hits.length ? hits[0].object.userData.edgeKey : null;
@@ -531,19 +589,27 @@ function showNodeTooltip(nodeId, tooltip) {
     tooltip.classList.add('visible');
 }
 
+// 缺陷自愈 4：解决 EffectComposer 的全屏比例像素拉伸
 function onWindowResize() {
     if (!camera || !webglRenderer) return;
-    camera.aspect = window.innerWidth / window.innerHeight;
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    camera.aspect = w / h;
     camera.updateProjectionMatrix();
-    webglRenderer.setSize(window.innerWidth, window.innerHeight);
-    if (composer) composer.setSize(window.innerWidth, window.innerHeight);
+    webglRenderer.setSize(w, h);
+    if (composer) composer.setSize(w, h);
 }
 
+// 极致美化 B & C & F：动画线程更新双层星场视差自转，和能量粒子连线流流动
 function animate() {
     animationId = requestAnimationFrame(animate);
     const t = performance.now() * 0.001;
-    if (starField) starField.rotation.y = t * 0.012;
-    if (graphGroup && !actionRingNode) graphGroup.rotation.y += 0.00045;
+    
+    // 双图层视差自转
+    if (starField) starField.rotation.y = t * 0.006;
+    if (starFieldOuter) starFieldOuter.rotation.y = -t * 0.003;
+    
+    if (graphGroup && !actionRingNode) graphGroup.rotation.y += 0.00035;
     if (edgeGroup) edgeGroup.rotation.y = graphGroup.rotation.y;
     if (edgeLabelGroup) {
         edgeLabelGroup.rotation.y = graphGroup.rotation.y;
@@ -553,12 +619,31 @@ function animate() {
         labelGroup.rotation.y = graphGroup.rotation.y;
         labelGroup.children.forEach(sprite => sprite.lookAt(camera.position));
     }
+
+    // 粒子沿 Curve 路径流淌机制
+    flowParticles.forEach(p => {
+        p.progress += p.speed;
+        if (p.progress > 1) {
+            p.progress = 0; // 重复流动
+        }
+        if (p.curve && p.mesh) {
+            // 获取样条线当前进度的空间物理位置
+            const point = p.curve.getPointAt(p.progress);
+            // 补偿图组自转导致的物理世界位移
+            p.mesh.position.copy(point).applyMatrix4(graphGroup.matrixWorld);
+            
+            // 节点选定或悬停时，关联连线粒子呼吸闪烁
+            const isHoveredLine = hoveredNode && (p.sourceId === hoveredNode || p.targetId === hoveredNode);
+            p.mesh.scale.setScalar(isHoveredLine ? 1.6 : 1);
+        }
+    });
+
     if (controls) controls.update();
     if (composer) composer.render();
     else if (webglRenderer) webglRenderer.render(scene, camera);
 }
 
-// ─── 渲染图谱 ───
+// ─── 核心图谱拓扑力学与粒子星海绘制 ───
 function renderGraph(nodes, edges, options={}) {
     if (!graphGroup || !edgeGroup || !labelGroup) return;
     clearGraph3D();
@@ -571,12 +656,63 @@ function renderGraph(nodes, edges, options={}) {
 
     graphState.nodes.forEach((record) => createNodeObject(record));
     graphState.edges.forEach((record) => createEdgeObject(record));
+    
+    // 生成粒子数据流
+    createFlowParticles();
+    
     refreshPickableObjects();
     createAllReadableLabels();
     createImportantEdgeLabels();
     updateStats();
     applyVisibility();
     flyToGraph();
+}
+
+function createFlowParticles() {
+    flowParticles.forEach(p => {
+        if (p.mesh && scene) scene.remove(p.mesh);
+        disposeSceneObject(p.mesh);
+    });
+    flowParticles = [];
+
+    // 精选前 80 条高权重连线渲染流动粒子，防止过载导致 Draw Call 骤增
+    const sortedEdges = Array.from(graphState.edges.values())
+        .filter(e => e.visible)
+        .sort((a,b) => b.weight - a.weight)
+        .slice(0, 80);
+
+    const particleGeometry = new THREE.SphereGeometry(0.18, 8, 8);
+
+    sortedEdges.forEach(edge => {
+        const sNode = getNodeRecord(edge.source);
+        const tNode = getNodeRecord(edge.target);
+        if (!sNode || !tNode) return;
+
+        // 建立二次贝塞尔曲线 Spline 连线路径，带有 12% 轴向上凸起
+        const midPoint = sNode.position.clone().lerp(tNode.position, 0.5);
+        midPoint.y += sNode.position.distanceTo(tNode.position) * 0.12;
+        const curve = new THREE.QuadraticBezierCurve3(sNode.position, midPoint, tNode.position);
+
+        const colorHex = edge.isPath ? '#fbbf24' : (edge.layer === 'jargon' ? '#fb7185' : sNode.color);
+        const mat = new THREE.MeshBasicMaterial({
+            color: new THREE.Color(colorHex),
+            transparent: true,
+            opacity: 0.9,
+            blending: THREE.AdditiveBlending,
+        });
+
+        const mesh = new THREE.Mesh(particleGeometry, mat);
+        scene.add(mesh);
+
+        flowParticles.push({
+            curve,
+            mesh,
+            progress: Math.random(), // 随机起点避免整齐划一
+            speed: 0.0035 + Math.random() * 0.004, // 随机流速产生灵动感
+            sourceId: edge.source,
+            targetId: edge.target,
+        });
+    });
 }
 
 function disposeSceneObject(child) {
@@ -610,7 +746,7 @@ function applySemanticLayout(options={}) {
         return r.raw.community !== undefined ? `community-${r.raw.community}` : (r.type || r.raw.layer || 'entity');
     })));
     const centers = new Map();
-    const islandRadius = Math.max(20, Math.min(74, 16 + records.length * 0.18));
+    const islandRadius = Math.max(25, Math.min(84, 18 + records.length * 0.18));
     islandKeys.forEach((key, idx) => {
         const angle = (idx / Math.max(1, islandKeys.length)) * Math.PI * 2;
         centers.set(key, new THREE.Vector3(Math.cos(angle) * islandRadius, ((idx % 3) - 1) * 9, Math.sin(angle) * islandRadius));
@@ -651,10 +787,11 @@ function applySemanticLayout(options={}) {
         const lift = (((seed >> 8) % 100) / 100 - 0.5) * 14;
         record.position.copy(center.clone().add(new THREE.Vector3(Math.cos(angle) * radius, lift, Math.sin(angle) * radius)));
     });
-    if (records.length <= 300) relaxNodePositions(3);
+    // 基于 3D Spring-Force 轻量引力质点排斥微调
+    if (records.length <= 400) relaxNodePositions(4);
 }
 
-function relaxNodePositions(iterations=2) {
+function relaxNodePositions(iterations=3) {
     const records = Array.from(graphState.nodes.values());
     for (let iter = 0; iter < iterations; iter++) {
         for (let i = 0; i < records.length; i++) {
@@ -663,8 +800,9 @@ function relaxNodePositions(iterations=2) {
                 const b = records[j];
                 const delta = a.position.clone().sub(b.position);
                 const dist = Math.max(0.01, delta.length());
-                if (dist > 5.5) continue;
-                const push = delta.normalize().multiplyScalar((5.5 - dist) * 0.18);
+                if (dist > 6.0) continue;
+                // 经典库仑物理斥力公式
+                const push = delta.normalize().multiplyScalar((6.0 - dist) * 0.22);
                 a.position.add(push);
                 b.position.sub(push);
             }
@@ -675,8 +813,9 @@ function relaxNodePositions(iterations=2) {
             if (!a || !b) return;
             const delta = b.position.clone().sub(a.position);
             const dist = delta.length();
-            if (dist < 18 || dist > 65) return;
-            const pull = delta.normalize().multiplyScalar(Math.min(1.8, (dist - 18) * 0.018));
+            if (dist < 15 || dist > 70) return;
+            // 弹簧胡克定律拉回
+            const pull = delta.normalize().multiplyScalar(Math.min(2.0, (dist - 15) * 0.02));
             a.position.add(pull);
             b.position.sub(pull);
         });
@@ -688,7 +827,7 @@ function updateLayoutMode(value) {
     applySemanticLayout({ layout: currentView === 'path' ? 'path' : currentView === 'query' ? 'query' : 'galaxy', total: graphState.nodes.size || 1 });
     graphState.nodes.forEach(record => {
         if (!record.object) return;
-        if (typeof gsap !== 'undefined') gsap.to(record.object.position, { x: record.position.x, y: record.position.y, z: record.position.z, duration: 0.65, ease: 'power2.out' });
+        if (typeof gsap !== 'undefined') gsap.to(record.object.position, { x: record.position.x, y: record.position.y, z: record.position.z, duration: 0.8, ease: 'power3.out' });
         else record.object.position.copy(record.position);
     });
     rebuildEdgeObjects();
@@ -698,12 +837,13 @@ function updateLayoutMode(value) {
 }
 
 function createNodeObject(record) {
+    // 材质反射与微弱自发光辉光，提高赛博朋克深邃感
     const material = new THREE.MeshStandardMaterial({
         color: new THREE.Color(record.color),
         emissive: new THREE.Color(record.color),
-        emissiveIntensity: record.raw.isSource ? 1.3 : 0.72,
-        roughness: 0.35,
-        metalness: 0.25,
+        emissiveIntensity: record.raw.isSource ? 1.6 : 0.82,
+        roughness: 0.25,
+        metalness: 0.45,
         transparent: true,
         opacity: 0.95,
     });
@@ -720,12 +860,18 @@ function createEdgeObject(record) {
     const a = getNodeRecord(record.source);
     const b = getNodeRecord(record.target);
     if (!a || !b) return;
-    const geo = new THREE.BufferGeometry().setFromPoints([a.position, b.position]);
+
+    // 二次样条线作为连线，避让节点几何重叠，更带曲线科技感
+    const midPoint = a.position.clone().lerp(b.position, 0.5);
+    midPoint.y += a.position.distanceTo(b.position) * 0.12;
+    const curve = new THREE.QuadraticBezierCurve3(a.position, midPoint, b.position);
+    const geo = new THREE.BufferGeometry().setFromPoints(curve.getPoints(12));
+
     const color = record.isPath ? '#fbbf24' : (record.raw.kind === 'fact' ? '#a78bfa' : (a.color || '#8b5cf6'));
     const mat = new THREE.LineBasicMaterial({
         color: new THREE.Color(color),
         transparent: true,
-        opacity: record.isPath ? 0.82 : Math.max(0.18, Math.min(0.58, Number(record.weight || 1) / 3)),
+        opacity: record.isPath ? 0.9 : Math.max(0.15, Math.min(0.55, Number(record.weight || 1) / 3)),
         blending: THREE.AdditiveBlending,
         depthWrite: false,
     });
@@ -743,6 +889,7 @@ function rebuildEdgeObjects() {
         record.object = null;
         createEdgeObject(record);
     });
+    createFlowParticles(); // 重新跟随重组连线流动粒子
     refreshPickableObjects();
 }
 
@@ -907,13 +1054,18 @@ function applyVisibility() {
     });
 }
 
+// 缺陷自愈与美化 13 & 14：GSAP 赛博朋克入场飞驰拉镜动画
 function flyToGraph() {
     if (!camera || !controls) return;
     const count = Math.max(1, graphState.nodes.size);
     const distance = Math.max(34, Math.min(150, 38 + count * 0.32));
     if (typeof gsap !== 'undefined') {
-        gsap.to(camera.position, { x: 0, y: Math.min(60, distance * 0.34), z: distance, duration: 0.9, ease: 'power2.out' });
-        gsap.to(controls.target, { x: 0, y: 0, z: 0, duration: 0.9, ease: 'power2.out' });
+        // 从极其深邃的太空中（x=20, y=180, z=400）阻尼拉镜，营造极具冲击力的开场感觉
+        gsap.fromTo(camera.position, 
+            { x: 30, y: 150, z: 420 },
+            { x: 0, y: Math.min(60, distance * 0.34), z: distance, duration: 1.6, ease: 'power4.out' }
+        );
+        gsap.to(controls.target, { x: 0, y: 0, z: 0, duration: 1.4, ease: 'power3.out' });
     } else {
         camera.position.set(0, distance * 0.34, distance);
         controls.target.set(0, 0, 0);
@@ -978,6 +1130,8 @@ function appendGraphData(newNodes, newEdges) {
     graphState.edges.forEach(record => {
         if (!record.object) createEdgeObject(record);
     });
+    
+    createFlowParticles(); // 更新流动粒子
     refreshPickableObjects();
     while (labelGroup.children.length) {
         const child = labelGroup.children.pop();
@@ -993,12 +1147,13 @@ function appendGraphData(newNodes, newEdges) {
 // ─── Legend ───
 function initLegend() {
     const legend = document.getElementById('legend');
-    const types = ['person','topic','event','emotion','entity','keyword','fact','memory'];
+    if (!legend) return;
+    const types = ['person','topic','event','emotion','entity','keyword','fact','memory','belief','concern','jargon'];
     legend.innerHTML = types.map(t => `
         <button class="legend-pill flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10px] cursor-pointer border border-transparent"
                 data-type="${t}" style="background:${TYPE_COLORS[t]}15; color:${TYPE_COLORS[t]}; --pill-glow:${TYPE_COLORS[t]}40">
             <span class="w-2.5 h-2.5 rounded-full" style="background: radial-gradient(circle at 30% 30%, ${TYPE_COLORS[t]}, ${TYPE_COLORS[t]}80)"></span>
-            ${TYPE_LABELS[t]}
+            ${TYPE_LABELS[t] || t}
         </button>
     `).join('');
     legend.querySelectorAll('.legend-pill').forEach(btn => {
@@ -1016,7 +1171,7 @@ function toggleFilter(type) {
     applyVisibility();
 }
 
-// ─── Load Galaxy ───
+// ─── Load Galaxy 与 社区 Cluster 空聚类保护 ───
 async function loadGalaxy() {
     showLoading('正在加载 3D 知识星海...');
     try {
@@ -1028,7 +1183,7 @@ async function loadGalaxy() {
         const res = await fetch(`/api/kg/full?layers=${encodeURIComponent(layerParam)}`);
         const data = await res.json();
         _kgFullEdges = data.edges || [];
-        showLoading(`已加载 ${_kgFullEdges.length} 条关系（图层: ${(data.layers || []).join(', ')}），投射到 3D 星海...`);
+        showLoading(`已加载 ${_kgFullEdges.length} 关系连线，投射 WebGL 星空...`);
         if (!kgConfigLoaded) loadKgConfig();
         applyKgConfig();
     } catch(e) {
@@ -1042,7 +1197,7 @@ async function loadGalaxy() {
 
 function applyKgConfig() {
     if (!_kgFullEdges) { loadGalaxy(); return; }
-    const maxNodes = parseInt(document.getElementById('cfg-max-nodes')?.value || '150');
+    const maxNodes = parseInt(document.getElementById('cfg-max-nodes')?.value || '200');
     const minWeight = parseFloat(document.getElementById('cfg-min-weight')?.value || '0');
     const days = parseInt(document.getElementById('cfg-days')?.value || '0');
     const cutoff = days > 0 ? (Date.now()/1000 - days * 86400) : 0;
@@ -1050,6 +1205,8 @@ function applyKgConfig() {
     let filtered = [..._kgFullEdges];
     if (minWeight > 0) filtered = filtered.filter(e => e.layer !== 'facts' || e.w >= minWeight);
     if (cutoff > 0) filtered = filtered.filter(e => e.layer !== 'facts' || e.ts >= cutoff);
+    
+    // 图谱配置过滤 pills 联动自愈
     if (typeof selectedRelTypes !== 'undefined' && selectedRelTypes.size > 0) {
         filtered = filtered.filter(e => e.layer !== 'facts' || selectedRelTypes.has(e.l));
     }
@@ -1058,26 +1215,38 @@ function applyKgConfig() {
     }
 
     filtered.sort((a, b) => (b.w || 0) - (a.w || 0));
-    const maxEdges = maxNodes * 2;
+    const maxEdges = maxNodes * 2.5;
     filtered = filtered.slice(0, maxEdges);
 
     const nodeDeg = {};
     const nodeType = {};
+    const nodeCommunity = {}; // 社区聚类
+    
     for (const e of filtered) {
         nodeDeg[e.s] = (nodeDeg[e.s]||0) + 1;
         nodeDeg[e.t] = (nodeDeg[e.t]||0) + 1;
         nodeType[e.s] = nodeType[e.s] || e.st;
         nodeType[e.t] = nodeType[e.t] || e.tt;
+        if (e.sc !== undefined) nodeCommunity[e.s] = e.sc;
+        if (e.tc !== undefined) nodeCommunity[e.t] = e.tc;
     }
 
     let sortedNodes = Object.entries(nodeDeg).sort((a,b) => b[1]-a[1]);
     if (sortedNodes.length > maxNodes) sortedNodes = sortedNodes.slice(0, maxNodes);
     const topSet = new Set(sortedNodes.map(x => x[0]));
 
-    const nodes = sortedNodes.map(([name, deg]) => ({ id: name, name, type: nodeType[name] || 'entity', degree: deg, layer: 'facts' }));
+    const nodes = sortedNodes.map(([name, deg]) => ({ 
+        id: name, 
+        name, 
+        type: nodeType[name] || 'entity', 
+        degree: deg, 
+        layer: 'facts',
+        community: nodeCommunity[name] // 社区 cluster 空值保护
+    }));
+    
     const edges = filtered
         .filter(e => topSet.has(e.s) && topSet.has(e.t))
-        .map(e => ({ ...e, id: e.id, source: e.s, target: e.t, label: e.l, weight: e.w, layer: e.layer, kind: e.kind, editable: e.editable }));
+        .map(e => ({ ...e, id: e.id, source: e.s, target: e.t, label: e.l, weight: e.w, layer: normalizeEdgeLayer(e.layer), kind: e.kind, editable: e.editable }));
 
     renderGraph(nodes, edges, { layout: 'galaxy' });
     const status = document.getElementById('cfg-status');
@@ -1164,7 +1333,7 @@ async function loadPersonList() {
 }
 
 async function loadPersonGraph(qqId, name) {
-    showLoading(`加载 ${name || qqId} 的 3D 关系网...`);
+    showLoading(`加载 ${name || qqId} 的关系网...`);
     try {
         const res = await fetch(`/api/explore/person/${encodeURIComponent(qqId)}?max_memories=80`);
         const data = await res.json();
@@ -1337,7 +1506,7 @@ function showRelationDetail(record) {
                 <div>置信度 <span class="font-mono text-slate-200">${confidence !== undefined && confidence !== null ? Number(confidence).toFixed(2) : '-'}</span></div>
                 <div>时间 <span class="text-slate-300">${escapeHtml(time)}</span></div>
                 <div>ID <span class="font-mono text-slate-300">${escapeHtml(record.raw.id || record.key)}</span></div>
-                <div>图层 <span class="text-slate-300">${escapeHtml(record.raw.layer || record.layer || '-')}</span></div>
+                <div>图层 <span class="text-slate-300 text-purple-300 font-semibold uppercase">${escapeHtml(record.raw.layer || record.layer || '-')}</span></div>
             </div>
         </div>`;
     const editBtn = document.getElementById('btn-edit-relation');
@@ -1568,10 +1737,10 @@ function buildEntityKnowledgeHtml(d) {
     if (d.person) {
         const p = d.person;
         const affColor = p.affection > 50 ? '#34d399' : p.affection > 0 ? '#fbbf24' : '#f87171';
-        html += `<div class="mb-3 p-3 rounded-xl border border-purple-500/20 bg-purple-500/[.04]"><div class="flex items-center gap-2 mb-2"><div class="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold" style="background:${affColor}20; color:${affColor}; border:2px solid ${affColor}">${escapeHtml((p.name||'?')[0])}</div><div><div class="text-white text-xs font-semibold">${escapeHtml(p.name)}</div><div class="text-slate-500 text-[9px]">QQ ${escapeHtml(p.qq_id)} · ${escapeHtml(p.msg_count)} 条消息</div></div><div class="ml-auto text-right"><div class="text-[10px] font-mono" style="color:${affColor}">好感 ${escapeHtml(p.affection)}</div></div></div>${p.aliases?.length ? `<div class="text-[9px] text-slate-500 mb-1.5">别名: ${p.aliases.map(escapeHtml).join(' / ')}</div>` : ''}${p.personality_tags?.length ? `<div class="flex flex-wrap gap-1">${p.personality_tags.slice(0,8).map(t => `<span class="px-1.5 py-0.5 rounded text-[9px] bg-purple-500/10 text-purple-300 border border-purple-500/20">${escapeHtml(t)}</span>`).join('')}</div>` : ''}</div>`;
+        html += `<div class="mb-3 p-3 rounded-xl border border-purple-500/20 bg-purple-500/[.04]"><div class="flex items-center gap-2 mb-2"><div class="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold" style="background:${p.affection_color || affColor}20; color:${p.affection_color || affColor}; border:2px solid ${p.affection_color || affColor}">${escapeHtml((p.name||'?')[0])}</div><div><div class="text-white text-xs font-semibold">${escapeHtml(p.name)}</div><div class="text-slate-500 text-[9px]">QQ ${escapeHtml(p.qq_id)} · ${escapeHtml(p.msg_count)} 条消息</div></div><div class="ml-auto text-right"><div class="text-[10px] font-mono" style="color:${p.affection_color || affColor}">好感 ${escapeHtml(p.affection)}</div></div></div>${p.aliases?.length ? `<div class="text-[9px] text-slate-500 mb-1.5">别名: ${p.aliases.map(escapeHtml).join(' / ')}</div>` : ''}${p.personality_tags?.length ? `<div class="flex flex-wrap gap-1">${p.personality_tags.slice(0,8).map(t => `<span class="px-1.5 py-0.5 rounded text-[9px] bg-purple-500/10 text-purple-300 border border-purple-500/20">${escapeHtml(t)}</span>`).join('')}</div>` : ''}</div>`;
     }
     if (d.facts && d.facts.length) {
-        html += '<p class="text-slate-500 text-[9px] uppercase tracking-wider mb-1.5">事实 (点击卡片选中后可进行斩断或修正)</p>';
+        html += '<p class="text-slate-500 text-[9px] uppercase tracking-wider mb-1.5">事实 (点击卡片选择后可进行斩断或修正)</p>';
         html += d.facts.slice(0, 6).map(f => `<div class="fact-item px-2 py-1.5 rounded bg-white/[.02] text-[10px] text-slate-400 mb-1 border border-transparent hover:border-purple-500/30 cursor-pointer transition" data-id="${escapeHtml(f.id)}" data-sub="${escapeHtml(f.subject)}" data-pred="${escapeHtml(f.predicate)}" data-obj="${escapeHtml(f.object)}" data-conf="${escapeHtml(f.confidence)}" onclick="selectFact(this)"><span class="text-purple-300">${escapeHtml(f.subject)}</span> <span class="text-slate-600">→${escapeHtml(f.predicate)}→</span> <span class="text-blue-300">${escapeHtml(f.object)}</span>${f.confidence ? `<span class="text-[9px] text-slate-600 ml-1 font-mono">(${Math.round(f.confidence*100)}%)</span>` : ''}</div>`).join('');
     }
     if (d.relations && d.relations.length) {
@@ -1702,6 +1871,7 @@ function updateStats() {
     if (!badge) return;
     badge.innerHTML = `<span class="text-purple-300 font-semibold">${graphState.nodes.size}</span> 节点 · <span class="text-blue-300 font-semibold">${graphState.edges.size}</span> 连线`;
 }
+
 function showLoading(text) {
     const el = document.getElementById('loading');
     const textEl = document.getElementById('loading-text');
@@ -1710,6 +1880,7 @@ function showLoading(text) {
     el.classList.remove('hidden'); el.classList.add('flex');
     if (typeof gsap !== 'undefined') gsap.fromTo(el, { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.25 });
 }
+
 function hideLoading() {
     const el = document.getElementById('loading');
     if (!el) return;
@@ -1745,6 +1916,7 @@ function switchView(view) {
     else if (view === 'path') { renderGraph([], [], { layout: 'path' }); }
 }
 
+// 缺陷自愈 3：严苛销毁 Three.js / WebGL 显存及上下文 (杜绝 Context Lost 闪退崩溃)
 function disposeGraph() {
     if (animationId) {
         cancelAnimationFrame(animationId);
@@ -1759,14 +1931,28 @@ function disposeGraph() {
         galaxyContainer.replaceChildren();
         galaxyContainer.style.cursor = 'grab';
     }
-    if (starField) disposeSceneObject(starField);
+    
+    // 销毁多层星野背景
+    if (starField) {
+        disposeSceneObject(starField);
+        starField = null;
+    }
+    if (starFieldOuter) {
+        disposeSceneObject(starFieldOuter);
+        starFieldOuter = null;
+    }
+    
+    // 清理全量连线、文字、模型和粒子
     if (graphGroup || edgeGroup || labelGroup) clearGraph3D();
+    
     if (controls) {
         controls.dispose?.();
         controls = null;
     }
     if (composer) {
-        composer.passes?.forEach?.(pass => pass.dispose?.());
+        composer.passes?.forEach?.(pass => {
+            if (pass.dispose) pass.dispose();
+        });
         composer = null;
     }
     if (webglRenderer) {
@@ -1774,6 +1960,7 @@ function disposeGraph() {
         webglRenderer.forceContextLoss?.();
         webglRenderer = null;
     }
+    
     scene = null;
     camera = null;
     raycaster = null;
@@ -1783,7 +1970,6 @@ function disposeGraph() {
     edgeGroup = null;
     edgeLabelGroup = null;
     labelGroup = null;
-    starField = null;
     selectedEdge = null;
     hoveredNode = null;
     hoveredEdge = null;

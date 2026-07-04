@@ -22,22 +22,24 @@ export function InjectionTrendCard({ metrics }: { metrics?: InjectionMetricsPayl
   const series = metrics?.series ?? []
 
   return (
-    <Card className="lg:col-span-2">
+    <Card className="lg:col-span-2 h-full flex flex-col">
       <CardHeader>
         <CardTitle>注入消耗趋势</CardTitle>
         <CardDescription>
           {metrics?.range ? `范围：${metrics.range}` : '最近 7 天'} · 样本 {metrics?.count ?? 0} 次
         </CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex-1 min-h-[280px]">
         {series.length === 0 ? (
-          <p className="text-sm text-muted-foreground">暂无注入指标样本。</p>
+          <p className="text-sm text-muted-foreground p-6">暂无注入指标样本。</p>
         ) : (
           <ChartContainer config={chartConfig} className="h-[260px] w-full">
             <LineChart data={series} margin={{ left: 12, right: 12, top: 12 }}>
-              <CartesianGrid vertical={false} />
+              {/* 美化网格，暗色模式具备微透明度 */}
+              <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.3} />
               <XAxis dataKey="bucket_ts" tickFormatter={formatBucket} tickLine={false} axisLine={false} minTickGap={24} />
-              <YAxis tickLine={false} axisLine={false} width={48} />
+              {/* 精确类型防御与 Y 轴范围自适应防 NaN */}
+              <YAxis tickLine={false} axisLine={false} width={48} allowDataOverflow={false} domain={[0, 'auto']} />
               <ChartTooltip content={<ChartTooltipContent />} />
               <Line dataKey="total_tokens" type="monotone" stroke="var(--color-total_tokens)" strokeWidth={2} dot={false} />
               <Line dataKey="memories_tokens" type="monotone" stroke="var(--color-memories_tokens)" strokeWidth={2} dot={false} />

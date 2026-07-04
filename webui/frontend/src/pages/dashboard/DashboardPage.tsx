@@ -82,28 +82,28 @@ function ModuleRanking({ metrics }: { metrics?: InjectionMetricsPayload }) {
   const max = Math.max(...ranking.map((item) => Number(item.sum ?? item.total_tokens ?? 0)), 1)
 
   return (
-    <Card>
+    <Card className="h-full flex flex-col">
       <CardHeader>
         <CardTitle>模块消耗排行</CardTitle>
         <CardDescription>按 token 总量聚合</CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex-1">
         {ranking.length === 0 ? (
           <p className="text-sm text-muted-foreground">暂无排行数据。</p>
         ) : (
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-4">
             {ranking.map((item) => {
               const value = Number(item.sum ?? item.total_tokens ?? 0)
               const ratio = Math.max(4, Math.round((value / max) * 100))
               const key = item.key ?? item.name ?? 'unknown'
               return (
-                <div key={key} className="flex flex-col gap-1.5">
-                  <div className="flex items-center justify-between gap-3 text-sm">
-                    <span className="truncate">{key}</span>
-                    <Badge variant="secondary">{formatNumber(value)}</Badge>
+                <div key={key} className="flex flex-col gap-2">
+                  <div className="flex items-center justify-between gap-3 text-sm min-w-0">
+                    <span className="truncate font-medium text-foreground min-w-0 flex-1">{key}</span>
+                    <Badge variant="secondary" className="shrink-0 font-mono text-xs">{formatNumber(value)}</Badge>
                   </div>
                   <div className="h-2 overflow-hidden rounded-full bg-muted">
-                    <div className="h-full rounded-full bg-primary" style={{ width: `${ratio}%` }} />
+                    <div className="h-full rounded-full bg-primary transition-all duration-500" style={{ width: `${ratio}%` }} />
                   </div>
                 </div>
               )
@@ -124,7 +124,7 @@ function RecentErrors({ errors }: { errors?: ErrorPayload }) {
         <CardTitle>最近错误</CardTitle>
         <CardDescription>运行时 warning/error 摘要</CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="px-6 pb-6">
         {items.length === 0 ? (
           <Alert>
             <AlertTriangleIcon />
@@ -132,12 +132,18 @@ function RecentErrors({ errors }: { errors?: ErrorPayload }) {
             <AlertDescription>最近没有记录到运行时错误。</AlertDescription>
           </Alert>
         ) : (
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-4">
             {items.slice(0, 5).map((item, index) => (
-              <Alert key={`${index}-${String(item.message ?? item.error ?? '')}`} variant="destructive">
-                <AlertTriangleIcon />
-                <AlertTitle>{String(item.level ?? item.type ?? 'error')}</AlertTitle>
-                <AlertDescription>{String(item.message ?? item.error ?? JSON.stringify(item))}</AlertDescription>
+              <Alert key={`${index}-${String(item.message ?? item.error ?? '')}`} variant="destructive" className="flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <AlertTriangleIcon className="size-4" />
+                  <AlertTitle className="font-semibold uppercase">{String(item.level ?? item.type ?? 'error')}</AlertTitle>
+                </div>
+                <AlertDescription className="w-full">
+                  <pre className="mt-2 max-h-48 w-full overflow-auto rounded-md bg-destructive-foreground/10 p-3 font-mono text-xs text-destructive whitespace-pre-wrap break-all leading-relaxed">
+                    {String(item.message ?? item.error ?? JSON.stringify(item))}
+                  </pre>
+                </AlertDescription>
               </Alert>
             ))}
           </div>
