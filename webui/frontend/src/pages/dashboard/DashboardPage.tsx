@@ -77,6 +77,28 @@ function KpiCard({ title, value, description, icon: Icon }: { title: string; val
   )
 }
 
+function moduleLabel(key: unknown): string {
+  const value = String(key ?? 'unknown')
+  const labels: Record<string, string> = {
+    total_tokens: '总 token',
+    memories_tokens: '主记忆',
+    soul_tokens: '灵魂合计',
+    belief_tokens: '信念',
+    relation_memories_tokens: '关系记忆',
+    jargon_tokens: '黑话',
+    persona_tokens: '人格画像',
+    facts_tokens: '事实',
+    concern_tokens: '关切',
+    mood_tokens: '情绪',
+    book_lore_tokens: '书设知识',
+    timeline_tokens: '时间线',
+    fts5_tokens: '全文检索',
+    fewshot_tokens: '风格范例',
+  }
+  if (value === 'unknown') return '未知模块'
+  return labels[value] ?? value
+}
+
 function ModuleRanking({ metrics }: { metrics?: InjectionMetricsPayload }) {
   const ranking = (metrics?.ranking ?? []).slice(0, 8)
   const max = Math.max(...ranking.map((item) => Number(item.sum ?? item.total_tokens ?? 0)), 1)
@@ -99,7 +121,7 @@ function ModuleRanking({ metrics }: { metrics?: InjectionMetricsPayload }) {
               return (
                 <div key={key} className="flex flex-col gap-2">
                   <div className="flex items-center justify-between gap-3 text-sm min-w-0">
-                    <span className="truncate font-medium text-foreground min-w-0 flex-1">{key}</span>
+                    <span className="truncate font-medium text-foreground min-w-0 flex-1">{moduleLabel(key)}</span>
                     <Badge variant="secondary" className="shrink-0 font-mono text-xs">{formatNumber(value)}</Badge>
                   </div>
                   <div className="h-2 overflow-hidden rounded-full bg-muted">
@@ -115,6 +137,14 @@ function ModuleRanking({ metrics }: { metrics?: InjectionMetricsPayload }) {
   )
 }
 
+function errorLevelLabel(level: unknown): string {
+  const value = String(level ?? 'error')
+  if (value === 'warning' || value === 'warn') return '警告'
+  if (value === 'error') return '错误'
+  if (value === 'info') return '信息'
+  return value
+}
+
 function RecentErrors({ errors }: { errors?: ErrorPayload }) {
   const items = errors?.errors ?? []
 
@@ -122,7 +152,7 @@ function RecentErrors({ errors }: { errors?: ErrorPayload }) {
     <Card>
       <CardHeader>
         <CardTitle>最近错误</CardTitle>
-        <CardDescription>运行时 warning/error 摘要</CardDescription>
+        <CardDescription>运行时警告/错误摘要</CardDescription>
       </CardHeader>
       <CardContent className="px-6 pb-6">
         {items.length === 0 ? (
@@ -137,7 +167,7 @@ function RecentErrors({ errors }: { errors?: ErrorPayload }) {
               <Alert key={`${index}-${String(item.message ?? item.error ?? '')}`} variant="destructive" className="flex flex-col gap-2">
                 <div className="flex items-center gap-2">
                   <AlertTriangleIcon className="size-4" />
-                  <AlertTitle className="font-semibold uppercase">{String(item.level ?? item.type ?? 'error')}</AlertTitle>
+                  <AlertTitle className="font-semibold">{errorLevelLabel(item.level ?? item.type)}</AlertTitle>
                 </div>
                 <AlertDescription className="w-full">
                   <pre className="mt-2 max-h-48 w-full overflow-auto rounded-md bg-destructive-foreground/10 p-3 font-mono text-xs text-destructive whitespace-pre-wrap break-all leading-relaxed">
@@ -170,7 +200,7 @@ export function DashboardPage() {
         }
       } catch (err) {
         if (alive) {
-          setError(err instanceof Error ? err.message : 'Dashboard 加载失败')
+          setError(err instanceof Error ? err.message : '总览仪表盘加载失败')
         }
       } finally {
         if (alive) {
@@ -194,9 +224,9 @@ export function DashboardPage() {
         icon: WavesIcon,
       },
       {
-        title: 'Tag 覆盖率',
+        title: '标签覆盖率',
         value: `${data.system?.coverage?.tag_pct ?? 0}%`,
-        description: `结构化 Tag ${formatNumber(data.system?.tags?.structured)}`,
+        description: `结构化标签 ${formatNumber(data.system?.tags?.structured)}`,
         icon: TagsIcon,
       },
       {
@@ -223,7 +253,7 @@ export function DashboardPage() {
     return (
       <Alert variant="destructive">
         <AlertTriangleIcon />
-        <AlertTitle>Dashboard 加载失败</AlertTitle>
+        <AlertTitle>总览仪表盘加载失败</AlertTitle>
         <AlertDescription>{error}</AlertDescription>
       </Alert>
     )
@@ -258,8 +288,8 @@ export function DashboardPage() {
             <CardDescription>近 7 天 token 聚合</CardDescription>
           </CardHeader>
           <CardContent className="grid gap-3 sm:grid-cols-2">
-            <KpiCard title="总 token" value={formatNumber(metricSummary(data.metrics, 'total_tokens', 'sum'))} description="sum" icon={WavesIcon} />
-            <KpiCard title="平均 token" value={formatNumber(metricSummary(data.metrics, 'total_tokens', 'avg'))} description="avg" icon={WavesIcon} />
+            <KpiCard title="总 token" value={formatNumber(metricSummary(data.metrics, 'total_tokens', 'sum'))} description="累计值" icon={WavesIcon} />
+            <KpiCard title="平均 token" value={formatNumber(metricSummary(data.metrics, 'total_tokens', 'avg'))} description="平均值" icon={WavesIcon} />
           </CardContent>
         </Card>
       </div>

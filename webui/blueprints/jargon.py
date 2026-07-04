@@ -681,6 +681,25 @@ async def batch_delete_jargon():
     return jsonify({"ok": True, "deleted_count": cur.rowcount})
 
 
+def _fetch_github_commit_info_sync() -> str:
+    """同步阻塞式获取远程最新提交的版本哈希；将被托付给外部线程池。"""
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            "https://api.github.com/repos/ykdeso/holyman-skills/commits/main",
+            headers={"User-Agent": "WaveMemory-WebUI"}
+        )
+        with urllib.request.urlopen(req, timeout=1.5) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            sha = data.get("sha", "")[:7]
+            date = data.get("commit", {}).get("committer", {}).get("date", "")[:10]
+            if sha and date:
+                return f"{date}-{sha}"
+    except Exception:
+        pass
+    return "Unknown"
+
+
 @jargon_bp.route("/holyman", methods=["GET"])
 @require_auth
 async def get_holyman():
@@ -788,21 +807,9 @@ async def get_holyman():
     categories = _build_holyman_categories(items)
     local_count = len(items)
 
-    # 4. 获取远程最新提交的版本哈希；是否提示更新由本地内容健康度决定，避免 commit 字符串误报。
-    remote_version = "Unknown"
-    try:
-        import urllib.request
-        req = urllib.request.Request(
-            "https://api.github.com/repos/ykdeso/holyman-skills/commits/main",
-            headers={"User-Agent": "WaveMemory-WebUI"}
-        )
-        with urllib.request.urlopen(req, timeout=1.5) as response:
-            data = json.loads(response.read().decode("utf-8"))
-            sha = data.get("sha", "")[:7]
-            date = data.get("commit", {}).get("committer", {}).get("date", "")[:10]
-            remote_version = f"{date}-{sha}"
-    except Exception:
-        pass
+    # 4. 获取远程最新提交的版本哈希；托付给多线程池执行，解决在国内恶劣网络环境卡事件循环的痛点。
+    import asyncio
+    remote_version = await asyncio.to_thread(_fetch_github_commit_info_sync)
 
     content_status = _holyman_content_status(phrases, local_count, remote_version, quality_report)
     declared_match = re.search(r"神言\.txt[（(]\s*(\d+)\s*条", raw_readme or "")

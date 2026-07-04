@@ -8,6 +8,21 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 
+function riskLabel(risk: unknown): string {
+  const value = String(risk ?? 'unknown')
+  if (value === 'high') return '高'
+  if (value === 'medium') return '中'
+  if (value === 'low') return '低'
+  if (value === 'unknown') return '未知'
+  return value
+}
+
+function modeLabel(enabled: unknown, disabledReason: unknown): string {
+  if (enabled) return '已启用'
+  const reason = String(disabledReason ?? '')
+  return reason || '已关闭'
+}
+
 function SummaryCard({ title, value }: { title: string; value: unknown }) {
   return (
     <Card>
@@ -97,7 +112,7 @@ export function LearningObjectsPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Key</TableHead>
+                    <TableHead>对象键</TableHead>
                     <TableHead>风险</TableHead>
                     <TableHead>模式</TableHead>
                     <TableHead>写入路径</TableHead>
@@ -109,8 +124,8 @@ export function LearningObjectsPage() {
                   {objects.map((item) => (
                     <TableRow key={item.key ?? item.name}>
                       <TableCell className="font-medium">{item.key ?? item.name}</TableCell>
-                      <TableCell><Badge variant={item.risk === 'high' ? 'destructive' : 'secondary'}>{item.risk ?? 'unknown'}</Badge></TableCell>
-                      <TableCell>{item.mode_enabled ? 'enabled' : item.mode_disabled_reason ?? 'disabled'}</TableCell>
+                      <TableCell><Badge variant={item.risk === 'high' ? 'destructive' : 'secondary'}>{riskLabel(item.risk)}</Badge></TableCell>
+                      <TableCell>{modeLabel(item.mode_enabled, item.mode_disabled_reason)}</TableCell>
                       <TableCell>{String(item.write_path ?? '-')}</TableCell>
                       <TableCell>{String(item.storage ?? '-')}</TableCell>
                       <TableCell>{String(item.injection_channel ?? '-')}</TableCell>

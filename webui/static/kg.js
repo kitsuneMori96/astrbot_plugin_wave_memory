@@ -1074,18 +1074,32 @@ function flyToGraph() {
 
 function flyToNode(nodeId) {
     const record = getNodeRecord(nodeId);
-    if (!record || !camera || !controls) return;
+    if (!record || !camera || !controls || !graphGroup) return;
+    
+    // 关键自愈修正：将图自转导致的本地相对坐标转换至 3D 物理世界的绝对空间坐标
     const target = record.position.clone();
-    const camTarget = target.clone().add(new THREE.Vector3(0, Math.max(4, record.radius * 4), Math.max(14, record.radius * 12)));
+    graphGroup.localToWorld(target);
+    
+    const camTarget = target.clone().add(new THREE.Vector3(0, Math.max(4, record.radius * 3.5), Math.max(12, record.radius * 10)));
     if (typeof gsap !== 'undefined') {
-        gsap.to(controls.target, { x: target.x, y: target.y, z: target.z, duration: 0.75, ease: 'sine.inOut' });
-        gsap.to(camera.position, { x: camTarget.x, y: camTarget.y, z: camTarget.z, duration: 0.75, ease: 'sine.inOut' });
+        gsap.killTweensOf(controls.target);
+        gsap.killTweensOf(camera.position);
+        gsap.to(controls.target, { 
+            x: target.x, y: target.y, z: target.z, 
+            duration: 0.8, ease: 'power2.out',
+            onUpdate: () => controls.update()
+        });
+        gsap.to(camera.position, { 
+            x: camTarget.x, y: camTarget.y, z: camTarget.z, 
+            duration: 0.8, ease: 'power2.out' 
+        });
     } else {
         controls.target.copy(target);
         camera.position.copy(camTarget);
+        controls.update();
     }
     createScreenRipple(nodeId);
-    if (actionRingNode) setTimeout(updateActionRingPosition, 780);
+    if (actionRingNode) setTimeout(updateActionRingPosition, 810);
 }
 
 function createScreenRipple(nodeId) {
@@ -1180,7 +1194,8 @@ async function loadGalaxy() {
             if (cb.checked) layers.push(cb.dataset.layer);
         });
         const layerParam = layers.length ? layers.join(',') : 'facts';
-        const res = await fetch(`/api/kg/full?layers=${encodeURIComponent(layerParam)}`);
+        const minConf = parseFloat(document.getElementById('cfg-min-confidence')?.value || '0.0');
+        const res = await fetch(`/api/kg/full?layers=${encodeURIComponent(layerParam)}&min_confidence=${minConf}`);
         const data = await res.json();
         _kgFullEdges = data.edges || [];
         showLoading(`已加载 ${_kgFullEdges.length} 关系连线，投射 WebGL 星空...`);

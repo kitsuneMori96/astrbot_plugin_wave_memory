@@ -17,10 +17,9 @@ import {
   SidebarSeparator,
 } from '@/components/ui/sidebar'
 
-const legacyLinks = [
-  { href: '/legacy', label: 'Old WebUI' },
-  { href: '/explore', label: 'Explore' },
-  { href: '/maintain', label: 'Maintain' },
+const toolLinks = [
+  { href: '/explore', label: '3D 星图' },
+  { href: '/maintain', label: '维护工具' },
 ]
 
 export function WaveSidebar() {
@@ -36,7 +35,7 @@ export function WaveSidebar() {
                 <WavesIcon />
                 <span className="flex flex-col gap-0.5">
                   <span className="font-semibold">Wave Memory</span>
-                  <span className="text-xs text-muted-foreground">WebUI Console</span>
+                  <span className="text-xs text-muted-foreground">WebUI 控制台</span>
                 </span>
               </NavLink>
             </SidebarMenuButton>
@@ -45,7 +44,7 @@ export function WaveSidebar() {
       </SidebarHeader>
       <SidebarContent>
         <SidebarGroup>
-          <SidebarGroupLabel>Overview</SidebarGroupLabel>
+          <SidebarGroupLabel>总览</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
               {appRoutes.slice(0, 1).map((item) => {
@@ -65,10 +64,10 @@ export function WaveSidebar() {
           </SidebarGroupContent>
         </SidebarGroup>
         <SidebarGroup>
-          <SidebarGroupLabel>Injection</SidebarGroupLabel>
+          <SidebarGroupLabel>注入</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {appRoutes.slice(1, 3).map((item) => {
+              {appRoutes.slice(1, 5).map((item) => {
                 const Icon = item.icon
                 return (
                   <SidebarMenuItem key={item.path}>
@@ -85,10 +84,30 @@ export function WaveSidebar() {
           </SidebarGroupContent>
         </SidebarGroup>
         <SidebarGroup>
-          <SidebarGroupLabel>Review</SidebarGroupLabel>
+          <SidebarGroupLabel>审查</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {appRoutes.slice(3).map((item) => {
+              {appRoutes.slice(5, 11).map((item) => {
+                const Icon = item.icon
+                return (
+                  <SidebarMenuItem key={item.path}>
+                    <SidebarMenuButton asChild isActive={location.pathname === item.path} tooltip={item.title}>
+                      <NavLink to={item.path}>
+                        <Icon />
+                        <span>{item.title}</span>
+                      </NavLink>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                )
+              })}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+        <SidebarGroup>
+          <SidebarGroupLabel>系统</SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              {appRoutes.slice(11).map((item) => {
                 const Icon = item.icon
                 return (
                   <SidebarMenuItem key={item.path}>
@@ -106,10 +125,10 @@ export function WaveSidebar() {
         </SidebarGroup>
         <SidebarSeparator />
         <SidebarGroup>
-          <SidebarGroupLabel>Legacy</SidebarGroupLabel>
+          <SidebarGroupLabel>扩展工具</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {legacyLinks.map((link) => (
+              {toolLinks.map((link) => (
                 <SidebarMenuItem key={link.href}>
                   <SidebarMenuButton asChild tooltip={link.label}>
                     <a href={link.href}>
@@ -126,7 +145,7 @@ export function WaveSidebar() {
       <SidebarFooter>
         <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
           <MoonStarIcon className="size-4" />
-          <span>shadcn/radix-nova</span>
+          <span>shadcn · Nova 风格</span>
           <Badge variant="secondary">v1</Badge>
         </div>
       </SidebarFooter>

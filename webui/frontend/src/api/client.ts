@@ -38,7 +38,7 @@ export function setAuthFailureHandler(handler: (() => void) | undefined): void {
   authFailureHandler = handler
 }
 
-function toApiPath(path: string): string {
+export function toApiPath(path: string): string {
   if (/^https?:\/\//i.test(path)) {
     return path
   }

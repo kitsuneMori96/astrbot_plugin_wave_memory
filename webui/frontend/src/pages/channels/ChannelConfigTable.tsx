@@ -50,12 +50,12 @@ export function ChannelConfigTable({
           <TableRow>
             <TableHead>通道</TableHead>
             <TableHead>启用</TableHead>
-            <TableHead>priority</TableHead>
-            <TableHead>top_k</TableHead>
-            <TableHead>max_items</TableHead>
-            <TableHead>token_budget</TableHead>
-            <TableHead>timeout_ms</TableHead>
-            <TableHead>min_score</TableHead>
+            <TableHead>优先级</TableHead>
+            <TableHead>检索数量</TableHead>
+            <TableHead>最大条数</TableHead>
+            <TableHead>Token 预算</TableHead>
+            <TableHead>超时毫秒</TableHead>
+            <TableHead>最低分</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -66,7 +66,7 @@ export function ChannelConfigTable({
                 <TableCell>
                   <div className="flex items-center gap-2">
                     <span className="font-medium">{name}</span>
-                    {safety ? <Badge variant="secondary">non-disableable</Badge> : null}
+                    {safety ? <Badge variant="secondary">不可关闭</Badge> : null}
                   </div>
                 </TableCell>
                 <TableCell>

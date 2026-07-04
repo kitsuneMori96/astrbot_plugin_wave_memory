@@ -61,6 +61,7 @@ async def overview():
     参数：
     - max_nodes: 最大节点数(50-500, default 150)
     - min_weight: 最小边权重阈值(0-5, default 0.5)
+    - min_confidence: 关系置信度门限(0-1, default 0.0)
     - relation_types: 逗号分隔的关系类型筛选(空=全部)
     - node_types: 逗号分隔的节点类型(空=全部)
     - days: 时间范围(7/30/90/0=全部, default 0)
@@ -70,11 +71,15 @@ async def overview():
         max_nodes = int(request.args.get("max_nodes", 150))
     except (ValueError, TypeError):
         max_nodes = 150
-    max_nodes = max(30, min(500, max_nodes))
+    max_nodes = max(30, min(1000, max_nodes)) # 向上支持 1000 节点高承载
     try:
         min_weight = float(request.args.get("min_weight", 0.5))
     except (ValueError, TypeError):
         min_weight = 0.5
+    try:
+        min_confidence = float(request.args.get("min_confidence", 0.0))
+    except (ValueError, TypeError):
+        min_confidence = 0.0
     relation_types_raw = request.args.get("relation_types", "")
     node_types_raw = request.args.get("node_types", "")
     try:
@@ -87,7 +92,7 @@ async def overview():
 
     # 版本缓存 key 包含参数
     now = time.time()
-    cache_key = f"{max_nodes}:{min_weight}:{relation_types_raw}:{node_types_raw}:{days}"
+    cache_key = f"{max_nodes}:{min_weight}:{min_confidence}:{relation_types_raw}:{node_types_raw}:{days}"
     if not _table_exists(c.db.conn, "facts") or not _table_exists(c.db.conn, "tag_relations"):
         return jsonify({"nodes": [], "edges": []})
     try:
@@ -110,19 +115,23 @@ async def overview():
 
     # Step 1: 从 facts 提取实体和边
     fact_rows = c.db.conn.execute(
-        f"SELECT subject, predicate, object, confidence FROM facts WHERE 1=1{time_cond} ORDER BY confidence DESC LIMIT 3000",
-        time_param,
+        f"SELECT subject, predicate, object, confidence FROM facts WHERE confidence >= ?{time_cond} ORDER BY confidence DESC LIMIT 3000",
+        [min_confidence] + time_param,
     ).fetchall()
 
     # Step 2: 从 tag_relations 提取实体和边
+    tag_rel_cols = _table_columns(c.db.conn, "tag_relations")
+    rel_confidence_cond = " AND tr.confidence >= ?" if "confidence" in tag_rel_cols else ""
+    rel_params = [min_confidence] if "confidence" in tag_rel_cols else []
     rel_weight_cond = f" AND tr.weight >= {min_weight}" if min_weight > 0 else ""
     rel_rows = c.db.conn.execute(
         f"""SELECT t1.name, tr.relation_type, t2.name, tr.weight, t1.tag_type, t2.tag_type
            FROM tag_relations tr
            JOIN tags t1 ON tr.source_tag_id = t1.id
            JOIN tags t2 ON tr.target_tag_id = t2.id
-           WHERE 1=1{rel_weight_cond}
-           ORDER BY tr.weight DESC LIMIT 3000"""
+           WHERE 1=1{rel_weight_cond}{rel_confidence_cond}
+           ORDER BY tr.weight DESC LIMIT 3000""",
+        rel_params,
     ).fetchall()
 
     # Step 3: 构建实体度数表
@@ -504,7 +513,7 @@ def _full_graph_cache_version(conn, layers: set[str]) -> tuple:
     return tuple((table, *_safe_table_state(conn, table, columns)) for table, columns in watched)
 
 
-def build_full_graph_data(layers_raw: str = "facts", *, use_cache: bool = True) -> dict:
+def build_full_graph_data(layers_raw: str = "facts", *, use_cache: bool = True, min_confidence: float = 0.0) -> dict:
     """构建全量知识图谱数据；供 HTTP API 和启动 warmup 共用，避免启动期 HTTP 自请求。"""
     c = get_container()
     layers = set(layers_raw.split(",")) - {""}
@@ -513,7 +522,7 @@ def build_full_graph_data(layers_raw: str = "facts", *, use_cache: bool = True) 
         layers_raw = "facts"
 
     now = time.time()
-    cache_key = f"full:{layers_raw}"
+    cache_key = f"full:{layers_raw}:{min_confidence}"
     conn = c.db.conn
     version = _full_graph_cache_version(conn, layers)
     if (
@@ -564,6 +573,9 @@ def build_full_graph_data(layers_raw: str = "facts", *, use_cache: bool = True) 
                    JOIN tags t1 ON tr.source_tag_id=t1.id
                    JOIN tags t2 ON tr.target_tag_id=t2.id"""
             ).fetchall():
+                conf_val = float(r[10] or 1.0) if r[10] is not None else 1.0
+                if conf_val < min_confidence:
+                    continue
                 s, t = resolve((r[1] or "").strip()[:25]), resolve((r[3] or "").strip()[:25])
                 if not s or not t or s == t:
                     continue
@@ -583,7 +595,7 @@ def build_full_graph_data(layers_raw: str = "facts", *, use_cache: bool = True) 
                         "st": r[5] or "topic",
                         "tt": r[6] or "topic",
                         "ts": r[7] or 0,
-                        "confidence": r[10],
+                        "confidence": conf_val,
                         "metadata": _json_loads_safe(r[11], {}),
                         "editable": True,
                         "layer": "facts",
@@ -600,7 +612,8 @@ def build_full_graph_data(layers_raw: str = "facts", *, use_cache: bool = True) 
             for r in conn.execute(
                 f"""SELECT id, subject, predicate, object, confidence, {fact_created},
                           {fact_group}, {fact_source}, {fact_reinforced}, {fact_type}
-                   FROM facts"""
+                   FROM facts WHERE confidence >= ?""",
+                (min_confidence,)
             ):
                 if not r[1] or not r[3]:
                     continue

@@ -193,7 +193,7 @@ export function ChannelConfigPage() {
     <div className="flex flex-col gap-6">
       <Card>
         <CardHeader>
-          <CardTitle>Channel Config</CardTitle>
+          <CardTitle>通道热配置</CardTitle>
           <CardDescription>热更新注入通道参数；安全通道在 UI 中不可关闭。</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
@@ -214,9 +214,9 @@ export function ChannelConfigPage() {
               />
             </Field>
             <Field>
-              <FieldLabel>Trace 记录</FieldLabel>
+              <FieldLabel>Trace 记录开关</FieldLabel>
               <div className="flex h-10 items-center justify-between gap-3 rounded-md border px-3">
-                <span className="text-sm text-muted-foreground">trace_enabled</span>
+                <span className="text-sm text-muted-foreground">{draft.trace_enabled ? '已开启' : '已关闭'}</span>
                 <Switch checked={Boolean(draft.trace_enabled)} onCheckedChange={(checked) => setDraft({ ...draft, trace_enabled: checked })} />
               </div>
             </Field>
@@ -224,7 +224,7 @@ export function ChannelConfigPage() {
           <Alert>
             <ShieldCheckIcon />
             <AlertTitle>安全边界</AlertTitle>
-            <AlertDescription>safety channel 始终保持启用，防止近期上下文重复和身份污染过滤被绕过。</AlertDescription>
+            <AlertDescription>安全通道始终保持启用，防止近期上下文重复和身份污染过滤被绕过。</AlertDescription>
           </Alert>
           <div className="flex flex-wrap items-center gap-3">
             <Button disabled={saving} onClick={() => void preview()}>
@@ -239,7 +239,7 @@ export function ChannelConfigPage() {
               <RotateCcwIcon data-icon="inline-start" />
               恢复默认
             </Button>
-            {validation ? <Badge variant={validationShape.ok ? 'secondary' : 'destructive'}>{validationShape.ok ? '校验通过 (valid)' : '校验失败 (invalid)'}</Badge> : null}
+            {validation ? <Badge variant={validationShape.ok ? 'secondary' : 'destructive'}>{validationShape.ok ? '校验通过' : '校验失败'}</Badge> : null}
             {isDirty ? (
               <Badge variant="secondary" className="animate-pulse bg-amber-500/10 text-amber-500 hover:bg-amber-500/10 border-amber-500/20">
                 <WandSparklesIcon className="size-3 mr-1" />

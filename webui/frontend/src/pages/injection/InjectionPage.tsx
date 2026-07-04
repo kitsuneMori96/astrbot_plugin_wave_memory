@@ -73,6 +73,13 @@ function traceLatency(trace: InjectionTraceSummary): string {
   return Number.isFinite(value) && value > 0 ? `${Math.round(value)} ms` : '-'
 }
 
+function statusLabel(status: string): string {
+  if (status === 'ok') return '正常'
+  if (status === 'error') return '错误'
+  if (status === 'timeout') return '超时'
+  return status || '-'
+}
+
 export function InjectionPage() {
   const [filters, setFilters] = useState<FilterState>(defaultFilters)
   const [traces, setTraces] = useState<InjectionTraceSummary[]>([])
@@ -126,7 +133,7 @@ export function InjectionPage() {
     <div className="flex flex-col gap-6">
       <Card>
         <CardHeader>
-          <CardTitle>Injection Observatory</CardTitle>
+          <CardTitle>注入观测台</CardTitle>
           <CardDescription>筛选注入 trace，查看通道瀑布、命中项、过滤项和最终注入文本。</CardDescription>
         </CardHeader>
         <CardContent>
@@ -147,7 +154,7 @@ export function InjectionPage() {
                 <Input id="trace-sender" value={filters.sender_id} onChange={(event) => setFilters({ ...filters, sender_id: event.target.value })} />
               </Field>
               <Field>
-                <FieldLabel htmlFor="trace-bot">Bot</FieldLabel>
+                <FieldLabel htmlFor="trace-bot">机器人</FieldLabel>
                 <Input id="trace-bot" value={filters.bot_id} onChange={(event) => setFilters({ ...filters, bot_id: event.target.value })} />
               </Field>
               <Field>
@@ -163,9 +170,9 @@ export function InjectionPage() {
                   <SelectContent>
                     <SelectGroup>
                       <SelectItem value="all">全部</SelectItem>
-                      <SelectItem value="ok">ok</SelectItem>
-                      <SelectItem value="error">error</SelectItem>
-                      <SelectItem value="timeout">timeout</SelectItem>
+                      <SelectItem value="ok">正常</SelectItem>
+                      <SelectItem value="error">错误</SelectItem>
+                      <SelectItem value="timeout">超时</SelectItem>
                     </SelectGroup>
                   </SelectContent>
                 </Select>
@@ -190,7 +197,7 @@ export function InjectionPage() {
                 <Input id="trace-scope" value={filters.scope} onChange={(event) => setFilters({ ...filters, scope: event.target.value })} />
               </Field>
               <Field>
-                <FieldLabel htmlFor="trace-limit">Limit</FieldLabel>
+                <FieldLabel htmlFor="trace-limit">返回数量</FieldLabel>
                 <Input id="trace-limit" inputMode="numeric" value={filters.limit} onChange={(event) => setFilters({ ...filters, limit: event.target.value })} />
               </Field>
             </FieldGroup>
@@ -211,14 +218,14 @@ export function InjectionPage() {
       {error ? (
         <Alert variant="destructive">
           <AlertTriangleIcon />
-          <AlertTitle>Trace 列表加载失败</AlertTitle>
+          <AlertTitle>注入追踪列表加载失败</AlertTitle>
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       ) : null}
 
       <Card>
         <CardHeader>
-          <CardTitle>Trace 列表</CardTitle>
+          <CardTitle>注入追踪列表</CardTitle>
           <CardDescription>{loading ? '加载中…' : `${traces.length} 条结果`}</CardDescription>
         </CardHeader>
         <CardContent>
@@ -235,13 +242,13 @@ export function InjectionPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Trace ID</TableHead>
+                    <TableHead>追踪 ID</TableHead>
                     <TableHead>时间</TableHead>
                     <TableHead>模式</TableHead>
                     <TableHead>状态</TableHead>
-                    <TableHead>Session</TableHead>
+                    <TableHead>会话</TableHead>
                     <TableHead>预览</TableHead>
-                    <TableHead>Token</TableHead>
+                    <TableHead>Token 数</TableHead>
                     <TableHead>耗时</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -255,7 +262,7 @@ export function InjectionPage() {
                         <TableCell>{formatTime(trace.timestamp ?? trace.created_at)}</TableCell>
                         <TableCell>{String(trace.mode ?? '-')}</TableCell>
                         <TableCell>
-                          <Badge variant={status === 'ok' ? 'secondary' : 'destructive'}>{status}</Badge>
+                          <Badge variant={status === 'ok' ? 'secondary' : 'destructive'}>{statusLabel(status)}</Badge>
                         </TableCell>
                         <TableCell>{String(trace.session_id ?? trace.group_id ?? '-')}</TableCell>
                         <TableCell className="max-w-md truncate">{tracePreview(trace)}</TableCell>

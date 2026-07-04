@@ -25,7 +25,7 @@ export function ChannelDiffCard({ diff = [], validation }: { diff?: ChannelDiffI
               <div key={item.path} className="rounded-lg border p-3">
                 <div className="mb-2 flex items-center justify-between gap-3">
                   <span className="font-mono text-xs">{item.path}</span>
-                  <Badge variant="secondary">changed</Badge>
+                  <Badge variant="secondary">已变更</Badge>
                 </div>
                 <div className="grid gap-2 text-xs md:grid-cols-2">
                   <pre className="overflow-auto rounded-md bg-muted p-2">{JSON.stringify(item.before)}</pre>

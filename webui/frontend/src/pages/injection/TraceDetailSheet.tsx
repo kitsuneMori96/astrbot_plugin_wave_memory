@@ -17,7 +17,7 @@ function JsonBlock({ value }: { value: unknown }) {
     return (
       <pre className="max-h-64 overflow-auto rounded-lg bg-muted p-3 font-mono text-xs text-muted-foreground whitespace-pre">
         {jsonStr.slice(0, 50000)}
-        {"\n\n// [Warning: Payload too large, truncated for render performance]"}
+        {"\n\n// [警告：载荷过大，已为渲染性能截断]"}
       </pre>
     )
   }
@@ -29,7 +29,7 @@ function JsonBlock({ value }: { value: unknown }) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/g, (match) => {
-      let cls = 'text-amber-500Dark:text-amber-400' // number, boolean, null 默认橙色
+      let cls = 'text-amber-500 dark:text-amber-400' // number, boolean, null 默认橙色
       if (/^"/.test(match)) {
         if (/:$/.test(match)) {
           cls = 'text-blue-500 font-medium' // key 蓝色
@@ -46,6 +46,17 @@ function JsonBlock({ value }: { value: unknown }) {
       dangerouslySetInnerHTML={{ __html: highlighted }}
     />
   )
+}
+
+function channelStatusLabel(status: unknown): string {
+  const value = String(status ?? 'unknown')
+  if (value === 'ok') return '正常'
+  if (value === 'error') return '错误'
+  if (value === 'timeout') return '超时'
+  if (value === 'empty') return '空'
+  if (value === 'disabled') return '已关闭'
+  if (value === 'unknown') return '未知'
+  return value
 }
 
 function Section({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
@@ -113,7 +124,7 @@ export function TraceDetailSheet({
                           <div className="mb-2 flex items-center justify-between gap-3">
                             <span className="font-semibold text-sm text-foreground">{String(channel.name ?? channel.key ?? `channel-${index + 1}`)}</span>
                             <Badge variant={String(channel.status ?? '').includes('error') || String(channel.status ?? '').includes('timeout') ? 'destructive' : 'secondary'} className="font-mono text-[10px] uppercase">
-                              {String(channel.status ?? 'unknown')}
+                              {channelStatusLabel(channel.status)}
                             </Badge>
                           </div>
                           <JsonBlock value={channel} />

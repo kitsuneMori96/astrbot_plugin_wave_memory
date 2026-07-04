@@ -40,6 +40,23 @@ async function loadKgConfig() {
             ).join('');
         }
         
+        // 自愈还原最小强度和置信度热数值滑块默认值
+        const savedWeight = d.defaults?.min_weight !== undefined ? d.defaults.min_weight : 0.5;
+        const weightInput = document.getElementById('cfg-min-weight');
+        if (weightInput) {
+            weightInput.value = savedWeight;
+            const weightVal = document.getElementById('cfg-weight-val');
+            if (weightVal) weightVal.innerText = savedWeight;
+        }
+
+        const savedConf = d.defaults?.min_confidence !== undefined ? d.defaults.min_confidence : 0.0;
+        const confInput = document.getElementById('cfg-min-confidence');
+        if (confInput) {
+            confInput.value = savedConf;
+            const confVal = document.getElementById('cfg-conf-val');
+            if (confVal) confVal.innerText = savedConf;
+        }
+
         kgConfigLoaded = true;
     } catch(e) { 
         console.error('[WaveMemory] loadKgConfig failed:', e); 

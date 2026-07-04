@@ -30,7 +30,7 @@ export function LoginPage() {
     <main className="flex min-h-screen items-center justify-center bg-background p-6">
       <Card className="w-full max-w-md">
         <CardHeader>
-          <CardTitle>Wave Memory WebUI</CardTitle>
+          <CardTitle>Wave Memory 管理台</CardTitle>
           <CardDescription>输入 WebUI 密码以进入管理面板。</CardDescription>
         </CardHeader>
         <CardContent>

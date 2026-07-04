@@ -23,6 +23,15 @@ function titleOf(record: Record<string, unknown>): string {
   return String(record.title ?? record.candidate_type ?? record.feedback ?? record.content ?? record.reason ?? record.id ?? '-')
 }
 
+function reviewStatusLabel(status: unknown): string {
+  const value = String(status ?? 'pending')
+  if (value === 'pending') return '待审'
+  if (value === 'approved' || value === 'approve') return '已批准'
+  if (value === 'rejected' || value === 'reject') return '已拒绝'
+  if (value === 'ignored' || value === 'ignore') return '已忽略'
+  return value
+}
+
 export function AgentFeedbackPage() {
   const [data, setData] = useState<AgentFeedbackPayload | null>(null)
   const [loading, setLoading] = useState(true)
@@ -89,7 +98,7 @@ export function AgentFeedbackPage() {
     <div className="flex flex-col gap-6">
       <Card>
         <CardHeader>
-          <CardTitle>Agent Feedback</CardTitle>
+          <CardTitle>Agent 反馈审查</CardTitle>
           <CardDescription>记忆反馈、配置建议、审查候选与人工操作。</CardDescription>
         </CardHeader>
       </Card>
@@ -117,8 +126,8 @@ export function AgentFeedbackPage() {
                 <TableHeader>
                   <TableRow>
                     <TableHead className="pl-4">ID</TableHead>
-                    <TableHead>Feedback</TableHead>
-                    <TableHead>Trace</TableHead>
+                    <TableHead>反馈</TableHead>
+                    <TableHead>追踪</TableHead>
                     <TableHead className="pr-4">内容</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -146,7 +155,7 @@ export function AgentFeedbackPage() {
               const id = recordId(item)
               return (
                 <div key={`suggestion-card-${String(id ?? index)}-${index}`} className="flex flex-col gap-3 rounded-lg border p-3">
-                  <div className="flex items-start justify-between gap-3"><span className="font-medium">{titleOf(item)}</span><Badge>{String(item.review_status ?? 'pending')}</Badge></div>
+                  <div className="flex items-start justify-between gap-3"><span className="font-medium">{titleOf(item)}</span><Badge>{reviewStatusLabel(item.review_status)}</Badge></div>
                   <pre className="overflow-auto rounded-md bg-muted p-2 text-xs font-mono">{JSON.stringify(item, null, 2)}</pre>
                   <div className="flex flex-wrap gap-2">
                     {(['approve', 'reject', 'ignore'] as const).map((action) => (
@@ -157,7 +166,7 @@ export function AgentFeedbackPage() {
                         variant={action === 'approve' ? 'default' : action === 'reject' ? 'destructive' : 'secondary'}
                         onClick={() => id !== null && void act('suggestion', id, action)}
                       >
-                        {action === 'approve' ? '批准 (approve)' : action === 'reject' ? '拒绝 (reject)' : '忽略 (ignore)'}
+                        {action === 'approve' ? '批准' : action === 'reject' ? '拒绝' : '忽略'}
                       </Button>
                     ))}
                   </div>
@@ -173,7 +182,7 @@ export function AgentFeedbackPage() {
               const id = recordId(item)
               return (
                 <div key={`candidate-card-${String(id ?? index)}-${index}`} className="flex flex-col gap-3 rounded-lg border p-3">
-                  <div className="flex items-start justify-between gap-3"><span className="font-medium">{String(item.candidate_type ?? item.object_key ?? 'candidate')}</span><Badge>{String(item.review_status ?? 'pending')}</Badge></div>
+                  <div className="flex items-start justify-between gap-3"><span className="font-medium">{String(item.candidate_type ?? item.object_key ?? '候选')}</span><Badge>{reviewStatusLabel(item.review_status)}</Badge></div>
                   <pre className="overflow-auto rounded-md bg-muted p-2 text-xs font-mono">{JSON.stringify(item, null, 2)}</pre>
                   <div className="flex flex-wrap gap-2">
                     {(['approve', 'reject', 'ignore'] as const).map((action) => (
@@ -184,7 +193,7 @@ export function AgentFeedbackPage() {
                         variant={action === 'approve' ? 'default' : action === 'reject' ? 'destructive' : 'secondary'}
                         onClick={() => id !== null && void act('candidate', id, action)}
                       >
-                        {action === 'approve' ? '批准 (approve)' : action === 'reject' ? '拒绝 (reject)' : '忽略 (ignore)'}
+                        {action === 'approve' ? '批准' : action === 'reject' ? '拒绝' : '忽略'}
                       </Button>
                     ))}
                   </div>

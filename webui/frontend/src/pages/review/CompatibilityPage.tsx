@@ -7,6 +7,14 @@ import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 
+function facadeStatusLabel(status: unknown): string {
+  const value = String(status ?? 'unknown')
+  if (value === 'enabled') return '已启用'
+  if (value === 'not_initialized') return '未初始化'
+  if (value === 'unknown') return '未知'
+  return value
+}
+
 export function CompatibilityPage() {
   const [data, setData] = useState<CompatibilityPayload | null>(null)
   const [loading, setLoading] = useState(true)
@@ -64,16 +72,16 @@ export function CompatibilityPage() {
 
       <div className="grid gap-4 lg:grid-cols-3">
         <Card>
-          <CardHeader><CardTitle>Runtime</CardTitle><CardDescription>当前运行模式</CardDescription></CardHeader>
+          <CardHeader><CardTitle>运行模式</CardTitle><CardDescription>当前运行模式</CardDescription></CardHeader>
           <CardContent><Badge variant="secondary">{String(data?.runtime?.mode ?? '-')}</Badge></CardContent>
         </Card>
         <Card>
-          <CardHeader><CardTitle>LivingMemory facade</CardTitle><CardDescription>兼容接口状态</CardDescription></CardHeader>
-          <CardContent className="flex flex-col gap-2"><Badge variant={data?.facade?.enabled ? 'secondary' : 'outline'}>{data?.facade?.status ?? 'unknown'}</Badge><pre className="overflow-auto rounded-md bg-muted p-2 text-xs">{JSON.stringify(data?.facade?.interface ?? [], null, 2)}</pre></CardContent>
+          <CardHeader><CardTitle>LivingMemory 兼容接口</CardTitle><CardDescription>面向外部记忆生态的兼容接口状态</CardDescription></CardHeader>
+          <CardContent className="flex flex-col gap-2"><Badge variant={data?.facade?.enabled ? 'secondary' : 'outline'}>{facadeStatusLabel(data?.facade?.status)}</Badge><pre className="overflow-auto rounded-md bg-muted p-2 text-xs">{JSON.stringify(data?.facade?.interface ?? [], null, 2)}</pre></CardContent>
         </Card>
         <Card>
           <CardHeader><CardTitle>工具别名</CardTitle><CardDescription>LivingMemory 风格别名</CardDescription></CardHeader>
-          <CardContent className="flex flex-col gap-2">{aliases.length === 0 ? <p className="text-sm text-muted-foreground">暂无别名信息。</p> : aliases.map(([name, item]) => <div key={name} className="flex items-center justify-between gap-3 rounded-lg border p-2"><span className="font-mono text-xs">{name}</span><Badge variant={item.enabled ? 'secondary' : 'outline'}>{item.enabled ? 'on' : 'off'}</Badge></div>)}</CardContent>
+          <CardContent className="flex flex-col gap-2">{aliases.length === 0 ? <p className="text-sm text-muted-foreground">暂无别名信息。</p> : aliases.map(([name, item]) => <div key={name} className="flex items-center justify-between gap-3 rounded-lg border p-2"><span className="font-mono text-xs">{name}</span><Badge variant={item.enabled ? 'secondary' : 'outline'}>{item.enabled ? '开启' : '关闭'}</Badge></div>)}</CardContent>
         </Card>
       </div>
 

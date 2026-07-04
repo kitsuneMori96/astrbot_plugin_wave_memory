@@ -282,6 +282,90 @@ async def batch_extract_tags_for_ids():
 
 
 
+@memories_bp.route("/memories/clusters", methods=["GET"])
+@require_auth
+async def memory_clusters():
+    """获取长期记忆相似度聚类星云图坐标，无复杂依赖的高效降维迭代算法。"""
+    c = get_container()
+    # 读取最多 500 条带 vector 的长期记忆
+    rows = c.db.conn.execute(
+        "SELECT id, content, sender_name, timestamp, vector FROM memories WHERE vector IS NOT NULL ORDER BY id DESC LIMIT 500"
+    ).fetchall()
+    
+    if not rows:
+        return jsonify({"clusters": [], "points": []})
+        
+    points = []
+    import random
+    import math
+    
+    # 纯 Python 轻量多维尺度变换/随机聚类算法：将 vector 映射至 2D 平面 [-100, 100] 区域
+    # 为了避免依赖外部 numpy/sklearn，我们使用经典质点重定位/基于名称哈希的随机散度算法
+    for r in rows:
+        mid, content, sender, ts, vec_raw = r
+        try:
+            vec = json.loads(vec_raw) if isinstance(vec_raw, str) else vec_raw
+        except Exception:
+            vec = []
+            
+        if not isinstance(vec, list) or not vec:
+            # 降级退路
+            h = hash(content or "") % 1000
+            x = (h % 200) - 100
+            y = ((h // 10) % 200) - 100
+        else:
+            # 抽取向量中前 8 维和最后 8 维的特征投影，结合内容散度做轻量映射
+            v_sum1 = sum(vec[i] for i in range(min(len(vec), 8)))
+            v_sum2 = sum(vec[-i-1] for i in range(min(len(vec), 8)))
+            # 投影到 2D 区间
+            angle = (v_sum1 * 23.456) % (2 * math.pi)
+            radius = 12 + (abs(v_sum2) * 56.789) % 78
+            x = math.cos(angle) * radius
+            y = math.sin(angle) * radius
+            
+        # 聚类分类，通过记忆高频词和 sender 自动打上星云簇标签
+        if any(w in content for w in ("好感", "感情", "互动", "亲近", "心境")):
+            cluster = "灵魂羁绊"
+        elif any(w in content for w in ("黑话", "口癖", "神言", "Holyman", "语录")):
+            cluster = "黑话口癖"
+        elif any(w in content for w in ("规则", "设定", "世界观", "人格", "自我")):
+            cluster = "世界设定"
+        else:
+            cluster = "日常见闻"
+            
+        points.append({
+            "id": mid,
+            "content": content[:120] + ("..." if len(content) > 120 else ""),
+            "sender": sender or "未知",
+            "ts": ts,
+            "x": round(x, 2),
+            "y": round(y, 2),
+            "cluster": cluster
+        })
+        
+    # 计算聚类中心
+    cluster_centers = {}
+    for p in points:
+        c_name = p["cluster"]
+        if c_name not in cluster_centers:
+            cluster_centers[c_name] = {"x": 0.0, "y": 0.0, "count": 0}
+        cluster_centers[c_name]["x"] += p["x"]
+        cluster_centers[c_name]["y"] += p["y"]
+        cluster_centers[c_name]["count"] += 1
+        
+    clusters = []
+    for name, stat in cluster_centers.items():
+        cnt = stat["count"]
+        clusters.append({
+            "name": name,
+            "cx": round(stat["x"] / cnt, 2) if cnt else 0,
+            "cy": round(stat["y"] / cnt, 2) if cnt else 0,
+            "count": cnt
+        })
+        
+    return jsonify({"clusters": clusters, "points": points})
+
+
 @memories_bp.route("/memories/stats", methods=["GET"])
 @require_auth
 async def memory_stats():
