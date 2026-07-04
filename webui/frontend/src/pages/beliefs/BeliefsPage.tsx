@@ -37,6 +37,8 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
 
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+
 function formatTime(seconds: unknown): string {
   const s = Number(seconds)
   if (!Number.isFinite(s) || s <= 0) return '-'
@@ -98,6 +100,9 @@ export function BeliefsPage() {
   const [evidenceBefore, setEvidenceBefore] = useState(15) // 上下文数默认拓宽
   const [evidenceAfter, setEvidenceAfter] = useState(15)
   const [evidenceLoading, setEvidenceLoading] = useState(false)
+  
+  // 证据弹窗子分类 Mini-Tabs
+  const [evidenceSubTab, setEvidenceSubTab] = useState<'relationship_event' | 'episode' | 'memory'>('memory')
 
   // 新增/编辑信念弹窗
   const [editOpen, setEditOpen] = useState(false)
@@ -184,7 +189,7 @@ export function BeliefsPage() {
   async function handleApproveSingle(id: number) {
     try {
       await approveBelief(id)
-      toast.success(`信念 #${id} 已确认通过，正式生效投入长期回忆`)
+      toast.success(`信念已确认通过并正式生效`)
       await loadData(page)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '审核失败')
@@ -195,7 +200,7 @@ export function BeliefsPage() {
   async function handleArchiveSingle(id: number) {
     try {
       await archiveBelief(id)
-      toast.success(`信念 #${id} 已安全归档`)
+      toast.success(`信念已安全归档`)
       await loadData(page)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '归档失败')
@@ -207,7 +212,7 @@ export function BeliefsPage() {
     if (!confirm(`确定要永久物理擦除信念 #${id} 吗？这会导致对应的关系演进证据被解绑！`)) return
     try {
       await deleteBelief(id)
-      toast.success(`信念 #${id} 已被删除`)
+      toast.success(`信念已被删除`)
       await loadData(page)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '删除失败')
@@ -334,7 +339,7 @@ export function BeliefsPage() {
     }
   }
 
-  // 8. 调取证据链并进行聊天气泡还原
+  // 8. 调取证据链并进行聊天气泡还原与高阶 BDI 分析
   async function handleOpenEvidence(id: number, b = evidenceBefore, a = evidenceAfter) {
     setEvidenceOpen(true)
     setEvidenceId(id)
@@ -343,6 +348,15 @@ export function BeliefsPage() {
     try {
       const res = await getBeliefEvidence(id, b, a)
       setEvidenceData(res)
+      
+      // 自适应定位到最优子分类 Tab
+      if (res.relationship_events && res.relationship_events.length > 0) {
+        setEvidenceSubTab('relationship_event')
+      } else if (res.episodes && res.episodes.length > 0) {
+        setEvidenceSubTab('episode')
+      } else {
+        setEvidenceSubTab('memory')
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '加载证据链失败')
     } finally {
@@ -400,7 +414,7 @@ export function BeliefsPage() {
         <CardHeader className="py-4 shrink-0 border-b bg-muted/10">
           <CardTitle>信念审核管理</CardTitle>
           <CardDescription>
-            统一审核、编辑 Bot 对客观世界、对自我及外部关系的心智信念（Beliefs）。支持一键追溯和 QQ 聊天气泡对话还原。
+            对自省、长语篇摘要合并过程中涌现出来的 Bot 信念（Beliefs）进行人工裁决。支持追溯关系增减事件、自省内心独白及群聊气泡流。
           </CardDescription>
         </CardHeader>
         <CardContent className="pt-6">
@@ -410,6 +424,7 @@ export function BeliefsPage() {
                 <FieldLabel htmlFor="belief-search">搜索词</FieldLabel>
                 <Input
                   id="belief-search"
+                  className="h-9 text-xs"
                   placeholder="搜索信念内容..."
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
@@ -418,7 +433,7 @@ export function BeliefsPage() {
               <Field>
                 <FieldLabel>信念类型</FieldLabel>
                 <Select value={type || 'all'} onValueChange={(val) => setType(val === 'all' ? '' : val)}>
-                  <SelectTrigger>
+                  <SelectTrigger className="h-9 text-xs">
                     <SelectValue placeholder="全部类型" />
                   </SelectTrigger>
                   <SelectContent>
@@ -433,7 +448,7 @@ export function BeliefsPage() {
               <Field>
                 <FieldLabel>信念状态</FieldLabel>
                 <Select value={status || 'all'} onValueChange={(val) => setStatus(val === 'all' ? '' : val)}>
-                  <SelectTrigger>
+                  <SelectTrigger className="h-9 text-xs">
                     <SelectValue placeholder="全部状态" />
                   </SelectTrigger>
                   <SelectContent>
@@ -448,7 +463,7 @@ export function BeliefsPage() {
               <Field>
                 <FieldLabel>Bot 对象</FieldLabel>
                 <Select value={botId || 'all'} onValueChange={(val) => setBotId(val === 'all' ? '' : val)}>
-                  <SelectTrigger>
+                  <SelectTrigger className="h-9 text-xs">
                     <SelectValue placeholder="全部 Bot" />
                   </SelectTrigger>
                   <SelectContent>
@@ -572,9 +587,9 @@ export function BeliefsPage() {
                           {b.confidence != null ? `${Math.round(b.confidence * 100)}%` : '—'}
                         </TableCell>
                         <TableCell className="text-center">
-                          <Button variant="ghost" className="h-7 text-xs px-2 flex items-center gap-1 mx-auto" onClick={() => void handleOpenEvidence(b.id)} disabled={countEvidence === 0}>
+                          <Button variant="ghost" className="h-7 text-xs px-2 flex items-center gap-1 mx-auto" onClick={() => void handleOpenEvidence(b.id)}>
                             <EyeIcon className="size-3" />
-                            {countEvidence > 0 ? `证据 (${countEvidence})` : '无'}
+                            {countEvidence > 0 ? `证据 (${countEvidence})` : '无证据'}
                           </Button>
                         </TableCell>
                         <TableCell className="text-muted-foreground font-mono text-xs whitespace-nowrap">
@@ -584,7 +599,7 @@ export function BeliefsPage() {
                           <div className="flex justify-end gap-1.5">
                             {b.status === 'pending' ? (
                               <Button size="xs" variant="secondary" className="bg-emerald-500/10 text-emerald-500 border border-emerald-500/10 hover:bg-emerald-500/20" onClick={() => void handleApproveSingle(b.id)}>
-                                确认
+                                确认通过
                               </Button>
                             ) : null}
                             {b.status !== 'archived' ? (
@@ -641,78 +656,160 @@ export function BeliefsPage() {
         </CardContent>
       </Card>
 
-      {/* ─── 弹出弹窗 A：聊天气泡还原证据追溯弹窗 ─── */}
+      {/* ─── 弹出弹窗 A：聊天气泡还原证据追溯弹窗（统一高阶多图层对齐） ─── */}
       <Dialog open={evidenceOpen} onOpenChange={setEvidenceOpen}>
         <DialogContent className="sm:max-w-2xl flex flex-col gap-0 h-[80vh]">
           <DialogHeader className="pb-3 border-b shrink-0 pr-6">
             <DialogTitle className="flex items-center gap-2">
-              <span>信念形成证据还原</span>
+              <span>信念形成多阶证据链追溯</span>
               {evidenceId ? <Badge variant="outline">#{evidenceId}</Badge> : null}
             </DialogTitle>
-            <DialogDescription>直接还原该条信念涌现时的多轮上下文。锚定背景框即是提取源气泡。</DialogDescription>
+            <DialogDescription>
+              还原该信念在心智推演过程中涌现的所有事实关系，包含关系数值变迁、反省独白和原始气泡还原。
+            </DialogDescription>
           </DialogHeader>
 
           {evidenceLoading ? (
             <div className="flex-1 flex flex-col items-center justify-center gap-2">
               <Loader2 className="animate-spin text-primary size-5" />
-              <span className="text-xs text-muted-foreground font-mono">正在拉取多维证据链快照，还原对话气泡...</span>
+              <span className="text-xs text-muted-foreground font-mono">正在拉取多维证据，还原心智演算链路...</span>
             </div>
           ) : evidenceData ? (
             <div className="flex-1 flex flex-col min-h-0">
-              <div className="p-3 bg-muted/40 border-b flex flex-wrap items-center gap-3 text-xs justify-between shrink-0">
-                <div className="flex items-center gap-2">
-                  <label className="flex items-center gap-1">前置上下文：
-                    <input type="number" className="input text-xs w-14 h-7" min="0" max="50" value={evidenceBefore} onChange={(e) => setEvidenceBefore(Number(e.target.value) || 0)} />
-                  </label>
-                  <label className="flex items-center gap-1">后置：
-                    <input type="number" className="input text-xs w-14 h-7" min="0" max="50" value={evidenceAfter} onChange={(e) => setEvidenceAfter(Number(e.target.value) || 0)} />
-                  </label>
-                  <Button size="xs" onClick={() => evidenceId && void handleOpenEvidence(evidenceId, evidenceBefore, evidenceAfter)}>刷新</Button>
+              {/* 子分类 Mini-Tabs 导航，完美展示 Relationship Events / Experience Episodes / Chat context */}
+              <Tabs value={evidenceSubTab} onValueChange={(val: any) => setEvidenceSubTab(val)} className="flex-1 flex flex-col min-h-0">
+                <div className="p-3 bg-muted/40 border-b flex flex-wrap items-center justify-between shrink-0 gap-3">
+                  <div className="flex items-center gap-2">
+                    <label className="flex items-center gap-1 text-[11px] text-muted-foreground">前：
+                      <input type="number" className="input text-xs w-12 h-6" min="0" max="50" value={evidenceBefore} onChange={(e) => setEvidenceBefore(Number(e.target.value) || 0)} />
+                    </label>
+                    <label className="flex items-center gap-1 text-[11px] text-muted-foreground">后：
+                      <input type="number" className="input text-xs w-12 h-6" min="0" max="50" value={evidenceAfter} onChange={(e) => setEvidenceAfter(Number(e.target.value) || 0)} />
+                    </label>
+                    <Button size="xs" onClick={() => evidenceId && void handleOpenEvidence(evidenceId, evidenceBefore, evidenceAfter)}>刷新</Button>
+                  </div>
+                  <TabsList className="grid grid-cols-3 h-7 w-full max-w-xs">
+                    <TabsTrigger value="relationship_event" className="text-[10px]" disabled={!evidenceData.relationship_events?.length}>关系变化</TabsTrigger>
+                    <TabsTrigger value="episode" className="text-[10px]" disabled={!evidenceData.episodes?.length}>自省独白</TabsTrigger>
+                    <TabsTrigger value="memory" className="text-[10px]" disabled={!evidenceData.memories?.length}>聊天气泡</TabsTrigger>
+                  </TabsList>
                 </div>
-                <Badge variant={evidenceData.used_fallback ? 'destructive' : 'secondary'}>
-                  {evidenceData.used_fallback ? '降级静态记录' : '动态事件溯源'}
-                </Badge>
-              </div>
 
-              {evidenceData.anchor ? (
-                <div className="p-3 bg-primary/5 border-b shrink-0">
-                  <span className="text-[10px] text-primary block mb-0.5 font-medium">锚定涌现事实</span>
-                  <p className="text-xs text-foreground font-mono leading-relaxed">{evidenceData.anchor.content}</p>
-                </div>
-              ) : null}
-
-              <ScrollArea className="flex-1 p-4 bg-muted/10">
-                <div className="flex flex-col gap-4">
-                  {evidenceData.messages?.length === 0 ? (
-                    <p className="text-sm text-muted-foreground py-12 text-center">无法还原上下文消息链（可能对应群已被退群）。</p>
-                  ) : (
-                    evidenceData.messages.map((msg, index) => {
-                      const isAnchor = msg.role === 'anchor'
-                      const isBot = msg.sender_id === '2500447291' || msg.sender_id === '1336495069' || String(msg.sender_name).includes('AI') || String(msg.sender_name).includes('Bot')
-                      
+                {/* TAB 1: 关系数值变化事件 */}
+                <TabsContent value="relationship_event" className="flex-1 overflow-auto p-4 bg-muted/5">
+                  <div className="space-y-3">
+                    {(evidenceData.relationship_events ?? []).map((ev: any) => {
+                      const isPositive = Number(ev.delta) >= 0
                       return (
-                        <div key={`${msg.id}-${index}`} className={`flex flex-col max-w-[85%] ${isBot ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
-                          <span className="text-[9px] text-muted-foreground font-mono mb-1">
-                            {msg.sender_name || msg.sender_id} · {formatTime(msg.timestamp)}
-                          </span>
-                          <div className={`rounded-2xl px-3.5 py-2 text-xs leading-relaxed border ${
-                            isAnchor 
-                              ? 'bg-amber-500/10 border-amber-500/20 text-foreground dark:text-foreground' 
-                              : isBot 
-                                ? 'bg-primary text-primary-foreground border-transparent' 
-                                : 'bg-background border-border/50 text-foreground'
-                          }`}>
-                            {msg.content}
+                        <div key={ev.id} className="p-3 rounded-xl border bg-background space-y-2 text-xs shadow-sm animate-in fade-in duration-150">
+                          <div className="flex items-center justify-between">
+                            <span className="font-semibold text-foreground flex items-center gap-1.5">
+                              💥 关系变迁 #{ev.id} · <span className="text-primary">{ev.dimension}</span> 
+                              <Badge className={isPositive ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20' : 'bg-destructive/10 text-destructive border-destructive/20'} variant="outline">
+                                {isPositive ? '+' : ''}{ev.delta}
+                              </Badge>
+                            </span>
+                            <span className="text-[10px] text-muted-foreground font-mono">{formatTime(ev.created_at)}</span>
                           </div>
-                          {isAnchor ? (
-                            <span className="text-[9px] text-amber-500 font-bold mt-1 font-mono uppercase">★ 锚定提取点 (Anchor)</span>
-                          ) : null}
+                          <div className="grid grid-cols-2 gap-2 text-[10px] text-muted-foreground bg-muted/30 p-2 rounded-md font-mono">
+                            <div>对象 QQ ID: {ev.user_id || '—'}</div>
+                            <div>群号: {ev.group_id || '全局'}</div>
+                          </div>
+                          <div className="text-xs text-foreground leading-relaxed pl-1 pt-1"><span className="text-muted-foreground font-medium">触发诱因：</span>{ev.reason}</div>
                         </div>
                       )
-                    })
-                  )}
-                </div>
-              </ScrollArea>
+                    })}
+                  </div>
+                </TabsContent>
+
+                {/* TAB 2: 自省内心独白插曲 */}
+                <TabsContent value="episode" className="flex-1 overflow-auto p-4 bg-muted/5">
+                  <div className="space-y-3">
+                    {(evidenceData.episodes ?? []).map((ep: any) => (
+                      <div key={ep.id} className="p-4 rounded-xl border bg-background space-y-3 text-xs shadow-sm animate-in fade-in duration-150">
+                        <div className="flex items-center justify-between border-b pb-1.5 border-white/5">
+                          <span className="font-semibold text-foreground">自省插曲 #{ep.id} <Badge variant="secondary" className="text-[9px] font-normal font-mono uppercase ml-1.5">{ep.episode_type}</Badge></span>
+                          <span className="text-[10px] text-muted-foreground font-mono">{formatTime(ep.created_at)}</span>
+                        </div>
+                        <div className="space-y-2.5 text-xs">
+                          {ep.trigger && (
+                            <div className="flex gap-2.5">
+                              <span className="text-muted-foreground font-semibold shrink-0 w-14 text-right select-none">外部触发:</span>
+                              <span className="text-foreground leading-relaxed">{ep.trigger}</span>
+                            </div>
+                          )}
+                          {ep.bot_inner_thought && (
+                            <div className="flex gap-2.5 bg-yellow-500/5 border border-yellow-500/10 p-2 rounded-lg">
+                              <span className="text-yellow-500 font-semibold shrink-0 w-14 text-right select-none">内心独白:</span>
+                              <span className="text-yellow-400/90 leading-relaxed italic font-mono">{ep.bot_inner_thought}</span>
+                            </div>
+                          )}
+                          {ep.bot_reply && (
+                            <div className="flex gap-2.5">
+                              <span className="text-emerald-500 font-semibold shrink-0 w-14 text-right select-none">回复内容:</span>
+                              <span className="text-emerald-400 leading-relaxed font-semibold">“{ep.bot_reply}”</span>
+                            </div>
+                          )}
+                          {ep.outcome && (
+                            <div className="flex gap-2.5 border-t border-white/5 pt-1.5 mt-1.5">
+                              <span className="text-muted-foreground font-semibold shrink-0 w-14 text-right select-none">反应与后果:</span>
+                              <span className="text-foreground leading-relaxed">{ep.outcome}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </TabsContent>
+
+                {/* TAB 3: 当时真实群聊气泡还原 (Genuine Chat Context) */}
+                <TabsContent value="memory" className="flex-1 flex flex-col min-h-0 bg-muted/10">
+                  {evidenceData.anchor ? (
+                    <div className="p-3 bg-primary/5 border-b shrink-0 flex items-center justify-between">
+                      <div className="min-w-0">
+                        <span className="text-[10px] text-primary block mb-0.5 font-bold uppercase tracking-wider">🎯 涌现锚定事实</span>
+                        <p className="text-xs text-foreground font-mono leading-relaxed truncate">{evidenceData.anchor.content}</p>
+                      </div>
+                      <Badge variant={evidenceData.used_fallback ? 'destructive' : 'secondary'} className="shrink-0 scale-90">
+                        {evidenceData.used_fallback ? '静态降级' : '动态解包'}
+                      </Badge>
+                    </div>
+                  ) : null}
+
+                  <ScrollArea className="flex-1 p-4 bg-muted/5">
+                    <div className="flex flex-col gap-4">
+                      {evidenceData.memories?.length === 0 ? (
+                        <p className="text-sm text-muted-foreground py-12 text-center">无法还原上下文消息链（可能对应群已被退群）。</p>
+                      ) : (
+                        (evidenceData.memories ?? []).map((msg: any, index: number) => {
+                          const isAnchor = evidenceData.anchor && String(msg.id) === String(evidenceData.anchor.id)
+                          const isBot = msg.sender_id === '2500447291' || msg.sender_id === '1336495069' || String(msg.sender_name).includes('AI') || String(msg.sender_name).includes('Bot')
+                          
+                          return (
+                            <div key={`${msg.id}-${index}`} className={`flex flex-col max-w-[85%] ${isBot ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
+                              <span className="text-[9px] text-muted-foreground font-mono mb-1">
+                                {msg.sender_name || msg.sender_id} · {formatTime(msg.timestamp)}
+                              </span>
+                              <div className={`rounded-2xl px-3.5 py-2 text-xs leading-relaxed border ${
+                                isAnchor 
+                                  ? 'bg-amber-500/10 border-amber-500/20 text-foreground dark:text-foreground shadow-[0_0_12px_rgba(245,158,11,0.06)]' 
+                                  : isBot 
+                                    ? 'bg-primary text-primary-foreground border-transparent' 
+                                    : 'bg-background border-border/50 text-foreground'
+                              }`}>
+                                {msg.content}
+                              </div>
+                              {isAnchor ? (
+                                <span className="text-[9px] text-amber-500 font-bold mt-1 font-mono uppercase">★ 锚定提取点 (Anchor)</span>
+                              ) : null}
+                            </div>
+                          )
+                        })
+                      )}
+                    </div>
+                  </ScrollArea>
+                </TabsContent>
+              </Tabs>
             </div>
           ) : (
             <p className="text-sm text-muted-foreground py-12 text-center">暂无证据链数据。</p>

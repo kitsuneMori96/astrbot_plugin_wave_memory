@@ -49,6 +49,9 @@ export interface EvidencePayload {
   anchor?: { id: string; content: string }
   messages: EvidenceMessage[]
   used_fallback: boolean
+  relationship_events?: any[]  // 新增对齐旧版
+  episodes?: any[]             // 新增对齐旧版自省独白
+  memories?: any[]             // 新增对齐旧版
 }
 
 export function listBeliefs(filters: BeliefsFilters): Promise<BeliefsResponse> {
