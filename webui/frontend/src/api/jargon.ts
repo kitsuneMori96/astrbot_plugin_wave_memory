@@ -51,13 +51,15 @@ export interface HolymanStatusPayload {
   local_version: string
   remote_version: string
   asset_status: string
-  update_available: boolean
+  update_available?: boolean
+  is_update_available?: boolean
   categories: HolymanCategory[]
-  items_count: number
-  concepts_count: number
-  examples_count: number
-  corpus_count: number
-  candidates_count: number
+  local_count?: number
+  items_count?: number
+  concepts_count?: number
+  examples_count?: number
+  corpus_count?: number
+  candidates_count?: number
   phrases?: any[] // 新增用于 TAB 下列出广域语料
   concepts?: any[] // 新增分层
   examples?: any[]
@@ -114,6 +116,66 @@ export function getJargonEvidence(id: number, before = 15, after = 15): Promise<
 
 export function getHolymanStatus(): Promise<any> {
   return fetchJson<any>('/api/jargon/holyman')
+}
+
+export interface ToggleHolymanPhrasePayload {
+  word: string
+  meaning?: string
+  activate: boolean
+}
+
+export interface ToggleHolymanPhraseResponse {
+  ok: boolean
+  db_id?: number
+  error?: string
+}
+
+export function toggleHolymanPhrase(payload: ToggleHolymanPhrasePayload): Promise<ToggleHolymanPhraseResponse> {
+  return fetchJson<ToggleHolymanPhraseResponse>('/api/jargon/holyman/toggle', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export interface BatchReviewHolymanCandidatesPayload {
+  ids: Array<number | string>
+  words: string[]
+  action: 'approve' | 'reject'
+}
+
+export interface BatchReviewHolymanCandidatesResponse {
+  ok: boolean
+  reviewed_count: number
+  blocked_count: number
+  action: string
+  error?: string
+}
+
+export function batchReviewHolymanCandidates(
+  payload: BatchReviewHolymanCandidatesPayload,
+): Promise<BatchReviewHolymanCandidatesResponse> {
+  return fetchJson<BatchReviewHolymanCandidatesResponse>('/api/jargon/holyman/candidates/batch-review', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export interface AddHolymanBlocklistPayload {
+  word: string
+  reason?: string
+}
+
+export interface AddHolymanBlocklistResponse {
+  ok: boolean
+  word: string
+  error?: string
+}
+
+export function addHolymanBlocklist(payload: AddHolymanBlocklistPayload): Promise<AddHolymanBlocklistResponse> {
+  return fetchJson<AddHolymanBlocklistResponse>('/api/jargon/holyman/blocklist', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
 }
 
 export function batchDeleteJargons(ids: number[]): Promise<{ ok: boolean; deleted: number }> {

@@ -95,7 +95,7 @@ export const appRoutes: AppRoute[] = [
   {
     path: '/jargon',
     title: '黑话与口癖',
-    description: '群聊习得本地黑话，在线同步官方 Holyman 人设语料库',
+    description: '群聊习得本地黑话，在线同步 Holyman 广域抽象黑话分层资产',
     icon: SmileIcon,
     element: JargonPage,
   },
