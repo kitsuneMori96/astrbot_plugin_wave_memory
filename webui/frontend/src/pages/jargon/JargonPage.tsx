@@ -457,8 +457,8 @@ export function JargonPage() {
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="grid w-full grid-cols-2 max-w-md shrink-0">
-          <TabsTrigger value="local">群聊本地黑话</TabsTrigger>
-          <TabsTrigger value="global">广域人设语料库 (Holyman)</TabsTrigger>
+          <TabsTrigger value="local" onClick={() => setActiveTab('local')}>群聊本地黑话</TabsTrigger>
+          <TabsTrigger value="global" onClick={() => { setActiveTab('global'); void loadHolyman(); }}>广域人设语料库 (Holyman)</TabsTrigger>
         </TabsList>
 
         {/* ═══ Tab 1: 本地群黑话 ═══ */}
