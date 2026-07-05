@@ -296,7 +296,7 @@ class HolymanSyncService:
             "candidates": candidates,
             "blocked": blocked,
             "raw_sources": fetched,
-            "asset_type": "persona_skill_reference",
+            "asset_type": "global_jargon_reference",
             "runtime_policy": "understanding_only",
         }
         assets["quality_report"] = self._build_quality_report(assets)
@@ -338,7 +338,7 @@ class HolymanSyncService:
             return {
                 "ok": report.get("status") == "ready",
                 "asset_status": report.get("status"),
-                "asset_type": "persona_skill_reference",
+                "asset_type": "global_jargon_reference",
                 "runtime_policy": "understanding_only",
                 "phrases_count": report.get("phrases_count"),
                 "content_count": len(content_entries(assets["phrases"])),

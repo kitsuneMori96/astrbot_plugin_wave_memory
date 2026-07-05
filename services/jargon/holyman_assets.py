@@ -269,7 +269,8 @@ def parse_concepts(fetched: dict[str, str]) -> list[dict[str, Any]]:
                 "source": source,
                 "tags": [CATEGORY_BY_SOURCE.get(source, "unknown")],
                 "confidence": 0.78,
-                "layer": "persona" if source.startswith("神人.skill/_persona/") or source == "神人.skill/SKILL.md" else "knowledge",
+                "source_category": CATEGORY_BY_SOURCE.get(source, "unknown"),
+                "layer": "concept",
                 "reference_only": True,
                 "runtime_match": False,
             })

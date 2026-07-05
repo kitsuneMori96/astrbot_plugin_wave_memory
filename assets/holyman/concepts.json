@@ -8,9 +8,10 @@
       "skill-core"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "skill-core"
   },
   {
     "id": "神人.skill/SKILL.md.2",
@@ -21,9 +22,10 @@
       "skill-core"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "skill-core"
   },
   {
     "id": "神人.skill/SKILL.md.3",
@@ -34,9 +36,10 @@
       "skill-core"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "skill-core"
   },
   {
     "id": "神人.skill/SKILL.md.4",
@@ -47,9 +50,10 @@
       "skill-core"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "skill-core"
   },
   {
     "id": "神人.skill/SKILL.md.5",
@@ -60,9 +64,10 @@
       "skill-core"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "skill-core"
   },
   {
     "id": "神人.skill/SKILL.md.6",
@@ -73,9 +78,10 @@
       "skill-core"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "skill-core"
   },
   {
     "id": "神人.skill/_persona/rules.md.7",
@@ -86,9 +92,10 @@
       "rules"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "rules"
   },
   {
     "id": "神人.skill/_persona/rules.md.8",
@@ -99,9 +106,10 @@
       "rules"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "rules"
   },
   {
     "id": "神人.skill/_persona/rules.md.9",
@@ -112,9 +120,10 @@
       "rules"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "rules"
   },
   {
     "id": "神人.skill/_persona/rules.md.10",
@@ -125,9 +134,10 @@
       "rules"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "rules"
   },
   {
     "id": "神人.skill/_persona/rules.md.11",
@@ -138,9 +148,10 @@
       "rules"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "rules"
   },
   {
     "id": "神人.skill/_persona/rules.md.12",
@@ -151,9 +162,10 @@
       "rules"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "rules"
   },
   {
     "id": "神人.skill/_persona/rules.md.13",
@@ -164,9 +176,10 @@
       "rules"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "rules"
   },
   {
     "id": "神人.skill/_persona/communication.md.14",
@@ -177,9 +190,10 @@
       "communication"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "communication"
   },
   {
     "id": "神人.skill/_persona/communication.md.15",
@@ -190,9 +204,10 @@
       "communication"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "communication"
   },
   {
     "id": "神人.skill/_persona/communication.md.16",
@@ -203,9 +218,10 @@
       "communication"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "communication"
   },
   {
     "id": "神人.skill/_persona/communication.md.17",
@@ -216,9 +232,10 @@
       "communication"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "communication"
   },
   {
     "id": "神人.skill/_persona/communication.md.18",
@@ -229,9 +246,10 @@
       "communication"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "communication"
   },
   {
     "id": "神人.skill/_persona/communication.md.19",
@@ -242,9 +260,10 @@
       "communication"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "communication"
   },
   {
     "id": "神人.skill/_persona/communication.md.20",
@@ -255,9 +274,10 @@
       "communication"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "communication"
   },
   {
     "id": "神人.skill/_persona/communication.md.21",
@@ -268,9 +288,10 @@
       "communication"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "communication"
   },
   {
     "id": "神人.skill/_persona/communication.md.22",
@@ -281,9 +302,10 @@
       "communication"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "communication"
   },
   {
     "id": "神人.skill/_persona/communication.md.23",
@@ -294,9 +316,10 @@
       "communication"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "communication"
   },
   {
     "id": "神人.skill/_persona/communication.md.24",
@@ -307,9 +330,10 @@
       "communication"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "communication"
   },
   {
     "id": "神人.skill/_persona/values.md.25",
@@ -320,9 +344,10 @@
       "values"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "values"
   },
   {
     "id": "神人.skill/_persona/values.md.26",
@@ -333,9 +358,10 @@
       "values"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "values"
   },
   {
     "id": "神人.skill/_persona/values.md.27",
@@ -346,9 +372,10 @@
       "values"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "values"
   },
   {
     "id": "神人.skill/_persona/values.md.28",
@@ -359,9 +386,10 @@
       "values"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "values"
   },
   {
     "id": "神人.skill/_persona/values.md.29",
@@ -372,9 +400,10 @@
       "values"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "values"
   },
   {
     "id": "神人.skill/_persona/values.md.30",
@@ -385,9 +414,10 @@
       "values"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "values"
   },
   {
     "id": "神人.skill/_persona/values.md.31",
@@ -398,9 +428,10 @@
       "values"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "values"
   },
   {
     "id": "神人.skill/_persona/values.md.32",
@@ -411,9 +442,10 @@
       "values"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "values"
   },
   {
     "id": "神人.skill/_persona/values.md.33",
@@ -424,9 +456,10 @@
       "values"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "values"
   },
   {
     "id": "神人.skill/_persona/values.md.34",
@@ -437,9 +470,10 @@
       "values"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "values"
   },
   {
     "id": "神人.skill/_persona/values.md.35",
@@ -450,9 +484,10 @@
       "values"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "values"
   },
   {
     "id": "神人.skill/_persona/values.md.36",
@@ -463,9 +498,10 @@
       "values"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "values"
   },
   {
     "id": "神人.skill/_persona/values.md.37",
@@ -476,9 +512,10 @@
       "values"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "values"
   },
   {
     "id": "神人.skill/_persona/values.md.38",
@@ -489,9 +526,10 @@
       "values"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "values"
   },
   {
     "id": "神人.skill/_persona/values.md.39",
@@ -502,9 +540,10 @@
       "values"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "values"
   },
   {
     "id": "神人.skill/_persona/values.md.40",
@@ -515,9 +554,10 @@
       "values"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "values"
   },
   {
     "id": "神人.skill/_persona/values.md.41",
@@ -528,9 +568,10 @@
       "values"
     ],
     "confidence": 0.78,
-    "layer": "persona",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "values"
   },
   {
     "id": "神人.skill/_meta/sources.md.42",
@@ -541,9 +582,10 @@
       "unknown"
     ],
     "confidence": 0.78,
-    "layer": "knowledge",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "unknown"
   },
   {
     "id": "神人.skill/_meta/sources.md.43",
@@ -554,9 +596,10 @@
       "unknown"
     ],
     "confidence": 0.78,
-    "layer": "knowledge",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "unknown"
   },
   {
     "id": "神人.skill/_meta/sources.md.44",
@@ -567,8 +610,9 @@
       "unknown"
     ],
     "confidence": 0.78,
-    "layer": "knowledge",
+    "layer": "concept",
     "reference_only": true,
-    "runtime_match": false
+    "runtime_match": false,
+    "source_category": "unknown"
   }
 ]

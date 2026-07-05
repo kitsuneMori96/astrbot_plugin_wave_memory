@@ -68,8 +68,9 @@ class HolymanJargonImportTest(unittest.TestCase):
         text = JargonInjector(_DB()).get_injection("今天疯狂星期四 v我50", "g1")
 
         self.assertIn("[黑话理解参考", text)
-        self.assertIn("不改变羽书人格", text)
-        self.assertIn("不要求模仿", text)
+        self.assertIn("只解释用户消息中已经出现", text)
+        self.assertIn("不改变系统身份", text)
+        self.assertIn("不要求模仿或主动使用", text)
 
     def test_current_phrases_asset_passes_quality_gate(self):
         path = Path("assets/holyman/phrases.json")
@@ -580,12 +581,12 @@ class HolymanJargonImportTest(unittest.TestCase):
         finally:
             jargon_bp_mod.get_container = original_container
 
-        self.assertEqual(data["asset_type"], "persona_skill_reference")
+        self.assertEqual(data["asset_type"], "global_jargon_reference")
         self.assertEqual(data["runtime_policy"], "understanding_only")
         self.assertIn("layers", data)
         self.assertEqual(
             set(data["layers"].keys()),
-            {"catchphrases", "persona", "quotes_knowledge", "corpus", "candidates", "blocked"},
+            {"catchphrases", "concepts", "quotes_knowledge", "corpus", "candidates", "blocked"},
         )
         self.assertIn("categories", data)
         self.assertIn("candidates", data)
@@ -595,7 +596,7 @@ class HolymanJargonImportTest(unittest.TestCase):
         self.assertTrue(all("category_label" in item for item in data["items"]))
         self.assertTrue(data["layers"]["corpus"]["reference_only"])
 
-    def test_persona_skill_reference_runtime_layer_is_explicit_and_conservative(self):
+    def test_global_jargon_reference_runtime_layer_is_explicit_and_conservative(self):
         from services.jargon.holyman_assets import content_entries
 
         phrases = json.loads(Path("assets/holyman/phrases.json").read_text(encoding="utf-8"))
@@ -672,9 +673,9 @@ class HolymanJargonImportTest(unittest.TestCase):
         ref._phrases = {
             "别急": {"meaning": "提醒对方不要急于反应。", "layer": "catchphrase", "runtime_match": True},
             "动了XX的蛋糕": {"meaning": "反串阴谋化解释。", "layer": "catchphrase", "runtime_match": True},
-            "Expression DNA": {"meaning": "persona 语言基因", "layer": "persona", "runtime_match": False},
+            "Expression DNA": {"meaning": "文化表达概念参考", "layer": "concept", "runtime_match": False},
         }
-        ref._examples = ["Expression DNA 是只读人格设定。"]
+        ref._examples = ["Expression DNA 是只读文化概念参考。"]
         ref._blocked = {}
 
         self.assertTrue(ref.match("别急")["matched"])
@@ -682,7 +683,7 @@ class HolymanJargonImportTest(unittest.TestCase):
         self.assertFalse(ref.match("动了")["matched"])
         self.assertTrue(ref.match("动了游戏厂商的蛋糕")["matched"])
 
-    def test_holyman_api_returns_persona_skill_reference_metadata(self):
+    def test_holyman_api_returns_global_jargon_reference_metadata(self):
         import asyncio
         from webui.blueprints import jargon as jargon_bp_mod
 
@@ -712,21 +713,22 @@ class HolymanJargonImportTest(unittest.TestCase):
         finally:
             jargon_bp_mod.get_container = original_container
 
-        self.assertEqual(data["asset_type"], "persona_skill_reference")
+        self.assertEqual(data["asset_type"], "global_jargon_reference")
         self.assertEqual(data["runtime_policy"], "understanding_only")
         self.assertIn("layers", data)
         self.assertIn("corpus_counts", data)
 
-    def test_holyman_asset_contract_uses_persona_skill_reference_language(self):
+    def test_holyman_asset_contract_uses_global_jargon_reference_language(self):
         phrases = json.loads(Path("assets/holyman/phrases.json").read_text(encoding="utf-8"))
         concepts = json.loads(Path("assets/holyman/concepts.json").read_text(encoding="utf-8"))
         examples = json.loads(Path("assets/holyman/examples.json").read_text(encoding="utf-8"))
 
         self.assertTrue(any(item.get("layer") == "catchphrase" for item in phrases.values() if isinstance(item, dict)))
-        self.assertTrue(any("summary" in item and "candidate_words" in item for item in concepts if isinstance(item, dict)))
+        self.assertTrue(any("summary" in item and item.get("layer") == "concept" for item in concepts if isinstance(item, dict)))
         self.assertTrue(any(item.get("reference_only") is True for item in examples if isinstance(item, dict)))
         self.assertTrue(any(item.get("runtime_match") is True for item in phrases.values() if isinstance(item, dict)))
         self.assertTrue(all(item.get("runtime_match") is not True for item in concepts if isinstance(item, dict)))
+        self.assertTrue(all(item.get("layer") != "persona" for item in concepts if isinstance(item, dict)))
 
 
 if __name__ == "__main__":

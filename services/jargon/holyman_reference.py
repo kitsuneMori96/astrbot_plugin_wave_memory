@@ -189,7 +189,7 @@ class HolymanReference:
 
     def _format_explanation(self, value: Any) -> str:
         meaning = self._phrase_meaning(value).strip()
-        return f"{meaning} 仅作为理解参考，不改变羽书人格或回复风格。" if meaning else "仅作为理解参考，不改变羽书人格或回复风格。"
+        return f"{meaning} 仅作为理解参考，不改变系统身份或回复风格。" if meaning else "仅作为理解参考，不改变系统身份或回复风格。"
 
     def match(self, term: str, context: str = "") -> dict[str, Any]:
         term = (term or "").strip()

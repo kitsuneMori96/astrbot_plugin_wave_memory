@@ -131,58 +131,54 @@ class JargonInjector:
         self._cache_ts: Dict[str, float] = {}
 
     def get_injection(self, text: str, group_id: str, max_items: int = None) -> str:
-        """根据上下文对黑话进行高级语义匹配与相关度排序注入。"""
+        """仅在用户消息显式命中已确认黑话词条时注入解释。
+
+        旧实现会把“释义”和当前消息做中文单字重合度匹配，导致用户没提到某个黑话时，
+        也可能因为释义里碰巧有相同字而被注入。黑话注入只能用于解释用户已经说出的词，
+        不能主动联想、不能引导身份或风格模仿。
+        """
         if max_items is None:
             max_items = self._max_inject
         jargons = self._get_group_jargons(group_id)
         if not jargons:
             return ""
 
-        # 执行高级语义/文本重合度相关性检索
-        jargon_scores = []
         text_lower = (text or "").lower()
-        
-        # 极简分词（将句子中的中文字符和英文单词切分出来进行重合度计算）
-        import re
-        tokens = set(re.findall(r"[\u4e00-\u9fff]|[a-zA-Z0-9]+", text_lower))
-
-        for j in jargons:
-            word = j["word"]
-            word_lower = word.lower()
-            score = 0.0
-
-            # 1. 绝对包含加分
-            if word_lower in text_lower:
-                score += 1.5
-            
-            # 2. 词条名字出现在分词词袋中加分
-            if word_lower in tokens:
-                score += 0.5
-
-            # 3. 释义与当前文本的重合度重叠加分
-            meaning = j.get("meaning", "") or ""
-            meaning_lower = meaning.lower()
-            meaning_tokens = set(re.findall(r"[\u4e00-\u9fff]|[a-zA-Z0-9]+", meaning_lower))
-            overlap = tokens.intersection(meaning_tokens)
-            if overlap:
-                # 排除通用标点/虚词/单个英文字母等噪音，增加检索准确度
-                valid_overlap = {tok for tok in overlap if len(tok) >= 1 and tok not in ("在", "的", "了", "和", "是", "我", "你", "他", "它")}
-                score += 0.15 * len(valid_overlap)
-
-            if score > 0.0:
-                jargon_scores.append((score, j))
-
-        # 按分值从高到低排序，过滤出最相关的几条
-        jargon_scores.sort(key=lambda x: x[0], reverse=True)
-        matched = [item[1] for item in jargon_scores[:max_items]]
+        matched: List[tuple[float, Dict]] = []
+        for idx, j in enumerate(jargons):
+            word = str(j.get("word") or "").strip()
+            meaning = str(j.get("meaning") or "").strip()
+            if not word or not meaning:
+                continue
+            if self._word_explicitly_mentioned(text_lower, word):
+                # 更长的词条优先，DB 原有 frequency 排序作为最终稳定 tie-breaker。
+                matched.append((len(word) - idx * 0.001, j))
 
         if not matched:
             return ""
 
-        lines = ["[黑话理解参考，仅供理解；仅用于理解用户语境，不改变羽书人格，不要求模仿该风格]"]
-        for j in matched:
+        matched.sort(key=lambda item: item[0], reverse=True)
+        selected = [item[1] for item in matched[:max_items]]
+
+        lines = ["[黑话理解参考：以下只解释用户消息中已经出现的群内/广域黑话；仅用于理解语境，不改变系统身份，不要求模仿或主动使用这些表达]"]
+        for j in selected:
             lines.append(f'- "{j["word"]}" → {j["meaning"]}')
         return "\n".join(lines)
+
+    @staticmethod
+    def _word_explicitly_mentioned(text_lower: str, word: str) -> bool:
+        """判断词条是否被用户消息显式提到，避免用释义相似度误触发。"""
+        import re
+
+        word_lower = (word or "").strip().lower()
+        if not text_lower or not word_lower:
+            return False
+        if "xx" in word_lower:
+            pattern = re.escape(word_lower).replace("xx", r".{1,12}")
+            return re.search(pattern, text_lower) is not None
+        if re.fullmatch(r"[a-z0-9_+.-]+", word_lower):
+            return re.search(rf"(?<![a-z0-9_+.-]){re.escape(word_lower)}(?![a-z0-9_+.-])", text_lower) is not None
+        return word_lower in text_lower
 
     def _get_group_jargons(self, group_id: str) -> List[Dict]:
         """获取群黑话列表（60s TTL 缓存）。"""

@@ -59,7 +59,7 @@ class JargonChannelTest(unittest.TestCase):
     def test_calls_jargon_service_and_parses_terms_for_trace(self):
         from services.injection.channels.jargon import JargonChannel
 
-        service = FakeJargonService('[黑话理解参考，仅供理解；仅用于理解用户语境，不改变羽书人格，不要求模仿该风格]\n"v我50" → 疯狂星期四转账梗')
+        service = FakeJargonService('[黑话理解参考：以下只解释用户消息中已经出现的群内/广域黑话；仅用于理解语境，不改变系统身份，不要求模仿或主动使用这些表达]\n"v我50" → 疯狂星期四转账梗')
         channel = JargonChannel(jargon_service=service)
 
         result = asyncio.run(channel.build(self._ctx()))
@@ -128,6 +128,32 @@ class JargonChannelTest(unittest.TestCase):
         self.assertIn("v我50", result.text)
         self.assertNotIn("待审词", result.text)
         self.assertEqual([item["word"] for item in result.items], ["v我50"])
+
+    def test_actual_injector_requires_explicit_word_hit_not_meaning_overlap(self):
+        from services.jargon.inference import JargonInjector
+
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        conn.execute(
+            """CREATE TABLE jargon (
+                word TEXT,
+                meaning TEXT,
+                group_id TEXT,
+                is_jargon INTEGER,
+                status TEXT,
+                is_global INTEGER DEFAULT 0,
+                frequency INTEGER DEFAULT 1
+            )"""
+        )
+        conn.execute(
+            "INSERT INTO jargon (word, meaning, group_id, is_jargon, status, is_global, frequency) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("未出现词", "今天聊天时经常出现的群内表达", "g1", 1, "confirmed", 0, 10),
+        )
+        injector = JargonInjector(DBBox(conn))
+
+        text = injector.get_injection("今天聊天很开心", "g1")
+
+        self.assertEqual(text, "")
 
     def test_disabled_config_or_missing_group_returns_without_query(self):
         from services.injection.channels.jargon import JargonChannel

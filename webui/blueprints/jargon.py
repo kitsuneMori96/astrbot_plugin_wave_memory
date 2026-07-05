@@ -25,7 +25,7 @@ HOLYMAN_CATEGORY_LABELS = {
     "gaming": "游戏文化",
     "internet-culture": "互联网文化",
     "communication": "沟通风格",
-    "rules": "人格规则",
+    "rules": "使用规则",
     "values": "价值观",
     "iconic-quotes": "标志语录",
     "internal-quotes": "内部语录",
@@ -139,7 +139,7 @@ def _holyman_content_status(phrases: dict, local_count: int, remote_version: str
         "remote_commit_version": remote_commit_version,
         "is_update_available": is_update_available,
         "asset_status": asset_status,
-        "asset_type": "persona_skill_reference",
+        "asset_type": "global_jargon_reference",
         "runtime_policy": "understanding_only",
     }
 
@@ -830,7 +830,7 @@ async def get_holyman():
     }
     layers = {
         "catchphrases": items,
-        "persona": concepts if isinstance(concepts, list) else [],
+        "concepts": concepts if isinstance(concepts, list) else [],
         "quotes_knowledge": examples if isinstance(examples, list) else [],
         "corpus": corpus_summary,
         "candidates": candidates if isinstance(candidates, list) else [],
@@ -856,7 +856,7 @@ async def get_holyman():
         "categories": categories,
         "layers": layers,
         "corpus_counts": corpus_counts,
-        "asset_type": "persona_skill_reference",
+        "asset_type": "global_jargon_reference",
         "runtime_policy": "understanding_only",
         "local_count": local_count,
         "local_version": local_version,
@@ -866,6 +866,13 @@ async def get_holyman():
         "content_hash": content_status["content_hash"],
         "asset_status": content_status["asset_status"],
         "is_update_available": content_status["is_update_available"],
+        # React WebUI compatibility aliases; v4.0.0 old frontend used direct layer lengths.
+        "update_available": content_status["is_update_available"],
+        "items_count": local_count,
+        "concepts_count": len(concepts) if isinstance(concepts, list) else 0,
+        "examples_count": len(examples) if isinstance(examples, list) else 0,
+        "corpus_count": len(corpus) if isinstance(corpus, list) else 0,
+        "candidates_count": len(candidates) if isinstance(candidates, list) else 0,
     })
 
 
