@@ -155,7 +155,7 @@ export function MemoriesPage() {
     try {
       const res = await listSenders()
       setSenders(res.senders ?? [])
-    } catch (e) {
+    } catch {
       // 容错：允许发送者加载失败而不崩溃
     }
   }
@@ -166,6 +166,7 @@ export function MemoriesPage() {
 
   useEffect(() => {
     void loadData(1)
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [source, sender, hasTags, hasVector])
 
   // 加载星云聚类数据并由 Canvas 绘制
@@ -175,7 +176,7 @@ export function MemoriesPage() {
       const res = await getMemoryClusters()
       setNebulaPoints(res.points ?? [])
       setNebulaClusters(res.clusters ?? [])
-    } catch (e) {
+    } catch {
       toast.error('记忆星云聚类加载失败')
     } finally {
       setNebulaLoading(false)

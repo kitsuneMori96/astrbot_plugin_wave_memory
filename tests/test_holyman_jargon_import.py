@@ -730,6 +730,167 @@ class HolymanJargonImportTest(unittest.TestCase):
         self.assertTrue(all(item.get("runtime_match") is not True for item in concepts if isinstance(item, dict)))
         self.assertTrue(all(item.get("layer") != "persona" for item in concepts if isinstance(item, dict)))
 
+    def _jargon_conn(self):
+        import sqlite3
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        conn.execute(
+            """CREATE TABLE jargon (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                word TEXT,
+                meaning TEXT,
+                is_jargon INTEGER,
+                status TEXT,
+                frequency INTEGER,
+                confidence REAL,
+                is_global INTEGER,
+                group_id TEXT,
+                contexts TEXT,
+                created_at INTEGER,
+                updated_at INTEGER,
+                scope TEXT,
+                source TEXT
+            )"""
+        )
+        return conn
+
+    def test_holyman_toggle_can_enable_runtime_phrase_without_name_error(self):
+        import asyncio
+        import types
+        from webui.blueprints import jargon
+
+        conn = self._jargon_conn()
+        old_container = jargon.get_container
+        old_request = jargon.request
+
+        class _DB:
+            def __init__(self, conn):
+                self.conn = conn
+
+        async def _get_json():
+            return {"word": "v我50", "meaning": "长篇铺垫后突然索要 50 元。", "activate": True}
+
+        jargon.get_container = lambda: types.SimpleNamespace(db=_DB(conn))
+        jargon.request = types.SimpleNamespace(get_json=_get_json)
+        self.addCleanup(lambda: setattr(jargon, "get_container", old_container))
+        self.addCleanup(lambda: setattr(jargon, "request", old_request))
+
+        result = asyncio.run(jargon.toggle_holyman.__wrapped__())
+
+        self.assertEqual(result["ok"], True)
+        row = conn.execute("SELECT word, source, scope, status FROM jargon WHERE word = ?", ("v我50",)).fetchone()
+        self.assertEqual(row, ("v我50", "holyman_skills", "global", "confirmed"))
+
+    def test_get_holyman_returns_corpus_items_for_readonly_display(self):
+        import asyncio
+        import types
+        from webui.blueprints import jargon
+
+        conn = self._jargon_conn()
+        old_container = jargon.get_container
+        old_fetch = jargon._fetch_github_commit_info_sync
+
+        class _DB:
+            def __init__(self, conn):
+                self.conn = conn
+
+        jargon.get_container = lambda: types.SimpleNamespace(db=_DB(conn))
+        jargon._fetch_github_commit_info_sync = lambda: "remote-test"
+        self.addCleanup(lambda: setattr(jargon, "get_container", old_container))
+        self.addCleanup(lambda: setattr(jargon, "_fetch_github_commit_info_sync", old_fetch))
+
+        payload = asyncio.run(jargon.get_holyman.__wrapped__())
+
+        self.assertIn("corpus", payload)
+        self.assertGreater(len(payload["corpus"]), 0)
+        self.assertEqual(payload["corpus"][0]["layer"], "corpus")
+        self.assertTrue(payload["corpus"][0]["reference_only"])
+        self.assertFalse(payload["corpus"][0]["safe_for_prompt"])
+        self.assertTrue(payload["layers"]["corpus"]["reference_only"])
+
+    def test_holyman_sync_preview_compares_remote_without_writing_assets(self):
+        from services.jargon.sync import HolymanSyncService
+
+        with tempfile.TemporaryDirectory() as tmp:
+            assets_dir = Path(tmp)
+            (assets_dir / "phrases.json").write_text(json.dumps({
+                "v我50": {
+                    "meaning": "旧解释",
+                    "category": "catchphrase",
+                    "layer": "catchphrase",
+                    "runtime_match": True,
+                },
+                "_version": "sync-old",
+                "_content_hash": "oldhash",
+            }, ensure_ascii=False), encoding="utf-8")
+            fetched = {
+                "神人.skill/SKILL.md": "\"v我50\"\n",
+                "神人.skill/_knowledge/gaming.md": "### 游戏传教\n围绕游戏身份展开夸张表达。\n",
+                "神人.skill/_knowledge/internet-culture.md": "### 抽象话术\n用反串和复读制造幽默。\n",
+                "神人.skill/_persona/communication.md": "### 复制粘贴模式\n用长文案表达。\n",
+                "神人.skill/_persona/values.md": "### 真诚是弱点\n直接表达会被视为不设防。\n",
+                "神人.skill/_quotes/iconic.md": "> 疯狂星期四 v我50\n",
+                "神言.txt": "v我50 今天疯狂星期四\n",
+            }
+            service = HolymanSyncService(assets_dir=assets_dir)
+
+            preview = service.build_sync_preview_from_fetched(fetched, remote_version="remote-new")
+
+            self.assertEqual(preview["local_version"], "sync-old")
+            self.assertEqual(preview["remote_version"], "remote-new")
+            self.assertTrue(preview["will_update"])
+            self.assertGreaterEqual(preview["remote_counts"]["corpus"], 1)
+            self.assertFalse((assets_dir / "corpus.json").exists())
+
+    def test_holyman_update_check_reports_remote_difference_and_cache(self):
+        import asyncio
+        from webui.blueprints import jargon
+
+        with tempfile.TemporaryDirectory() as tmp:
+            assets_dir = Path(tmp)
+            (assets_dir / "phrases.json").write_text(json.dumps({
+                "v我50": {
+                    "meaning": "长篇铺垫后突然索要 50 元。",
+                    "category": "catchphrase",
+                    "layer": "catchphrase",
+                    "runtime_match": True,
+                },
+                "_version": "sync-local",
+                "_content_hash": "localhash",
+                "_content_count": 1,
+                "_remote_commit_version": "remote-old",
+            }, ensure_ascii=False), encoding="utf-8")
+            (assets_dir / "quality_report.json").write_text(json.dumps({"status": "ready"}), encoding="utf-8")
+
+            old_resolve = jargon._resolve_holyman_assets_dir
+            old_fetch = jargon._fetch_github_commit_info_sync
+            old_cache = getattr(jargon, "_HOLYMAN_UPDATE_CHECK_CACHE", None)
+            jargon._resolve_holyman_assets_dir = lambda: assets_dir
+            jargon._fetch_github_commit_info_sync = lambda: "remote-new"
+            jargon._HOLYMAN_UPDATE_CHECK_CACHE = None
+            self.addCleanup(lambda: setattr(jargon, "_resolve_holyman_assets_dir", old_resolve))
+            self.addCleanup(lambda: setattr(jargon, "_fetch_github_commit_info_sync", old_fetch))
+            self.addCleanup(lambda: setattr(jargon, "_HOLYMAN_UPDATE_CHECK_CACHE", old_cache))
+
+            first = asyncio.run(jargon._check_holyman_update(force=True))
+            self.assertTrue(first["ok"])
+            self.assertFalse(first["cached"])
+            self.assertTrue(first["has_update"])
+            self.assertTrue(first["is_update_available"])
+            self.assertEqual(first["local_version"], "sync-local")
+            self.assertEqual(first["remote_version"], "remote-new")
+            self.assertEqual(first["remote_commit_version"], "remote-old")
+            self.assertIn("checked_at", first)
+
+            jargon._fetch_github_commit_info_sync = lambda: "remote-even-newer"
+            cached = asyncio.run(jargon._check_holyman_update(force=False))
+            self.assertTrue(cached["cached"])
+            self.assertEqual(cached["remote_version"], "remote-new")
+
+            refreshed = asyncio.run(jargon._check_holyman_update(force=True))
+            self.assertFalse(refreshed["cached"])
+            self.assertEqual(refreshed["remote_version"], "remote-even-newer")
+
 
 if __name__ == "__main__":
     unittest.main()

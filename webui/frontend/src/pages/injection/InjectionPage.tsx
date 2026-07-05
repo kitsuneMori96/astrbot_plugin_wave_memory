@@ -133,8 +133,8 @@ export function InjectionPage() {
     <div className="flex flex-col gap-6">
       <Card>
         <CardHeader>
-          <CardTitle>注入观测台</CardTitle>
-          <CardDescription>筛选注入 trace，查看通道瀑布、命中项、过滤项和最终注入文本。</CardDescription>
+          <CardTitle>Injection Observatory · 注入观测台</CardTitle>
+          <CardDescription>筛选 Trace 列表，查看通道瀑布、命中项、过滤项和最终注入文本。</CardDescription>
         </CardHeader>
         <CardContent>
           <form

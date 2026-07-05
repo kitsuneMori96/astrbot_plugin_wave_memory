@@ -1,6 +1,7 @@
 import { HashRouter } from 'react-router-dom'
 
-import { AuthProvider, useAuth } from '@/app/auth-provider'
+import { AuthProvider } from '@/app/auth-provider'
+import { useAuth } from '@/app/auth-context'
 import { AppRoutes } from '@/app/AppShell'
 import { LoginPage } from '@/pages/LoginPage'
 import { Skeleton } from '@/components/ui/skeleton'

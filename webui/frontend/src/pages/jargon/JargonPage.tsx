@@ -19,18 +19,24 @@ import {
   batchDeleteJargons,
   batchReviewHolymanCandidates,
   batchReviewJargons,
+  checkHolymanUpdate,
   createJargon,
   deleteJargon,
   getHolymanStatus,
   getJargonEvidence,
   listJargons,
+  previewHolymanSync,
   reviewJargon,
+  syncHolymanAssets,
   toggleHolymanPhrase,
   toggleJargonGlobal,
   updateJargon,
+  type HolymanSyncPreviewPayload,
+  type HolymanUpdateCheckPayload,
   type JargonItem,
 } from '@/api/jargon'
-import { runPostStream, type StreamProgress } from '@/api/memories'
+import { type StreamProgress } from '@/api/memories'
+
 import { getStoredToken } from '@/api/client'
 import {
   filterHolymanCandidates,
@@ -43,7 +49,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -57,6 +63,14 @@ function formatTime(seconds: unknown): string {
   const s = Number(seconds)
   if (!Number.isFinite(s) || s <= 0) return '-'
   return new Date(s * 1000).toLocaleString('zh-CN')
+}
+
+function formatUpdateCheckTime(value: unknown): string {
+  const text = String(value || '').trim()
+  if (!text) return '—'
+  const date = new Date(text)
+  if (Number.isNaN(date.getTime())) return text
+  return date.toLocaleString('zh-CN')
 }
 
 function asArray(value: unknown): any[] {
@@ -74,6 +88,30 @@ function holymanCandidateKey(item: any): string {
 function isHolymanPendingStatus(statusValue: unknown): boolean {
   const value = String(statusValue || 'pending').toLowerCase()
   return value === 'pending' || value === 'pending_review'
+}
+
+function holymanCorpusText(item: any): string {
+  return String(item?.text ?? item?.content ?? item?.raw ?? item ?? '').trim()
+}
+
+function filterHolymanCorpus(items: any[], search: string): any[] {
+  const q = search.trim().toLowerCase()
+  if (!q) return items
+  return items.filter((item) => {
+    const text = holymanCorpusText(item).toLowerCase()
+    const source = String(item?.source ?? '').toLowerCase()
+    const terms = Array.isArray(item?.linked_terms) ? item.linked_terms.join(' ').toLowerCase() : ''
+    return text.includes(q) || source.includes(q) || terms.includes(q)
+  })
+}
+
+function syncCountLabel(key: string): string {
+  return ({ phrases: '精选口癖', concepts: '文化概念', examples: '声音样本', corpus: '原始语料', candidates: '待审候选', blocked: '屏蔽项' } as Record<string, string>)[key] || key
+}
+
+function syncDeltaText(value: number): string {
+  if (value > 0) return `+${value}`
+  return String(value)
 }
 
 export function JargonPage() {
@@ -121,13 +159,22 @@ export function JargonPage() {
   // 2. 广域 Holyman 同步与列表分层展示（词条、文化概念、例句、待审、Blocked）
   const [holyman, setHolyman] = useState<any | null>(null)
   const [holymanLoading, setHolymanLoading] = useState(false)
+  const [holymanUpdateCheck, setHolymanUpdateCheck] = useState<HolymanUpdateCheckPayload | null>(null)
+  const [holymanUpdateChecking, setHolymanUpdateChecking] = useState(false)
   const [streamOpen, setStreamOpen] = useState(false)
   const [streamProgress, setStreamProgress] = useState<StreamProgress | null>(null)
   const [streamLog, setStreamLog] = useState<string[]>([])
+  const [syncPreviewOpen, setSyncPreviewOpen] = useState(false)
+  const [syncPreviewLoading, setSyncPreviewLoading] = useState(false)
+  const [syncPreview, setSyncPreview] = useState<HolymanSyncPreviewPayload | null>(null)
+  const [syncConfirming, setSyncConfirming] = useState(false)
   
   // 广域 Mini 子选项卡：对齐 v4.0.0 旧前端的 Holyman 分层
   const [globalSubTab, setGlobalSubTab] = useState<'catchphrases' | 'concepts' | 'examples' | 'corpus' | 'candidates' | 'blocked'>('catchphrases')
   const [holymanSearch, setHolymanSearch] = useState('')
+  const [corpusSearch, setCorpusSearch] = useState('')
+  const [corpusVisibleCount, setCorpusVisibleCount] = useState(40)
+  const [selectedCorpusItem, setSelectedCorpusItem] = useState<any | null>(null)
   const [holymanStatusFilter, setHolymanStatusFilter] = useState<'all' | 'active' | 'inactive'>('all')
   const [holymanCategoryFilter, setHolymanCategoryFilter] = useState('all')
   const [selectedHolymanWords, setSelectedHolymanWords] = useState<string[]>([])
@@ -188,14 +235,42 @@ export function JargonPage() {
     }
   }
 
+  async function loadHolymanUpdateCheck(force = false, silent = false) {
+    setHolymanUpdateChecking(true)
+    try {
+      const res = await checkHolymanUpdate(force)
+      setHolymanUpdateCheck(res)
+      if (!silent && force) {
+        if (res.warning) {
+          toast.warning(res.warning)
+        } else if (res.has_update) {
+          toast.info(`检测到 Holyman 远端更新：${res.remote_version || 'Unknown'}`)
+        } else {
+          toast.success('Holyman 远端检查完成，当前无需更新')
+        }
+      }
+      return res
+    } catch (err) {
+      if (!silent) {
+        toast.error(err instanceof Error ? err.message : '检查 Holyman 更新失败')
+      }
+      return null
+    } finally {
+      setHolymanUpdateChecking(false)
+    }
+  }
+
   async function loadHolyman() {
     setHolymanLoading(true)
     try {
       const res = await getHolymanStatus()
       setHolyman(res)
+      if (res?.update_check) {
+        setHolymanUpdateCheck(res.update_check)
+      }
       setSelectedHolymanWords([])
       setSelectedHolymanCandidateIds([])
-    } catch (e) {
+    } catch {
       // 容错
     } finally {
       setHolymanLoading(false)
@@ -208,12 +283,27 @@ export function JargonPage() {
     } else {
       void loadHolyman()
     }
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, status, size])
+
+  useEffect(() => {
+    if (activeTab !== 'global') return undefined
+    void loadHolymanUpdateCheck(false, true)
+    const timer = window.setInterval(() => {
+      void loadHolymanUpdateCheck(false, true)
+    }, 15 * 60 * 1000)
+    return () => window.clearInterval(timer)
+  }, [activeTab])
 
   useEffect(() => {
     setSelectedHolymanWords([])
     setSelectedHolymanCandidateIds([])
+    setCorpusVisibleCount(40)
   }, [globalSubTab])
+
+  useEffect(() => {
+    setCorpusVisibleCount(40)
+  }, [corpusSearch])
 
   // 本地检索提交
   function handleSearchSubmit(e?: React.FormEvent) {
@@ -242,7 +332,7 @@ export function JargonPage() {
       setJargons((prev) =>
         prev.map((j) => (j.id === id ? { ...j, meaning: editingValue } : j))
       )
-    } catch (err) {
+    } catch {
       toast.error('快捷保存失败')
     }
   }
@@ -253,7 +343,7 @@ export function JargonPage() {
       await reviewJargon(id, action)
       toast.success(action === 'approve' ? `黑话已通过审核并确认` : `已否决并拉黑该黑话`)
       await loadLocalJargons(page)
-    } catch (err) {
+    } catch {
       toast.error('审核失败')
     }
   }
@@ -264,7 +354,7 @@ export function JargonPage() {
       const res = await toggleJargonGlobal(id)
       toast.success(res.is_global ? '已设为全局可用' : '已限制为群专用')
       await loadLocalJargons(page)
-    } catch (err) {
+    } catch {
       toast.error('操作失败')
     }
   }
@@ -276,7 +366,7 @@ export function JargonPage() {
       await deleteJargon(id)
       toast.success('删除成功')
       await loadLocalJargons(page)
-    } catch (err) {
+    } catch {
       toast.error('删除失败')
     }
   }
@@ -311,7 +401,7 @@ export function JargonPage() {
         toast.success(`已批量审核并[${action === 'approve' ? '确认' : '否决'}] ${count} 条黑话`)
       }
       await loadLocalJargons(page)
-    } catch (err) {
+    } catch {
       toast.error('操作失败')
       setLoading(false)
     }
@@ -345,7 +435,7 @@ export function JargonPage() {
         toast.success(`成功批量删除了 ${count} 条黑话`)
       }
       await loadLocalJargons(page)
-    } catch (err) {
+    } catch {
       toast.error('操作失败')
       setLoading(false)
     }
@@ -366,7 +456,7 @@ export function JargonPage() {
       }
       setEditOpen(false)
       await loadLocalJargons(page)
-    } catch (err) {
+    } catch {
       toast.error('操作失败')
     } finally {
       setSaving(false)
@@ -394,42 +484,61 @@ export function JargonPage() {
     try {
       const res = await getJargonEvidence(id, b, a)
       setEvidenceData(res)
-    } catch (err) {
+    } catch {
       toast.error('证据加载失败')
     } finally {
       setEvidenceLoading(false)
     }
   }
 
-  // 触发广域 Holyman GitHub 同步 (SSE 流)
-  function handleSyncHolyman() {
-    setStreamLog([])
-    setStreamProgress(null)
-    setStreamOpen(true)
-    setStreamLog((prev) => [...prev, '[INIT] 正在连接 GitHub CDN 拉取最新 Holyman 广域黑话与分层词包...'])
+  // 触发广域 Holyman GitHub 同步预览；确认后才会真实写入资产
+  async function handleSyncHolyman() {
+    setSyncPreviewOpen(true)
+    setSyncPreviewLoading(true)
+    setSyncPreview(null)
+    try {
+      const preview = await previewHolymanSync({ use_proxy: true })
+      setSyncPreview(preview)
+      if (!preview.ok) {
+        toast.error(preview.error || '同步预览失败')
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '同步预览失败')
+    } finally {
+      setSyncPreviewLoading(false)
+    }
+  }
 
-    void runPostStream('/api/jargon/holyman/sync', [], (state) => {
-      setStreamProgress(state)
-      if (state.processed !== undefined) {
-        setStreamLog((prev) => [
-          ...prev,
-          `[SYNC] 同步进度: ${Math.round(state.progress * 100)}% | 已写入: ${state.processed}/${state.total}`,
-        ].slice(-60))
+  async function handleConfirmSyncHolyman() {
+    setSyncConfirming(true)
+    setSyncPreviewOpen(false)
+    setStreamOpen(true)
+    setStreamLog([
+      '[CONFIRM] 用户已确认版本与内容差异，开始写入 Holyman 分层资产。',
+      `[PREVIEW] 本地 ${syncPreview?.local_version || 'Unknown'} → 远端 ${syncPreview?.remote_version || 'Unknown'}`,
+    ])
+    setStreamProgress({ progress: 0.08, processed: 0, total: 1 })
+    try {
+      const res = await syncHolymanAssets({ use_proxy: true })
+      if (!res?.ok) {
+        throw new Error(res?.error || '同步失败')
       }
-      if (state.done) {
-        setStreamLog((prev) => [...prev, '[SUCCESS] 广域 Holyman 语料分层数据库同步覆写 100% 完成！'])
-        toast.success('Holyman 数据源同步成功')
-        void loadHolyman()
-      }
-      if (state.error) {
-        setStreamLog((prev) => [...prev, `[ERROR] 同步失败: ${state.error}`])
-        toast.error(`同步中断: ${state.error}`)
-      }
-    }).catch((err) => {
-      const msg = err instanceof Error ? err.message : '连接异常'
-      setStreamLog((prev) => [...prev, `[CRITICAL] 网络断开: ${msg}`])
-      toast.error(`连接失败: ${msg}`)
-    })
+      setStreamProgress({ progress: 1, processed: 1, total: 1, done: true })
+      setStreamLog((prev) => [
+        ...prev,
+        `[WRITE] 精选口癖 ${res.content_count ?? res.phrases_count ?? '—'} 条；文化概念 ${res.concepts_count ?? '—'} 组；原始语料 ${res.corpus_count ?? '—'} 条。`,
+        '[SUCCESS] 广域 Holyman 语料分层数据库同步覆写完成。',
+      ].slice(-60))
+      toast.success('Holyman 数据源同步成功')
+      await loadHolyman()
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '同步失败'
+      setStreamProgress({ progress: 1, processed: 0, total: 1, error: msg, done: true })
+      setStreamLog((prev) => [...prev, `[ERROR] 同步失败: ${msg}`])
+      toast.error(`同步中断: ${msg}`)
+    } finally {
+      setSyncConfirming(false)
+    }
   }
 
   // 广域语料一键激活/去激活切换
@@ -563,10 +672,18 @@ export function JargonPage() {
   const holymanPhrases = asArray(holyman?.phrases ?? holyman?.items ?? holyman?.layers?.catchphrases)
   const holymanConcepts = asArray(holyman?.concepts ?? holyman?.layers?.concepts)
   const holymanExamples = asArray(holyman?.examples ?? holyman?.layers?.quotes_knowledge)
+  const holymanCorpus = asArray(holyman?.corpus ?? holyman?.layers?.corpus?.items)
   const holymanCandidates = asArray(holyman?.candidates ?? holyman?.layers?.candidates)
   const holymanBlocked = holyman?.blocked ?? holyman?.layers?.blocked ?? {}
-  const holymanCorpusSummary = holyman?.corpus_summary ?? holyman?.layers?.corpus ?? { count: 0, reference_only: true }
-  const holymanIsUpdateAvailable = Boolean(holyman?.is_update_available ?? holyman?.update_available)
+  const holymanCorpusSummary = holyman?.corpus_summary ?? holyman?.layers?.corpus ?? { count: holymanCorpus.length, reference_only: true }
+  const effectiveHolymanUpdateCheck = holymanUpdateCheck ?? holyman?.update_check ?? null
+  const holymanIsUpdateAvailable = Boolean(effectiveHolymanUpdateCheck?.has_update ?? holyman?.is_update_available ?? holyman?.update_available)
+  const holymanLocalVersion = effectiveHolymanUpdateCheck?.local_version ?? holyman?.local_version ?? 'Unknown'
+  const holymanRemoteVersion = effectiveHolymanUpdateCheck?.remote_version ?? holyman?.remote_version ?? 'Unknown'
+  const holymanAssetStatus = effectiveHolymanUpdateCheck?.asset_status ?? holyman?.asset_status ?? 'ready'
+  const holymanCheckedAt = effectiveHolymanUpdateCheck?.checked_at ?? holyman?.checked_at
+  const holymanCheckCached = Boolean(effectiveHolymanUpdateCheck?.cached ?? holyman?.update_cached)
+  const holymanCheckWarning = effectiveHolymanUpdateCheck?.warning ?? holyman?.warning
   const holymanCategories = getHolymanCategories(holymanPhrases, asArray(holyman?.categories))
   const filteredHolymanPhrases = filterHolymanPhrases(holymanPhrases, {
     search: holymanSearch,
@@ -575,6 +692,8 @@ export function JargonPage() {
   })
   const filteredHolymanConcepts = filterHolymanEvidence(holymanConcepts, holymanEvidenceSearch)
   const filteredHolymanExamples = filterHolymanEvidence(holymanExamples, holymanEvidenceSearch)
+  const filteredHolymanCorpus = filterHolymanCorpus(holymanCorpus, corpusSearch)
+  const visibleHolymanCorpus = filteredHolymanCorpus.slice(0, corpusVisibleCount)
   const filteredHolymanCandidates = filterHolymanCandidates(holymanCandidates, {
     search: candidateSearch,
     status: candidateStatusFilter,
@@ -814,9 +933,9 @@ export function JargonPage() {
                   内置 Holyman 广域黑话分层资产：精选口癖可手动启用为理解提示，其余文化概念、声音样本与原始语料仅作为语境参考，不改变系统身份。
                 </CardDescription>
               </div>
-              <Button disabled={holymanLoading} onClick={handleSyncHolyman}>
-                {holymanLoading ? <Loader2Icon className="animate-spin" data-icon="inline-start" /> : <RefreshCwIcon data-icon="inline-start" />}
-                🔄 在线同步更新 (GitHub)
+              <Button disabled={holymanLoading || syncPreviewLoading || syncConfirming} onClick={() => void handleSyncHolyman()}>
+                {syncPreviewLoading ? <Loader2Icon className="animate-spin" data-icon="inline-start" /> : <RefreshCwIcon data-icon="inline-start" />}
+                预览并确认同步
               </Button>
             </CardHeader>
             <CardContent className="pt-6">
@@ -824,29 +943,49 @@ export function JargonPage() {
                 <div className="py-12 flex justify-center"><Loader2Icon className="animate-spin text-primary size-6" /></div>
               ) : holyman ? (
                 <div className="flex flex-col gap-6 animate-in fade-in duration-200">
-                  {holymanIsUpdateAvailable ? (
-                    <Alert className="bg-amber-500/10 border-amber-500/20 text-amber-500">
-                      <AlertCircleIcon />
-                      <AlertTitle>Holyman 知识库有可用更新</AlertTitle>
-                      <AlertDescription>
-                        本地版本：{holyman.local_version}，线上最新：{holyman.remote_version}。建议同步原始资料并重新生成分层资产。
-                      </AlertDescription>
-                    </Alert>
-                  ) : (
-                    <Alert className="bg-emerald-500/10 border-emerald-500/20 text-emerald-500">
-                      <CheckCircle2Icon className="text-emerald-500" />
-                      <AlertTitle>本地 Holyman 分层资产可用</AlertTitle>
-                      <AlertDescription>
-                        本地版本：{holyman.local_version}，质量状态：{holyman.asset_status || 'ready'}。
-                      </AlertDescription>
-                    </Alert>
-                  )}
+                  <Alert className={holymanIsUpdateAvailable ? 'bg-amber-500/10 border-amber-500/20 text-amber-500' : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-500'}>
+                    {holymanIsUpdateAvailable ? <AlertCircleIcon /> : <CheckCircle2Icon className="text-emerald-500" />}
+                    <AlertTitle>{holymanIsUpdateAvailable ? 'Holyman 知识库有可用更新' : '本地 Holyman 分层资产可用'}</AlertTitle>
+                    <AlertDescription>
+                      <div className="flex flex-col gap-2 text-xs">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span>本地版本：<span className="font-mono">{holymanLocalVersion}</span></span>
+                          <span>线上最新：<span className="font-mono">{holymanRemoteVersion}</span></span>
+                          <Badge variant={holymanCheckCached ? 'secondary' : 'outline'} className="text-[9px]">
+                            {holymanCheckCached ? '缓存结果' : '实时检查'}
+                          </Badge>
+                          <Badge variant="outline" className="text-[9px]">质量：{holymanAssetStatus}</Badge>
+                        </div>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-muted-foreground">
+                            上次检查：<span className="font-mono">{formatUpdateCheckTime(holymanCheckedAt)}</span>
+                            {effectiveHolymanUpdateCheck?.cache_age_seconds ? ` · 缓存 ${effectiveHolymanUpdateCheck.cache_age_seconds}s` : ''}
+                          </span>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2 text-[11px]"
+                            disabled={holymanUpdateChecking}
+                            onClick={() => void loadHolymanUpdateCheck(true)}
+                          >
+                            {holymanUpdateChecking ? <Loader2Icon className="animate-spin" data-icon="inline-start" /> : <RefreshCwIcon data-icon="inline-start" />}
+                            强制检查
+                          </Button>
+                        </div>
+                        {holymanCheckWarning ? (
+                          <div className="text-destructive">{holymanCheckWarning}</div>
+                        ) : holymanIsUpdateAvailable ? (
+                          <div>建议先点击「预览并确认同步」查看差异，确认后再写入本地分层资产。</div>
+                        ) : null}
+                      </div>
+                    </AlertDescription>
+                  </Alert>
 
                   <div className="grid gap-4 sm:grid-cols-4">
                     <Card className="bg-muted/10 border-border/50"><CardHeader className="py-3"><CardDescription className="text-xs">精选口癖</CardDescription><CardTitle className="text-xl font-mono text-primary">{holymanPhrases.length} 条</CardTitle></CardHeader></Card>
                     <Card className="bg-muted/10 border-border/50"><CardHeader className="py-3"><CardDescription className="text-xs">文化概念</CardDescription><CardTitle className="text-xl font-mono text-primary">{holymanConcepts.length} 组</CardTitle></CardHeader></Card>
                     <Card className="bg-muted/10 border-border/50"><CardHeader className="py-3"><CardDescription className="text-xs">声音样本与知识</CardDescription><CardTitle className="text-xl font-mono text-primary">{holymanExamples.length} 条</CardTitle></CardHeader></Card>
-                    <Card className="bg-muted/10 border-border/50"><CardHeader className="py-3"><CardDescription className="text-xs">原始语料</CardDescription><CardTitle className="text-xl font-mono text-primary">{holymanCorpusSummary?.count || 0} 条</CardTitle></CardHeader></Card>
+                    <Card className="bg-muted/10 border-border/50"><CardHeader className="py-3"><CardDescription className="text-xs">原始语料</CardDescription><CardTitle className="text-xl font-mono text-primary">{holymanCorpus.length || holymanCorpusSummary?.count || 0} 条</CardTitle></CardHeader></Card>
                   </div>
 
                   {/* 广域分层 Sub-Tabs 子分类过滤器 */}
@@ -1073,8 +1212,77 @@ export function JargonPage() {
 
                     {/* Sub-Tab 4: 原始语料 / Corpus */}
                     <TabsContent value="corpus" className="mt-0">
-                      <div className="rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground leading-relaxed">
-                        原始语料保存在 corpus 层，当前共 <span className="font-mono text-primary">{holymanCorpusSummary?.count || 0}</span> 条；该层 reference_only，不直接注入 prompt，也不参与 confirmed 匹配。
+                      <div className="flex flex-col gap-3">
+                        <Alert>
+                          <AlertCircleIcon />
+                          <AlertTitle>原始语料只读展示</AlertTitle>
+                          <AlertDescription>
+                            当前共 <span className="font-mono text-primary">{holymanCorpus.length || holymanCorpusSummary?.count || 0}</span> 条；该层 reference_only，不直接注入 prompt，也不参与 confirmed 匹配。
+                          </AlertDescription>
+                        </Alert>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Input
+                            className="h-8 max-w-sm text-xs"
+                            placeholder="搜索原始语料全文 / 来源 / 关联口癖..."
+                            value={corpusSearch}
+                            onChange={(event) => setCorpusSearch(event.target.value)}
+                          />
+                          <Badge variant="secondary" className="text-[10px]">
+                            已筛选 {filteredHolymanCorpus.length} 条 · 当前显示 {Math.min(visibleHolymanCorpus.length, filteredHolymanCorpus.length)} 条
+                          </Badge>
+                        </div>
+                        {filteredHolymanCorpus.length === 0 ? (
+                          <div className="rounded-lg border bg-muted/20 p-6 text-center text-xs text-muted-foreground">
+                            暂无符合筛选条件的原始语料。
+                          </div>
+                        ) : (
+                          <ScrollArea className="h-[420px] rounded-lg border bg-muted/10 p-3">
+                            <div className="flex flex-col gap-3 pr-3">
+                              {visibleHolymanCorpus.map((item: any, idx: number) => {
+                                const text = holymanCorpusText(item)
+                                const preview = String(item?.preview || (text.length > 220 ? `${text.slice(0, 220)}...` : text))
+                                const line = item?.line ?? item?.index ?? idx + 1
+                                return (
+                                  <Card key={`${line}-${idx}`} className="bg-background/80 border-border/60">
+                                    <CardHeader className="py-3">
+                                      <div className="flex flex-wrap items-center justify-between gap-2">
+                                        <CardTitle className="text-xs font-mono text-primary">Corpus #{line}</CardTitle>
+                                        <div className="flex flex-wrap items-center gap-1.5">
+                                          <Badge variant="outline" className="text-[9px] font-mono">{item?.source || '神言.txt'}</Badge>
+                                          <Badge variant="secondary" className="text-[9px]">{item?.length || text.length} 字</Badge>
+                                          <Badge variant="outline" className="text-[9px]">reference_only</Badge>
+                                        </div>
+                                      </div>
+                                    </CardHeader>
+                                    <CardContent className="flex flex-col gap-3 pt-0">
+                                      <p className="text-xs leading-relaxed text-muted-foreground whitespace-pre-wrap break-words">
+                                        {preview}
+                                      </p>
+                                      {Array.isArray(item?.linked_terms) && item.linked_terms.length > 0 ? (
+                                        <div className="flex flex-wrap gap-1">
+                                          {item.linked_terms.slice(0, 8).map((term: string, termIdx: number) => (
+                                            <Badge key={`${term}-${termIdx}`} variant="secondary" className="text-[8px] font-mono">{term}</Badge>
+                                          ))}
+                                        </div>
+                                      ) : null}
+                                      <div className="flex justify-end">
+                                        <Button variant="ghost" size="xs" onClick={() => setSelectedCorpusItem(item)}>
+                                          <EyeIcon data-icon="inline-start" />
+                                          查看全文
+                                        </Button>
+                                      </div>
+                                    </CardContent>
+                                  </Card>
+                                )
+                              })}
+                              {visibleHolymanCorpus.length < filteredHolymanCorpus.length ? (
+                                <Button variant="outline" size="sm" onClick={() => setCorpusVisibleCount((count) => count + 40)}>
+                                  再显示 40 条
+                                </Button>
+                              ) : null}
+                            </div>
+                          </ScrollArea>
+                        )}
                       </div>
                     </TabsContent>
 
@@ -1350,12 +1558,147 @@ export function JargonPage() {
         </DialogContent>
       </Dialog>
 
-      {/* ─── 广域 SSE 同步控制弹窗 ─── */}
+      {/* ─── 原始语料全文详情 Dialog ─── */}
+      <Dialog open={Boolean(selectedCorpusItem)} onOpenChange={(open) => { if (!open) setSelectedCorpusItem(null) }}>
+        <DialogContent className="sm:max-w-3xl flex flex-col gap-0 h-[80vh]">
+          <DialogHeader className="pb-3 border-b shrink-0 pr-6">
+            <DialogTitle>原始语料全文详情</DialogTitle>
+            <DialogDescription>Corpus 层为 reference_only，只读展示，不直接注入 prompt，也不参与 confirmed 匹配。</DialogDescription>
+          </DialogHeader>
+          {selectedCorpusItem ? (
+            <div className="flex flex-col gap-3 py-4 min-h-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="secondary" className="font-mono">#{selectedCorpusItem.line ?? selectedCorpusItem.index ?? selectedCorpusItem.id}</Badge>
+                <Badge variant="outline" className="font-mono">{selectedCorpusItem.source || '神言.txt'}</Badge>
+                <Badge variant="outline">reference_only</Badge>
+                <Badge variant="outline">safe_for_prompt=false</Badge>
+              </div>
+              <ScrollArea className="flex-1 rounded-lg border bg-muted/20 p-4">
+                <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-muted-foreground">
+                  {holymanCorpusText(selectedCorpusItem)}
+                </p>
+              </ScrollArea>
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
+      {/* ─── Holyman 同步预览确认 Dialog ─── */}
+      <Dialog open={syncPreviewOpen} onOpenChange={setSyncPreviewOpen}>
+        <DialogContent className="sm:max-w-4xl flex flex-col gap-0 max-h-[86vh]">
+          <DialogHeader className="pb-3 border-b shrink-0 pr-6">
+            <DialogTitle>Holyman 语料同步预览</DialogTitle>
+            <DialogDescription>先对比本地与远端版本、内容数量和风险项；确认后才会执行真实写入。</DialogDescription>
+          </DialogHeader>
+
+          {syncPreviewLoading ? (
+            <div className="flex flex-col items-center justify-center gap-3 py-12 text-sm text-muted-foreground">
+              <Loader2Icon className="animate-spin text-primary" />
+              正在读取 GitHub 远端内容并生成差异预览...
+            </div>
+          ) : syncPreview ? (
+            <div className="flex flex-col gap-4 py-4 min-h-0">
+              <div className="grid gap-3 md:grid-cols-2">
+                <Card className="bg-muted/10">
+                  <CardHeader className="py-3">
+                    <CardDescription>本地版本</CardDescription>
+                    <CardTitle className="text-sm font-mono break-all">{syncPreview.local_version || 'Unknown'}</CardTitle>
+                    <CardDescription className="font-mono break-all">hash: {syncPreview.local_content_hash || '—'}</CardDescription>
+                  </CardHeader>
+                </Card>
+                <Card className="bg-muted/10">
+                  <CardHeader className="py-3">
+                    <CardDescription>远端版本</CardDescription>
+                    <CardTitle className="text-sm font-mono break-all">{syncPreview.remote_version || 'Unknown'}</CardTitle>
+                    <CardDescription className="font-mono break-all">hash: {syncPreview.remote_content_hash || '—'}</CardDescription>
+                  </CardHeader>
+                </Card>
+              </div>
+
+              <Alert className={syncPreview.will_update ? 'bg-amber-500/10 border-amber-500/20 text-amber-500' : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-500'}>
+                {syncPreview.will_update ? <AlertCircleIcon /> : <CheckCircle2Icon />}
+                <AlertTitle>{syncPreview.will_update ? '检测到内容差异' : '未检测到内容差异'}</AlertTitle>
+                <AlertDescription>
+                  远端质量状态：{syncPreview.asset_status || 'unknown'}。{syncPreview.safety?.statement || '确认前不会写入本地资产。'}
+                </AlertDescription>
+              </Alert>
+
+              <ScrollArea className="min-h-0 max-h-[420px] pr-3">
+                <div className="flex flex-col gap-4">
+                  <div className="rounded-lg border overflow-hidden">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>资产层</TableHead>
+                          <TableHead className="text-right">本地</TableHead>
+                          <TableHead className="text-right">远端</TableHead>
+                          <TableHead className="text-right">变化</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {Object.keys({ ...(syncPreview.local_counts || {}), ...(syncPreview.remote_counts || {}) }).map((key) => {
+                          const delta = Number(syncPreview.delta_counts?.[key] || 0)
+                          return (
+                            <TableRow key={key}>
+                              <TableCell className="text-xs font-medium">{syncCountLabel(key)}</TableCell>
+                              <TableCell className="text-right font-mono text-xs">{syncPreview.local_counts?.[key] ?? 0}</TableCell>
+                              <TableCell className="text-right font-mono text-xs">{syncPreview.remote_counts?.[key] ?? 0}</TableCell>
+                              <TableCell className={delta > 0 ? 'text-right font-mono text-xs text-emerald-500' : delta < 0 ? 'text-right font-mono text-xs text-destructive' : 'text-right font-mono text-xs text-muted-foreground'}>{syncDeltaText(delta)}</TableCell>
+                            </TableRow>
+                          )
+                        })}
+                      </TableBody>
+                    </Table>
+                  </div>
+
+                  <div className="grid gap-3 md:grid-cols-3">
+                    {[
+                      ['新增口癖', syncPreview.samples?.added_phrases || []],
+                      ['变更口癖', syncPreview.samples?.changed_phrases || []],
+                      ['移除口癖', syncPreview.samples?.removed_phrases || []],
+                    ].map(([title, words]: any) => (
+                      <Card key={title} className="bg-muted/10">
+                        <CardHeader className="py-3">
+                          <CardTitle className="text-xs">{title}</CardTitle>
+                          <CardDescription>{words.length ? '仅展示前 12 条样本' : '无样本变化'}</CardDescription>
+                        </CardHeader>
+                        <CardContent className="flex flex-wrap gap-1 pt-0">
+                          {words.length ? words.map((word: string) => <Badge key={word} variant="secondary" className="text-[9px] font-mono">{word}</Badge>) : <span className="text-xs text-muted-foreground">—</span>}
+                        </CardContent>
+                      </Card>
+                    ))}
+                  </div>
+
+                  <Alert>
+                    <AlertCircleIcon />
+                    <AlertTitle>安全性声明</AlertTitle>
+                    <AlertDescription>
+                      同步后的 Holyman 资产仍是 global_jargon_reference；原始语料保持 reference_only、safe_for_prompt=false。只有精选口癖中 runtime_match=true 的条目可被人工启用为理解提示。
+                    </AlertDescription>
+                  </Alert>
+                </div>
+              </ScrollArea>
+            </div>
+          ) : (
+            <div className="py-8 text-center text-sm text-muted-foreground">暂无预览数据。</div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" disabled={syncPreviewLoading || syncConfirming} onClick={() => setSyncPreviewOpen(false)}>取消</Button>
+            <Button disabled={syncPreviewLoading || syncConfirming || !syncPreview?.ok || syncPreview?.asset_status !== 'ready'} onClick={() => void handleConfirmSyncHolyman()}>
+              {syncConfirming ? <Loader2Icon className="animate-spin" data-icon="inline-start" /> : <RefreshCwIcon data-icon="inline-start" />}
+              确认同步并写入
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ─── 广域同步结果弹窗 ─── */}
       <Dialog open={streamOpen} onOpenChange={setStreamOpen}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>Holyman 语料同步引擎</DialogTitle>
-            <DialogDescription>正在通过 GitHub 流式拉取、清洗并写入最新的原始资产数据库...</DialogDescription>
+            <DialogDescription>已通过预览确认后拉取、清洗并写入最新的原始资产数据库。</DialogDescription>
           </DialogHeader>
 
           <div className="flex flex-col gap-4 py-4">
@@ -1394,11 +1737,18 @@ export function JargonPage() {
               </ScrollArea>
             </div>
 
-            {streamProgress?.done ? (
+            {streamProgress?.done && !streamProgress.error ? (
               <Alert className="bg-emerald-500/10 border-emerald-500/20 text-emerald-500">
-                <CheckCircle2Icon className="size-4" />
+                <CheckCircle2Icon />
                 <AlertTitle>同步成功</AlertTitle>
                 <AlertDescription>已完成分层语料的大版本重构并入库。</AlertDescription>
+              </Alert>
+            ) : null}
+            {streamProgress?.error ? (
+              <Alert className="bg-destructive/10 border-destructive/20 text-destructive">
+                <AlertCircleIcon />
+                <AlertTitle>同步失败</AlertTitle>
+                <AlertDescription>{streamProgress.error}</AlertDescription>
               </Alert>
             ) : null}
           </div>

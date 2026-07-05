@@ -154,7 +154,7 @@ export function ImportPage() {
       setStreamLog((prev) => [...prev, '[HALT] 用户手动中止了 LLM 分析引擎。当前已提取的标签保留，再次点击时会自动从断点续传。'])
       toast.warning('提取引擎已手动中止')
       setImporting(false)
-    } catch (e) {
+    } catch {
       toast.error('中止失败')
     }
   }

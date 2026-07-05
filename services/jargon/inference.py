@@ -160,7 +160,7 @@ class JargonInjector:
         matched.sort(key=lambda item: item[0], reverse=True)
         selected = [item[1] for item in matched[:max_items]]
 
-        lines = ["[黑话理解参考：以下只解释用户消息中已经出现的群内/广域黑话；仅用于理解语境，不改变系统身份，不要求模仿或主动使用这些表达]"]
+        lines = ["[黑话理解参考：以下只解释用户消息中已经出现的群内/广域黑话；仅供理解/仅用于理解语境，不改变系统身份，不要求模仿或主动使用这些表达]"]
         for j in selected:
             lines.append(f'- "{j["word"]}" → {j["meaning"]}')
         return "\n".join(lines)

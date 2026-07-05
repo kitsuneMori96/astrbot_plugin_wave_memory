@@ -1,22 +1,9 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 
 import { checkAuth, login as loginRequest } from '@/api/auth'
 import { clearStoredToken, getStoredToken, setAuthFailureHandler, setStoredToken } from '@/api/client'
 import { getSystemStatus } from '@/api/system'
-
-export type AuthState =
-  | { status: 'checking' }
-  | { status: 'anonymous'; requiresAuth: true }
-  | { status: 'ready'; token: string | null; requiresAuth: boolean }
-
-interface AuthContextValue {
-  state: AuthState
-  login: (password: string) => Promise<void>
-  logout: () => void
-  refresh: () => Promise<void>
-}
-
-const AuthContext = createContext<AuthContextValue | null>(null)
+import { AuthContext, type AuthContextValue, type AuthState } from '@/app/auth-context'
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   // 乐观假定：本地已存 Token 时前置设为 ready，防止初始化阶段瞬间闪烁 LoginPage 影响美观
@@ -80,10 +67,3 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }
 
-export function useAuth() {
-  const context = useContext(AuthContext)
-  if (!context) {
-    throw new Error('useAuth must be used within AuthProvider')
-  }
-  return context
-}

@@ -274,6 +274,110 @@ class HolymanSyncService:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content or "", encoding="utf-8")
 
+    def _fetch_all_sources_sync(self, use_proxy: bool = True) -> dict[str, str]:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        fetched: dict[str, str] = {}
+        for path in self.SOURCE_PATHS:
+            logger.info(f"[HolymanSync] Downloading source file: {path}")
+            direct_url, proxy_url = self._source_urls(path)
+            fetched[path] = self._fetch_content(direct_url=direct_url, proxy_url=proxy_url, use_proxy=use_proxy, headers=headers)
+        return fetched
+
+    def _read_local_counts(self) -> dict[str, int]:
+        phrases = self._read_json("phrases.json", {})
+        concepts = self._read_json("concepts.json", [])
+        examples = self._read_json("examples.json", [])
+        corpus = self._read_json("corpus.json", [])
+        candidates = self._read_json("candidates.json", [])
+        blocked = self._read_json("blocked.json", {})
+        return {
+            "phrases": len(content_entries(phrases)),
+            "concepts": len(concepts) if isinstance(concepts, list) else 0,
+            "examples": len(examples) if isinstance(examples, list) else 0,
+            "corpus": len(corpus) if isinstance(corpus, list) else 0,
+            "candidates": len(candidates) if isinstance(candidates, list) else 0,
+            "blocked": len(blocked) if isinstance(blocked, dict) else 0,
+        }
+
+    @staticmethod
+    def _asset_counts(assets: dict[str, Any]) -> dict[str, int]:
+        return {
+            "phrases": len(content_entries(assets.get("phrases") or {})),
+            "concepts": len(assets.get("concepts") or []) if isinstance(assets.get("concepts"), list) else 0,
+            "examples": len(assets.get("examples") or []) if isinstance(assets.get("examples"), list) else 0,
+            "corpus": len(assets.get("corpus") or []) if isinstance(assets.get("corpus"), list) else 0,
+            "candidates": len(assets.get("candidates") or []) if isinstance(assets.get("candidates"), list) else 0,
+            "blocked": len(assets.get("blocked") or {}) if isinstance(assets.get("blocked"), dict) else 0,
+        }
+
+    @staticmethod
+    def _delta_counts(local_counts: dict[str, int], remote_counts: dict[str, int]) -> dict[str, int]:
+        keys = sorted(set(local_counts) | set(remote_counts))
+        return {key: int(remote_counts.get(key, 0)) - int(local_counts.get(key, 0)) for key in keys}
+
+    def build_sync_preview_from_fetched(self, fetched: dict[str, str], *, remote_version: str = "") -> dict[str, Any]:
+        """Build a no-write sync preview comparing current local assets with fetched remote assets."""
+        local_phrases = self._read_json("phrases.json", {})
+        local_version = str(local_phrases.get("_version") or "Unknown") if isinstance(local_phrases, dict) else "Unknown"
+        local_content_hash = str(local_phrases.get("_content_hash") or content_hash(local_phrases)) if isinstance(local_phrases, dict) else ""
+
+        remote_assets = self.build_assets_from_fetched(fetched, remote_version=remote_version)
+        remote_phrases = remote_assets.get("phrases") or {}
+        remote_content_hash = content_hash(remote_phrases) if isinstance(remote_phrases, dict) else ""
+        local_counts = self._read_local_counts()
+        remote_counts = self._asset_counts(remote_assets)
+        local_words = set(content_entries(local_phrases).keys()) if isinstance(local_phrases, dict) else set()
+        remote_words = set(content_entries(remote_phrases).keys()) if isinstance(remote_phrases, dict) else set()
+        added_words = sorted(remote_words - local_words)[:12]
+        removed_words = sorted(local_words - remote_words)[:12]
+        changed_words = sorted(
+            word for word in (local_words & remote_words)
+            if content_entries(local_phrases).get(word) != content_entries(remote_phrases).get(word)
+        )[:12]
+        report = remote_assets.get("quality_report") if isinstance(remote_assets.get("quality_report"), dict) else {}
+        will_update = bool(remote_content_hash and remote_content_hash != local_content_hash)
+
+        return {
+            "ok": True,
+            "will_update": will_update,
+            "asset_status": report.get("status") or "unknown",
+            "local_version": local_version,
+            "remote_version": remote_version or str((remote_assets.get("manifest") or {}).get("remote_version") or "Unknown"),
+            "local_content_hash": local_content_hash,
+            "remote_content_hash": remote_content_hash,
+            "local_counts": local_counts,
+            "remote_counts": remote_counts,
+            "delta_counts": self._delta_counts(local_counts, remote_counts),
+            "samples": {
+                "added_phrases": added_words,
+                "removed_phrases": removed_words,
+                "changed_phrases": changed_words,
+            },
+            "quality_report": report,
+            "safety": {
+                "asset_type": "global_jargon_reference",
+                "runtime_policy": "understanding_only",
+                "corpus_reference_only": True,
+                "corpus_safe_for_prompt": False,
+                "activatable_scope": "runtime_match catchphrases only",
+                "statement": "预览只读取远端并在内存中生成差异，不写入本地资产；确认后才会执行真实同步。",
+            },
+        }
+
+    def preview_sync_from_github_sync(self, use_proxy: bool = True) -> dict[str, Any]:
+        try:
+            fetched = self._fetch_all_sources_sync(use_proxy=use_proxy)
+            remote_version = self._fetch_remote_version()
+            return self.build_sync_preview_from_fetched(fetched, remote_version=remote_version)
+        except Exception as e:
+            logger.error(f"[HolymanSyncService] Preview failed: {e}")
+            return {"ok": False, "error": str(e)}
+
+    async def preview_sync_from_github(self, use_proxy: bool = True) -> dict[str, Any]:
+        return await asyncio.to_thread(self.preview_sync_from_github_sync, use_proxy=use_proxy)
+
     def build_assets_from_fetched(self, fetched: dict[str, str], *, remote_version: str = "") -> dict[str, Any]:
         """Build all layered Holyman assets from fetched raw files without writing them."""
         existing_phrases = self._read_json("phrases.json", {})
@@ -304,16 +408,8 @@ class HolymanSyncService:
 
     def sync_from_github_sync(self, use_proxy: bool = True) -> dict:
         """Synchronously download and parse Holyman-skills files from Github, then save layered assets locally."""
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
         try:
-            fetched: dict[str, str] = {}
-            for path in self.SOURCE_PATHS:
-                logger.info(f"[HolymanSync] Downloading source file: {path}")
-                direct_url, proxy_url = self._source_urls(path)
-                fetched[path] = self._fetch_content(direct_url=direct_url, proxy_url=proxy_url, use_proxy=use_proxy, headers=headers)
-
+            fetched = self._fetch_all_sources_sync(use_proxy=use_proxy)
             remote_version = self._fetch_remote_version()
             assets = self.build_assets_from_fetched(fetched, remote_version=remote_version)
             report = assets["quality_report"]

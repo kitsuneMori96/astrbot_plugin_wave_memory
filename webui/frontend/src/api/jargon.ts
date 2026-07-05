@@ -1,4 +1,7 @@
 import { fetchJson } from './client'
+import { holymanUpdateCheckPath, type HolymanUpdateCheckPayload } from './jargonUpdate'
+
+export type { HolymanUpdateCheckPayload } from './jargonUpdate'
 
 export interface JargonItem {
   id: number
@@ -116,6 +119,60 @@ export function getJargonEvidence(id: number, before = 15, after = 15): Promise<
 
 export function getHolymanStatus(): Promise<any> {
   return fetchJson<any>('/api/jargon/holyman')
+}
+
+export function checkHolymanUpdate(force = false): Promise<HolymanUpdateCheckPayload> {
+  return fetchJson<HolymanUpdateCheckPayload>(holymanUpdateCheckPath(force))
+}
+
+export interface HolymanSyncPayload {
+  use_proxy?: boolean
+}
+
+export interface HolymanSyncPreviewPayload {
+  ok: boolean
+  will_update: boolean
+  asset_status: string
+  local_version: string
+  remote_version: string
+  local_content_hash: string
+  remote_content_hash: string
+  local_counts: Record<string, number>
+  remote_counts: Record<string, number>
+  delta_counts: Record<string, number>
+  samples?: {
+    added_phrases?: string[]
+    removed_phrases?: string[]
+    changed_phrases?: string[]
+  }
+  safety?: {
+    asset_type?: string
+    runtime_policy?: string
+    corpus_reference_only?: boolean
+    corpus_safe_for_prompt?: boolean
+    activatable_scope?: string
+    statement?: string
+  }
+  quality_report?: any
+  error?: string
+}
+
+function postHolymanLong<T>(path: string, payload: HolymanSyncPayload = {}, timeoutMs = 120000): Promise<T> {
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs)
+  return fetchJson<T>(path, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    signal: controller.signal,
+  }).finally(() => window.clearTimeout(timeout))
+}
+
+export function previewHolymanSync(payload: HolymanSyncPayload = { use_proxy: true }): Promise<HolymanSyncPreviewPayload> {
+  return postHolymanLong<HolymanSyncPreviewPayload>('/api/jargon/holyman/sync/preview', payload)
+}
+
+export function syncHolymanAssets(payload: HolymanSyncPayload = { use_proxy: true }): Promise<any> {
+  return postHolymanLong<any>('/api/jargon/holyman/sync', payload)
 }
 
 export interface ToggleHolymanPhrasePayload {

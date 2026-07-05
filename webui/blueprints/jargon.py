@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import time
+from pathlib import Path
 
 from quart import Blueprint, jsonify, request
 
@@ -21,18 +23,49 @@ jargon_bp = Blueprint("jargon", __name__, url_prefix="/api/jargon")
 
 
 HOLYMAN_CATEGORY_LABELS = {
-    "skill-core": "核心技能",
+    "kfc": "疯狂星期四",
+    "defense": "表达策略",
+    "reaction": "反应词",
+    "copypasta": "复制粘贴",
+    "abstract": "抽象话术",
     "gaming": "游戏文化",
-    "internet-culture": "互联网文化",
-    "communication": "沟通风格",
-    "rules": "使用规则",
-    "values": "价值观",
-    "iconic-quotes": "标志语录",
-    "internal-quotes": "内部语录",
-    "corpus": "神言语料",
+    "general": "通用口癖",
     "legacy": "旧版内置",
-    "unknown": "未分类",
 }
+
+HOLYMAN_UPDATE_CHECK_CACHE_TTL_SECONDS = 30 * 60
+_HOLYMAN_UPDATE_CHECK_CACHE: dict | None = None
+
+
+def _resolve_holyman_assets_dir() -> Path:
+
+    """Resolve Holyman assets from runtime volume, dev checkout, or module-relative fallback."""
+    for target_path in [
+        "/AstrBot/data/plugins/astrbot_plugin_wave_memory/assets/holyman",
+        os.path.join(os.getcwd(), "data/plugins/astrbot_plugin_wave_memory/assets/holyman"),
+        os.path.join(os.getcwd(), "astrbot_plugin_wave_memory/assets/holyman"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../assets/holyman"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../assets/holyman"),
+    ]:
+        candidate = Path(target_path)
+        if candidate.exists() and (candidate / "phrases.json").exists():
+            return candidate
+    return Path(os.path.dirname(os.path.abspath(__file__))) / ".." / ".." / "assets" / "holyman"
+
+
+def _load_holyman_asset_json(name: str, default, assets_dir: Path | None = None):
+    """Load a Holyman asset JSON file; shared by list/toggle/preview handlers."""
+    path = (assets_dir or _resolve_holyman_assets_dir()) / name
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+# Compatibility alias for older code paths and regression coverage.
+_load_asset_json = _load_holyman_asset_json
 
 
 def _normalize_holyman_phrase(word: str, value) -> dict:
@@ -130,8 +163,8 @@ def _holyman_content_status(phrases: dict, local_count: int, remote_version: str
         asset_status = "legacy"
     is_update_available = asset_status != "ready"
 
-    if asset_status == "ready" and remote_version != "Unknown" and remote_commit_version:
-        is_update_available = not content_hash
+    if asset_status == "ready" and remote_version and remote_version != "Unknown" and remote_commit_version:
+        is_update_available = remote_version != remote_commit_version
 
     return {
         "content_hash": content_hash,
@@ -165,6 +198,46 @@ def _safe_json_list(val):
         return parsed if isinstance(parsed, list) else []
     except Exception:
         return []
+
+
+def _normalize_holyman_corpus(corpus) -> list[dict]:
+    """Normalize raw Holyman corpus into read-only display cards."""
+    normalized: list[dict] = []
+    if not isinstance(corpus, list):
+        return normalized
+    for idx, raw_item in enumerate(corpus, start=1):
+        if isinstance(raw_item, dict):
+            text = str(raw_item.get("text") or raw_item.get("content") or raw_item.get("raw") or "").strip()
+            source = str(raw_item.get("source") or "神言.txt")
+            line = raw_item.get("line") or raw_item.get("line_no") or raw_item.get("index") or idx
+            linked_terms = raw_item.get("linked_terms") or raw_item.get("terms") or []
+            tags = raw_item.get("tags") or []
+            item_id = raw_item.get("id") or idx
+        else:
+            text = str(raw_item or "").strip()
+            source = "神言.txt"
+            line = idx
+            linked_terms = []
+            tags = []
+            item_id = idx
+        if not text:
+            continue
+        normalized.append({
+            "id": item_id,
+            "index": idx,
+            "line": _safe_int(line, idx),
+            "text": text,
+            "preview": text[:180] + ("..." if len(text) > 180 else ""),
+            "length": len(text),
+            "source": source,
+            "linked_terms": linked_terms if isinstance(linked_terms, list) else [],
+            "tags": tags if isinstance(tags, list) else [],
+            "layer": "corpus",
+            "reference_only": True,
+            "safe_for_prompt": False,
+            "runtime_match": False,
+        })
+    return normalized
 
 
 def _clamp_int(val, default, min_value=0, max_value=50):
@@ -700,56 +773,134 @@ def _fetch_github_commit_info_sync() -> str:
     return "Unknown"
 
 
+def _now_rfc3339() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _truthy_query(value) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on", "force"}
+
+
+def _copy_holyman_update_cache(payload: dict, *, cached: bool, now: float | None = None) -> dict:
+    copied = dict(payload)
+    copied["cached"] = cached
+    if cached and now is not None:
+        try:
+            copied["cache_age_seconds"] = max(0, int(now - float(payload.get("_cache_timestamp", now))))
+        except Exception:
+            copied["cache_age_seconds"] = 0
+    copied.pop("_cache_timestamp", None)
+    return copied
+
+
+async def _check_holyman_update(force: bool = False) -> dict:
+    """Lightweight Holyman GitHub update check with a kirors-style cache handshake."""
+    global _HOLYMAN_UPDATE_CHECK_CACHE
+
+    now = time.time()
+    if not force and _HOLYMAN_UPDATE_CHECK_CACHE:
+        cache_ts = float(_HOLYMAN_UPDATE_CHECK_CACHE.get("_cache_timestamp", 0) or 0)
+        if now - cache_ts <= HOLYMAN_UPDATE_CHECK_CACHE_TTL_SECONDS:
+            return _copy_holyman_update_cache(_HOLYMAN_UPDATE_CHECK_CACHE, cached=True, now=now)
+
+    local_dir = _resolve_holyman_assets_dir()
+    phrases = _load_holyman_asset_json("phrases.json", {}, local_dir)
+    concepts = _load_holyman_asset_json("concepts.json", [], local_dir)
+    examples = _load_holyman_asset_json("examples.json", [], local_dir)
+    corpus = _load_holyman_asset_json("corpus.json", [], local_dir)
+    candidates = _load_holyman_asset_json("candidates.json", [], local_dir)
+    blocked = _load_holyman_asset_json("blocked.json", {}, local_dir)
+    quality_report = _load_holyman_asset_json("quality_report.json", {}, local_dir)
+
+    local_count = len(_holyman_content_entries(phrases))
+    local_version = str(phrases.get("_version") or "Unknown") if isinstance(phrases, dict) else "Unknown"
+
+    import asyncio
+    warning = None
+    try:
+        remote_version = await asyncio.to_thread(_fetch_github_commit_info_sync)
+    except Exception as exc:
+        remote_version = "Unknown"
+        warning = f"GitHub 远端版本检查失败：{exc}"
+
+    if not remote_version or remote_version == "Unknown":
+        remote_version = "Unknown"
+        warning = warning or "无法获取 GitHub 远端 Holyman 版本，已显示本地缓存状态。"
+
+    content_status = _holyman_content_status(phrases, local_count, remote_version, quality_report)
+    remote_commit_version = str(content_status.get("remote_commit_version") or "")
+    asset_status = str(content_status.get("asset_status") or "unknown")
+    remote_reachable = remote_version != "Unknown"
+    has_update = bool(content_status.get("is_update_available"))
+
+    payload = {
+        "ok": True,
+        "asset_type": "global_jargon_reference",
+        "runtime_policy": "understanding_only",
+        "local_version": local_version,
+        "remote_version": remote_version,
+        "remote_commit_version": remote_commit_version,
+        "content_hash": content_status.get("content_hash") or "",
+        "local_content_hash": content_status.get("content_hash") or "",
+        "content_count": content_status.get("content_count") or local_count,
+        "local_count": local_count,
+        "local_counts": {
+            "phrases": local_count,
+            "concepts": len(concepts) if isinstance(concepts, list) else 0,
+            "examples": len(examples) if isinstance(examples, list) else 0,
+            "corpus": len(corpus) if isinstance(corpus, list) else 0,
+            "candidates": len(candidates) if isinstance(candidates, list) else 0,
+            "blocked": len(blocked) if isinstance(blocked, dict) else 0,
+        },
+        "asset_status": asset_status,
+        "has_update": has_update,
+        "is_update_available": has_update,
+        "update_available": has_update,
+        "remote_reachable": remote_reachable,
+        "checked_at": _now_rfc3339(),
+        "cached": False,
+        "cache_ttl_seconds": HOLYMAN_UPDATE_CHECK_CACHE_TTL_SECONDS,
+        "source_url": "https://github.com/ykdeso/holyman-skills/commits/main",
+    }
+    if warning:
+        payload["warning"] = warning
+
+    _HOLYMAN_UPDATE_CHECK_CACHE = dict(payload)
+    _HOLYMAN_UPDATE_CHECK_CACHE["_cache_timestamp"] = now
+    return _copy_holyman_update_cache(_HOLYMAN_UPDATE_CHECK_CACHE, cached=False)
+
+
+@jargon_bp.route("/holyman/update/check", methods=["GET"])
+@require_auth
+async def check_holyman_update():
+    """轻量检查 Holyman GitHub 版本，带 30 分钟缓存；force=true 强制刷新。"""
+    force = _truthy_query(getattr(request, "args", {}).get("force"))
+    return jsonify(await _check_holyman_update(force=force))
+
+
 @jargon_bp.route("/holyman", methods=["GET"])
 @require_auth
 async def get_holyman():
     """获取 Holyman 预设黑话及其数据库激活状态。"""
     c = get_container()
-    from pathlib import Path
-    import os
     
     # 1. 采用绝对物理隔离寻址，解决在装饰器、闭包或符号链接下 __file__ 盘符漂移的痛点
-    local_dir = None
-    for target_path in [
-        "/AstrBot/data/plugins/astrbot_plugin_wave_memory/assets/holyman",
-        os.path.join(os.getcwd(), "data/plugins/astrbot_plugin_wave_memory/assets/holyman"),
-        os.path.join(os.getcwd(), "astrbot_plugin_wave_memory/assets/holyman"),
-        # 动态自愈 fallback：通过当前 jargon.py 真实的绝对路径计算
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../assets/holyman"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../assets/holyman")
-    ]:
-        if Path(target_path).exists() and (Path(target_path) / "phrases.json").exists():
-            local_dir = Path(target_path)
-            break
-            
-    if not local_dir:
-        # 最后的保底，直接使用相对路径，但不使用可能会导致问题的 resolve() 符号解析
-        local_dir = Path(os.path.dirname(os.path.abspath(__file__))) / ".." / ".." / "assets" / "holyman"
+    local_dir = _resolve_holyman_assets_dir()
 
-    phrases_file = local_dir / "phrases.json"
-
-    def _load_asset_json(name, default):
-        path = local_dir / name
-        if not path.exists():
-            return default
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return default
-
-    phrases = _load_asset_json("phrases.json", {})
-    concepts = _load_asset_json("concepts.json", [])
-    examples = _load_asset_json("examples.json", [])
-    corpus = _load_asset_json("corpus.json", [])
-    candidates = _load_asset_json("candidates.json", [])
-    blocked = _load_asset_json("blocked.json", {})
-    quality_report = _load_asset_json("quality_report.json", {})
+    phrases = _load_holyman_asset_json("phrases.json", {}, local_dir)
+    concepts = _load_holyman_asset_json("concepts.json", [], local_dir)
+    examples = _load_holyman_asset_json("examples.json", [], local_dir)
+    corpus = _load_holyman_asset_json("corpus.json", [], local_dir)
+    candidates = _load_holyman_asset_json("candidates.json", [], local_dir)
+    blocked = _load_holyman_asset_json("blocked.json", {}, local_dir)
+    quality_report = _load_holyman_asset_json("quality_report.json", {}, local_dir)
     raw_readme = (local_dir / "raw" / "README.md").read_text(encoding="utf-8", errors="ignore") if (local_dir / "raw" / "README.md").exists() else ""
     raw_corpus = (local_dir / "raw" / "神言.txt").read_text(encoding="utf-8", errors="ignore") if (local_dir / "raw" / "神言.txt").exists() else ""
     if not isinstance(candidates, list):
         candidates = []
     if not isinstance(blocked, dict):
         blocked = {}
+    corpus_items = _normalize_holyman_corpus(corpus)
 
     # DB 审核状态优先覆盖资产快照，保证 approve/reject 后刷新页面立即可见。
     if c.db and hasattr(c.db, "conn") and c.db.conn:
@@ -807,11 +958,16 @@ async def get_holyman():
     categories = _build_holyman_categories(items)
     local_count = len(items)
 
-    # 4. 获取远程最新提交的版本哈希；托付给多线程池执行，解决在国内恶劣网络环境卡事件循环的痛点。
-    import asyncio
-    remote_version = await asyncio.to_thread(_fetch_github_commit_info_sync)
-
-    content_status = _holyman_content_status(phrases, local_count, remote_version, quality_report)
+    # 4. 轻量更新检查走独立缓存握手，避免每次加载完整列表都直连 GitHub。
+    update_check = await _check_holyman_update(force=False)
+    remote_version = update_check.get("remote_version") or "Unknown"
+    content_status = {
+        "content_hash": update_check.get("content_hash") or _holyman_content_hash(phrases),
+        "content_count": update_check.get("content_count") or local_count,
+        "remote_commit_version": update_check.get("remote_commit_version") or "",
+        "is_update_available": bool(update_check.get("has_update")),
+        "asset_status": update_check.get("asset_status") or "unknown",
+    }
     declared_match = re.search(r"神言\.txt[（(]\s*(\d+)\s*条", raw_readme or "")
     try:
         declared_count = int(declared_match.group(1)) if declared_match else None
@@ -824,7 +980,7 @@ async def get_holyman():
     except Exception:
         source_count = len(corpus) if isinstance(corpus, list) else 0
     corpus_summary = {
-        "count": len(corpus) if isinstance(corpus, list) else 0,
+        "count": len(corpus_items),
         "safe_for_prompt": False,
         "reference_only": True,
     }
@@ -849,6 +1005,7 @@ async def get_holyman():
         "phrases": items,
         "concepts": concepts if isinstance(concepts, list) else [],
         "examples": examples if isinstance(examples, list) else [],
+        "corpus": corpus_items,
         "corpus_summary": corpus_summary,
         "candidates": candidates if isinstance(candidates, list) else [],
         "blocked": blocked if isinstance(blocked, dict) else {},
@@ -866,12 +1023,16 @@ async def get_holyman():
         "content_hash": content_status["content_hash"],
         "asset_status": content_status["asset_status"],
         "is_update_available": content_status["is_update_available"],
+        "update_check": update_check,
+        "checked_at": update_check.get("checked_at"),
+        "update_cached": update_check.get("cached", False),
+        "warning": update_check.get("warning"),
         # React WebUI compatibility aliases; v4.0.0 old frontend used direct layer lengths.
         "update_available": content_status["is_update_available"],
         "items_count": local_count,
         "concepts_count": len(concepts) if isinstance(concepts, list) else 0,
         "examples_count": len(examples) if isinstance(examples, list) else 0,
-        "corpus_count": len(corpus) if isinstance(corpus, list) else 0,
+        "corpus_count": len(corpus_items),
         "candidates_count": len(candidates) if isinstance(candidates, list) else 0,
     })
 
@@ -924,18 +1085,41 @@ async def toggle_holyman():
         return jsonify({"ok": True})
 
 
+@jargon_bp.route("/holyman/sync/preview", methods=["POST"])
+@require_auth
+async def preview_holyman_sync():
+    """预览 Holyman 同步差异；只读远端并在内存中构建对比，不写入本地资产。"""
+    body = await request.get_json() or {}
+    use_proxy = body.get("use_proxy", True)
+
+    try:
+        from ...services.jargon.sync import HolymanSyncService
+    except ImportError:
+        from services.jargon.sync import HolymanSyncService
+    sync_service = HolymanSyncService()
+
+    res = await sync_service.preview_sync_from_github(use_proxy=use_proxy)
+    status = 200 if res.get("ok") else 500
+    return jsonify(res), status
+
+
 @jargon_bp.route("/holyman/sync", methods=["POST"])
 @require_auth
 async def sync_holyman():
     """同步 Holyman 词库。"""
+    global _HOLYMAN_UPDATE_CHECK_CACHE
     body = await request.get_json() or {}
     use_proxy = body.get("use_proxy", True)
     
-    from ...services.jargon.sync import HolymanSyncService
+    try:
+        from ...services.jargon.sync import HolymanSyncService
+    except ImportError:
+        from services.jargon.sync import HolymanSyncService
     sync_service = HolymanSyncService()
     
     res = await sync_service.sync_from_github(use_proxy=use_proxy)
     if res.get("ok"):
+        _HOLYMAN_UPDATE_CHECK_CACHE = None
         c = get_container()
         if hasattr(c, "jargon_service") and c.jargon_service:
             if hasattr(c.jargon_service, "_holyman") and c.jargon_service._holyman:

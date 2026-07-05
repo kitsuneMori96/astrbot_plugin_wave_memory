@@ -193,8 +193,8 @@ export function ChannelConfigPage() {
     <div className="flex flex-col gap-6">
       <Card>
         <CardHeader>
-          <CardTitle>通道热配置</CardTitle>
-          <CardDescription>热更新注入通道参数；安全通道在 UI 中不可关闭。</CardDescription>
+          <CardTitle>Channel Config · 通道热配置</CardTitle>
+          <CardDescription>热更新注入通道参数；safety channel / 安全通道在 UI 中不可关闭。</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
           <FieldGroup className="grid gap-4 md:grid-cols-3">

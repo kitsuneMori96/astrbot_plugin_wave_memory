@@ -98,7 +98,7 @@ export function AgentFeedbackPage() {
     <div className="flex flex-col gap-6">
       <Card>
         <CardHeader>
-          <CardTitle>Agent 反馈审查</CardTitle>
+          <CardTitle>Agent Feedback · Agent 反馈审查</CardTitle>
           <CardDescription>记忆反馈、配置建议、审查候选与人工操作。</CardDescription>
         </CardHeader>
       </Card>

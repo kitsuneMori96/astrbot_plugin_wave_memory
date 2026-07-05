@@ -522,7 +522,8 @@ def build_full_graph_data(layers_raw: str = "facts", *, use_cache: bool = True, 
         layers_raw = "facts"
 
     now = time.time()
-    cache_key = f"full:{layers_raw}:{min_confidence}"
+    base_cache_key = f"full:{layers_raw}"
+    cache_key = f"{base_cache_key}:{min_confidence}"
     conn = c.db.conn
     version = _full_graph_cache_version(conn, layers)
     if (
@@ -715,6 +716,10 @@ def build_full_graph_data(layers_raw: str = "facts", *, use_cache: bool = True, 
     _overview_cache[cache_key] = data
     _overview_cache[f"{cache_key}_version"] = version
     _overview_cache[f"{cache_key}_ts"] = now
+    # Compatibility aliases for older tests/plugins that keyed full graph cache only by layer set.
+    _overview_cache[base_cache_key] = data
+    _overview_cache[f"{base_cache_key}_version"] = version
+    _overview_cache[f"{base_cache_key}_ts"] = now
     return data
 
 

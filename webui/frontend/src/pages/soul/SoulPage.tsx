@@ -100,6 +100,7 @@ export function SoulPage() {
 
   useEffect(() => {
     void loadData()
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [botFilter, moodGroupFilter])
 
   // 生物钟算法动态能量映射
@@ -162,7 +163,7 @@ export function SoulPage() {
       }
       setConcernOpen(false)
       await loadData()
-    } catch (err) {
+    } catch {
       toast.error('操作失败')
     } finally {
       setSaving(false)
@@ -180,7 +181,7 @@ export function SoulPage() {
       setConcerns((prev) =>
         prev.map((item) => (item.id === id ? { ...item, intensity: nextIntensity } : item))
       )
-    } catch (e) {
+    } catch {
       toast.error('调强度失败')
     }
   }
@@ -191,7 +192,7 @@ export function SoulPage() {
       await deleteConcern(id)
       toast.success('删除成功')
       setConcerns((prev) => prev.filter((item) => item.id !== id))
-    } catch (e) {
+    } catch {
       toast.error('删除失败')
     }
   }
@@ -223,7 +224,7 @@ export function SoulPage() {
       }
       setAnchorOpen(false)
       await loadData()
-    } catch (err) {
+    } catch {
       toast.error('操作失败')
     } finally {
       setSaving(false)
@@ -236,7 +237,7 @@ export function SoulPage() {
       await deleteTimeAnchor(id)
       toast.success('删除大事记成功')
       setAnchors((prev) => prev.filter((item) => item.id !== id))
-    } catch (e) {
+    } catch {
       toast.error('删除失败')
     }
   }
@@ -262,7 +263,7 @@ export function SoulPage() {
       toast.success('情绪波值修正成功')
       setMoodOpen(false)
       await loadData()
-    } catch (err) {
+    } catch {
       toast.error('操作失败')
     } finally {
       setSaving(false)
@@ -275,7 +276,7 @@ export function SoulPage() {
       await deleteMood(id)
       toast.success('删除成功')
       setMoods((prev) => prev.filter((item) => item.id !== id))
-    } catch (e) {
+    } catch {
       toast.error('删除失败')
     }
   }

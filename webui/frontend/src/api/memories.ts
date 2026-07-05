@@ -183,7 +183,7 @@ export async function runPostStream(
           const jsonStr = cleanLine.substring(5).trim()
           const payload = JSON.parse(jsonStr) as StreamProgress
           onProgress(payload)
-        } catch (e) {
+        } catch {
           // Ignore
         }
       }

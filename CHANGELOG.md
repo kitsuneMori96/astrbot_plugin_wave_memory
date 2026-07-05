@@ -1,5 +1,15 @@
 # Changelog
 
+## v4.2.1 (2026-07-05)
+
+### Holyman GitHub 更新握手与前端质量清理
+
+- **Holyman 在线更新握手**：新增 `/api/jargon/holyman/update/check` 轻量检查接口，支持 30 分钟缓存、`force=true` 强制刷新、`checked_at/cached/warning/has_update` 状态字段，避免列表加载时频繁直连 GitHub。
+- **预览确认同步体验**：React Jargon 页同步 kirors 式流程，进入广域黑话页后静默轮询检查版本，展示本地/远端版本、缓存状态、检查时间和 warning；真实写入仍需先预览差异并人工确认。
+- **Holyman 同步缓存自愈**：成功写入分层资产后清空更新检查缓存，防止前端继续显示旧的可更新状态；保留旧 ready 资产无远端 commit 元数据时的兼容行为。
+- **WebUI lint 清零**：拆分 `auth-context`，清理 shadcn 非组件导出警告、未使用 `catch` 参数和有意筛选触发加载的 Hook 依赖提示，`npm run lint` 达到 0 warning / 0 error。
+- **回归兼容修复**：补回 KG full graph cache 旧 key alias、Holyman legacy/gaming 分类标签旧契约和黑话注入“仅供理解”文案，确保全量 Python 回归测试通过。
+
 ## v4.2.0 (2026-07-05)
 
 ### React WebUI Holyman 黑话治理与审计体验修复

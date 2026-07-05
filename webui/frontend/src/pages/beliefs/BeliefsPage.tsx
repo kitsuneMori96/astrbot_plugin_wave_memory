@@ -142,6 +142,7 @@ export function BeliefsPage() {
 
   useEffect(() => {
     void loadData(1)
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [type, status, botId, size])
 
   // 执行搜索
