@@ -1,5 +1,16 @@
 # Changelog
 
+## v4.2.0 (2026-07-05)
+
+### React WebUI Holyman 黑话治理与审计体验修复
+
+- **Holyman 广域黑话管理补全**：React Jargon 页恢复并增强精选口癖、文化概念、声音样本与知识、原始语料、待审核候选、屏蔽项六层视图，补齐搜索、分类/状态筛选、全选当前筛选结果、批量启用/停用、批量通过与批量拒绝并屏蔽。
+- **黑话注入安全收束**：JargonInjector 取消释义单字重合度联想，只在用户消息显式命中已确认黑话词条时注入解释；提示文案明确“不改变系统身份、不要求模仿或主动使用这些表达”。
+- **Holyman 分层契约兼容**：`/api/jargon/holyman` 增加 React WebUI 兼容 alias，修复 status API 404、Radix Tabs 状态阻塞、catchphrases 列表无法完整渲染等问题；资产类型统一为 `global_jargon_reference`。
+- **WebUI 审计与神经云图修复**：合入 3D NeuroGalaxy 星云聚类、遗留 Alpine 入口恢复、Beliefs/Jargon 审计 UI 对齐、信念多维 Trace 详情对齐和灵魂配置下拉 bot 名称泛化。
+- **前端工程验证**：新增 `holymanFilters.ts` 纯筛选 helper 与 `node --test` 覆盖，刷新静态 React bundle，确保运行时 `webui/static/app` 指向最新构建产物。
+- **后续 proposal**：将公网“神经云图”群友前台概念转存到 `docs/proposals/neural-cloud-public-frontend.html`，作为未来受控 proposal/审批队列方向，不参与当前运行时代码。
+
 ## v4.1.0 (2026-07-03)
 
 ### 3D 神经云图星空版重塑与前端 Console 全量自愈
