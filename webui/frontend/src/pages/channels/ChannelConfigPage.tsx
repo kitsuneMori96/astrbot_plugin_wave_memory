@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Loader2Icon, RotateCcwIcon, SaveIcon, ShieldCheckIcon, WandSparklesIcon } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { ArrowRightIcon, Loader2Icon, RotateCcwIcon, SaveIcon, ShieldCheckIcon, WandSparklesIcon } from 'lucide-react'
 import { toast } from 'sonner'
 
 import {
@@ -26,6 +27,16 @@ import { ChannelDiffCard } from '@/pages/channels/ChannelDiffCard'
 
 const editableFields = ['enabled', 'priority', 'top_k', 'max_items', 'token_budget', 'timeout_ms', 'min_score'] as const
 const numericFields = ['priority', 'top_k', 'max_items', 'token_budget', 'timeout_ms', 'min_score'] as const
+
+const fieldHelp = [
+  'enabled：是否参与注入',
+  'priority：通道执行/拼接优先级',
+  'top_k：检索类通道候选数',
+  'max_items：非检索类通道最多注入条目',
+  'token_budget：单通道预算',
+  'timeout_ms：单通道超时',
+  'min_score：检索命中最低分',
+]
 
 function serializePatch(draft: ChannelConfigData): ChannelPatch {
   const channels: Record<string, Partial<ChannelSettings>> = {}
@@ -241,11 +252,33 @@ export function ChannelConfigPage() {
             </Button>
             {validation ? <Badge variant={validationShape.ok ? 'secondary' : 'destructive'}>{validationShape.ok ? '校验通过' : '校验失败'}</Badge> : null}
             {isDirty ? (
-              <Badge variant="secondary" className="animate-pulse bg-amber-500/10 text-amber-500 hover:bg-amber-500/10 border-amber-500/20">
-                <WandSparklesIcon className="size-3 mr-1" />
+              <Badge variant="secondary" className="animate-pulse">
+                <WandSparklesIcon className="mr-1 size-3" />
                 配置已修改（未保存）
               </Badge>
             ) : null}
+            <Button asChild variant="outline">
+              <Link to="/injection">
+                去注入观测台验证最近 trace
+                <ArrowRightIcon data-icon="inline-end" />
+              </Link>
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>字段说明</CardTitle>
+          <CardDescription>这些字段都是 WaveMemory 热参数；影响注入通道启用、优先级、预算和过滤阈值。</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+            {fieldHelp.map((item) => (
+              <div key={item} className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+                {item}
+              </div>
+            ))}
           </div>
         </CardContent>
       </Card>

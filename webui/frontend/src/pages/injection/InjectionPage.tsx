@@ -35,6 +35,20 @@ const defaultFilters: FilterState = {
   limit: '100',
 }
 
+const channelFilterOptions = [
+  'safety',
+  'memory',
+  'timeline',
+  'facts',
+  'persona',
+  'belief',
+  'jargon',
+  'fewshot',
+  'book_lore',
+  'fts5',
+  'affinity',
+]
+
 function toFilters(filters: FilterState): TraceFilters {
   return {
     group_id: filters.group_id,
@@ -78,6 +92,54 @@ function statusLabel(status: string): string {
   if (status === 'error') return '错误'
   if (status === 'timeout') return '超时'
   return status || '-'
+}
+
+function channelRecords(trace: InjectionTraceSummary): Array<Record<string, unknown>> {
+  const raw = trace.channels ?? trace.channel_results ?? trace.channel_summaries ?? []
+  return Array.isArray(raw) ? raw.filter((item): item is Record<string, unknown> => item !== null && typeof item === 'object' && !Array.isArray(item)) : []
+}
+
+function traceHitChannelCount(trace: InjectionTraceSummary): string {
+  const explicit = trace.hit_channel_count ?? trace.hit_channels_count ?? trace.matched_channel_count
+  if (explicit !== undefined && explicit !== null) return String(explicit)
+  const count = channelRecords(trace).filter((channel) => {
+    const status = String(channel.status ?? '')
+    const hits = Number(channel.hit_count ?? channel.hits_count ?? 0)
+    return status === 'ok' || hits > 0
+  }).length
+  return count ? String(count) : '-'
+}
+
+function traceSkippedChannelCount(trace: InjectionTraceSummary): string {
+  const explicit = trace.skipped_channel_count ?? trace.skipped_channels_count ?? trace.filtered_channel_count
+  if (explicit !== undefined && explicit !== null) return String(explicit)
+  const count = channelRecords(trace).filter((channel) => {
+    const status = String(channel.status ?? '')
+    return status === 'empty' || status === 'disabled' || status === 'skipped'
+  }).length
+  return count ? String(count) : '-'
+}
+
+function traceErrorChannelCount(trace: InjectionTraceSummary): string {
+  const explicit = trace.error_channel_count ?? trace.error_channels_count
+  if (explicit !== undefined && explicit !== null) return String(explicit)
+  const count = channelRecords(trace).filter((channel) => {
+    const status = String(channel.status ?? '')
+    return status.includes('error') || status.includes('timeout') || Boolean(channel.error)
+  }).length
+  return count ? String(count) : trace.has_error ? '1' : '-'
+}
+
+function tracePrimaryTokenChannel(trace: InjectionTraceSummary): string {
+  const explicit = trace.primary_token_channel ?? trace.max_token_channel ?? trace.top_token_channel
+  if (explicit !== undefined && explicit !== null && explicit !== '') return String(explicit)
+  const channels = channelRecords(trace)
+  const top = channels.reduce<Record<string, unknown> | null>((current, channel) => {
+    const currentTokens = Number(current?.tokens ?? current?.token_count ?? 0)
+    const nextTokens = Number(channel.tokens ?? channel.token_count ?? 0)
+    return nextTokens > currentTokens ? channel : current
+  }, null)
+  return top ? String(top.channel ?? top.name ?? top.key ?? '-') : '-'
 }
 
 export function InjectionPage() {
@@ -158,8 +220,20 @@ export function InjectionPage() {
                 <Input id="trace-bot" value={filters.bot_id} onChange={(event) => setFilters({ ...filters, bot_id: event.target.value })} />
               </Field>
               <Field>
-                <FieldLabel htmlFor="trace-channel">通道</FieldLabel>
-                <Input id="trace-channel" value={filters.channel} onChange={(event) => setFilters({ ...filters, channel: event.target.value })} />
+                <FieldLabel>通道</FieldLabel>
+                <Select value={filters.channel || 'all'} onValueChange={(value) => setFilters({ ...filters, channel: value === 'all' ? '' : value })}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="全部" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectItem value="all">全部</SelectItem>
+                      {channelFilterOptions.map((channel) => (
+                        <SelectItem key={channel} value={channel}>{channel}</SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
               </Field>
               <Field>
                 <FieldLabel>状态</FieldLabel>
@@ -248,6 +322,10 @@ export function InjectionPage() {
                     <TableHead>状态</TableHead>
                     <TableHead>会话</TableHead>
                     <TableHead>预览</TableHead>
+                    <TableHead>命中通道数</TableHead>
+                    <TableHead>跳过通道数</TableHead>
+                    <TableHead>错误通道数</TableHead>
+                    <TableHead>主 token 消耗通道</TableHead>
                     <TableHead>Token 数</TableHead>
                     <TableHead>耗时</TableHead>
                   </TableRow>
@@ -266,6 +344,10 @@ export function InjectionPage() {
                         </TableCell>
                         <TableCell>{String(trace.session_id ?? trace.group_id ?? '-')}</TableCell>
                         <TableCell className="max-w-md truncate">{tracePreview(trace)}</TableCell>
+                        <TableCell>{traceHitChannelCount(trace)}</TableCell>
+                        <TableCell>{traceSkippedChannelCount(trace)}</TableCell>
+                        <TableCell>{traceErrorChannelCount(trace)}</TableCell>
+                        <TableCell className="font-mono text-xs">{tracePrimaryTokenChannel(trace)}</TableCell>
                         <TableCell>{traceTokens(trace)}</TableCell>
                         <TableCell>{traceLatency(trace)}</TableCell>
                       </TableRow>

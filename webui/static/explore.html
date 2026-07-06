@@ -222,6 +222,11 @@
     <div id="kg-config" class="fixed top-12 left-4 z-20 glass glass-accent rounded-xl p-4 w-72 hidden" style="max-height:calc(100vh - 80px); overflow-y:auto">
         <h4 class="text-slate-400 text-[10px] uppercase tracking-widest mb-3">图谱配置</h4>
         <div class="space-y-3">
+            <section id="view-config-section" class="rounded-xl border border-white/5 bg-white/[.025] p-3 space-y-3">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="text-[11px] font-semibold text-purple-200">视图配置</div>
+                    <span class="rounded-full border border-white/10 px-2 py-0.5 text-[9px] text-slate-400">只影响当前画布显示</span>
+                </div>
             <div>
                 <label class="text-[10px] text-slate-500 block mb-1">显示节点数</label>
                 <input type="number" id="cfg-max-nodes" min="10" max="5000" value="200" class="w-full px-2 py-1.5 bg-nebula-700 border border-white/10 rounded-md text-[11px] text-slate-300">
@@ -268,7 +273,58 @@
                 <label class="text-[10px] text-slate-500 block mb-1">节点类型（点击取消=隐藏该类）</label>
                 <div id="cfg-node-types" class="flex flex-wrap gap-1"></div>
             </div>
-            <button onclick="loadGalaxy()" class="w-full px-3 py-2 bg-glow-purple/80 hover:bg-glow-purple rounded-lg text-white text-[11px] font-medium transition mt-2">应用配置</button>
+            </section>
+            <section id="query-config-section" class="rounded-xl border border-blue-500/10 bg-blue-500/[.035] p-3 space-y-3">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="text-[11px] font-semibold text-blue-200">查询配置</div>
+                    <span class="rounded-full border border-blue-400/20 px-2 py-0.5 text-[9px] text-blue-200/70">影响 /api/query 调试请求</span>
+                </div>
+                <div>
+                    <label class="text-[10px] text-slate-500 block mb-1">高级检索实验台 preset</label>
+                    <select id="query-mode-preset" onchange="applyQueryPreset(this.value)" class="w-full px-2 py-1.5 bg-nebula-700 border border-white/10 rounded-md text-[10px] text-slate-300">
+                        <option value="full">full · EPA + Pyramid + Spike + Geodesic</option>
+                        <option value="baseline">baseline · 仅基础向量</option>
+                        <option value="spike">spike · 向量 + 脉冲传播</option>
+                        <option value="pyramid">pyramid · EPA + 残差金字塔 + 脉冲传播</option>
+                        <option value="ablation">ablation · 对比 baseline/full（当前返回 full 调试 envelope）</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="text-[10px] text-slate-500 block mb-1">返回记忆数 top_k</label>
+                    <input type="number" id="query-top-k" min="1" max="50" value="12" class="w-full px-2 py-1.5 bg-nebula-700 border border-white/10 rounded-md text-[11px] text-slate-300">
+                </div>
+                <div class="grid grid-cols-2 gap-2">
+                    <div>
+                        <label class="text-[9px] text-slate-500 block mb-1">source filter</label>
+                        <input type="text" id="query-source-filter" placeholder="可选 source" class="w-full px-2 py-1.5 bg-nebula-700 border border-white/10 rounded-md text-[10px] text-slate-300">
+                    </div>
+                    <label class="flex items-end gap-2 cursor-pointer pb-1.5"><input type="checkbox" id="query-debug-toggle" checked class="accent-blue-500"> <span class="text-[10px] text-slate-300">debug 明细</span></label>
+                </div>
+                <div>
+                    <label class="text-[10px] text-slate-500 block mb-2">高级检索阶段</label>
+                    <div class="grid grid-cols-2 gap-1.5">
+                        <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" id="query-stage-epa" checked class="accent-blue-500"> <span class="text-[10px] text-slate-300">EPA</span></label>
+                        <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" id="query-stage-pyramid" checked class="accent-blue-500"> <span class="text-[10px] text-slate-300">残差金字塔</span></label>
+                        <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" id="query-stage-spike" checked class="accent-blue-500"> <span class="text-[10px] text-slate-300">脉冲传播</span></label>
+                        <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" id="query-stage-geodesic" checked class="accent-blue-500"> <span class="text-[10px] text-slate-300">测地线重排</span></label>
+                    </div>
+                </div>
+                <div class="grid grid-cols-3 gap-2">
+                    <div>
+                        <label class="text-[9px] text-slate-500 block mb-1">Pyramid top_k</label>
+                        <input type="number" id="query-pyramid-top-k" min="1" max="30" value="10" class="w-full px-2 py-1.5 bg-nebula-700 border border-white/10 rounded-md text-[10px] text-slate-300">
+                    </div>
+                    <div>
+                        <label class="text-[9px] text-slate-500 block mb-1">Spike hops</label>
+                        <input type="number" id="query-spike-max-hops" min="1" max="8" value="4" class="w-full px-2 py-1.5 bg-nebula-700 border border-white/10 rounded-md text-[10px] text-slate-300">
+                    </div>
+                    <div>
+                        <label class="text-[9px] text-slate-500 block mb-1">Geo α</label>
+                        <input type="number" id="query-geodesic-alpha" min="0" max="1" step="0.1" value="0.3" class="w-full px-2 py-1.5 bg-nebula-700 border border-white/10 rounded-md text-[10px] text-slate-300">
+                    </div>
+                </div>
+            </section>
+            <button onclick="loadGalaxy()" class="w-full px-3 py-2 bg-glow-purple/80 hover:bg-glow-purple rounded-lg text-white text-[11px] font-medium transition mt-2">应用视图配置</button>
             <div class="text-[9px] text-slate-600 text-center" id="cfg-status"></div>
         </div>
     </div>
@@ -343,6 +399,27 @@
 
     <!-- Stats Badge -->
     <div id="stats-badge" class="fixed bottom-4 left-4 z-20 glass rounded-lg px-3 py-2 text-[11px] text-slate-500">0 节点 · 0 连线</div>
+
+    <!-- Runtime Config Status -->
+    <div id="runtime-config-section" class="fixed bottom-16 left-4 z-20 glass rounded-xl p-3 w-64 text-[10px] text-slate-400 space-y-1.5">
+        <div class="flex items-center justify-between border-b border-white/5 pb-1">
+            <span class="text-emerald-300 font-semibold">运行配置</span>
+            <span class="rounded-full border border-emerald-400/20 px-2 py-0.5 text-[9px] text-emerald-200/70">只读诊断</span>
+        </div>
+        <div class="text-[9px] text-slate-600">不修改 AstrBot 静态配置；仅显示当前页面请求和渲染状态。</div>
+        <div class="flex justify-between"><span>当前视图</span><span id="runtime-status-view" class="text-slate-300 font-mono">galaxy</span></div>
+        <div class="flex justify-between"><span>查询链路</span><span id="runtime-status-query" class="text-slate-300 font-mono">EPA/Pyramid/Spike/Geo</span></div>
+    </div>
+
+    <!-- Event Status -->
+    <div id="event-status-section" class="fixed bottom-20 right-4 z-20 glass rounded-xl p-3 w-72 text-[10px] text-slate-400 space-y-1.5">
+        <div class="flex items-center justify-between border-b border-white/5 pb-1">
+            <span class="text-blue-300 font-semibold">事件状态</span>
+            <span id="event-status-current" class="rounded-full border border-blue-400/20 px-2 py-0.5 text-[9px] text-blue-200/70">idle</span>
+        </div>
+        <div class="flex justify-between"><span>最近动作</span><span id="event-status-last-action" class="text-slate-300 font-mono">等待操作</span></div>
+        <div id="event-status-warning-list" class="text-[9px] text-amber-300 leading-relaxed"></div>
+    </div>
 
     <!-- 交互指引水晶卡片 -->
     <div id="interactive-guide" class="fixed bottom-14 left-4 z-20 glass rounded-xl p-3 w-56 text-[10px] text-slate-400 space-y-1.5 animate-in slide-in-from-left duration-200">

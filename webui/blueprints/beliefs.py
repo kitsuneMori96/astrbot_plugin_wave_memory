@@ -23,6 +23,34 @@ def _table_exists(conn, table: str) -> bool:
 
 # 需要排除的 archived_reason（身份污染 / 清理标记）
 _EXCLUDED_REASONS = ("identity_roleplay_contamination", "identity_cleanup_full")
+_VALID_BELIEF_TYPES = {"self_identity", "person_judgment", "world_view", "preference"}
+_LEGACY_BELIEF_TYPE_MAP = {
+    "self": "self_identity",
+    "other": "person_judgment",
+    "world": "world_view",
+    "value": "preference",
+}
+_NEW_TO_LEGACY_BELIEF_TYPE_MAP = {v: k for k, v in _LEGACY_BELIEF_TYPE_MAP.items()}
+
+
+def _normalize_belief_type(value) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return _LEGACY_BELIEF_TYPE_MAP.get(raw, raw)
+
+
+def _append_belief_type_filter(where_parts: list[str], params: list, belief_type) -> None:
+    normalized = _normalize_belief_type(belief_type)
+    if not normalized:
+        return
+    legacy = _NEW_TO_LEGACY_BELIEF_TYPE_MAP.get(normalized)
+    if legacy:
+        where_parts.append("type IN (?, ?)")
+        params.extend([normalized, legacy])
+    else:
+        where_parts.append("type = ?")
+        params.append(normalized)
 
 
 def _belief_level(strength) -> str:
@@ -49,15 +77,21 @@ async def list_beliefs():
 
     status = request.args.get("status")  # pending / active / archived / pending_legacy
     bot_id = request.args.get("bot_id")
-    belief_type = request.args.get("type") # self / other / world / value
+    belief_type = request.args.get("type") # self_identity / person_judgment / world_view / preference
     search_q = request.args.get("search") # 搜索内容
 
     try:
-        limit = int(request.args.get("limit", 50))
+        limit = int(request.args.get("limit") or request.args.get("size") or 50)
     except (ValueError, TypeError):
         limit = 50
+    limit = max(1, min(limit, 500))
     try:
-        offset = int(request.args.get("offset", 0))
+        if request.args.get("offset") is not None:
+            offset = int(request.args.get("offset", 0))
+        elif request.args.get("page") is not None:
+            offset = (max(1, int(request.args.get("page", 1))) - 1) * limit
+        else:
+            offset = 0
     except (ValueError, TypeError):
         offset = 0
 
@@ -70,8 +104,7 @@ async def list_beliefs():
         where_parts.append("bot_id = ?")
         params.append(bot_id)
     if belief_type:
-        where_parts.append("type = ?")
-        params.append(belief_type)
+        _append_belief_type_filter(where_parts, params, belief_type)
     if search_q:
         where_parts.append("content LIKE ?")
         params.append(f"%{search_q.strip()}%")
@@ -104,7 +137,7 @@ async def list_beliefs():
         evidence_ids = json.loads(r[10] or "[]")
         evidence_type = r[9] or "memory"
         items.append({
-            "id": r[0], "content": r[1], "type": r[2], "confidence": r[3],
+            "id": r[0], "content": r[1], "type": _normalize_belief_type(r[2]) or "world_view", "confidence": r[3],
             "bot_id": r[4], "source": evidence_type, "evidence_type": evidence_type,
             "sources": evidence_ids or sources, "raw_sources": sources, "status": r[6],
             "created_at": r[7], "updated_at": r[8], "level": _belief_level(r[3]),
@@ -125,11 +158,11 @@ async def create_belief():
     if not content or len(content) < 5:
         return jsonify({"ok": False, "error": "content required (min 5 chars)"}), 400
 
-    belief_type = body.get("type", "world_view")
-    if belief_type not in ("person_judgment", "world_view", "self_identity", "preference"):
+    belief_type = _normalize_belief_type(body.get("type", "world_view"))
+    if belief_type not in _VALID_BELIEF_TYPES:
         belief_type = "world_view"
     try:
-        strength = float(body.get("strength", 0.5))
+        strength = float(body.get("strength", body.get("confidence", 0.5)))
     except (ValueError, TypeError):
         strength = 0.5
     strength = max(0.0, min(1.0, strength))
@@ -166,15 +199,16 @@ async def edit_belief(belief_id: int):
     if "content" in body and body["content"]:
         sets.append("content = ?")
         params.append(str(body["content"]).strip())
-    if "strength" in body and body["strength"] is not None:
+    strength_value = body.get("strength", body.get("confidence"))
+    if strength_value is not None:
         try:
             sets.append("strength = ?")
-            params.append(max(0.0, min(1.0, float(body["strength"]))))
+            params.append(max(0.0, min(1.0, float(strength_value))))
         except (ValueError, TypeError):
             pass
     if "type" in body and body["type"]:
-        t = body["type"]
-        if t in ("person_judgment", "world_view", "self_identity", "preference"):
+        t = _normalize_belief_type(body["type"])
+        if t in _VALID_BELIEF_TYPES:
             sets.append("type = ?")
             params.append(t)
     if not sets:
@@ -367,6 +401,55 @@ async def batch_archive():
     return jsonify({"ok": True, "archived_count": cur.rowcount})
 
 
+@beliefs_bp.route("/batch-archive-selected", methods=["POST"])
+@require_auth
+async def batch_archive_selected_beliefs():
+    """批量归档前端已勾选的信念。"""
+    c = get_container()
+    if not _table_exists(c.db.conn, "beliefs"):
+        return jsonify({"ok": False, "error": "beliefs table not found"}), 500
+    body = await request.get_json() or {}
+    all_matching = body.get("all_matching", False)
+    now = int(time.time())
+    if all_matching:
+        status = body.get("status")
+        bot_id = body.get("bot_id")
+        belief_type = body.get("type")
+        search_q = body.get("search")
+        where_parts = ["1=1"]
+        params = []
+        if status:
+            where_parts.append("status = ?")
+            params.append(status)
+        if bot_id:
+            where_parts.append("bot_id = ?")
+            params.append(bot_id)
+        if belief_type:
+            _append_belief_type_filter(where_parts, params, belief_type)
+        if search_q:
+            where_parts.append("content LIKE ?")
+            params.append(f"%{search_q.strip()}%")
+        reason_excl = ",".join("?" for _ in _EXCLUDED_REASONS)
+        where_parts.append(f"COALESCE(archived_reason, '') NOT IN ({reason_excl})")
+        params.extend(_EXCLUDED_REASONS)
+        where_sql = " AND ".join(where_parts)
+        cur = c.db.conn.execute(
+            f"UPDATE beliefs SET status = 'archived', archived_reason = 'webui_batch_archive', last_reinforced = ? WHERE {where_sql}",
+            [now] + params,
+        )
+    else:
+        ids = body.get("ids", [])
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "ids list or all_matching is required"}), 400
+        placeholders = ",".join("?" * len(ids))
+        cur = c.db.conn.execute(
+            f"UPDATE beliefs SET status = 'archived', archived_reason = 'webui_batch_archive', last_reinforced = ? WHERE id IN ({placeholders})",
+            [now] + ids,
+        )
+    c.db.conn.commit()
+    return jsonify({"ok": True, "archived_count": cur.rowcount})
+
+
 @beliefs_bp.route("/batch-approve", methods=["POST"])
 @require_auth
 async def batch_approve_beliefs():
@@ -398,8 +481,7 @@ async def batch_approve_beliefs():
             where_parts.append("bot_id = ?")
             params.append(bot_id)
         if belief_type:
-            where_parts.append("type = ?")
-            params.append(belief_type)
+            _append_belief_type_filter(where_parts, params, belief_type)
         if search_q:
             where_parts.append("content LIKE ?")
             params.append(f"%{search_q.strip()}%")
@@ -472,8 +554,7 @@ async def batch_delete_beliefs():
             where_parts.append("bot_id = ?")
             params.append(bot_id)
         if belief_type:
-            where_parts.append("type = ?")
-            params.append(belief_type)
+            _append_belief_type_filter(where_parts, params, belief_type)
         if search_q:
             where_parts.append("content LIKE ?")
             params.append(f"%{search_q.strip()}%")

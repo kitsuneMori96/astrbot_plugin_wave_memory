@@ -129,6 +129,53 @@ class JargonChannelTest(unittest.TestCase):
         self.assertNotIn("待审词", result.text)
         self.assertEqual([item["word"] for item in result.items], ["v我50"])
 
+    def test_actual_injector_exposes_source_layer_and_reference_only_trace_items(self):
+        from services.injection.channels.jargon import JargonChannel
+        from services.jargon.inference import JargonInjector
+
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        conn.execute(
+            """CREATE TABLE jargon (
+                word TEXT,
+                meaning TEXT,
+                group_id TEXT,
+                is_jargon INTEGER,
+                status TEXT,
+                is_global INTEGER DEFAULT 0,
+                frequency INTEGER DEFAULT 1,
+                scope TEXT DEFAULT 'local',
+                source TEXT DEFAULT 'wave_memory'
+            )"""
+        )
+        conn.executemany(
+            "INSERT INTO jargon (word, meaning, group_id, is_jargon, status, is_global, frequency, scope, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("本地梗", "本群内部约定说法", "g1", 1, "confirmed", 0, 10, "local", "wave_memory"),
+                ("v我50", "疯狂星期四转账梗", "global_fallback", 1, "confirmed", 1, 9, "global", "holyman_skills"),
+            ],
+        )
+        channel = JargonChannel(jargon_service=JargonInjector(DBBox(conn)))
+
+        result = asyncio.run(channel.build(self._ctx(message="本地梗 v我50")))
+
+        self.assertEqual(result.status, "hit")
+        items = {item["word"]: item for item in result.items}
+        local = items["本地梗"]
+        holyman = items["v我50"]
+        self.assertEqual(local["source"], "wave_memory")
+        self.assertEqual(local["source_layer"], "local")
+        self.assertIs(local["reference_only"], False)
+        self.assertIs(local["runtime_match"], True)
+        self.assertEqual(local["matched_by"], "explicit_user_message")
+        self.assertEqual(local["preview"], "本地梗 → 本群内部约定说法")
+        self.assertEqual(holyman["source"], "holyman_skills")
+        self.assertEqual(holyman["source_layer"], "phrases")
+        self.assertIs(holyman["reference_only"], True)
+        self.assertIs(holyman["runtime_match"], True)
+        self.assertEqual(holyman["matched_by"], "explicit_user_message")
+        self.assertEqual(holyman["preview"], "v我50 → 疯狂星期四转账梗")
+
     def test_actual_injector_requires_explicit_word_hit_not_meaning_overlap(self):
         from services.jargon.inference import JargonInjector
 

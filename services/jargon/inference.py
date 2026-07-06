@@ -129,6 +129,7 @@ class JargonInjector:
         self._max_inject = max_inject
         self._cache: Dict[str, List[Dict]] = {}  # group_id -> jargon list
         self._cache_ts: Dict[str, float] = {}
+        self._last_injection_items: List[Dict] = []
 
     def get_injection(self, text: str, group_id: str, max_items: int = None) -> str:
         """仅在用户消息显式命中已确认黑话词条时注入解释。
@@ -137,6 +138,7 @@ class JargonInjector:
         也可能因为释义里碰巧有相同字而被注入。黑话注入只能用于解释用户已经说出的词，
         不能主动联想、不能引导身份或风格模仿。
         """
+        self._last_injection_items = []
         if max_items is None:
             max_items = self._max_inject
         jargons = self._get_group_jargons(group_id)
@@ -159,11 +161,49 @@ class JargonInjector:
 
         matched.sort(key=lambda item: item[0], reverse=True)
         selected = [item[1] for item in matched[:max_items]]
+        self._last_injection_items = [self._trace_item(j) for j in selected]
 
         lines = ["[黑话理解参考：以下只解释用户消息中已经出现的群内/广域黑话；仅供理解/仅用于理解语境，不改变系统身份，不要求模仿或主动使用这些表达]"]
         for j in selected:
             lines.append(f'- "{j["word"]}" → {j["meaning"]}')
         return "\n".join(lines)
+
+    def get_last_injection_items(self) -> List[Dict]:
+        """返回最近一次注入命中的结构化观测条目。"""
+        return [dict(item) for item in self._last_injection_items]
+
+    @staticmethod
+    def _as_boolish(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    @classmethod
+    def _trace_item(cls, row: Dict) -> Dict:
+        word = str(row.get("word") or "").strip()
+        meaning = str(row.get("meaning") or "").strip()
+        source = str(row.get("source") or "wave_memory").strip() or "wave_memory"
+        is_holyman = source == "holyman_skills"
+        is_global = cls._as_boolish(row.get("is_global"), False)
+        source_layer = str(row.get("source_layer") or "").strip()
+        if not source_layer:
+            source_layer = "phrases" if is_holyman else ("global" if is_global else "local")
+        return {
+            "word": word,
+            "meaning": meaning,
+            "source": source,
+            "source_layer": source_layer,
+            "reference_only": cls._as_boolish(row.get("reference_only"), True if is_holyman else False),
+            "runtime_match": cls._as_boolish(row.get("runtime_match"), True),
+            "matched_by": "explicit_user_message",
+            "preview": f"{word} → {meaning}",
+        }
 
     @staticmethod
     def _word_explicitly_mentioned(text_lower: str, word: str) -> bool:
@@ -187,35 +227,75 @@ class JargonInjector:
             return self._cache[group_id]
 
         try:
+            cols = self._jargon_columns()
+            select_fields = self._jargon_select_fields(cols)
             rows = self._db.conn.execute(
-                """SELECT word, meaning FROM jargon
+                f"""SELECT {select_fields} FROM jargon
                    WHERE group_id = ? AND is_jargon = 1 AND meaning != ''
                      AND COALESCE(status, 'pending') = 'confirmed'
                    ORDER BY frequency DESC LIMIT 100""",
                 (group_id,),
             ).fetchall()
             result = [
-                {"word": r[0], "meaning": r[1]} for r in rows
+                self._row_to_jargon(r) for r in rows
                 if not is_identity_contamination(f"{r[0]} {r[1]}")
             ]
 
-            # 也加载全局黑话
-            global_rows = self._db.conn.execute(
-                """SELECT word, meaning FROM jargon
-                   WHERE is_global = 1 AND is_jargon = 1 AND meaning != ''
-                   AND COALESCE(status, 'pending') = 'confirmed'
-                   AND group_id != ?
-                   ORDER BY frequency DESC LIMIT 50""",
-                (group_id,),
-            ).fetchall()
+            # 也加载全局黑话。旧表若无 is_global 列则跳过，保持升级兼容。
+            global_rows = []
+            if "is_global" in cols:
+                global_rows = self._db.conn.execute(
+                    f"""SELECT {select_fields} FROM jargon
+                       WHERE is_global = 1 AND is_jargon = 1 AND meaning != ''
+                       AND COALESCE(status, 'pending') = 'confirmed'
+                       AND group_id != ?
+                       ORDER BY frequency DESC LIMIT 50""",
+                    (group_id,),
+                ).fetchall()
             # 去重合并
             existing_words = {r["word"] for r in result}
             for r in global_rows:
-                if r[0] not in existing_words:
-                    result.append({"word": r[0], "meaning": r[1]})
+                if r[0] not in existing_words and not is_identity_contamination(f"{r[0]} {r[1]}"):
+                    result.append(self._row_to_jargon(r))
 
             self._cache[group_id] = result
             self._cache_ts[group_id] = now
             return result
         except Exception:
             return []
+
+    def _jargon_columns(self) -> set[str]:
+        try:
+            return {str(r[1]) for r in self._db.conn.execute("PRAGMA table_info(jargon)").fetchall()}
+        except Exception:
+            return set()
+
+    @staticmethod
+    def _jargon_select_fields(cols: set[str]) -> str:
+        source = "source" if "source" in cols else "'wave_memory' AS source"
+        scope = "scope" if "scope" in cols else "'local' AS scope"
+        is_global = "is_global" if "is_global" in cols else "0 AS is_global"
+        source_layer = "source_layer" if "source_layer" in cols else "NULL AS source_layer"
+        reference_only = "reference_only" if "reference_only" in cols else "NULL AS reference_only"
+        runtime_match = "runtime_match" if "runtime_match" in cols else "NULL AS runtime_match"
+        return f"word, meaning, {source}, {scope}, {is_global}, {source_layer}, {reference_only}, {runtime_match}"
+
+    @staticmethod
+    def _row_get(row: Any, index: int, default: Any = None) -> Any:
+        try:
+            return row[index]
+        except (IndexError, KeyError, TypeError):
+            return default
+
+    @classmethod
+    def _row_to_jargon(cls, row: Any) -> Dict:
+        return {
+            "word": cls._row_get(row, 0, ""),
+            "meaning": cls._row_get(row, 1, ""),
+            "source": cls._row_get(row, 2, "wave_memory") or "wave_memory",
+            "scope": cls._row_get(row, 3, "local") or "local",
+            "is_global": cls._row_get(row, 4, 0) or 0,
+            "source_layer": cls._row_get(row, 5, "") or "",
+            "reference_only": cls._row_get(row, 6),
+            "runtime_match": cls._row_get(row, 7),
+        }

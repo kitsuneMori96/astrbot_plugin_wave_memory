@@ -1,5 +1,15 @@
 import { useEffect, useState } from 'react'
-import { AlertCircleIcon, CheckCircle2Icon, Loader2, PlayIcon, RefreshCwIcon, Save, StopCircleIcon } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import {
+  AlertCircleIcon,
+  ArrowRightIcon,
+  CheckCircle2Icon,
+  Loader2,
+  PlayIcon,
+  RefreshCwIcon,
+  Save,
+  StopCircleIcon,
+} from 'lucide-react'
 import { toast } from 'sonner'
 
 import { getChannelConfig, type ChannelConfigData } from '@/api/channels'
@@ -10,17 +20,32 @@ import { runPostStream, type StreamProgress } from '@/api/memories'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
 
+const importWizardSteps = ['配置检查', '数据源发现', '导入预览', '执行导入', 'Tag 提取', '结果复核']
+
+const dryRunPreviewFields = ['数据源', '总条数', '已导入估计', '重复估计', '将写入 source 类型', '是否会 re-embed']
+
+const taskModelFields = [
+  'task_id',
+  'task_type: import | tag_extract',
+  'status: running | done | error | stopped',
+  'progress',
+  'processed',
+  'total',
+  'errors',
+  'message',
+]
+
 export function ImportPage() {
   const [sys, setSys] = useState<SystemPayload | null>(null)
   const [config, setConfig] = useState<ChannelConfigData | null>(null)
   const [sources, setSources] = useState<ImportSourceItem[]>([])
-  
+
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -83,8 +108,7 @@ export function ImportPage() {
     setStreamType('import')
     setStreamProgress(null)
     setStreamLog([`[INIT] 正在扫描并连接记忆数据源：${sourceItem.name}...`])
-    
-    // 我们将把 limit 作为伪 id 拼写进队列
+
     void runPostStream(`/api/memories/import/run?source_id=${sourceItem.id}&limit=${importLimit}`, [], (state) => {
       setStreamProgress(state)
       if (state.processed !== undefined) {
@@ -179,24 +203,62 @@ export function ImportPage() {
   }
 
   const unlabelledCount = Number((sys?.memories?.total ?? 0) - (sys?.memories?.with_tags ?? 0))
+  const totalSourceCount = sources.reduce((sum, src) => sum + Number(src.count ?? 0), 0)
+  const importedEstimate = sources.reduce((sum, src) => sum + Math.round(Number(src.count ?? 0) * Number(src.imported_pct ?? 0) / 100), 0)
+  const remainingEstimate = sources.reduce((sum, src) => sum + Number(src.remaining ?? 0), 0)
+  const duplicateEstimate = Math.max(totalSourceCount - importedEstimate - remainingEstimate, 0)
+  const dryRunPreviewRows = [
+    ['数据源', sources.length ? `${sources.length} 个可扫描来源` : '未发现可扫描来源'],
+    ['总条数', totalSourceCount.toLocaleString()],
+    ['已导入估计', importedEstimate.toLocaleString()],
+    ['重复估计', duplicateEstimate.toLocaleString()],
+    ['将写入 source 类型', 'external_plugin_import'],
+    ['是否会 re-embed', Number(config?.embedding_dimension ?? 0) > 0 ? `会，按 ${Number(config?.embedding_dimension)} 维向量写入` : '等待配置检查'],
+  ]
 
   return (
     <div className="flex flex-col gap-6">
-      {/* ─── 1. 模型提供商配置 ─── */}
       <Card>
-        <CardHeader className="py-4 shrink-0">
+        <CardHeader>
           <CardTitle>智能导入与标签提取</CardTitle>
           <CardDescription>
             自动发现外部记忆插件（如 SelfLearning）数据并排重入库；使用 LLM 对无标签的长期记忆进行批量结构化标签提取。
           </CardDescription>
         </CardHeader>
-        <CardContent className="pt-0 flex flex-col gap-4">
-          <CardTitle className="text-sm font-semibold">🤖 核心模型提供商</CardTitle>
+        <CardContent className="flex flex-col gap-4">
+          <div className="grid gap-3 md:grid-cols-6">
+            {importWizardSteps.map((step, index) => (
+              <div key={step} className="rounded-lg border bg-muted/20 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <Badge variant={index < 2 ? 'secondary' : 'outline'}>{index + 1}</Badge>
+                  <span className="text-xs text-muted-foreground">{index < 2 ? '已接入' : '契约'}</span>
+                </div>
+                <p className="mt-3 text-sm font-medium">{step}</p>
+              </div>
+            ))}
+          </div>
+          <Alert>
+            <AlertCircleIcon />
+            <AlertTitle>provider 配置块属于静态配置，需要重启</AlertTitle>
+            <AlertDescription>
+              Embedding Provider、向量维度、Tag 提取分析 LLM 会影响导入和 Tag 提取；保存后通过 AstrBot 重启让 provider 配置块生效。
+            </AlertDescription>
+          </Alert>
+        </CardContent>
+      </Card>
+
+      {/* ─── 1. 模型提供商配置 ─── */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm font-semibold">核心模型提供商</CardTitle>
+          <CardDescription>配置检查阶段只维护静态 provider 参数；运行中热参数请到通道热配置页面调整。</CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
           {config ? (
             <FieldGroup className="grid gap-4 sm:grid-cols-3">
               <Field>
                 <FieldLabel>Embedding Provider</FieldLabel>
-                <div className="flex h-10 items-center rounded-md border px-3 text-sm bg-muted/20">
+                <div className="flex h-10 items-center rounded-md border bg-muted/20 px-3 text-sm">
                   {String(config.embedding_provider_id || '未配置')}
                 </div>
               </Field>
@@ -218,11 +280,33 @@ export function ImportPage() {
               </Field>
             </FieldGroup>
           ) : null}
-          <div className="flex justify-end border-t pt-3">
-            <Button disabled={saving} onClick={() => void handleSaveConfig()}>
-              {saving ? <Loader2 className="animate-spin" data-icon="inline-start" /> : <Save data-icon="inline-start" />}
-              保存配置
-            </Button>
+        </CardContent>
+        <CardFooter className="justify-end">
+          <Button disabled={saving} onClick={() => void handleSaveConfig()}>
+            {saving ? <Loader2 className="animate-spin" data-icon="inline-start" /> : <Save data-icon="inline-start" />}
+            保存配置
+          </Button>
+        </CardFooter>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm font-semibold">dry-run 预览</CardTitle>
+          <CardDescription>先把导入前的关键数字显式摆出来，避免直接执行后才发现来源、重复或 re-embed 策略不对。</CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <div className="grid gap-3 md:grid-cols-3">
+            {dryRunPreviewRows.map(([label, value]) => (
+              <div key={label} className="rounded-lg border bg-muted/20 p-4">
+                <p className="text-xs text-muted-foreground">{label}</p>
+                <p className="mt-2 text-sm font-semibold">{value}</p>
+              </div>
+            ))}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {dryRunPreviewFields.map((field) => (
+              <Badge key={field} variant="outline">{field}</Badge>
+            ))}
           </div>
         </CardContent>
       </Card>
@@ -230,17 +314,17 @@ export function ImportPage() {
       <div className="grid gap-6 lg:grid-cols-2">
         {/* ─── 2. 外部插件排重一键导入 ─── */}
         <Card className="flex flex-col">
-          <CardHeader className="py-4 flex flex-row items-center justify-between gap-3 shrink-0 border-b">
-            <div className="flex flex-col gap-1">
-              <CardTitle className="text-sm font-semibold">📦 外部插件一键排重导入</CardTitle>
-              <CardDescription>自动发现其他带有对话语料的普通记忆生态，导入过程在后台异步向量化。</CardDescription>
-            </div>
-            <Button variant="outline" className="size-8 p-0" onClick={() => void loadData()} title="刷新">
-              <RefreshCwIcon className="size-4" />
-            </Button>
+          <CardHeader className="border-b">
+            <CardTitle className="text-sm font-semibold">外部插件一键排重导入</CardTitle>
+            <CardDescription>自动发现其他带有对话语料的普通记忆生态，导入过程在后台异步向量化。</CardDescription>
+            <CardAction>
+              <Button variant="outline" size="icon" onClick={() => void loadData()} title="刷新">
+                <RefreshCwIcon />
+              </Button>
+            </CardAction>
           </CardHeader>
-          <CardContent className="pt-6 flex-1 flex flex-col justify-between gap-4">
-            <div className="flex flex-col gap-3.5">
+          <CardContent className="flex flex-1 flex-col justify-between gap-4 pt-6">
+            <div className="flex flex-col gap-4">
               <Field className="max-w-xs">
                 <FieldLabel>单批次导入条数上限</FieldLabel>
                 <Input
@@ -254,34 +338,34 @@ export function ImportPage() {
 
               <div className="flex flex-col gap-3">
                 {sources.length === 0 ? (
-                  <p className="text-xs text-muted-foreground p-6 text-center">系统当前未扫描到任何其他可用的记忆插件源数据。</p>
+                  <p className="p-6 text-center text-xs text-muted-foreground">系统当前未扫描到任何其他可用的记忆插件源数据。</p>
                 ) : (
                   sources.map((src) => (
-                    <div key={src.id} className="rounded-lg border p-3.5 bg-muted/10 flex flex-col gap-3">
+                    <div key={src.id} className="flex flex-col gap-3 rounded-lg border bg-muted/10 p-4">
                       <div className="flex items-center justify-between gap-3">
-                        <div className="flex flex-col gap-1 min-w-0">
-                          <span className="text-xs font-semibold text-foreground flex items-center gap-1.5 truncate">
+                        <div className="flex min-w-0 flex-col gap-1">
+                          <span className="flex items-center gap-2 truncate text-xs font-semibold text-foreground">
                             {src.name}
-                            <Badge variant={src.has_adapter ? 'secondary' : 'outline'} className="text-[9px]">
+                            <Badge variant={src.has_adapter ? 'secondary' : 'outline'}>
                               {src.has_adapter ? '专属适配' : '自动扫描'}
                             </Badge>
                           </span>
-                          <span className="text-[10px] text-muted-foreground truncate">{src.description}</span>
+                          <span className="truncate text-xs text-muted-foreground">{src.description}</span>
                         </div>
-                        <div className="flex items-center gap-2 shrink-0">
+                        <div className="flex shrink-0 items-center gap-2">
                           <span className="font-mono text-xs text-primary">{src.count?.toLocaleString()} 条</span>
                           <Button disabled={importing} size="xs" onClick={() => handleStartImport(src)}>
                             导入
                           </Button>
                         </div>
                       </div>
-                      <div className="w-full h-1.5 rounded-full overflow-hidden bg-muted">
+                      <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
                         <div className="h-full rounded-full bg-primary" style={{ width: `${src.imported_pct ?? 0}%` }} />
                       </div>
-                      <div className="flex justify-between text-[10px] text-muted-foreground">
+                      <div className="flex justify-between gap-3 text-xs text-muted-foreground">
                         <span>已导入 ~{src.imported_pct ?? 0}%</span>
                         {src.remaining === 0 ? (
-                          <span className="text-emerald-500 font-semibold">✓ 均已安全入库</span>
+                          <Badge variant="secondary">均已安全入库</Badge>
                         ) : (
                           <span>剩余 {src.remaining?.toLocaleString()} 条未对齐</span>
                         )}
@@ -296,20 +380,20 @@ export function ImportPage() {
 
         {/* ─── 3. LLM 批量 Tag 分析 ─── */}
         <Card className="flex flex-col">
-          <CardHeader className="py-4 shrink-0 border-b">
-            <CardTitle className="text-sm font-semibold">🧠 LLM 异步标签（Tag）提取</CardTitle>
+          <CardHeader className="border-b">
+            <CardTitle className="text-sm font-semibold">LLM 异步标签（Tag）提取</CardTitle>
             <CardDescription>调用上面配置的 Tag LLM 批次提取标签，对零碎记忆自动建立高维主题索引。</CardDescription>
           </CardHeader>
-          <CardContent className="pt-6 flex-1 flex flex-col justify-between gap-4">
-            <div className="flex flex-col gap-3.5">
-              <div className="grid gap-3 sm:grid-cols-2 rounded-lg border p-3.5 bg-muted/20 text-xs">
-                <div><span className="text-muted-foreground font-medium">总记忆数：</span>{sys?.memories?.total?.toLocaleString() ?? '-'}</div>
-                <div><span className="text-muted-foreground font-medium">已结构化标签记录：</span>{sys?.memories?.with_tags?.toLocaleString() ?? '-'}</div>
-                <div className="sm:col-span-2 flex items-center justify-between border-t pt-2.5 mt-1.5">
-                  <span className="text-muted-foreground font-semibold">待分析提取的空白记忆：</span>
-                  <span className={unlabelledCount > 0 ? 'font-bold font-mono text-amber-500 text-sm' : 'font-bold font-mono text-emerald-500'}>
+          <CardContent className="flex flex-1 flex-col justify-between gap-4 pt-6">
+            <div className="flex flex-col gap-4">
+              <div className="grid gap-3 rounded-lg border bg-muted/20 p-4 text-xs sm:grid-cols-2">
+                <div><span className="font-medium text-muted-foreground">总记忆数：</span>{sys?.memories?.total?.toLocaleString() ?? '-'}</div>
+                <div><span className="font-medium text-muted-foreground">已结构化标签记录：</span>{sys?.memories?.with_tags?.toLocaleString() ?? '-'}</div>
+                <div className="flex items-center justify-between gap-3 border-t pt-3 sm:col-span-2">
+                  <span className="font-semibold text-muted-foreground">待分析提取的空白记忆：</span>
+                  <Badge variant={unlabelledCount > 0 ? 'outline' : 'secondary'}>
                     {unlabelledCount?.toLocaleString()} 条
-                  </span>
+                  </Badge>
                 </div>
               </div>
 
@@ -327,12 +411,12 @@ export function ImportPage() {
             </div>
 
             <div className="flex gap-2">
-              <Button disabled={importing || unlabelledCount === 0} className="flex-1 py-5 justify-center" onClick={handleStartLLMExtract}>
+              <Button disabled={importing || unlabelledCount === 0} size="lg" className="flex-1" onClick={handleStartLLMExtract}>
                 <PlayIcon data-icon="inline-start" />
-                🧠 开启异步提取标签分析
+                开启异步提取标签分析
               </Button>
               {importing && streamType === 'extract' ? (
-                <Button variant="destructive" className="py-5" onClick={() => void handleStopExtract()}>
+                <Button variant="destructive" size="lg" onClick={() => void handleStopExtract()}>
                   <StopCircleIcon data-icon="inline-start" />
                   中止分析
                 </Button>
@@ -342,44 +426,65 @@ export function ImportPage() {
         </Card>
       </div>
 
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm font-semibold">统一任务模型</CardTitle>
+          <CardDescription>导入和 Tag 提取都应该回传同一套任务结构，便于进度条、日志和错误展示复用。</CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <div className="grid gap-3 md:grid-cols-4">
+            {taskModelFields.map((field) => (
+              <div key={field} className="rounded-lg border bg-muted/20 p-3 font-mono text-xs">
+                {field}
+              </div>
+            ))}
+          </div>
+          <Alert>
+            <AlertCircleIcon />
+            <AlertTitle>中止按钮只对可中止任务显示</AlertTitle>
+            <AlertDescription>当前只有 task_type 为 tag_extract 且 status 为 running 的任务显示中止入口；导入任务保持只读进度。</AlertDescription>
+          </Alert>
+        </CardContent>
+      </Card>
+
       {/* ─── 4. SSE 控制流实时控制台 ─── */}
       {importing || streamProgress ? (
         <Card className="animate-in fade-in duration-200">
-          <CardHeader className="py-4 shrink-0 border-b">
+          <CardHeader className="border-b">
             <CardTitle className="text-xs font-semibold">
-              {streamType === 'import' ? '📦 正在从外部记忆插件一键排重导入...' : '🧠 正在连接 LLM 自动提取并分析记忆标签...'}
+              {streamType === 'import' ? '正在从外部记忆插件一键排重导入...' : '正在连接 LLM 自动提取并分析记忆标签...'}
             </CardTitle>
           </CardHeader>
-          <CardContent className="pt-6 flex flex-col gap-4">
+          <CardContent className="flex flex-col gap-4 pt-6">
             {streamProgress ? (
               <div className="flex flex-col gap-2">
-                <div className="flex items-center justify-between text-xs font-mono">
-                  <span className="text-primary font-semibold">
+                <div className="flex items-center justify-between gap-3 font-mono text-xs">
+                  <span className="font-semibold text-primary">
                     进度：{Math.round(streamProgress.progress * 100)}%
                   </span>
                   <span>
                     已写入: {streamProgress.processed}/{streamProgress.total} | 失败：{streamProgress.errors ?? 0}
                   </span>
                 </div>
-                <div className="w-full h-2 rounded-full overflow-hidden bg-muted">
+                <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
                   <div className="h-full rounded-full bg-primary transition-all duration-300" style={{ width: `${streamProgress.progress * 100}%` }} />
                 </div>
               </div>
             ) : (
-              <div className="flex items-center gap-2 text-xs text-muted-foreground py-2 font-mono">
-                <Loader2 className="animate-spin text-primary size-4 shrink-0" />
-                正在与流式后台通道握手握手，拉取计算日志...
+              <div className="flex items-center gap-2 py-2 font-mono text-xs text-muted-foreground">
+                <Loader2 className="shrink-0 animate-spin text-primary" />
+                正在与流式后台通道握手，拉取计算日志...
               </div>
             )}
 
-            <div className="flex flex-col gap-1.5 mt-2">
+            <div className="flex flex-col gap-2">
               <span className="text-xs font-semibold text-foreground">流式执行日志控制台：</span>
-              <ScrollArea className="h-44 rounded-lg border bg-muted/60 p-3 font-mono text-[10px] text-muted-foreground leading-relaxed">
+              <ScrollArea className="h-44 rounded-lg border bg-muted/60 p-3 font-mono text-xs leading-relaxed text-muted-foreground">
                 {streamLog.length === 0 ? (
                   <div className="text-muted-foreground">等待数据块推送...</div>
                 ) : (
                   streamLog.map((line, idx) => (
-                    <div key={idx} className={line.includes('[CRITICAL]') || line.includes('[ERROR]') ? 'text-destructive' : line.includes('[SUCCESS]') ? 'text-emerald-500' : ''}>
+                    <div key={idx} className={line.includes('[CRITICAL]') || line.includes('[ERROR]') ? 'text-destructive' : line.includes('[SUCCESS]') ? 'text-primary' : ''}>
                       {line}
                     </div>
                   ))
@@ -388,8 +493,8 @@ export function ImportPage() {
             </div>
 
             {streamProgress?.done ? (
-              <Alert className="bg-emerald-500/10 border-emerald-500/20 text-emerald-500">
-                <CheckCircle2Icon className="size-4" />
+              <Alert>
+                <CheckCircle2Icon />
                 <AlertTitle>处理完毕</AlertTitle>
                 <AlertDescription>当前异步进程已 100% 成功执行完毕。</AlertDescription>
               </Alert>
@@ -397,6 +502,33 @@ export function ImportPage() {
           </CardContent>
         </Card>
       ) : null}
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm font-semibold">结果复核入口</CardTitle>
+          <CardDescription>导入或提取完成后从三个入口复核数据、Tag 审计和覆盖率变化。</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-3 md:grid-cols-3">
+          <Button asChild variant="outline" size="lg">
+            <Link to="/memories">
+              去记忆管理器看新导入数据
+              <ArrowRightIcon data-icon="inline-end" />
+            </Link>
+          </Button>
+          <Button asChild variant="outline" size="lg">
+            <a href="/maintain">
+              去维护工作台看 Tag 审计
+              <ArrowRightIcon data-icon="inline-end" />
+            </a>
+          </Button>
+          <Button asChild variant="outline" size="lg">
+            <Link to="/dashboard">
+              去总览看覆盖率变化
+              <ArrowRightIcon data-icon="inline-end" />
+            </Link>
+          </Button>
+        </CardContent>
+      </Card>
     </div>
   )
 }

@@ -6,7 +6,12 @@ from pathlib import Path
 
 from quart import Quart, request
 
-from astrbot.api import logger
+try:
+    from astrbot.api import logger
+except Exception:  # pragma: no cover - 本地单测未安装 AstrBot SDK 时的轻量兜底
+    class _Logger:
+        def debug(self, *args, **kwargs): pass
+    logger = _Logger()
 
 
 def _enable_cors(app: Quart) -> None:

@@ -17,6 +17,15 @@ import {
   SidebarSeparator,
 } from '@/components/ui/sidebar'
 
+const routeGroups = [
+  { label: '总览', paths: ['/dashboard'] },
+  { label: '记忆与导入', paths: ['/memories', '/import'] },
+  { label: '注入与通道', paths: ['/injection', '/channels'] },
+  { label: '认知与审查', paths: ['/beliefs', '/jargon', '/soul', '/learning-objects', '/agent-feedback'] },
+  { label: '黑盒管理', paths: ['/blackbox'] },
+  { label: '系统与维护', paths: ['/compatibility', '/settings'] },
+]
+
 const toolLinks = [
   { href: '/explore', label: '3D 星图' },
   { href: '/maintain', label: '维护工具' },
@@ -43,86 +52,42 @@ export function WaveSidebar() {
         </SidebarMenu>
       </SidebarHeader>
       <SidebarContent>
-        <SidebarGroup>
-          <SidebarGroupLabel>总览</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {appRoutes.slice(0, 1).map((item) => {
-                const Icon = item.icon
-                return (
-                  <SidebarMenuItem key={item.path}>
-                    <SidebarMenuButton asChild isActive={location.pathname === item.path} tooltip={item.title}>
-                      <NavLink to={item.path}>
-                        <Icon />
-                        <span>{item.title}</span>
-                      </NavLink>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                )
-              })}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
-        <SidebarGroup>
-          <SidebarGroupLabel>注入</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {appRoutes.slice(1, 5).map((item) => {
-                const Icon = item.icon
-                return (
-                  <SidebarMenuItem key={item.path}>
-                    <SidebarMenuButton asChild isActive={location.pathname === item.path} tooltip={item.title}>
-                      <NavLink to={item.path}>
-                        <Icon />
-                        <span>{item.title}</span>
-                      </NavLink>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                )
-              })}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
-        <SidebarGroup>
-          <SidebarGroupLabel>审查</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {appRoutes.slice(5, 11).map((item) => {
-                const Icon = item.icon
-                return (
-                  <SidebarMenuItem key={item.path}>
-                    <SidebarMenuButton asChild isActive={location.pathname === item.path} tooltip={item.title}>
-                      <NavLink to={item.path}>
-                        <Icon />
-                        <span>{item.title}</span>
-                      </NavLink>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                )
-              })}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
-        <SidebarGroup>
-          <SidebarGroupLabel>系统</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {appRoutes.slice(11).map((item) => {
-                const Icon = item.icon
-                return (
-                  <SidebarMenuItem key={item.path}>
-                    <SidebarMenuButton asChild isActive={location.pathname === item.path} tooltip={item.title}>
-                      <NavLink to={item.path}>
-                        <Icon />
-                        <span>{item.title}</span>
-                      </NavLink>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                )
-              })}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
+        {routeGroups.map((group) => {
+          const routes = group.paths
+            .map((path) => appRoutes.find((route) => route.path === path))
+            .filter((route): route is NonNullable<typeof route> => Boolean(route))
+
+          if (!routes.length) {
+            return null
+          }
+
+          return (
+            <SidebarGroup key={group.label}>
+              <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {routes.map((item) => {
+                    const Icon = item.icon
+                    return (
+                      <SidebarMenuItem key={item.path}>
+                        <SidebarMenuButton
+                          asChild
+                          isActive={location.pathname === item.path || location.pathname.startsWith(`${item.path}/`)}
+                          tooltip={item.title}
+                        >
+                          <NavLink to={item.path}>
+                            <Icon />
+                            <span>{item.title}</span>
+                          </NavLink>
+                        </SidebarMenuButton>
+                      </SidebarMenuItem>
+                    )
+                  })}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          )
+        })}
         <SidebarSeparator />
         <SidebarGroup>
           <SidebarGroupLabel>扩展工具</SidebarGroupLabel>

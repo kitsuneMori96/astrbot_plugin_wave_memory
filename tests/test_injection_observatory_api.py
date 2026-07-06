@@ -130,6 +130,42 @@ class InjectionObservatoryApiTest(unittest.TestCase):
         self.assertEqual(payload["channels"][0]["filtered_items"][0]["reason"], "recent_context_duplicate")
         self.assertEqual(payload["feedback"][0]["feedback"], "useful")
 
+    def test_trace_detail_preserves_jargon_source_metadata(self):
+        from services.injection.channel_base import InjectionResult
+        from webui.blueprints.injection_observatory import build_trace_detail_payload
+
+        trace_store, feedback_store = self._stores()
+        trace_store.record(
+            {"trace_id": "trace-jargon-meta", "timestamp": 123, "mode": "full", "message": "v我50", "status": "ok"},
+            [
+                InjectionResult.hit(
+                    "jargon",
+                    "[黑话理解参考]\n- \"v我50\" → 疯狂星期四转账梗",
+                    items=[{
+                        "word": "v我50",
+                        "meaning": "疯狂星期四转账梗",
+                        "source": "holyman_skills",
+                        "source_layer": "phrases",
+                        "reference_only": True,
+                        "runtime_match": True,
+                        "matched_by": "explicit_user_message",
+                        "preview": "v我50 → 疯狂星期四转账梗",
+                    }],
+                )
+            ],
+        )
+
+        payload = build_trace_detail_payload(trace_store, feedback_store, "trace-jargon-meta")
+
+        item = payload["channels"][0]["hit_items"][0]
+        self.assertEqual(item["word"], "v我50")
+        self.assertEqual(item["meaning"], "疯狂星期四转账梗")
+        self.assertEqual(item["source"], "holyman_skills")
+        self.assertEqual(item["source_layer"], "phrases")
+        self.assertIs(item["reference_only"], True)
+        self.assertIs(item["runtime_match"], True)
+        self.assertEqual(item["matched_by"], "explicit_user_message")
+
     def test_trace_detail_missing_returns_none(self):
         from webui.blueprints.injection_observatory import build_trace_detail_payload
 
@@ -154,6 +190,14 @@ class InjectionObservatoryApiTest(unittest.TestCase):
         self.assertIn("openDetail", page)
         self.assertIn("Trace 列表", page)
         self.assertIn("通道瀑布", sheet)
+        self.assertIn("黑话来源", sheet)
+        self.assertIn("source_layer", sheet)
+        self.assertIn("reference_only", sheet)
+        self.assertIn("matched_by", sheet)
+        self.assertIn("跳过原因", sheet)
+        self.assertIn("filteredItems", sheet)
+        self.assertIn("filter_channel", sheet)
+        self.assertIn("reason", sheet)
         self.assertIn("final_injection_text", sheet)
         self.assertIn("/api/injection/traces", api)
         self.assertIn("/injection", routes)

@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
-import { AlertTriangleIcon, DatabaseIcon, TagsIcon, UsersIcon, WavesIcon } from 'lucide-react'
+import { type ReactNode, useEffect, useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
+import { ArrowRightIcon, AlertTriangleIcon, DatabaseIcon, TagsIcon, UsersIcon, WavesIcon } from 'lucide-react'
 
 import { getInjectionMetrics, getRecentErrors, getSystemStatus, type ErrorPayload, type InjectionMetricsPayload, type SystemPayload } from '@/api/system'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { InjectionTrendCard } from '@/pages/dashboard/InjectionTrendCard'
@@ -77,6 +79,66 @@ function KpiCard({ title, value, description, icon: Icon }: { title: string; val
   )
 }
 
+const capabilityActions = [
+  { title: '高级检索', route: '/explore', description: '神经云图与高级检索实验台' },
+  { title: 'BookLore', route: '/blackbox/book-lore', description: '书设知识索引与 BookLore-only 查询' },
+  { title: 'FewShot', route: '/blackbox/fewshot', description: '风格范例库与待审候选' },
+  { title: 'Facts', route: '/blackbox/facts', description: '稳定事实关系与注入测试' },
+  { title: '人物画像/好感', route: '/blackbox/people', description: 'UserProfile、Affinity 与关系事件' },
+  { title: 'FTS5', route: '/blackbox/indexes', description: '全文检索与索引健康' },
+  { title: '注入 Trace', route: '/injection', description: '最近注入链路验证' },
+  { title: '通道配置', route: '/channels', description: '热参数调优与校验预览' },
+]
+
+const actionItems = [
+  { title: '无标签记忆数量', route: '/import', description: '导入与 Tag 提取后复核覆盖率' },
+  { title: 'Tag 低覆盖', route: '/maintain', description: '进入维护工作台查看 Tag 审计' },
+  { title: 'BookLore 索引缺失', route: '/blackbox/book-lore', description: '检查 HNSW 文件、id map 与 count 匹配' },
+  { title: 'FewShot 待审候选', route: '/blackbox/fewshot', description: '查看 pending / approved / rejected' },
+  { title: '注入通道错误', route: '/injection', description: '从 trace 详情定位错误通道' },
+  { title: '配置校验失败', route: '/channels', description: '返回通道热配置校验并调参' },
+]
+
+function isStaticRoute(route: string): boolean {
+  return route === '/explore' || route === '/maintain'
+}
+
+function ActionButton({ route, children }: { route: string; children: ReactNode }) {
+  return (
+    <Button asChild variant="outline" size="sm">
+      {isStaticRoute(route) ? (
+        <a href={route}>
+          {children}
+          <ArrowRightIcon data-icon="inline-end" />
+        </a>
+      ) : (
+        <Link to={route}>
+          {children}
+          <ArrowRightIcon data-icon="inline-end" />
+        </Link>
+      )}
+    </Button>
+  )
+}
+
+function statusVariant(value: string): 'default' | 'secondary' | 'destructive' | 'outline' {
+  if (value === 'ok') return 'secondary'
+  if (value === 'degraded') return 'outline'
+  if (value === 'off') return 'destructive'
+  return 'outline'
+}
+
+function serviceStatus(system: SystemPayload | undefined, capability: string): string {
+  const services = system?.services_health ?? []
+  const lower = capability.toLowerCase()
+  const matched = services.find((service) => String(service.name ?? '').toLowerCase().includes(lower))
+  if (!matched) return 'unknown'
+  const value = String(matched.status ?? 'unknown')
+  if (value === 'ok') return 'ok'
+  if (value === 'disabled' || value === 'off') return 'off'
+  return 'degraded'
+}
+
 function moduleLabel(key: unknown): string {
   const value = String(key ?? 'unknown')
   const labels: Record<string, string> = {
@@ -99,6 +161,18 @@ function moduleLabel(key: unknown): string {
   return labels[value] ?? value
 }
 
+function moduleRoute(key: unknown): string | undefined {
+  const value = String(key ?? '')
+  const routes: Record<string, string> = {
+    book_lore_tokens: '/blackbox/book-lore',
+    fewshot_tokens: '/blackbox/fewshot',
+    jargon_tokens: '/jargon',
+    belief_tokens: '/beliefs',
+    facts_tokens: '/blackbox/facts',
+  }
+  return routes[value]
+}
+
 function ModuleRanking({ metrics }: { metrics?: InjectionMetricsPayload }) {
   const ranking = (metrics?.ranking ?? []).slice(0, 8)
   const max = Math.max(...ranking.map((item) => Number(item.sum ?? item.total_tokens ?? 0)), 1)
@@ -118,10 +192,18 @@ function ModuleRanking({ metrics }: { metrics?: InjectionMetricsPayload }) {
               const value = Number(item.sum ?? item.total_tokens ?? 0)
               const ratio = Math.max(4, Math.round((value / max) * 100))
               const key = item.key ?? item.name ?? 'unknown'
+              const route = moduleRoute(key)
+              const label = moduleLabel(key)
               return (
                 <div key={key} className="flex flex-col gap-2">
-                  <div className="flex items-center justify-between gap-3 text-sm min-w-0">
-                    <span className="truncate font-medium text-foreground min-w-0 flex-1">{moduleLabel(key)}</span>
+                  <div className="flex min-w-0 items-center justify-between gap-3 text-sm">
+                    {route ? (
+                      <Link to={route} className="min-w-0 flex-1 truncate font-medium text-foreground hover:underline">
+                        {label}
+                      </Link>
+                    ) : (
+                      <span className="min-w-0 flex-1 truncate font-medium text-foreground">{label}</span>
+                    )}
                     <Badge variant="secondary" className="shrink-0 font-mono text-xs">{formatNumber(value)}</Badge>
                   </div>
                   <div className="h-2 overflow-hidden rounded-full bg-muted">
@@ -143,6 +225,75 @@ function errorLevelLabel(level: unknown): string {
   if (value === 'error') return '错误'
   if (value === 'info') return '信息'
   return value
+}
+
+function CapabilityStatusMatrix({ system }: { system?: SystemPayload }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>能力状态矩阵</CardTitle>
+        <CardDescription>{'发现 -> 管理 -> 验证 -> 调参'}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {capabilityActions.map((capability) => {
+            const status = serviceStatus(system, capability.title)
+            return (
+              <div key={capability.title} className="flex flex-col gap-3 rounded-lg border p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium">{capability.title}</p>
+                    <p className="text-xs text-muted-foreground">{capability.description}</p>
+                  </div>
+                  <Badge variant={statusVariant(status)}>{status}</Badge>
+                </div>
+                <ActionButton route={capability.route}>管理入口</ActionButton>
+              </div>
+            )
+          })}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function NeedsAttentionCards({ system, errors }: { system?: SystemPayload; errors?: ErrorPayload }) {
+  const tagCoverage = Number(system?.coverage?.tag_pct ?? 0)
+  const hasErrors = (errors?.errors ?? []).length > 0
+  const enrichedActions = actionItems.map((item) => {
+    if (item.title === 'Tag 低覆盖') {
+      return { ...item, status: tagCoverage > 0 && tagCoverage < 80 ? 'degraded' : 'unknown' }
+    }
+    if (item.title === '注入通道错误') {
+      return { ...item, status: hasErrors ? 'degraded' : 'unknown' }
+    }
+    return { ...item, status: 'unknown' }
+  })
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>需要处理</CardTitle>
+        <CardDescription>把总览发现的问题直接带到管理页处理。</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {enrichedActions.map((item) => (
+            <div key={item.title} className="flex flex-col gap-3 rounded-lg border p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium">{item.title}</p>
+                  <p className="text-xs text-muted-foreground">{item.description}</p>
+                </div>
+                <Badge variant={statusVariant(item.status)}>{item.status}</Badge>
+              </div>
+              <ActionButton route={item.route}>处理入口</ActionButton>
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  )
 }
 
 function RecentErrors({ errors }: { errors?: ErrorPayload }) {
@@ -274,6 +425,9 @@ export function DashboardPage() {
           <AlertDescription>建议在维护窗口执行清理与备份，避免 SQLite 体积继续膨胀。</AlertDescription>
         </Alert>
       ) : null}
+
+      <CapabilityStatusMatrix system={data.system} />
+      <NeedsAttentionCards system={data.system} errors={data.errors} />
 
       <div className="grid gap-4 lg:grid-cols-3">
         <InjectionTrendCard metrics={data.metrics} />

@@ -8,9 +8,14 @@ import sys
 import threading
 from typing import Optional
 
-from astrbot.api import logger
-
-from .app import create_app
+try:
+    from astrbot.api import logger
+except Exception:  # pragma: no cover - 本地单测未安装 AstrBot SDK 时的轻量兜底
+    class _Logger:
+        def info(self, *args, **kwargs): pass
+        def warning(self, *args, **kwargs): pass
+        def debug(self, *args, **kwargs): pass
+    logger = _Logger()
 
 
 class _SecureConfig:
@@ -64,6 +69,7 @@ class Server:
                 logger.warning(f"[WaveMemory WebUI] 端口 {self.port} 仍被占用，跳过 WebUI 启动")
                 return
 
+        from .app import create_app
         self.app = create_app()
 
         self._thread = threading.Thread(

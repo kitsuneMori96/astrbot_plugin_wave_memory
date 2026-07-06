@@ -16,6 +16,9 @@ export interface ChannelSettings {
   timeout_ms?: number
   min_score?: number
   modes?: string[]
+  status?: string
+  last_latency_ms?: number
+  last_hit_count?: number
   [key: string]: unknown
 }
 

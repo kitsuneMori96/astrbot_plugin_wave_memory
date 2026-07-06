@@ -1,5 +1,19 @@
 # Changelog
 
+## v4.5.0 (2026-07-06)
+
+### 前端优化 + 黑盒管理前端
+
+- **黑盒管理矩阵**：新增 `/blackbox` 能力总入口和 BookLore、FewShot、Facts、People、Indexes 五个子页面，完成“发现 -> 管理 -> 验证 -> 调参”的只读管理闭环。
+- **统一 `/api/blackbox` 后端**：新增只读 API blueprint，覆盖 BookLore summary/entities/communities/relations/notes、FewShot summary/examples、Facts 列表与详情、People 合并视图、Indexes summary/check，危险写操作继续保持二次确认边界。
+- **BookLore 管理补齐**：BookLore 页面接入真实 API，展示实体、社区、关系、notes 列表和索引健康入口，明确世界观/书设知识库不是群聊记忆、不是人格指令。
+- **FewShot / Facts / People / Indexes 接入真实数据**：风格范例、稳定事实关系、人物画像/好感、向量/FTS5/EPA/BookLore HNSW 诊断页从静态占位升级为 loading/error/empty/list 状态完整的只读页面。
+- **v4.5 WebUI 体验闭环**：总览动作入口、记忆来源语义、智能导入向导、注入观测台、通道热配置、学习对象审查、维护工作台、灵魂只读边界等页面补齐风险标识和跨页面跳转。
+- **v4.4 神经云图 + 高级检索拆分**：补齐查询实验台、view/query 配置拆分、debug envelope、EPA/残差金字塔/脉冲传播/测地线阶段解释和维护边界文案。
+- **v4.3 黑话 / Holyman / 注入治理**：补齐 Holyman 审计面板、候选分流、黑话审核可见性、注入通道元数据、Agent 反馈与学习对象审查闭环。
+- **v4.2.2 先止血**：保留 WebUI/Jargon/兼容性修复契约，确保旧配置、旧静态入口和本地测试环境 fallback 不阻断启动。
+- **全量验证**：新增 v4.2.2 / v4.3.0 / v4.4.0 / v4.5.0 契约测试；当前 `python -m pytest -q`、`npm run lint`、`npm run build` 均通过（Vite 仍提示既有 chunk-size warning）。
+
 ## v4.2.1 (2026-07-05)
 
 ### Holyman GitHub 更新握手与前端质量清理

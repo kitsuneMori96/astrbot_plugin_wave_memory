@@ -36,6 +36,15 @@ function formatTime(seconds: unknown): string {
   return new Date(s * 1000).toLocaleString('zh-CN')
 }
 
+const soulInternalStatusCards = [
+  { title: 'persona evolution 状态', metric: '当前 Bot 视角', description: '只读诊断当前人格演化入口，不允许 WebUI 直接覆盖 AstrBot Persona。' },
+  { title: 'concern tracker 当前关切', metric: '当前关切数量', description: '展示关切焦点数量和强度，修改类操作必须进入后续版本。' },
+  { title: 'desire engine 当前欲望/动机', metric: '心里话动机', description: '读取咽回去的心里话和动机，只读优先。' },
+  { title: 'mood trajectory 当前情绪轨迹', metric: '情绪快照数量', description: '展示情绪轨迹快照数量和当前波动。' },
+  { title: 'experience episodes', metric: '经历锚点数量', description: '读取 experience episodes / 生平大事时间锚点。' },
+  { title: 'relationship events', metric: '关系事件', description: '关系事件暂由人物与好感管理页承接，本页只做只读入口提示。' },
+]
+
 export function SoulPage() {
   const [sys, setSys] = useState<SystemPayload | null>(null)
   const [concerns, setConcerns] = useState<ConcernItem[]>([])
@@ -381,6 +390,16 @@ export function SoulPage() {
     )
   }
 
+  function soulInternalStatusValue(metric: string): string {
+    if (metric === '当前 Bot 视角') return botFilter
+    if (metric === '当前关切数量') return `${concerns.length} 项`
+    if (metric === '经历锚点数量') return `${anchors.length} 个`
+    if (metric === '情绪快照数量') return `${moods.length} 条`
+    if (metric === '心里话动机') return sys?.lifecycle?.unspoken_desire?.motive ? '有' : '无'
+    if (metric === '关系事件') return '见 /blackbox/people'
+    return '-'
+  }
+
   if (loading) {
     return (
       <div className="flex flex-col gap-6">
@@ -402,6 +421,31 @@ export function SoulPage() {
 
   return (
     <div className="flex flex-col gap-6">
+      <Card>
+        <CardHeader>
+          <CardTitle>只读内部状态管理</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <Alert>
+            <AlertCircleIcon />
+            <AlertTitle>只读优先</AlertTitle>
+            <AlertDescription>不允许 WebUI 直接覆盖 AstrBot Persona；修改类操作必须进入后续版本。本区只读诊断灵魂引擎内部状态。</AlertDescription>
+          </Alert>
+          <div className="grid gap-3 md:grid-cols-3">
+            {soulInternalStatusCards.map((card) => (
+              <div key={card.title} className="rounded-lg border bg-muted/20 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-xs font-semibold text-foreground">{card.title}</span>
+                  <Badge variant="outline">只读诊断</Badge>
+                </div>
+                <div className="mt-3 text-sm font-semibold">{card.metric}：{soulInternalStatusValue(card.metric)}</div>
+                <p className="mt-2 text-xs text-muted-foreground">{card.description}</p>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
       {/* ─── 1. 生物钟呼吸圆环 + 心里话 ─── */}
       <div className="grid gap-6 md:grid-cols-3">
         {/* 生物钟呼吸环卡片 */}

@@ -1,5 +1,15 @@
 import { fetchJson } from './client'
 
+export type BeliefType = 'self_identity' | 'person_judgment' | 'world_view' | 'preference'
+export type LegacyBeliefType = 'self' | 'other' | 'world' | 'value'
+
+const LEGACY_TYPE_MAP: Record<LegacyBeliefType, BeliefType> = {
+  self: 'self_identity',
+  other: 'person_judgment',
+  world: 'world_view',
+  value: 'preference',
+}
+
 export interface BeliefTag {
   id: number
   name: string
@@ -9,12 +19,15 @@ export interface BeliefTag {
 export interface BeliefItem {
   id: number
   content: string
-  type: 'self' | 'other' | 'world' | 'value'
+  type: BeliefType
   status: 'pending' | 'active' | 'archived' | 'pending_legacy'
   source?: string
   confidence?: number
+  strength?: number
   timestamp?: number
+  created_at?: number
   last_reinforced?: number
+  updated_at?: number
   bot_id?: string
   sources?: string[]
 }
@@ -22,7 +35,7 @@ export interface BeliefItem {
 export interface BeliefsFilters {
   page?: number
   size?: number
-  type?: string
+  type?: 'self_identity' | 'person_judgment' | 'world_view' | 'preference' | ''
   status?: string
   bot_id?: string
   search?: string
@@ -54,29 +67,68 @@ export interface EvidencePayload {
   memories?: any[]             // 新增对齐旧版
 }
 
-export function listBeliefs(filters: BeliefsFilters): Promise<BeliefsResponse> {
-  const params = new URLSearchParams()
-  if (filters.page) params.append('page', String(filters.page))
-  if (filters.size) params.append('size', String(filters.size))
-  if (filters.type) params.append('type', filters.type)
-  if (filters.status) params.append('status', filters.status)
-  if (filters.bot_id) params.append('bot_id', filters.bot_id)
-  if (filters.search) params.append('search', filters.search)
-
-  return fetchJson<BeliefsResponse>(`/api/beliefs?${params.toString()}`)
+function normalizeBeliefType(type: unknown): BeliefType {
+  const raw = String(type || '').trim()
+  if (raw === 'self_identity' || raw === 'person_judgment' || raw === 'world_view' || raw === 'preference') {
+    return raw
+  }
+  return LEGACY_TYPE_MAP[raw as LegacyBeliefType] ?? 'world_view'
 }
 
-export function createBelief(payload: Partial<BeliefItem>): Promise<{ ok: boolean; id: number }> {
-  return fetchJson<{ ok: boolean; id: number }>('/api/beliefs', {
+function normalizeBeliefItem(item: any): BeliefItem {
+  return {
+    ...item,
+    type: normalizeBeliefType(item?.type),
+    confidence: item?.confidence ?? item?.strength,
+    strength: item?.strength ?? item?.confidence,
+    timestamp: item?.timestamp ?? item?.created_at,
+    last_reinforced: item?.last_reinforced ?? item?.updated_at,
+  }
+}
+
+function normalizeBeliefPayload(payload: Partial<BeliefItem>): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...payload }
+  if (payload.type) next.type = normalizeBeliefType(payload.type)
+  if (payload.confidence != null && next.strength == null) next.strength = payload.confidence
+  delete next.confidence
+  delete next.timestamp
+  delete next.last_reinforced
+  delete next.created_at
+  delete next.updated_at
+  return next
+}
+
+function pageOffset(filters: BeliefsFilters): { limit: number; offset: number } {
+  const limit = Math.max(1, Number(filters.size || 50))
+  const page = Math.max(1, Number(filters.page || 1))
+  return { limit, offset: (page - 1) * limit }
+}
+
+export async function listBeliefs(filters: BeliefsFilters): Promise<BeliefsResponse> {
+  const params = new URLSearchParams()
+  const { limit, offset } = pageOffset(filters)
+  params.set('limit', String(limit))
+  params.set('offset', String(offset))
+  if (filters.type) params.set('type', filters.type)
+  if (filters.status) params.set('status', filters.status)
+  if (filters.bot_id) params.set('bot_id', filters.bot_id)
+  if (filters.search) params.set('search', filters.search)
+
+  const res = await fetchJson<BeliefsResponse>(`/api/beliefs?${params.toString()}`)
+  return { ...res, items: (res.items ?? []).map(normalizeBeliefItem) }
+}
+
+export function createBelief(payload: Partial<BeliefItem>): Promise<{ ok: boolean; id?: number; belief_id?: number }> {
+  return fetchJson<{ ok: boolean; id?: number; belief_id?: number }>('/api/beliefs', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify(normalizeBeliefPayload(payload)),
   })
 }
 
 export function updateBelief(id: number, payload: Partial<BeliefItem>): Promise<{ ok: boolean }> {
   return fetchJson<{ ok: boolean }>(`/api/beliefs/${id}`, {
     method: 'PUT',
-    body: JSON.stringify(payload),
+    body: JSON.stringify(normalizeBeliefPayload(payload)),
   })
 }
 
@@ -98,33 +150,38 @@ export function archiveBelief(id: number): Promise<{ ok: boolean }> {
   })
 }
 
-export function getBeliefEvidence(id: number, before = 5, after = 5): Promise<EvidencePayload> {
-  return fetchJson<EvidencePayload>(`/api/beliefs/${id}/evidence?before=${before}&after=${after}`)
+export async function getBeliefEvidence(id: number, before = 5, after = 5): Promise<EvidencePayload> {
+  const res = await fetchJson<EvidencePayload>(`/api/beliefs/${id}/evidence?before=${before}&after=${after}`)
+  return { ...res, belief: res.belief ? normalizeBeliefItem(res.belief) : res.belief }
 }
 
-export function batchArchiveBeliefsLegacy(): Promise<{ ok: boolean; archived: number }> {
-  return fetchJson<{ ok: boolean; archived: number }>('/api/beliefs/batch-archive', {
+export async function batchArchiveBeliefsLegacy(): Promise<{ ok: boolean; archived: number }> {
+  const res = await fetchJson<{ ok: boolean; archived?: number; archived_count?: number }>('/api/beliefs/batch-archive', {
     method: 'POST',
   })
+  return { ok: res.ok, archived: res.archived ?? res.archived_count ?? 0 }
 }
 
-export function batchArchiveSelectedBeliefs(ids: number[]): Promise<{ ok: boolean; archived: number }> {
-  return fetchJson<{ ok: boolean; archived: number }>('/api/beliefs/batch-archive-selected', {
-    method: 'POST',
-    body: JSON.stringify({ ids }),
-  })
-}
-
-export function batchApproveBeliefs(ids: number[]): Promise<{ ok: boolean; approved: number }> {
-  return fetchJson<{ ok: boolean; approved: number }>('/api/beliefs/batch-approve', {
+export async function batchArchiveSelectedBeliefs(ids: number[]): Promise<{ ok: boolean; archived: number }> {
+  const res = await fetchJson<{ ok: boolean; archived?: number; archived_count?: number }>('/api/beliefs/batch-archive-selected', {
     method: 'POST',
     body: JSON.stringify({ ids }),
   })
+  return { ok: res.ok, archived: res.archived ?? res.archived_count ?? 0 }
 }
 
-export function batchDeleteBeliefs(ids: number[]): Promise<{ ok: boolean; deleted: number }> {
-  return fetchJson<{ ok: boolean; deleted: number }>('/api/beliefs/batch-delete', {
+export async function batchApproveBeliefs(ids: number[]): Promise<{ ok: boolean; approved: number }> {
+  const res = await fetchJson<{ ok: boolean; approved?: number; approved_count?: number }>('/api/beliefs/batch-approve', {
     method: 'POST',
     body: JSON.stringify({ ids }),
   })
+  return { ok: res.ok, approved: res.approved ?? res.approved_count ?? 0 }
+}
+
+export async function batchDeleteBeliefs(ids: number[]): Promise<{ ok: boolean; deleted: number }> {
+  const res = await fetchJson<{ ok: boolean; deleted?: number; deleted_count?: number }>('/api/beliefs/batch-delete', {
+    method: 'POST',
+    body: JSON.stringify({ ids }),
+  })
+  return { ok: res.ok, deleted: res.deleted ?? res.deleted_count ?? 0 }
 }

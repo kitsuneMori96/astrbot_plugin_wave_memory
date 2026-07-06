@@ -23,8 +23,10 @@ except Exception:  # pragma: no cover - 本地单测未安装 AstrBot SDK 时的
 
 from .container import ServiceContainer, get_container
 try:
-    from .server import Server
+    from . import server as server
+    Server = server.Server
 except Exception:  # pragma: no cover - 仅允许蓝图 helper 在缺少 WebUI 运行依赖时被导入测试
+    server = None
     Server = None
 
 

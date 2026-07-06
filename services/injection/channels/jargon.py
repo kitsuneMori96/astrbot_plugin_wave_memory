@@ -51,12 +51,36 @@ def _parse_terms(text: str) -> list[dict[str, Any]]:
             terms.append({
                 "word": word,
                 "meaning": meaning,
-                "source": "JargonService.get_injection",
+                "source": "wave_memory",
+                "source_layer": "local",
+                "reference_only": False,
+                "runtime_match": True,
+                "matched_by": "explicit_user_message",
                 "preview": f"{word} → {meaning}",
             })
     if not terms and text:
-        terms.append({"word": "", "meaning": "", "source": "JargonService.get_injection", "preview": _preview(text)})
+        terms.append({
+            "word": "",
+            "meaning": "",
+            "source": "wave_memory",
+            "source_layer": "local",
+            "reference_only": False,
+            "runtime_match": True,
+            "matched_by": "explicit_user_message",
+            "preview": _preview(text),
+        })
     return terms
+
+
+def _service_trace_items(service: Any) -> list[dict[str, Any]]:
+    getter = getattr(service, "get_last_injection_items", None)
+    if not callable(getter):
+        return []
+    try:
+        items = getter() or []
+    except Exception:
+        return []
+    return [dict(item) for item in items if isinstance(item, Mapping)]
 
 
 class JargonChannel:
@@ -96,7 +120,7 @@ class JargonChannel:
                     "preview": _preview(text),
                 }]
                 return result
-            items = _parse_terms(text)
+            items = _service_trace_items(self.jargon_service) or _parse_terms(text)
             return InjectionResult.hit(self.name, text, items=items, latency_ms=self._latency_ms(started))
         except Exception as exc:  # pragma: no cover - 防御性错误通道
             result = InjectionResult.error_result(self.name, exc)

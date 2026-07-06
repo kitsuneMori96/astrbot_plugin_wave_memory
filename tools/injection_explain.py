@@ -43,12 +43,16 @@ def _parse_details(raw: str | None) -> dict[str, Any]:
 
 
 def _brief_hit(item: dict[str, Any]) -> dict[str, Any]:
-    return {
+    payload = {
         "id": item.get("id") or item.get("rowid") or item.get("community_id") or item.get("example_id"),
         "source": item.get("source", ""),
         "score": item.get("score") or item.get("confidence") or item.get("effective_confidence"),
         "preview": item.get("preview", ""),
     }
+    for key in ("word", "meaning", "source_layer", "reference_only", "runtime_match", "matched_by"):
+        if key in item:
+            payload[key] = item.get(key)
+    return payload
 
 
 def _brief_filtered(item: dict[str, Any]) -> dict[str, Any]:

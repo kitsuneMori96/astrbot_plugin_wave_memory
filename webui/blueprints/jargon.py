@@ -35,6 +35,13 @@ HOLYMAN_CATEGORY_LABELS = {
 
 HOLYMAN_UPDATE_CHECK_CACHE_TTL_SECONDS = 30 * 60
 _HOLYMAN_UPDATE_CHECK_CACHE: dict | None = None
+_TECHNICAL_NOISE_WORDS = (
+    "id", "ids", "json", "api", "url", "uri", "http", "https", "get", "post", "put", "patch", "delete",
+    "from", "has", "object", "objects", "array", "list", "dict", "map", "set", "type", "types",
+    "value", "values", "data", "item", "items", "key", "keys", "param", "params", "args", "kwargs",
+    "none", "null", "true", "false", "bool", "str", "int", "float", "class", "method", "function",
+    "return", "import", "async", "await", "self", "this", "const", "let", "var",
+)
 
 
 def _resolve_holyman_assets_dir() -> Path:
@@ -256,8 +263,16 @@ async def list_jargon():
     status = request.args.get("status")  # confirmed / pending / rejected
     search_q = request.args.get("search")  # 搜索词条名或释义
 
-    limit = _safe_int(request.args.get("limit", 50), 50)
-    offset = _safe_int(request.args.get("offset", 0), 0)
+    limit = _safe_int(request.args.get("limit") or request.args.get("size") or 50, 50)
+    limit = max(1, min(limit, 500))
+    if request.args.get("offset") is not None:
+        offset = _safe_int(request.args.get("offset", 0), 0)
+    elif request.args.get("page") is not None:
+        offset = (max(1, _safe_int(request.args.get("page", 1), 1)) - 1) * limit
+    else:
+        offset = 0
+    include_rejected = _truthy_query(request.args.get("include_rejected"))
+    cols = {r[1] for r in c.db.conn.execute("PRAGMA table_info(jargon)").fetchall()}
 
     where_parts = ["1=1"]
     params = []
@@ -268,17 +283,32 @@ async def list_jargon():
     if status:
         where_parts.append("COALESCE(status, 'pending') = ?")
         params.append(status)
+    elif not include_rejected:
+        hidden_audit_conditions = []
+        if "candidate_type" in cols:
+            hidden_audit_conditions.append("COALESCE(candidate_type, 'jargon') IN ('technical_noise', 'person_alias', 'ordinary_word')")
+        if "reject_reason" in cols:
+            hidden_audit_conditions.append("COALESCE(reject_reason, '') IN ('person_alias_diverted', 'technical_noise_filtered', 'ordinary_word_filtered')")
+        if hidden_audit_conditions:
+            where_parts.append(f"NOT (COALESCE(status, 'pending') = 'rejected' AND ({' OR '.join(hidden_audit_conditions)}))")
+        else:
+            where_parts.append("COALESCE(status, 'pending') != 'rejected'")
+    if not status and not include_rejected:
+        noise_placeholders = ",".join("?" for _ in _TECHNICAL_NOISE_WORDS)
+        where_parts.append(f"NOT (COALESCE(status, 'pending') != 'confirmed' AND LOWER(word) IN ({noise_placeholders}))")
+        params.extend(_TECHNICAL_NOISE_WORDS)
     if search_q:
         where_parts.append("(word LIKE ? OR meaning LIKE ?)")
         sq = f"%{search_q.strip()}%"
         params.extend([sq, sq])
 
-    cols = {r[1] for r in c.db.conn.execute("PRAGMA table_info(jargon)").fetchall()}
     extra_cols = [
+
         "source_memory_id" if "source_memory_id" in cols else "NULL AS source_memory_id",
         "source_message_ts" if "source_message_ts" in cols else "NULL AS source_message_ts",
         "source_sender_id" if "source_sender_id" in cols else "NULL AS source_sender_id",
         "source_context" if "source_context" in cols else "'[]' AS source_context",
+        "source" if "source" in cols else "'wave_memory' AS source",
         "candidate_type" if "candidate_type" in cols else "'jargon' AS candidate_type",
         "reject_reason" if "reject_reason" in cols else "NULL AS reject_reason",
         "status" if "status" in cols else "'pending' AS status",
@@ -298,12 +328,20 @@ async def list_jargon():
          "frequency": r[4], "confidence": r[5], "is_global": bool(r[6]),
          "group_id": r[7], "contexts": _safe_json_list(r[8]), "created_at": r[9],
          "source_memory_id": r[10], "source_message_ts": r[11], "source_sender_id": r[12],
-         "source_context": _safe_json_list(r[13]), "candidate_type": r[14] or "jargon",
-         "reject_reason": r[15], "status": r[16] or "pending"}
+         "source_context": _safe_json_list(r[13]), "source": r[14] or "wave_memory",
+         "candidate_type": r[15] or "jargon", "reject_reason": r[16], "status": r[17] or "pending"}
         for r in rows
     ]
+    pending_where = ["COALESCE(status, 'pending') = 'pending'"]
+    pending_params = []
+    noise_placeholders = ",".join("?" for _ in _TECHNICAL_NOISE_WORDS)
+    pending_where.append(f"LOWER(word) NOT IN ({noise_placeholders})")
+    pending_params.extend(_TECHNICAL_NOISE_WORDS)
+    if "candidate_type" in cols:
+        pending_where.append("COALESCE(candidate_type, 'jargon') NOT IN ('technical_noise', 'person_alias', 'ordinary_word')")
     pending_count = c.db.conn.execute(
-        "SELECT COUNT(*) FROM jargon WHERE COALESCE(status, 'pending') = 'pending'"
+        f"SELECT COUNT(*) FROM jargon WHERE {' AND '.join(pending_where)}",
+        pending_params,
     ).fetchone()[0]
     return jsonify({"items": items, "total": total, "pending_count": pending_count})
 
@@ -343,6 +381,7 @@ async def create_jargon():
 
 
 @jargon_bp.route("/<int:jargon_id>/context", methods=["GET"])
+@jargon_bp.route("/<int:jargon_id>/evidence", methods=["GET"])
 @require_auth
 async def get_jargon_context(jargon_id: int):
     """按黑话锚点动态截取原始聊天上下文。"""
@@ -628,6 +667,7 @@ async def delete_jargon(jargon_id: int):
 
 
 @jargon_bp.route("/<int:jargon_id>/toggle_global", methods=["POST"])
+@jargon_bp.route("/<int:jargon_id>/toggle-global", methods=["POST"])
 @require_auth
 async def toggle_global(jargon_id: int):
     """切换全局状态。"""
@@ -644,6 +684,7 @@ async def toggle_global(jargon_id: int):
 
 
 @jargon_bp.route("/batch-review", methods=["POST"])
+@jargon_bp.route("/batch/review", methods=["POST"])
 @require_auth
 async def batch_review_jargon():
     """批量审核确认/否决黑话词条（支持 all_matching 跨页全选）。"""
@@ -712,6 +753,7 @@ async def batch_review_jargon():
 
 
 @jargon_bp.route("/batch-delete", methods=["POST"])
+@jargon_bp.route("/batch/delete", methods=["POST"])
 @require_auth
 async def batch_delete_jargon():
     """批量删除黑话词条（支持 all_matching 跨页全选）。"""
@@ -893,6 +935,7 @@ async def get_holyman():
     corpus = _load_holyman_asset_json("corpus.json", [], local_dir)
     candidates = _load_holyman_asset_json("candidates.json", [], local_dir)
     blocked = _load_holyman_asset_json("blocked.json", {}, local_dir)
+    manifest = _load_holyman_asset_json("manifest.json", {}, local_dir)
     quality_report = _load_holyman_asset_json("quality_report.json", {}, local_dir)
     raw_readme = (local_dir / "raw" / "README.md").read_text(encoding="utf-8", errors="ignore") if (local_dir / "raw" / "README.md").exists() else ""
     raw_corpus = (local_dir / "raw" / "神言.txt").read_text(encoding="utf-8", errors="ignore") if (local_dir / "raw" / "神言.txt").exists() else ""
@@ -999,6 +1042,33 @@ async def get_holyman():
         "mismatch": quality_report.get("corpus_count_mismatch") if isinstance(quality_report, dict) else False,
         "note": quality_report.get("corpus_count_note") if isinstance(quality_report, dict) else "",
     }
+    manifest_payload = manifest if isinstance(manifest, dict) else {}
+    manifest_files = manifest_payload.get("files") if isinstance(manifest_payload.get("files"), list) else []
+    parse_statuses: dict[str, int] = {}
+    for source_file in manifest_files:
+        if not isinstance(source_file, dict):
+            continue
+        parse_status = str(source_file.get("parse_status") or "unknown")
+        parse_statuses[parse_status] = parse_statuses.get(parse_status, 0) + 1
+    quality_payload = quality_report if isinstance(quality_report, dict) else {}
+    quality_errors = quality_payload.get("errors") if isinstance(quality_payload.get("errors"), dict) else {}
+    error_count = 0
+    for value in quality_errors.values():
+        try:
+            error_count += int(value or 0)
+        except (TypeError, ValueError):
+            error_count += 1 if value else 0
+    manifest_summary = {
+        "source_count": len(manifest_files),
+        "parse_statuses": parse_statuses,
+        "repo": manifest_payload.get("repo") or manifest_payload.get("source") or "",
+    }
+    quality_summary = {
+        "status": quality_payload.get("status") or asset_status,
+        "declared_corpus_count": quality_payload.get("declared_corpus_count"),
+        "parsed_corpus_count": quality_payload.get("parsed_corpus_count"),
+        "error_count": error_count,
+    }
 
     return jsonify({
         "items": items,
@@ -1009,7 +1079,10 @@ async def get_holyman():
         "corpus_summary": corpus_summary,
         "candidates": candidates if isinstance(candidates, list) else [],
         "blocked": blocked if isinstance(blocked, dict) else {},
-        "quality_report": quality_report if isinstance(quality_report, dict) else {},
+        "manifest": manifest_payload,
+        "manifest_summary": manifest_summary,
+        "quality_report": quality_payload,
+        "quality_summary": quality_summary,
         "categories": categories,
         "layers": layers,
         "corpus_counts": corpus_counts,

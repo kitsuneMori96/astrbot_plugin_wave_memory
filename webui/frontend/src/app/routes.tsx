@@ -2,16 +2,20 @@ import type { ComponentType } from 'react'
 import {
   ActivityIcon,
   BookHeartIcon,
+  BookOpenIcon,
   BrainCircuitIcon,
   DatabaseIcon,
   DownloadIcon,
   GaugeIcon,
+  GitBranchIcon,
   GitCompareArrowsIcon,
   HeartIcon,
   MessageSquareWarningIcon,
+  SearchCheckIcon,
   Settings2Icon,
   SlidersIcon,
   SmileIcon,
+  UsersIcon,
 } from 'lucide-react'
 
 import { AgentFeedbackPage } from '@/pages/review/AgentFeedbackPage'
@@ -26,6 +30,12 @@ import { ImportPage } from '@/pages/import/ImportPage'
 import { BeliefsPage } from '@/pages/beliefs/BeliefsPage'
 import { JargonPage } from '@/pages/jargon/JargonPage'
 import { SoulPage } from '@/pages/soul/SoulPage'
+import { BlackboxHubPage } from '@/pages/blackbox/BlackboxHubPage'
+import { BlackboxBookLorePage } from '@/pages/blackbox/BlackboxBookLorePage'
+import { BlackboxFewShotPage } from '@/pages/blackbox/BlackboxFewShotPage'
+import { BlackboxFactsPage } from '@/pages/blackbox/BlackboxFactsPage'
+import { BlackboxPeoplePage } from '@/pages/blackbox/BlackboxPeoplePage'
+import { BlackboxIndexesPage } from '@/pages/blackbox/BlackboxIndexesPage'
 
 export interface AppRoute {
   path: string
@@ -105,6 +115,48 @@ export const appRoutes: AppRoute[] = [
     description: '心里话动机展示、生平大事 Timeline、SVG 情绪波动轨迹图',
     icon: HeartIcon,
     element: SoulPage,
+  },
+  {
+    path: '/blackbox',
+    title: '黑盒管理',
+    description: 'BookLore、FewShot、Facts、人物与索引能力的统一管理入口',
+    icon: DatabaseIcon,
+    element: BlackboxHubPage,
+  },
+  {
+    path: '/blackbox/book-lore',
+    title: 'BookLore 管理',
+    description: '世界观/书设知识库、索引健康与 BookLore-only 查询入口',
+    icon: BookOpenIcon,
+    element: BlackboxBookLorePage,
+  },
+  {
+    path: '/blackbox/fewshot',
+    title: 'FewShot 管理',
+    description: '风格范例库、候选治理、漂移检测与测试匹配入口',
+    icon: BrainCircuitIcon,
+    element: BlackboxFewShotPage,
+  },
+  {
+    path: '/blackbox/facts',
+    title: 'Facts / 关系管理',
+    description: '稳定事实关系、PERSON_ALIAS 和 facts channel 测试入口',
+    icon: GitBranchIcon,
+    element: BlackboxFactsPage,
+  },
+  {
+    path: '/blackbox/people',
+    title: '人物与好感管理',
+    description: '人物画像、UserProfile、Affinity、关系事件与别名入口',
+    icon: UsersIcon,
+    element: BlackboxPeoplePage,
+  },
+  {
+    path: '/blackbox/indexes',
+    title: '索引与 FTS5 管理',
+    description: '向量索引、FTS5、EPA basis 与 BookLore HNSW 健康入口',
+    icon: SearchCheckIcon,
+    element: BlackboxIndexesPage,
   },
   {
     path: '/compatibility',

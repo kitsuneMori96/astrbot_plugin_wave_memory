@@ -1,6 +1,8 @@
-import { useEffect, useState, useTransition, useRef } from 'react'
+import { type ReactNode, useEffect, useState, useTransition, useRef } from 'react'
+import { Link } from 'react-router-dom'
 import {
   AlertCircleIcon,
+  ArrowRightIcon,
   CheckCircle2Icon,
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -47,6 +49,40 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
+
+const sourceAssetMetadata: Record<string, { label: string; handling: string; route?: string }> = {
+  live: { label: '群聊长期记忆', handling: '保持在记忆管理器' },
+  chat: { label: '群聊长期记忆', handling: '保持在记忆管理器' },
+  bzz_experience: { label: '第一人称经历', handling: '链接到灵魂/经历视图', route: '/soul' },
+  experience: { label: '第一人称经历', handling: '链接到灵魂/经历视图', route: '/soul' },
+  book_lore: { label: '书设知识', handling: '提示去 BookLore 管理', route: '/blackbox/book-lore' },
+  lore: { label: '书设知识', handling: '提示去 BookLore 管理', route: '/blackbox/book-lore' },
+  bot_reply: { label: 'Bot 回复素材', handling: '可送入 FewShot 候选', route: '/blackbox/fewshot' },
+  fewshot: { label: '风格范例', handling: '提示去 FewShot 管理', route: '/blackbox/fewshot' },
+}
+
+const associationPlaceholders = ['Tags', 'Facts', 'Beliefs', 'Person links', 'Injection traces', 'Similar memories']
+
+const managementConversions = [
+  { label: 'Bot 回复 -> FewShot 候选', route: '/blackbox/fewshot' },
+  { label: '世界观内容 -> BookLore 条目候选', route: '/blackbox/book-lore' },
+  { label: '稳定关系句子 -> Fact 候选', route: '/blackbox/facts' },
+]
+
+function sourceAssetMeta(source: string | undefined) {
+  return sourceAssetMetadata[source || ''] ?? { label: source || '未知来源', handling: '保持在记忆管理器' }
+}
+
+function ManagementLink({ route, children }: { route: string; children: ReactNode }) {
+  return (
+    <Button asChild variant="outline" size="sm">
+      <Link to={route}>
+        {children}
+        <ArrowRightIcon data-icon="inline-end" />
+      </Link>
+    </Button>
+  )
+}
 
 // 辅助方法：不同标签类型的颜色分级
 function tagBadgeClass(type: string): string {
@@ -621,14 +657,18 @@ export function MemoriesPage() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">全部来源</SelectItem>
+                    <SelectItem value="live">live（群聊长期记忆）</SelectItem>
                     <SelectItem value="chat">chat（群聊/私聊）</SelectItem>
                     <SelectItem value="noise">noise（日常琐碎）</SelectItem>
                     <SelectItem value="core">core（核心记忆）</SelectItem>
                     <SelectItem value="identity_quarantine">identity_quarantine（身份隔离）</SelectItem>
                     <SelectItem value="evolution">evolution（性格进化）</SelectItem>
+                    <SelectItem value="bzz_experience">bzz_experience（第一人称经历）</SelectItem>
                     <SelectItem value="experience">experience（经历）</SelectItem>
                     <SelectItem value="lore">lore（背景知识）</SelectItem>
                     <SelectItem value="book_lore">book_lore（小说世界观）</SelectItem>
+                    <SelectItem value="bot_reply">bot_reply（Bot 回复素材）</SelectItem>
+                    <SelectItem value="fewshot">fewshot（风格范例）</SelectItem>
                   </SelectContent>
                 </Select>
               </Field>
@@ -697,6 +737,29 @@ export function MemoriesPage() {
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       ) : null}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>资产类型语义</CardTitle>
+          <CardDescription>source-aware 资产浏览器：把普通记忆、书设、风格范例和经历分流到正确管理入口。</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+          {Object.entries(sourceAssetMetadata).filter(([sourceKey]) => ['live', 'bzz_experience', 'book_lore', 'bot_reply', 'fewshot'].includes(sourceKey)).map(([sourceKey, metadata]) => (
+            <div key={sourceKey} className="flex flex-col gap-2 rounded-lg border p-3">
+              <Badge variant="secondary" className="w-fit font-mono text-xs">{sourceKey}</Badge>
+              <div className="text-sm font-medium">{metadata.label}</div>
+              <p className="text-xs text-muted-foreground">{metadata.handling}</p>
+              {metadata.route ? <ManagementLink route={metadata.route}>管理入口</ManagementLink> : <Badge variant="outline" className="w-fit">保持在记忆管理器</Badge>}
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+
+      <Alert>
+        <AlertCircleIcon />
+        <AlertTitle>危险等级</AlertTitle>
+        <AlertDescription>re-embed：中风险；改 source：中风险；删除：高风险，必须二次确认。星云视图为只读可视化，不和神经云图职责冲突。</AlertDescription>
+      </Alert>
 
       {/* ─── 批量控制条（有选中时出现） ─── */}
       {selectedIds.length > 0 ? (
@@ -810,7 +873,7 @@ export function MemoriesPage() {
                     <TableHead className="w-16">ID</TableHead>
                     <TableHead>内容</TableHead>
                     <TableHead className="w-24">发送者</TableHead>
-                    <TableHead className="w-20">来源</TableHead>
+                    <TableHead className="w-44">来源</TableHead>
                     <TableHead className="w-36">关联标签 (Tags)</TableHead>
                     <TableHead className="w-16 text-center">特征向量</TableHead>
                     <TableHead className="w-32">创建时间</TableHead>
@@ -821,6 +884,7 @@ export function MemoriesPage() {
                   {memories.map((m) => {
                     const hasV = m.has_vector
                     const isRowChecked = selectedIds.includes(m.id)
+                    const asset = sourceAssetMeta(m.source)
                     return (
                       <TableRow key={m.id} className={isRowChecked ? 'bg-primary/5 hover:bg-primary/5' : ''}>
                         <TableCell>
@@ -836,9 +900,19 @@ export function MemoriesPage() {
                         </TableCell>
                         <TableCell className="max-w-28 truncate text-muted-foreground">{m.sender_name || '-'}</TableCell>
                         <TableCell>
-                          <Badge variant="secondary" className="font-mono text-[10px] uppercase">
-                            {m.source || '—'}
-                          </Badge>
+                          <div className="flex flex-col gap-1">
+                            <Badge variant="secondary" className="w-fit font-mono text-[10px] uppercase">
+                              {m.source || '—'}
+                            </Badge>
+                            <span className="text-xs text-muted-foreground">{asset.label}</span>
+                            {asset.route ? (
+                              <Link to={asset.route} className="text-xs text-primary hover:underline">
+                                {asset.handling}
+                              </Link>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">{asset.handling}</span>
+                            )}
+                          </div>
                         </TableCell>
                         <TableCell>
                           <div className="flex flex-wrap gap-1">
@@ -924,6 +998,19 @@ export function MemoriesPage() {
                 </Alert>
               ) : detail ? (
                 <>
+                  {(() => {
+                    const asset = sourceAssetMeta(detail.source)
+                    return (
+                      <Alert>
+                        <AlertCircleIcon />
+                        <AlertTitle>source-aware 管理建议</AlertTitle>
+                        <AlertDescription>
+                          当前来源：{detail.source || '未知'} · {asset.label} · {asset.handling}
+                        </AlertDescription>
+                      </Alert>
+                    )
+                  })()}
+
                   <Field>
                     <FieldLabel>内容编辑 (content)</FieldLabel>
                     <Textarea
@@ -959,7 +1046,7 @@ export function MemoriesPage() {
 
                   <Field>
                     <FieldLabel>关联标签 (Tags)</FieldLabel>
-                    <div className="flex flex-wrap gap-1.5 p-3 rounded-lg border bg-muted/10 min-h-12">
+                    <div className="flex min-h-12 flex-wrap gap-1.5 rounded-lg border bg-muted/10 p-3">
                       {(detail.tags ?? []).length === 0 ? (
                         <span className="text-xs text-muted-foreground">暂无关联标签。</span>
                       ) : (
@@ -972,7 +1059,33 @@ export function MemoriesPage() {
                     </div>
                   </Field>
 
-                  <div className="flex flex-wrap gap-2 pt-4 border-t">
+                  <Card>
+                    <CardHeader>
+                      <CardTitle>详情关联区</CardTitle>
+                      <CardDescription>只读占位：后续接入关联对象 API，不在记忆详情里直接改黑盒对象。</CardDescription>
+                    </CardHeader>
+                    <CardContent className="grid gap-2 sm:grid-cols-2">
+                      {associationPlaceholders.map((item) => (
+                        <div key={item} className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+                          {item}
+                        </div>
+                      ))}
+                    </CardContent>
+                  </Card>
+
+                  <Card>
+                    <CardHeader>
+                      <CardTitle>转为管理对象</CardTitle>
+                      <CardDescription>这些入口只跳转到管理页；候选转正、写入和回滚由对应黑盒管理页负责。</CardDescription>
+                    </CardHeader>
+                    <CardContent className="flex flex-wrap gap-2">
+                      {managementConversions.map((item) => (
+                        <ManagementLink key={item.label} route={item.route}>{item.label}</ManagementLink>
+                      ))}
+                    </CardContent>
+                  </Card>
+
+                  <div className="flex flex-wrap gap-2 border-t pt-4">
                     <Button disabled={detailSaving} onClick={() => void handleSaveDetail()}>
                       {detailSaving ? <Loader2Icon className="animate-spin" data-icon="inline-start" /> : <SaveIcon data-icon="inline-start" />}
                       保存修改

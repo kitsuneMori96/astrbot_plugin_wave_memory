@@ -6,7 +6,15 @@ import asyncio
 import json
 import time
 
-from quart import Blueprint, jsonify, request, Response
+try:
+    from quart import Blueprint, jsonify, request, Response
+except ImportError:  # pragma: no cover - 本地单测可能注入不完整 fake Quart
+    from quart import Blueprint, jsonify, request
+
+    class Response:  # type: ignore[no-redef]
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
 
 from ..container import get_container
 from ..middleware.auth import require_auth
@@ -32,6 +40,14 @@ def _safe_int(val, default):
     """安全 int 转换。"""
     try:
         return int(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_float(val, default):
+    """安全 float 转换。"""
+    try:
+        return float(val)
     except (ValueError, TypeError):
         return default
 
@@ -408,71 +424,445 @@ async def query_test():
     body = await request.get_json(silent=True) or {}
     text = body.get("text", "")
     top_k = _safe_int(body.get("top_k", 5), 5)
-    enable_spike = body.get("enable_spike", True)
-    enable_pyramid = body.get("enable_pyramid", True)
-    enable_epa = body.get("enable_epa", False)
-    enable_geodesic = body.get("enable_geodesic", False)
+    mode = str(body.get("mode") or "").strip()
+    source_filter = str(body.get("source_filter") or "").strip()
+    exclude_sources = body.get("exclude_sources") if isinstance(body.get("exclude_sources"), list) else []
+    exclude_sources = {str(item).strip() for item in exclude_sources if str(item).strip()}
+    stages = body.get("stages") if isinstance(body.get("stages"), dict) else {}
+    raw_query_params = body.get("params") if isinstance(body.get("params"), dict) else {}
+
+    def _clamp_number(value, min_value, max_value):
+        return max(min_value, min(max_value, value))
+
+    def _query_int_param(name: str, default: int, min_value: int, max_value: int):
+        if name not in raw_query_params or raw_query_params.get(name) is None:
+            return None
+        return _clamp_number(_safe_int(raw_query_params.get(name), default), min_value, max_value)
+
+    def _query_float_param(name: str, default: float, min_value: float, max_value: float):
+        if name not in raw_query_params or raw_query_params.get(name) is None:
+            return None
+        return round(_clamp_number(_safe_float(raw_query_params.get(name), default), min_value, max_value), 6)
+
+    query_params = {}
+    for key, value in (
+        ("pyramid_max_levels", _query_int_param("pyramid_max_levels", 3, 1, 10)),
+        ("pyramid_top_k", _query_int_param("pyramid_top_k", 10, 1, 50)),
+        ("spike_max_hops", _query_int_param("spike_max_hops", 4, 0, 16)),
+        ("spike_firing_threshold", _query_float_param("spike_firing_threshold", 0.1, 0.0, 1.0)),
+        ("geodesic_alpha", _query_float_param("geodesic_alpha", 0.3, 0.0, 1.0)),
+    ):
+        if value is not None:
+            query_params[key] = value
+
+    def _bool_flag(value, default=False):
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def _stage_enabled(stage_name: str, legacy_key: str, default: bool) -> bool:
+        if stage_name in stages:
+            return _bool_flag(stages.get(stage_name), default)
+        return _bool_flag(body.get(legacy_key), default)
+
+    debug_requested = _bool_flag(body.get("debug"), True)
+    enable_spike = _stage_enabled("spike", "enable_spike", True)
+    enable_pyramid = _stage_enabled("pyramid", "enable_pyramid", True)
+    enable_epa = _stage_enabled("epa", "enable_epa", False)
+    enable_geodesic = _stage_enabled("geodesic", "enable_geodesic", False)
 
     timing = {}
-    debug_info = {}
+    debug_info = {
+        "query": {
+            "text": text,
+            "top_k": top_k,
+            "mode": mode,
+            "source_filter": source_filter,
+            "exclude_sources": sorted(exclude_sources),
+            "stages": {
+                "epa": enable_epa,
+                "pyramid": enable_pyramid,
+                "spike": enable_spike,
+                "geodesic": enable_geodesic,
+            },
+            "params": query_params,
+        },
+        "embedding": {"enabled": True, "available": False},
+        "epa": {"enabled": enable_epa, "available": False},
+        "pyramid": {"enabled": enable_pyramid, "available": False},
+        "spike": {"enabled": enable_spike, "available": False},
+        "vector_search": {"enabled": True, "available": False},
+        "scoring": {"enabled": True, "available": False},
+        "geodesic": {"enabled": enable_geodesic, "available": False},
+        "final": {"result_count": 0},
+        "highlights": {
+            "pyramid_tags": [],
+            "seed_tags": [],
+            "emergent_tags": [],
+            "geodesic_memory_ids": [],
+            "final_memory_ids": [],
+        },
+        "warnings": [],
+    }
+
+    def _compact_tag(item: dict, energy_key: str | None = None) -> dict:
+        result = {"tag_id": item.get("tag_id")}
+        if "level" in item:
+            result["level"] = item.get("level")
+        if "similarity" in item:
+            result["similarity"] = round(float(item.get("similarity") or 0), 4)
+        if "weight" in item:
+            result["weight"] = round(float(item.get("weight") or 0), 4)
+        if energy_key and energy_key in item:
+            result[energy_key] = round(float(item.get(energy_key) or 0), 4)
+        if "is_emergent" in item:
+            result["is_emergent"] = bool(item.get("is_emergent"))
+        return result
+
+    def _disable_stage(stage_name: str):
+        debug_info[stage_name].update({"available": False, "reason": "disabled by request"})
+
+    def _stage_unavailable(stage_name: str, reason: str):
+        debug_info[stage_name].update({"available": False, "reason": reason})
+        if debug_info[stage_name].get("enabled"):
+            debug_info["warnings"].append({"stage": stage_name, "reason": reason})
+
+    def _stage_error(stage_name: str, exc: Exception):
+        _stage_unavailable(stage_name, str(exc))
+        debug_info[stage_name]["error"] = str(exc)
+
+    def _as_query_array(vector):
+        try:
+            import numpy as np
+            return np.asarray(vector, dtype=np.float32)
+        except Exception:
+            return vector
+
+    def _apply_temporary_attrs(obj, updates: dict) -> dict:
+        previous = {}
+        for attr, value in updates.items():
+            if value is None or obj is None or not hasattr(obj, attr):
+                continue
+            previous[attr] = getattr(obj, attr)
+            setattr(obj, attr, value)
+        return previous
+
+    def _restore_attrs(obj, previous: dict):
+        for attr, value in previous.items():
+            setattr(obj, attr, value)
+
+    def _current_attrs(obj, attr_names: tuple[str, ...]) -> dict:
+        return {attr: getattr(obj, attr) for attr in attr_names if hasattr(obj, attr)}
+
+    def _infer_geodesic_mode_and_hits(geodesic, memory_ids: list, energy_field: dict, reranked: list) -> tuple[str, dict, int]:
+        min_geo_samples = _safe_int(getattr(geodesic, "min_geo_samples", 4), 4)
+        hit_counts = {mid: 0 for mid in memory_ids}
+        memory_tag_map = {}
+        if hasattr(geodesic, "_get_memory_tags"):
+            try:
+                memory_tag_map = geodesic._get_memory_tags(memory_ids) or {}
+            except Exception:
+                memory_tag_map = {}
+        for mid in memory_ids:
+            tag_ids = memory_tag_map.get(mid, []) or []
+            hit_counts[mid] = sum(1 for tid in tag_ids if tid in energy_field)
+        if any(count >= min_geo_samples for count in hit_counts.values()):
+            return "L0", hit_counts, min_geo_samples
+        if any(count > 0 for count in hit_counts.values()) or any(float(item.get("geo_score", 0) or 0) > 0 for item in reranked if isinstance(item, dict)):
+            return "L1", hit_counts, min_geo_samples
+        return "L2", hit_counts, min_geo_samples
+
+    for stage_name, enabled in (("epa", enable_epa), ("pyramid", enable_pyramid), ("spike", enable_spike), ("geodesic", enable_geodesic)):
+        if not enabled:
+            _disable_stage(stage_name)
 
     t0 = time.perf_counter()
     query_vec = await c.embedding_service.get_embedding(text)
-    timing["embedding_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+    embedding_ms = round((time.perf_counter() - t0) * 1000, 1)
+    timing["embedding_ms"] = embedding_ms
 
     if query_vec is None:
-        return jsonify({"results": [], "timing": timing, "debug": {"error": "embedding failed"}})
+        debug_info["embedding"].update({"available": False, "reason": "embedding failed", "latency_ms": embedding_ms})
+        debug_info["warnings"].append({"stage": "embedding", "reason": "embedding failed"})
+        return jsonify({"results": [], "timing": timing, "debug": debug_info if debug_requested else {}})
 
-    debug_info["query_vector_dim"] = len(query_vec)
+    query_array = _as_query_array(query_vec)
+    debug_info["embedding"].update({"available": True, "dimension": len(query_vec), "latency_ms": embedding_ms})
+
+    epa_result = None
+    timing["epa_ms"] = 0
+    if enable_epa:
+        epa = getattr(c, "epa", None)
+        if not epa:
+            _stage_unavailable("epa", "EPA module unavailable")
+        elif not getattr(epa, "initialized", False):
+            _stage_unavailable("epa", "EPA basis is not initialized")
+        else:
+            t0 = time.perf_counter()
+            try:
+                epa_result = epa.analyze(query_array)
+                logic_depth = float(epa_result.get("logic_depth", 0)) if isinstance(epa_result, dict) else 0.0
+                interpretation = "focused" if logic_depth >= 0.66 else "diffuse" if logic_depth <= 0.33 else "mixed"
+                debug_info["epa"].update({
+                    "available": True,
+                    "logic_depth": round(logic_depth, 4),
+                    "entropy": round(float(epa_result.get("entropy", 0)), 4) if isinstance(epa_result, dict) else 0,
+                    "dominant_axis": epa_result.get("dominant_axis") if isinstance(epa_result, dict) else None,
+                    "interpretation": interpretation,
+                    "result": epa_result,
+                })
+            except Exception as e:
+                _stage_error("epa", e)
+            timing["epa_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+            debug_info["epa"]["latency_ms"] = timing["epa_ms"]
+
+    pyramid_result = None
+    timing["pyramid_ms"] = 0
+    if enable_pyramid:
+        pyramid = getattr(c, "residual_pyramid", None)
+        if not pyramid:
+            _stage_unavailable("pyramid", "Residual pyramid module unavailable")
+        else:
+            t0 = time.perf_counter()
+            pyramid_overrides = {
+                "max_levels": query_params.get("pyramid_max_levels"),
+                "top_k": query_params.get("pyramid_top_k"),
+            }
+            previous_attrs = _apply_temporary_attrs(pyramid, pyramid_overrides)
+            try:
+                debug_info["pyramid"]["params"] = _current_attrs(pyramid, ("max_levels", "top_k"))
+                pyramid_result = pyramid.analyze(query_array)
+                levels = pyramid_result.get("levels", []) if isinstance(pyramid_result, dict) else []
+                level_summaries = []
+                pyramid_highlight_tags = []
+                for level_items in levels:
+                    level_limit = int(debug_info["pyramid"].get("params", {}).get("top_k", 10) or 10)
+                    compact_level = [
+                        _compact_tag(item)
+                        for item in level_items[:level_limit]
+                        if isinstance(item, dict)
+                    ]
+                    level_summaries.append(compact_level)
+                    pyramid_highlight_tags.extend(compact_level)
+                debug_info["highlights"]["pyramid_tags"] = pyramid_highlight_tags[:30]
+                debug_info["pyramid"].update({
+                    "available": True,
+                    "level_count": len(levels),
+                    "levels": level_summaries,
+                    "coverage": round(float(pyramid_result.get("coverage", 0)), 4) if isinstance(pyramid_result, dict) else 0,
+                    "tag_count": len(pyramid_result.get("all_tag_ids", [])) if isinstance(pyramid_result, dict) else 0,
+                })
+            except Exception as e:
+                _stage_error("pyramid", e)
+            finally:
+                _restore_attrs(pyramid, previous_attrs)
+            timing["pyramid_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
     t0 = time.perf_counter()
     candidates = c.memory_index.search(query_vec, k=top_k * 4)
     timing["vector_search_ms"] = round((time.perf_counter() - t0) * 1000, 1)
-    debug_info["candidates_before_rerank"] = len(candidates)
 
     ids = [x[0] for x in candidates]
     distances = [x[1] for x in candidates]
+    vector_candidates = [
+        {
+            "rank": i + 1,
+            "memory_id": mid,
+            "distance": round(float(distances[i]), 4),
+            "similarity": round(1.0 - float(distances[i]), 4),
+        }
+        for i, mid in enumerate(ids[:max(top_k, 1)])
+    ]
+    debug_info["vector_search"].update({
+        "available": True,
+        "candidate_count": len(candidates),
+        "k": top_k * 4,
+        "top_candidates": vector_candidates,
+        "used_vector": "raw",
+        "reason": "no tag context vector available",
+        "latency_ms": timing["vector_search_ms"],
+    })
 
-    # Spike Routing
+    score_breakdown_by_id = {}
+    for i, mid in enumerate(ids):
+        similarity = round(1.0 - float(distances[i]), 4)
+        score_breakdown_by_id[mid] = {
+            "memory_id": mid,
+            "rank_before": i + 1,
+            "rank_after": i + 1,
+            "similarity": similarity,
+            "importance": 1.0,
+            "time_decay": 1.0,
+            "access_boost": 1.0,
+            "score_before_geodesic": similarity,
+            "score_after": similarity,
+            "source": "vector",
+            "is_cross_group": False,
+        }
+    debug_info["scoring"].update({
+        "available": True,
+        "before_filter_count": len(candidates),
+        "after_filter_count": len(ids),
+        "base_scores": [
+            {"rank": i + 1, "id": mid, "similarity": round(1.0 - distances[i], 4)}
+            for i, mid in enumerate(ids[:top_k])
+        ],
+        "score_breakdown": [score_breakdown_by_id[mid] for mid in ids[:top_k] if mid in score_breakdown_by_id],
+    })
+
     timing["spike_routing_ms"] = 0
     energy_field = {}
-    if enable_spike and c.spike_router:
-        t0 = time.perf_counter()
-        try:
-            seed_results = c.tag_index.search(query_vec, k=5)
-            seed_tags = [{"tag_id": tid, "weight": 1.0 - dist} for tid, dist in seed_results if (1.0 - dist) > 0.3]
-            if seed_tags:
-                spike_result = c.spike_router.propagate(seed_tags)
+    if enable_spike:
+        spike_router = getattr(c, "spike_router", None)
+        if not spike_router:
+            _stage_unavailable("spike", "Spike router unavailable")
+        else:
+            t0 = time.perf_counter()
+            spike_overrides = {
+                "max_hops": query_params.get("spike_max_hops"),
+                "firing_threshold": query_params.get("spike_firing_threshold"),
+            }
+            previous_attrs = _apply_temporary_attrs(spike_router, spike_overrides)
+            try:
+                debug_info["spike"]["params"] = _current_attrs(
+                    spike_router,
+                    ("max_hops", "firing_threshold", "base_decay", "wormhole_decay", "tension_threshold"),
+                )
+                pyramid_tag_ids = []
+                if isinstance(pyramid_result, dict):
+                    pyramid_tag_ids = list(pyramid_result.get("all_tag_ids", []))[:5]
+                if pyramid_tag_ids:
+                    seed_tags = [{"tag_id": tid, "weight": 1.0} for tid in pyramid_tag_ids]
+                else:
+                    seed_results = c.tag_index.search(query_vec, k=5)
+                    seed_tags = [{"tag_id": tid, "weight": 1.0 - dist} for tid, dist in seed_results if (1.0 - dist) > 0.3]
+                spike_result = spike_router.propagate(seed_tags, epa_result)
                 energy_field = spike_result.get("energy_field", {})
-                debug_info["spike_seeds"] = len(seed_tags)
-                debug_info["spike_activated"] = len(spike_result.get("activated_tags", []))
-        except Exception as e:
-            debug_info["spike_error"] = str(e)
-        timing["spike_routing_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+                activated_tags = [
+                    _compact_tag(item, "energy")
+                    for item in spike_result.get("activated_tags", [])[:50]
+                    if isinstance(item, dict)
+                ]
+                seed_tag_details = [_compact_tag(item) for item in seed_tags[:20] if isinstance(item, dict)]
+                emergent_tags = [item for item in activated_tags if item.get("is_emergent")]
+                energy_field_top = [
+                    {"tag_id": tag_id, "energy": round(float(energy), 4)}
+                    for tag_id, energy in sorted(energy_field.items(), key=lambda item: float(item[1] or 0), reverse=True)[:20]
+                ]
+                debug_info["highlights"]["seed_tags"] = seed_tag_details
+                debug_info["highlights"]["emergent_tags"] = emergent_tags[:30]
+                debug_info["spike"].update({
+                    "available": True,
+                    "seed_count": len(seed_tags),
+                    "seed_tags": seed_tag_details,
+                    "activated_count": len(spike_result.get("activated_tags", [])),
+                    "activated_tags": activated_tags,
+                    "energy_count": len(energy_field),
+                    "energy_field_size": len(energy_field),
+                    "energy_field_top": energy_field_top,
+                })
+                if not seed_tags:
+                    debug_info["spike"]["reason"] = "no seed tags above threshold"
+            except Exception as e:
+                _stage_error("spike", e)
+            finally:
+                _restore_attrs(spike_router, previous_attrs)
+            timing["spike_routing_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
-    # Geodesic Rerank
     timing["geodesic_ms"] = 0
-    if enable_geodesic and c.geodesic and energy_field:
-        t0 = time.perf_counter()
-        try:
-            rerank_candidates = [{"id": mid, "score": 1.0 - distances[i] if i < len(distances) else 0} for i, mid in enumerate(ids)]
-            reranked = c.geodesic.rerank(rerank_candidates, energy_field)
-            ids = [x["id"] for x in reranked]
-            distances = [1.0 - x["score"] for x in reranked]
-        except Exception as e:
-            debug_info["geodesic_error"] = str(e)
-        timing["geodesic_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+    if enable_geodesic:
+        geodesic = getattr(c, "geodesic", None)
+        if not geodesic:
+            _stage_unavailable("geodesic", "Geodesic reranker unavailable")
+        elif not energy_field:
+            _stage_unavailable("geodesic", "requires non-empty spike energy_field")
+        else:
+            t0 = time.perf_counter()
+            geodesic_overrides = {"alpha": query_params.get("geodesic_alpha")}
+            previous_attrs = _apply_temporary_attrs(geodesic, geodesic_overrides)
+            try:
+                debug_info["geodesic"]["params"] = _current_attrs(geodesic, ("alpha",))
+                rerank_candidates = [{"id": mid, "score": 1.0 - distances[i] if i < len(distances) else 0} for i, mid in enumerate(ids)]
+                before_ids = ids[:]
+                before_rank_by_id = {mid: i + 1 for i, mid in enumerate(before_ids)}
+                before_score_by_id = {mid: round(float(item.get("score", 0)), 4) for mid, item in zip(before_ids, rerank_candidates)}
+                reranked = geodesic.rerank(rerank_candidates, energy_field)
+                mode, hit_counts, min_geo_samples = _infer_geodesic_mode_and_hits(geodesic, before_ids, energy_field, reranked)
+                ids = [x["id"] for x in reranked]
+                distances = [1.0 - x["score"] for x in reranked]
+                reranked_details = []
+                for after_index, item in enumerate(reranked[:top_k]):
+                    mid = item.get("id")
+                    geo_score = round(float(item.get("geo_score", 0) or 0), 4)
+                    score_after = round(float(item.get("score", 0) or 0), 4)
+                    detail = {
+                        "memory_id": mid,
+                        "rank_before": before_rank_by_id.get(mid),
+                        "rank_after": after_index + 1,
+                        "score_before": before_score_by_id.get(mid, 0),
+                        "score_after": score_after,
+                        "geo_score": geo_score,
+                        "hit_count": hit_counts.get(mid, 0),
+                    }
+                    reranked_details.append(detail)
+                    if mid in score_breakdown_by_id:
+                        score_breakdown_by_id[mid].update({
+                            "rank_after": after_index + 1,
+                            "score_after": score_after,
+                            "geodesic_score": geo_score,
+                            "hit_count": hit_counts.get(mid, 0),
+                            "geodesic_mode": mode,
+                        })
+                debug_info["highlights"]["geodesic_memory_ids"] = ids[:top_k]
+                debug_info["geodesic"].update({
+                    "available": True,
+                    "mode": mode,
+                    "alpha": debug_info["geodesic"].get("params", {}).get("alpha"),
+                    "min_geo_samples": min_geo_samples,
+                    "energy_count": len(energy_field),
+                    "before_ids": before_ids[:top_k],
+                    "after_ids": ids[:top_k],
+                    "geo_scores": [round(float(x.get("geo_score", 0)), 4) for x in reranked[:top_k]],
+                    "reranked": reranked_details,
+                })
+            except Exception as e:
+                _stage_error("geodesic", e)
+            finally:
+                _restore_attrs(geodesic, previous_attrs)
+            timing["geodesic_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
     results = []
     for i, mid in enumerate(ids[:top_k]):
         mem = c.db.get_memory_brief(mid)
         if mem:
+            mem_source = str(mem.get("source") or "")
+            if source_filter and mem_source != source_filter:
+                continue
+            if mem_source and mem_source in exclude_sources:
+                continue
             score = 1.0 - distances[i] if i < len(distances) else 0
             mem["score"] = round(score, 4)
+            breakdown = score_breakdown_by_id.get(mid, {}).copy()
+            breakdown.setdefault("memory_id", mid)
+            breakdown.setdefault("rank_before", i + 1)
+            breakdown["rank_after"] = i + 1
+            breakdown["score_after"] = mem["score"]
+            mem["score_breakdown"] = breakdown
             results.append(mem)
 
     timing["total_ms"] = round(sum(timing.values()), 1)
-    return jsonify({"results": results, "timing": timing, "debug": debug_info})
+    debug_info["scoring"]["after_source_filter_count"] = len(results)
+    final_memory_ids = [item.get("id") for item in results]
+    final_score_breakdown = [item.get("score_breakdown", {}) for item in results]
+    debug_info["highlights"]["final_memory_ids"] = final_memory_ids
+    if not debug_info["highlights"].get("geodesic_memory_ids") and enable_geodesic:
+        debug_info["highlights"]["geodesic_memory_ids"] = final_memory_ids
+    debug_info["final"] = {"result_count": len(results), "ids": final_memory_ids, "score_breakdown": final_score_breakdown}
+    return jsonify({"results": results, "timing": timing, "debug": debug_info if debug_requested else {}})
 
 
 @memories_bp.route("/import/sources", methods=["GET"])

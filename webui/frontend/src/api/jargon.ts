@@ -11,8 +11,11 @@ export interface JargonItem {
   status: 'pending' | 'confirmed' | 'rejected'
   group_id?: string
   is_global: boolean
+  source?: string
   source_memory_id?: number
   source_context?: string
+  candidate_type?: string
+  reject_reason?: string
 }
 
 export interface JargonsFilters {
@@ -21,6 +24,7 @@ export interface JargonsFilters {
   status?: string
   group_id?: string
   search?: string
+  include_rejected?: boolean
 }
 
 export interface JargonsResponse {
@@ -41,6 +45,7 @@ export interface JargonEvidencePayload {
     sender_id?: string
     timestamp: number
   }>
+  fallback_contexts?: string[]
   used_fallback: boolean
 }
 
@@ -56,6 +61,10 @@ export interface HolymanStatusPayload {
   asset_status: string
   update_available?: boolean
   is_update_available?: boolean
+  update_check?: HolymanUpdateCheckPayload
+  checked_at?: string
+  update_cached?: boolean
+  warning?: string
   categories: HolymanCategory[]
   local_count?: number
   items_count?: number
@@ -63,19 +72,52 @@ export interface HolymanStatusPayload {
   examples_count?: number
   corpus_count?: number
   candidates_count?: number
+  layers?: {
+    catchphrases?: any[]
+    concepts?: any[]
+    quotes_knowledge?: any[]
+    corpus?: { items?: any[]; count?: number; reference_only?: boolean; [key: string]: any }
+    candidates?: any[]
+    blocked?: Record<string, any>
+  }
+  items?: any[]
+  corpus?: any[]
+  blocked?: Record<string, any>
+  corpus_summary?: { count?: number; reference_only?: boolean; [key: string]: any }
+  manifest?: any
+  manifest_summary?: {
+    source_count?: number
+    parse_statuses?: Record<string, number>
+    repo?: string
+  }
+  quality_report?: any
+  quality_summary?: {
+    status?: string
+    declared_corpus_count?: number
+    parsed_corpus_count?: number
+    error_count?: number
+  }
   phrases?: any[] // 新增用于 TAB 下列出广域语料
   concepts?: any[] // 新增分层
   examples?: any[]
   candidates?: any[]
 }
 
+function pageOffset(filters: JargonsFilters): { limit: number; offset: number } {
+  const limit = Math.max(1, Number(filters.size || 50))
+  const page = Math.max(1, Number(filters.page || 1))
+  return { limit, offset: (page - 1) * limit }
+}
+
 export function listJargons(filters: JargonsFilters): Promise<JargonsResponse> {
   const params = new URLSearchParams()
-  if (filters.page) params.append('page', String(filters.page))
-  if (filters.size) params.append('size', String(filters.size))
-  if (filters.status) params.append('status', filters.status)
-  if (filters.group_id) params.append('group_id', filters.group_id)
-  if (filters.search) params.append('search', filters.search)
+  const { limit, offset } = pageOffset(filters)
+  params.set('limit', String(limit))
+  params.set('offset', String(offset))
+  if (filters.status) params.set('status', filters.status)
+  if (filters.group_id) params.set('group_id', filters.group_id)
+  if (filters.search) params.set('search', filters.search)
+  if (filters.include_rejected) params.set('include_rejected', 'true')
 
   return fetchJson<JargonsResponse>(`/api/jargon?${params.toString()}`)
 }
@@ -108,17 +150,17 @@ export function reviewJargon(id: number, action: 'approve' | 'reject', rejectRea
 }
 
 export function toggleJargonGlobal(id: number): Promise<{ ok: boolean; is_global: boolean }> {
-  return fetchJson<{ ok: boolean; is_global: boolean }>(`/api/jargon/${id}/toggle-global`, {
+  return fetchJson<{ ok: boolean; is_global: boolean }>(`/api/jargon/${id}/toggle_global`, {
     method: 'POST',
   })
 }
 
 export function getJargonEvidence(id: number, before = 15, after = 15): Promise<JargonEvidencePayload> {
-  return fetchJson<JargonEvidencePayload>(`/api/jargon/${id}/evidence?before=${before}&after=${after}`)
+  return fetchJson<JargonEvidencePayload>(`/api/jargon/${id}/context?before=${before}&after=${after}`)
 }
 
-export function getHolymanStatus(): Promise<any> {
-  return fetchJson<any>('/api/jargon/holyman')
+export function getHolymanStatus(): Promise<HolymanStatusPayload> {
+  return fetchJson<HolymanStatusPayload>('/api/jargon/holyman')
 }
 
 export function checkHolymanUpdate(force = false): Promise<HolymanUpdateCheckPayload> {
@@ -235,16 +277,18 @@ export function addHolymanBlocklist(payload: AddHolymanBlocklistPayload): Promis
   })
 }
 
-export function batchDeleteJargons(ids: number[]): Promise<{ ok: boolean; deleted: number }> {
-  return fetchJson<{ ok: boolean; deleted: number }>('/api/jargon/batch/delete', {
+export async function batchDeleteJargons(ids: number[]): Promise<{ ok: boolean; deleted: number }> {
+  const res = await fetchJson<{ ok: boolean; deleted?: number; deleted_count?: number }>('/api/jargon/batch-delete', {
     method: 'POST',
     body: JSON.stringify({ ids }),
   })
+  return { ok: res.ok, deleted: res.deleted ?? res.deleted_count ?? 0 }
 }
 
-export function batchReviewJargons(ids: number[], action: 'approve' | 'reject'): Promise<{ ok: boolean; reviewed: number }> {
-  return fetchJson<{ ok: boolean; reviewed: number }>('/api/jargon/batch/review', {
+export async function batchReviewJargons(ids: number[], action: 'approve' | 'reject'): Promise<{ ok: boolean; reviewed: number }> {
+  const res = await fetchJson<{ ok: boolean; reviewed?: number; reviewed_count?: number }>('/api/jargon/batch-review', {
     method: 'POST',
     body: JSON.stringify({ ids, action }),
   })
+  return { ok: res.ok, reviewed: res.reviewed ?? res.reviewed_count ?? 0 }
 }

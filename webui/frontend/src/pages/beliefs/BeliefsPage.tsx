@@ -22,6 +22,7 @@ import {
   listBeliefs,
   updateBelief,
   type BeliefItem,
+  type BeliefsFilters,
   type EvidencePayload,
 } from '@/api/beliefs'
 import { getStoredToken } from '@/api/client'
@@ -48,14 +49,31 @@ function formatTime(seconds: unknown): string {
 // 辅助：获取信念类型的标签颜色
 function beliefTypeBadge(type: string): string {
   switch (type) {
-    case 'self':
+    case 'self_identity':
       return 'bg-purple-500/10 text-purple-500 border-purple-500/20 hover:bg-purple-500/10'
-    case 'world':
+    case 'person_judgment':
+      return 'bg-amber-500/10 text-amber-500 border-amber-500/20 hover:bg-amber-500/10'
+    case 'world_view':
       return 'bg-blue-500/10 text-blue-500 border-blue-500/20 hover:bg-blue-500/10'
-    case 'value':
+    case 'preference':
       return 'bg-pink-500/10 text-pink-500 border-pink-500/20 hover:bg-pink-500/10'
     default:
-      return 'bg-amber-500/10 text-amber-500 border-amber-500/20 hover:bg-amber-500/10'
+      return 'bg-muted text-muted-foreground border-border/50 hover:bg-muted'
+  }
+}
+
+function beliefTypeLabel(type: string): string {
+  switch (type) {
+    case 'self_identity':
+      return '自我身份'
+    case 'person_judgment':
+      return '人物判断'
+    case 'world_view':
+      return '世界观'
+    case 'preference':
+      return '偏好'
+    default:
+      return '未知类型'
   }
 }
 
@@ -80,7 +98,7 @@ export function BeliefsPage() {
   
   // 筛选检索与单页大小
   const [search, setSearch] = useState('')
-  const [type, setType] = useState('')
+  const [type, setType] = useState<BeliefsFilters['type']>('')
   const [status, setStatus] = useState('')
   const [botId, setBotId] = useState('')
   const [page, setPage] = useState(1)
@@ -108,7 +126,7 @@ export function BeliefsPage() {
   const [editOpen, setEditOpen] = useState(false)
   const [editForm, setEditForm] = useState<Partial<BeliefItem>>({
     content: '',
-    type: 'self',
+    type: 'self_identity',
     status: 'pending',
     bot_id: 'bot',
     confidence: 1.0,
@@ -121,7 +139,7 @@ export function BeliefsPage() {
       const res = await listBeliefs({
         page: nextPage,
         size,
-        type: type === 'all' ? '' : type,
+        type: type || '',
         status: status === 'all' ? '' : status,
         bot_id: botId === 'all' ? '' : botId,
         search,
@@ -236,7 +254,7 @@ export function BeliefsPage() {
           headers,
           body: JSON.stringify({
             all_matching: true,
-            type: type === 'all' ? '' : type,
+            type: type || '',
             status: status === 'all' ? '' : status,
             bot_id: botId === 'all' ? '' : botId,
             search,
@@ -271,7 +289,7 @@ export function BeliefsPage() {
           headers,
           body: JSON.stringify({
             all_matching: true,
-            type: type === 'all' ? '' : type,
+            type: type || '',
             status: status === 'all' ? '' : status,
             bot_id: botId === 'all' ? '' : botId,
             search,
@@ -307,7 +325,7 @@ export function BeliefsPage() {
           headers,
           body: JSON.stringify({
             all_matching: true,
-            type: type === 'all' ? '' : type,
+            type: type || '',
             status: status === 'all' ? '' : status,
             bot_id: botId === 'all' ? '' : botId,
             search,
@@ -391,7 +409,7 @@ export function BeliefsPage() {
     setIsEditNew(true)
     setEditForm({
       content: '',
-      type: 'self',
+      type: 'self_identity',
       status: 'pending',
       bot_id: 'bot',
       confidence: 1.0,
@@ -433,16 +451,16 @@ export function BeliefsPage() {
               </Field>
               <Field>
                 <FieldLabel>信念类型</FieldLabel>
-                <Select value={type || 'all'} onValueChange={(val) => setType(val === 'all' ? '' : val)}>
+                <Select value={type || 'all'} onValueChange={(val) => setType(val === 'all' ? '' : (val as BeliefsFilters['type']))}>
                   <SelectTrigger className="h-9 text-xs">
                     <SelectValue placeholder="全部类型" />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">全部类型</SelectItem>
-                    <SelectItem value="self">self（自我认知）</SelectItem>
-                    <SelectItem value="other">other（外部关系）</SelectItem>
-                    <SelectItem value="world">world（世界观）</SelectItem>
-                    <SelectItem value="value">value（价值观）</SelectItem>
+                    <SelectItem value="self_identity">self_identity（自我身份）</SelectItem>
+                    <SelectItem value="person_judgment">person_judgment（人物判断）</SelectItem>
+                    <SelectItem value="world_view">world_view（世界观）</SelectItem>
+                    <SelectItem value="preference">preference（偏好）</SelectItem>
                   </SelectContent>
                 </Select>
               </Field>
@@ -579,7 +597,7 @@ export function BeliefsPage() {
                         </TableCell>
                         <TableCell className="text-center">
                           <Badge className={beliefTypeBadge(b.type)} variant="outline">
-                            {b.type === 'self' ? '自我' : b.type === 'world' ? '世界' : b.type === 'value' ? '价值' : '外部'}
+                            {beliefTypeLabel(b.type)}
                           </Badge>
                         </TableCell>
                         <TableCell className="font-medium max-w-sm truncate" title={b.content}>{b.content}</TableCell>
@@ -839,15 +857,15 @@ export function BeliefsPage() {
 
               <Field>
                 <FieldLabel>信念类型</FieldLabel>
-                <Select value={editForm.type || 'self'} onValueChange={(val: any) => setEditForm({ ...editForm, type: val })}>
+                <Select value={editForm.type || 'self_identity'} onValueChange={(val: any) => setEditForm({ ...editForm, type: val })}>
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="self">self (自我认知)</SelectItem>
-                    <SelectItem value="other">other (外部关系)</SelectItem>
-                    <SelectItem value="world">world (世界观)</SelectItem>
-                    <SelectItem value="value">value (价值观)</SelectItem>
+                    <SelectItem value="self_identity">self_identity (自我身份)</SelectItem>
+                    <SelectItem value="person_judgment">person_judgment (人物判断)</SelectItem>
+                    <SelectItem value="world_view">world_view (世界观)</SelectItem>
+                    <SelectItem value="preference">preference (偏好)</SelectItem>
                   </SelectContent>
                 </Select>
               </Field>

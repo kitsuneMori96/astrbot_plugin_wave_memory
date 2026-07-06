@@ -55,6 +55,7 @@ import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Switch } from '@/components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -125,6 +126,7 @@ export function JargonPage() {
   const [search, setSearch] = useState('')
   const [groupId, setGroupId] = useState('')
   const [status, setStatus] = useState('')
+  const [showAuditRows, setShowAuditRows] = useState(false)
   const [page, setPage] = useState(1)
   const [size, setSize] = useState(15) // 单页行数持久化
 
@@ -220,6 +222,7 @@ export function JargonPage() {
         status: status === 'all' ? '' : status,
         group_id: groupId,
         search,
+        include_rejected: showAuditRows,
       })
       setJargons(res.items ?? [])
       setTotal(res.total ?? 0)
@@ -284,7 +287,7 @@ export function JargonPage() {
       void loadHolyman()
     }
     // oxlint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, status, size])
+  }, [activeTab, status, size, showAuditRows])
 
   useEffect(() => {
     if (activeTab !== 'global') return undefined
@@ -315,6 +318,7 @@ export function JargonPage() {
     setSearch('')
     setGroupId('')
     setStatus('')
+    setShowAuditRows(false)
     void loadLocalJargons(1)
   }
 
@@ -684,6 +688,10 @@ export function JargonPage() {
   const holymanCheckedAt = effectiveHolymanUpdateCheck?.checked_at ?? holyman?.checked_at
   const holymanCheckCached = Boolean(effectiveHolymanUpdateCheck?.cached ?? holyman?.update_cached)
   const holymanCheckWarning = effectiveHolymanUpdateCheck?.warning ?? holyman?.warning
+  const holymanManifestSummary = holyman?.manifest_summary ?? { source_count: 0, parse_statuses: {}, repo: '' }
+  const holymanQualitySummary = holyman?.quality_summary ?? { status: holymanAssetStatus, declared_corpus_count: undefined, parsed_corpus_count: undefined, error_count: 0 }
+  const holymanParseStatuses = holymanManifestSummary.parse_statuses ?? {}
+  const holymanParseStatusText = Object.entries(holymanParseStatuses).map(([statusKey, count]) => `${statusKey}:${count}`).join(' · ') || '—'
   const holymanCategories = getHolymanCategories(holymanPhrases, asArray(holyman?.categories))
   const filteredHolymanPhrases = filterHolymanPhrases(holymanPhrases, {
     search: holymanSearch,
@@ -748,6 +756,12 @@ export function JargonPage() {
                     <SelectItem value="rejected">已否决</SelectItem>
                   </SelectContent>
                 </Select>
+                <div className="flex h-9 items-center gap-2 rounded-md border px-3 text-xs text-muted-foreground">
+                  <Switch id="show-jargon-audit-rows" checked={showAuditRows} onCheckedChange={setShowAuditRows} />
+                  <label htmlFor="show-jargon-audit-rows" className="cursor-pointer whitespace-nowrap">
+                    显示分流/噪声审计
+                  </label>
+                </div>
                 <Button disabled={loading} type="submit" size="sm">
                   <SearchIcon className="size-3.5 mr-1" />
                   搜索
@@ -805,6 +819,9 @@ export function JargonPage() {
                         <TableHead>释义 (双击快捷修改)</TableHead>
                         <TableHead className="w-24 text-center">学成频次</TableHead>
                         <TableHead className="w-24 text-center">当前状态</TableHead>
+                        <TableHead className="w-32 text-center">候选类型</TableHead>
+                        <TableHead className="w-28 text-center">来源</TableHead>
+                        <TableHead className="w-36 text-center">拒绝原因</TableHead>
                         <TableHead className="w-28 text-center">作用域</TableHead>
                         <TableHead className="w-48 text-right pr-4">操作</TableHead>
                       </TableRow>
@@ -848,6 +865,15 @@ export function JargonPage() {
                               <Badge className={j.status === 'confirmed' ? 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/10 hover:bg-emerald-500/10' : j.status === 'rejected' ? 'bg-destructive/10 text-destructive border border-destructive/10 hover:bg-destructive/10' : 'bg-amber-500/10 text-amber-500 border border-amber-500/10 hover:bg-amber-500/10'} variant="outline">
                                 {j.status === 'confirmed' ? '已确认' : j.status === 'rejected' ? '已否决' : '待确认'}
                               </Badge>
+                            </TableCell>
+                            <TableCell className="text-center">
+                              <Badge variant="outline" className="text-[10px] font-mono">{j.candidate_type || 'jargon'}</Badge>
+                            </TableCell>
+                            <TableCell className="text-center">
+                              <Badge variant="secondary" className="text-[10px] font-mono">{j.source || 'wave_memory'}</Badge>
+                            </TableCell>
+                            <TableCell className="text-center text-xs text-muted-foreground">
+                              {j.reject_reason || '—'}
                             </TableCell>
                             <TableCell className="text-center">
                               <Badge variant={j.is_global ? 'secondary' : 'outline'} className="text-[10px]">
@@ -987,6 +1013,33 @@ export function JargonPage() {
                     <Card className="bg-muted/10 border-border/50"><CardHeader className="py-3"><CardDescription className="text-xs">声音样本与知识</CardDescription><CardTitle className="text-xl font-mono text-primary">{holymanExamples.length} 条</CardTitle></CardHeader></Card>
                     <Card className="bg-muted/10 border-border/50"><CardHeader className="py-3"><CardDescription className="text-xs">原始语料</CardDescription><CardTitle className="text-xl font-mono text-primary">{holymanCorpus.length || holymanCorpusSummary?.count || 0} 条</CardTitle></CardHeader></Card>
                   </div>
+
+                  <Card className="bg-muted/10 border-border/50">
+                    <CardHeader className="py-3">
+                      <CardTitle className="text-sm">资产审计</CardTitle>
+                      <CardDescription>
+                        manifest source_count、parse_statuses 与 quality_report 只读展示；用于确认 Holyman reference-only 分层资产完整可审计。
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="grid gap-3 pt-0 text-xs md:grid-cols-4">
+                      <div className="flex flex-col gap-1 rounded-md border bg-background/60 p-3">
+                        <span className="text-muted-foreground">manifest source_count</span>
+                        <span className="font-mono text-primary">{holymanManifestSummary.source_count ?? 0}</span>
+                      </div>
+                      <div className="flex flex-col gap-1 rounded-md border bg-background/60 p-3">
+                        <span className="text-muted-foreground">parse_statuses</span>
+                        <span className="font-mono text-primary">{holymanParseStatusText}</span>
+                      </div>
+                      <div className="flex flex-col gap-1 rounded-md border bg-background/60 p-3">
+                        <span className="text-muted-foreground">declared_corpus_count / parsed_corpus_count</span>
+                        <span className="font-mono text-primary">{String(holymanQualitySummary.declared_corpus_count ?? '—')} / {String(holymanQualitySummary.parsed_corpus_count ?? '—')}</span>
+                      </div>
+                      <div className="flex flex-col gap-1 rounded-md border bg-background/60 p-3">
+                        <span className="text-muted-foreground">quality status / error_count</span>
+                        <span className="font-mono text-primary">{String(holymanQualitySummary.status || holymanAssetStatus)} / {String(holymanQualitySummary.error_count ?? 0)}</span>
+                      </div>
+                    </CardContent>
+                  </Card>
 
                   {/* 广域分层 Sub-Tabs 子分类过滤器 */}
                   <Tabs value={globalSubTab} onValueChange={(val: any) => setGlobalSubTab(val)} className="border rounded-xl p-4 bg-muted/5 mt-2">

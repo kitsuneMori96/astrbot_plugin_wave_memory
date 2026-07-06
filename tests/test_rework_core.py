@@ -652,7 +652,7 @@ git clone https://github.com/ykdeso/holyman-skills.git
         self.assertEqual(match["term"], "v我50")
         self.assertIn("常见荒诞转折梗", match["explanation"])
 
-    def test_jargon_service_requires_curated_holyman_layer_for_confirmation(self):
+    def test_jargon_service_keeps_holyman_reference_hits_out_of_local_jargon_table(self):
         from services.jargon.service import JargonService
 
         class FakeFilter:
@@ -710,9 +710,7 @@ git clone https://github.com/ykdeso/holyman-skills.git
 
         self.assertEqual(result, [])
         row = conn.execute("SELECT status, scope, source FROM jargon WHERE word='外层词'").fetchone()
-        self.assertEqual(row[0], 'pending')
-        self.assertEqual(row[1], 'local')
-        self.assertEqual(row[2], 'wave_memory')
+        self.assertIsNone(row)
 
     def test_wave_memory_db_creates_holyman_knowledge_tables(self):
         from engine.database import WaveMemoryDB

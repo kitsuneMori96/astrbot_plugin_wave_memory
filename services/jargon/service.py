@@ -14,6 +14,23 @@ from .inference import JargonInferenceEngine, JargonInjector
 from .holyman_reference import HolymanReference
 
 
+_TECHNICAL_NOISE_WORDS = {
+    "id", "ids", "json", "api", "url", "uri", "http", "https", "get", "post", "put", "patch", "delete",
+    "from", "has", "object", "objects", "array", "list", "dict", "map", "set", "type", "types",
+    "value", "values", "data", "item", "items", "key", "keys", "param", "params", "args", "kwargs",
+    "none", "null", "true", "false", "bool", "str", "int", "float", "class", "method", "function",
+    "return", "import", "async", "await", "self", "this", "const", "let", "var",
+}
+
+_ORDINARY_WORDS = {
+    "吃饭", "睡觉", "上班", "下班", "回家", "出门", "上课", "工作", "学习", "考试",
+    "好的", "可以", "谢谢", "没事", "不用", "不是", "没有", "手机", "电脑", "学校",
+    "今天", "昨天", "明天", "现在", "刚才", "马上", "哈哈", "哈哈哈", "嗯嗯", "呵呵",
+    "朋友", "同学", "老师", "家人", "爸爸", "妈妈", "真的", "确实", "其实", "当然",
+    "知道", "不知道", "怎么", "什么", "为什么", "这个", "那个",
+}
+
+
 class JargonService:
     """黑话系统主服务。"""
 
@@ -172,10 +189,33 @@ class JargonService:
         if not candidates:
             return []
 
-        candidates = [c for c in candidates if not self._should_filter_candidate(c.get("word", ""))]
+        now = int(time.time())
+        routed_candidates = []
+        for cand in candidates:
+            word = cand.get("word", "")
+            source_ctx = self._pick_source_context(cand)
+            route = self.classify_candidate(word, group_id, source_ctx, cand.get("contexts") or [])
+            cand["_route"] = route
+            if route.get("candidate_type") == "person_alias":
+                memory_id = self._resolve_source_memory_id(group_id, word, source_ctx)
+                self._record_person_alias_fact(group_id, word, source_ctx, memory_id)
+                self._record_diverted_candidate(cand, group_id, route, source_ctx, memory_id, now)
+                continue
+            if route.get("candidate_type") in {"technical_noise", "ordinary_word"}:
+                memory_id = self._resolve_source_memory_id(group_id, word, source_ctx)
+                self._record_diverted_candidate(cand, group_id, route, source_ctx, memory_id, now)
+                continue
+            if route.get("candidate_type") == "holyman_reference_hit":
+                # Holyman 是广域 reference-only 命中，不写成本地群黑话候选。
+                continue
+            if route.get("enter_llm"):
+                routed_candidates.append(cand)
+
+        candidates = routed_candidates
         if not candidates:
+            self._db.conn.commit()
             return []
-        logger.info(f"[Jargon] 挖掘 {group_id}: {len(candidates)} 候选")
+        logger.info(f"[Jargon] 挖掘 {group_id}: {len(candidates)} 本地候选进入 LLM")
 
         # Step 1.5: LLM 批量验证（改动3，开关控制）
         if self._llm_validate and self._llm and candidates:
@@ -185,7 +225,6 @@ class JargonService:
             logger.info(f"[Jargon] LLM 验证通过: {len(candidates)} 候选")
 
         results = []
-        now = int(time.time())
 
         for cand in candidates:
             word = cand["word"]
@@ -196,41 +235,14 @@ class JargonService:
             source_message_ts = source_ctx.get("timestamp")
             source_sender_id = str(source_ctx.get("sender_id") or "")
             source_context_json = json.dumps(source_contexts or [source_ctx] if source_ctx else [], ensure_ascii=False)
-            candidate_type = "jargon"
-
-            if self._should_filter_candidate(word):
-                continue
-            if self._is_person_like_candidate(word, source_sender_id):
-                candidate_type = "person_alias"
-                self._record_person_alias_fact(group_id, word, source_ctx, source_memory_id)
+            route = cand.get("_route") or self.classify_candidate(word, group_id, source_ctx, contexts)
+            candidate_type = route.get("candidate_type") or "local_jargon_candidate"
 
             # 检查是否已存在
             existing = self._db.conn.execute(
                 "SELECT id, frequency, is_jargon, last_infer_freq FROM jargon WHERE group_id = ? AND word = ?",
                 (group_id, word),
             ).fetchone()
-
-            if candidate_type == "person_alias":
-                self._db.conn.execute(
-                    """INSERT OR IGNORE INTO jargon
-                       (word, meaning, is_jargon, frequency, confidence, group_id, contexts,
-                        last_infer_freq, created_at, updated_at, status, scope, source, reject_reason,
-                        source_memory_id, source_message_ts, source_sender_id, source_context, candidate_type)
-                       VALUES (?, '', 0, ?, 0, ?, ?, 0, ?, ?, 'rejected', 'local', 'wave_memory',
-                               'person_alias_diverted', ?, ?, ?, ?, ?)""",
-                    (word, cand["frequency"], group_id, json.dumps(contexts, ensure_ascii=False), now, now,
-                     source_memory_id, source_message_ts, source_sender_id, source_context_json, candidate_type),
-                )
-                self._db.conn.execute(
-                    """UPDATE jargon SET frequency = ?, status = 'rejected', is_jargon = 0,
-                       reject_reason = 'person_alias_diverted', source_memory_id = COALESCE(source_memory_id, ?),
-                       source_message_ts = COALESCE(source_message_ts, ?), source_sender_id = COALESCE(source_sender_id, ?),
-                       source_context = ?, candidate_type = ?, updated_at = ?
-                       WHERE group_id = ? AND word = ? AND COALESCE(status, 'pending') != 'confirmed'""",
-                    (cand["frequency"], source_memory_id, source_message_ts, source_sender_id, source_context_json,
-                     candidate_type, now, group_id, word),
-                )
-                continue
 
             if existing:
                 row_id, old_freq, old_is_jargon, last_infer_freq = existing
@@ -296,21 +308,6 @@ class JargonService:
             scope = "local"
             source = "wave_memory"
 
-            holyman_match = self._holyman.match(word, "\n".join(contexts)) if self._holyman else {"matched": False}
-            if holyman_match.get("matched"):
-                meaning = holyman_match.get("explanation", "")
-                confidence = float(holyman_match.get("confidence", 0.0))
-                if holyman_match.get("source_layer") == "curated" and not self._holyman_reference_only:
-                    is_jargon = 1
-                    status = "confirmed"
-                    scope = "global"
-                    source = "holyman_skills"
-                else:
-                    is_jargon = None
-                    status = "pending"
-                    scope = "local"
-                    source = "wave_memory"
-
             if is_jargon is None and self._inference and contexts:
                 try:
                     result = await self._inference.infer(word, contexts)
@@ -350,15 +347,104 @@ class JargonService:
 
         return results
 
+    def classify_candidate(self, word: str, group_id: str = "", source_ctx: Optional[Dict] = None, contexts: Optional[List[str]] = None) -> Dict[str, Any]:
+        """v4.3.0 候选路由：只有本地黑话候选允许进入 LLM。"""
+        word = (word or "").strip()
+        source_ctx = source_ctx or {}
+        contexts = contexts or []
+        base = {
+            "word": word,
+            "candidate_type": "local_jargon_candidate",
+            "enter_llm": True,
+            "reject_reason": None,
+            "source": "wave_memory",
+            "scope": "local",
+            "meaning": "",
+            "confidence": 0.0,
+            "reference_only": False,
+        }
+        if not word:
+            return {**base, "candidate_type": "ordinary_word", "enter_llm": False, "reject_reason": "ordinary_word_filtered"}
+
+        sender_id = str(source_ctx.get("sender_id") or "")
+        if self._is_known_person_alias(word, group_id, source_ctx):
+            return {**base, "candidate_type": "person_alias", "enter_llm": False, "reject_reason": "person_alias_diverted"}
+        if self._is_technical_noise_candidate(word):
+            return {**base, "candidate_type": "technical_noise", "enter_llm": False, "reject_reason": "technical_noise_filtered"}
+        if self._is_ordinary_word_candidate(word):
+            return {**base, "candidate_type": "ordinary_word", "enter_llm": False, "reject_reason": "ordinary_word_filtered"}
+        if self._is_person_like_candidate(word, sender_id):
+            return {**base, "candidate_type": "person_alias", "enter_llm": False, "reject_reason": "person_alias_diverted"}
+
+        holyman_match = self._holyman.match(word, "\n".join(contexts)) if self._holyman else {"matched": False}
+        if holyman_match.get("matched"):
+            return {
+                **base,
+                "candidate_type": "holyman_reference_hit",
+                "enter_llm": False,
+                "source": "holyman_skills",
+                "source_layer": holyman_match.get("source_layer") or "phrases",
+                "meaning": holyman_match.get("explanation", ""),
+                "confidence": float(holyman_match.get("confidence", 0.0) or 0.0),
+                "reference_only": True,
+                "matched_term": holyman_match.get("term") or word,
+            }
+        return base
+
+    def _record_diverted_candidate(self, cand: Dict, group_id: str, route: Dict, source_ctx: Dict, memory_id: Optional[int], now: int) -> None:
+        """保留分流审计行；默认列表会隐藏这些非黑话候选。"""
+        word = str(cand.get("word") or "").strip()
+        if not word:
+            return
+        contexts = cand.get("contexts") or []
+        source_contexts = cand.get("source_contexts") or []
+        source_message_ts = source_ctx.get("timestamp")
+        source_sender_id = str(source_ctx.get("sender_id") or "")
+        source_context_json = json.dumps(source_contexts or [source_ctx] if source_ctx else [], ensure_ascii=False)
+        candidate_type = route.get("candidate_type") or "ordinary_word"
+        reject_reason = route.get("reject_reason") or f"{candidate_type}_filtered"
+        self._db.conn.execute(
+            """INSERT OR IGNORE INTO jargon
+               (word, meaning, is_jargon, frequency, confidence, group_id, contexts,
+                last_infer_freq, created_at, updated_at, status, scope, source, reject_reason,
+                source_memory_id, source_message_ts, source_sender_id, source_context, candidate_type)
+               VALUES (?, ?, 0, ?, 0, ?, ?, 0, ?, ?, 'rejected', 'local', 'wave_memory',
+                       ?, ?, ?, ?, ?, ?)""",
+            (word, route.get("meaning", ""), cand.get("frequency", 1), group_id, json.dumps(contexts, ensure_ascii=False), now, now,
+             reject_reason, memory_id, source_message_ts, source_sender_id, source_context_json, candidate_type),
+        )
+        self._db.conn.execute(
+            """UPDATE jargon SET frequency = ?, status = 'rejected', is_jargon = 0,
+               reject_reason = ?, source_memory_id = COALESCE(source_memory_id, ?),
+               source_message_ts = COALESCE(source_message_ts, ?), source_sender_id = COALESCE(source_sender_id, ?),
+               source_context = ?, candidate_type = ?, updated_at = ?
+               WHERE group_id = ? AND word = ? AND COALESCE(status, 'pending') != 'confirmed'""",
+            (cand.get("frequency", 1), reject_reason, memory_id, source_message_ts, source_sender_id,
+             source_context_json, candidate_type, now, group_id, word),
+        )
+
     @staticmethod
-    def _should_filter_candidate(word: str) -> bool:
-        """过滤明显不是黑话的候选，减少昵称/句子污染。"""
+    def _is_technical_noise_candidate(word: str) -> bool:
+        word = (word or "").strip()
+        lower_word = word.lower()
+        if lower_word in _TECHNICAL_NOISE_WORDS:
+            return True
+        if re.match(r"^https?://", word, re.I):
+            return True
+        if re.search(r"[/\\]", word) and re.search(r"\.[A-Za-z0-9]{1,8}$", word):
+            return True
+        if re.fullmatch(r"[a-fA-F0-9]{7,64}", word):
+            return True
+        if re.fullmatch(r"v?\d+(?:\.\d+){1,3}", word):
+            return True
+        return False
+
+    @staticmethod
+    def _is_ordinary_word_candidate(word: str) -> bool:
         word = (word or "").strip()
         if not word or "@" in word:
             return True
         if len(word) < 2 or len(word) > 12:
-            return True
-        if re.match(r"^https?://", word, re.I):
             return True
         if re.match(r"^[\d\s.]+$", word):
             return True
@@ -370,14 +456,72 @@ class JargonService:
             return True
         if re.match(r"^\[.+\]$", word):
             return True
-        common_words = {
-            "吃饭", "睡觉", "上班", "下班", "回家", "出门", "上课", "工作", "学习", "考试",
-            "好的", "可以", "谢谢", "没事", "不用", "不是", "没有", "手机", "电脑", "学校",
-            "今天", "昨天", "明天", "现在", "刚才", "马上", "哈哈", "哈哈哈", "嗯嗯", "呵呵",
-            "朋友", "同学", "老师", "家人", "爸爸", "妈妈", "真的", "确实", "其实", "当然",
-            "知道", "不知道", "怎么", "什么", "为什么", "这个", "那个",
-        }
-        return word in common_words
+        return word in _ORDINARY_WORDS
+
+    def _table_exists(self, table: str) -> bool:
+        try:
+            row = self._db.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+            return row is not None
+        except Exception:
+            return False
+
+    def _table_columns(self, table: str) -> set[str]:
+        try:
+            return {str(r[1]) for r in self._db.conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        except Exception:
+            return set()
+
+    def _is_known_person_alias(self, word: str, group_id: str, source_ctx: Dict) -> bool:
+        word = (word or "").strip()
+        if not word:
+            return False
+        sender_id = str(source_ctx.get("sender_id") or "")
+        sender_name = str(source_ctx.get("sender_name") or "").strip()
+        if sender_name and word == sender_name:
+            return True
+        checks = [
+            ("memories", "sender_name", "group_id = ? AND sender_name = ?", (group_id, word)),
+            ("user_profiles", "nickname", "group_id = ? AND nickname = ?", (group_id, word)),
+            ("person_registry", "display_name", "display_name = ?", (word,)),
+        ]
+        for table, required_col, where_sql, params in checks:
+            if self._table_exists(table) and required_col in self._table_columns(table):
+                try:
+                    row = self._db.conn.execute(f"SELECT 1 FROM {table} WHERE {where_sql} LIMIT 1", params).fetchone()
+                    if row:
+                        return True
+                except Exception:
+                    pass
+        if self._table_exists("facts"):
+            cols = self._table_columns("facts")
+            try:
+                if {"fact_type", "object"}.issubset(cols):
+                    row = self._db.conn.execute(
+                        "SELECT 1 FROM facts WHERE fact_type = 'PERSON_ALIAS' AND (object = ? OR subject = ?) LIMIT 1",
+                        (word, sender_id or word),
+                    ).fetchone()
+                    if row:
+                        return True
+                elif {"fact_type", "obj"}.issubset(cols):
+                    row = self._db.conn.execute(
+                        "SELECT 1 FROM facts WHERE fact_type = 'PERSON_ALIAS' AND (obj = ? OR subject = ?) LIMIT 1",
+                        (word, sender_id or word),
+                    ).fetchone()
+                    if row:
+                        return True
+            except Exception:
+                pass
+        return False
+
+    @staticmethod
+    def _should_filter_candidate(word: str) -> bool:
+        """过滤明显不是黑话的候选，减少昵称/句子污染。"""
+        word = (word or "").strip()
+        if not word or "@" in word:
+            return True
+        if len(word) < 2 or len(word) > 12:
+            return True
+        return JargonService._is_technical_noise_candidate(word) or JargonService._is_ordinary_word_candidate(word)
 
     @staticmethod
     def _is_person_like_candidate(word: str, sender_id: str = "") -> bool:
@@ -501,6 +645,11 @@ class JargonService:
         if not self._enabled:
             return ""
         return self._injector.get_injection(text, group_id)
+
+    def get_last_injection_items(self) -> List[Dict]:
+        """返回最近一次黑话注入命中的结构化观测条目。"""
+        getter = getattr(self._injector, "get_last_injection_items", None)
+        return getter() if callable(getter) else []
 
     def _check_global_promotion(self) -> None:
         """US-4.5: 同词在 >= N 群确认 → 自动全局化。"""

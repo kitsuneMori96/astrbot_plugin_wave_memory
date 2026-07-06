@@ -121,6 +121,8 @@ function normalizeEdgeLayer(rawLayer) {
 
 function showGraphUnavailable(message) {
     graphUnavailableReason = message || '当前浏览器无法初始化 WebGL 3D 画布。';
+    setEventStatus('error', graphUnavailableReason);
+    renderEventWarnings([{ stage: 'webgl', reason: graphUnavailableReason }]);
     const container = galaxyContainer || document.getElementById('galaxy-container');
     if (!container) return;
     container.innerHTML = `
@@ -1187,6 +1189,9 @@ function toggleFilter(type) {
 
 // ─── Load Galaxy 与 社区 Cluster 空聚类保护 ───
 async function loadGalaxy() {
+    setEventStatus('loading', '加载图谱视图');
+    renderEventWarnings([]);
+    updateRuntimeConfigStatus();
     showLoading('正在加载 3D 知识星海...');
     try {
         const layers = [];
@@ -1203,10 +1208,13 @@ async function loadGalaxy() {
         applyKgConfig();
     } catch(e) {
         console.error('Load KG failed:', e);
+        setEventStatus('error', '知识星海加载失败');
+        renderEventWarnings([{ stage: 'kg_full', reason: e?.message || 'load failed' }]);
         showLoading('知识星海加载失败');
         setTimeout(hideLoading, 1400);
         return;
     }
+    setEventStatus('ok', '图谱视图已更新');
     hideLoading();
 }
 
@@ -1264,30 +1272,125 @@ function applyKgConfig() {
         .map(e => ({ ...e, id: e.id, source: e.s, target: e.t, label: e.l, weight: e.w, layer: normalizeEdgeLayer(e.layer), kind: e.kind, editable: e.editable }));
 
     renderGraph(nodes, edges, { layout: 'galaxy' });
+    updateRuntimeConfigStatus();
     const status = document.getElementById('cfg-status');
     if (status) status.textContent = `显示 ${nodes.length} 实体 / ${edges.length} 关系（总 ${_kgFullEdges.length} 条）`;
 }
 
 // ─── Query ───
+function applyQueryPreset(preset) {
+    const stageMap = {
+        baseline: { epa: false, pyramid: false, spike: false, geodesic: false },
+        spike: { epa: false, pyramid: false, spike: true, geodesic: false },
+        pyramid: { epa: true, pyramid: true, spike: true, geodesic: false },
+        full: { epa: true, pyramid: true, spike: true, geodesic: true },
+        ablation: { epa: true, pyramid: true, spike: true, geodesic: true },
+    };
+    const stages = stageMap[preset] || stageMap.full;
+    const bind = (id, value) => {
+        const el = document.getElementById(id);
+        if (el) el.checked = value;
+    };
+    bind('query-stage-epa', stages.epa);
+    bind('query-stage-pyramid', stages.pyramid);
+    bind('query-stage-spike', stages.spike);
+    bind('query-stage-geodesic', stages.geodesic);
+    updateRuntimeConfigStatus();
+}
+
+function readQueryConfig() {
+    const boolInput = (id, fallback=true) => {
+        const el = document.getElementById(id);
+        return el ? Boolean(el.checked) : fallback;
+    };
+    const numberInput = (id, fallback, min, max) => {
+        const raw = Number(document.getElementById(id)?.value ?? fallback);
+        const value = Number.isFinite(raw) ? raw : fallback;
+        return Math.max(min, Math.min(max, value));
+    };
+    const modePreset = document.getElementById('query-mode-preset')?.value || 'full';
+    const sourceFilter = String(document.getElementById('query-source-filter')?.value || '').trim();
+    return {
+        modePreset,
+        sourceFilter,
+        debug: boolInput('query-debug-toggle', true),
+        topK: numberInput('query-top-k', 12, 1, 50),
+        stages: {
+            epa: boolInput('query-stage-epa', true),
+            pyramid: boolInput('query-stage-pyramid', true),
+            spike: boolInput('query-stage-spike', true),
+            geodesic: boolInput('query-stage-geodesic', true),
+        },
+        params: {
+            pyramid_top_k: numberInput('query-pyramid-top-k', 10, 1, 30),
+            spike_max_hops: numberInput('query-spike-max-hops', 4, 1, 8),
+            geodesic_alpha: numberInput('query-geodesic-alpha', 0.3, 0, 1),
+        },
+    };
+}
+
 async function doQuery() {
     const q = document.getElementById('search-input').value.trim();
     if (!q) return;
+    setEventStatus('loading', '执行高级检索查询');
+    renderEventWarnings([]);
     showLoading('正在语义检索...');
     try {
+        const queryConfig = readQueryConfig();
+        updateRuntimeConfigStatus();
         const res = await fetch('/api/query', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: q, top_k: 12, enable_spike: true, enable_pyramid: false, enable_epa: false, enable_geodesic: false }),
+            body: JSON.stringify({
+                text: q,
+                top_k: queryConfig.topK,
+                mode: queryConfig.modePreset,
+                source_filter: queryConfig.sourceFilter,
+                debug: queryConfig.debug,
+                stages: queryConfig.stages,
+                params: queryConfig.params,
+            }),
         });
         const data = await res.json();
         if (data.results && data.results.length) {
             const nodes = [{ id: 'query-source', name: q, type: 'source', degree: data.results.length, isSource: true }];
             const edges = [];
+            const debug = data.debug || {};
+            const highlights = debug.highlights || {};
+            const stageHighlightNodes = [];
+            const stageHighlightEdges = [];
+            const stageHighlightNodeIds = new Set();
+            const addStageTagNode = (stageKey, label, tag, type='keyword') => {
+                const tagId = tag && typeof tag === 'object' ? tag.tag_id : tag;
+                if (tagId === undefined || tagId === null || tagId === '') return;
+                const nodeId = `${stageKey}-${String(tagId)}`;
+                if (!stageHighlightNodeIds.has(nodeId)) {
+                    stageHighlightNodeIds.add(nodeId);
+                    stageHighlightNodes.push({
+                        id: nodeId,
+                        name: `${label}: ${String(tagId)}`,
+                        type,
+                        degree: Math.max(1, Math.round((tag?.energy || tag?.weight || tag?.similarity || 0.5) * 10)),
+                        source_stage: stageKey,
+                        stage_label: label,
+                        raw: tag,
+                    });
+                }
+                stageHighlightEdges.push({ source: 'query-source', target: nodeId, label, weight: Math.max(0.25, tag?.energy || tag?.weight || tag?.similarity || 0.35) });
+            };
+            (highlights.pyramid_tags || []).forEach(tag => addStageTagNode('pyramid', '残差金字塔', tag, 'keyword'));
+            (highlights.seed_tags || []).forEach(tag => addStageTagNode('spike-seed', '脉冲种子', tag, 'topic'));
+            (highlights.emergent_tags || []).forEach(tag => addStageTagNode('spike-emergent', '脉冲涌现', tag, 'community'));
             data.results.forEach((m, i) => {
                 const id = `mem-${m.id || i}`;
                 nodes.push({ id, name: `${m.sender_name || '未知'}: ${(m.content || '').slice(0, 18)}`, type: 'memory', degree: Math.max(1, Math.round((m.score || 0.2) * 10)), content: m.content, sender: m.sender_name, ts: m.timestamp, score: m.score });
                 edges.push({ source: 'query-source', target: id, label: '联想', weight: Math.max(0.3, m.score || 0.3) });
             });
+            (highlights.geodesic_memory_ids || []).forEach(memId => {
+                stageHighlightEdges.push({ source: 'query-source', target: `mem-${memId}`, label: '测地线重排', weight: 0.75 });
+            });
+            nodes.push(...stageHighlightNodes);
+            edges.push(...stageHighlightEdges);
             renderGraph(nodes, edges, { layout: 'query' });
             showQueryDetail(q, data);
         } else {
@@ -1295,7 +1398,11 @@ async function doQuery() {
             setTimeout(hideLoading, 1500);
             return;
         }
-    } catch(e) { console.error('Query failed:', e); }
+    } catch(e) {
+        console.error('Query failed:', e);
+        setEventStatus('error', '高级检索查询失败');
+        renderEventWarnings([{ stage: 'query', reason: e?.message || 'fetch failed' }]);
+    }
     hideLoading();
 }
 
@@ -1305,7 +1412,51 @@ function showQueryDetail(q, data) {
     document.getElementById('detail-meta').innerHTML = `<span class="text-purple-300">${data.results.length} 条相关记忆</span> · ${data.timing?.total_ms || '?'}ms`;
     document.getElementById('detail-neighbor-list').innerHTML = '';
     const memList = document.getElementById('detail-memory-list');
-    memList.innerHTML = data.results.map(m => {
+    const stageDebug = data.debug || {};
+    const stageCards = [
+        ['epa', 'EPA'],
+        ['pyramid', '残差金字塔'],
+        ['spike', '脉冲传播'],
+        ['geodesic', '测地线重排'],
+    ].map(([key, label]) => {
+        const stage = stageDebug[key] || {};
+        const enabled = stage.enabled !== false;
+        const available = stage.available === true;
+        const badge = !enabled ? '关闭' : available ? '可用' : '降级';
+        const reason = stage.reason || stage.error || '';
+        return `<div class="rounded-lg border border-white/5 bg-white/[.03] p-2">
+            <div class="flex items-center justify-between gap-2">
+                <span class="text-[10px] font-medium text-slate-200">${label}</span>
+                <span class="rounded-full border border-white/10 px-1.5 py-0.5 text-[9px] ${available ? 'text-emerald-300' : enabled ? 'text-amber-300' : 'text-slate-500'}">${badge}</span>
+            </div>
+            <div class="mt-1 text-[9px] text-slate-500">${escapeHtml(reason || `available=${available}`)}</div>
+        </div>`;
+    }).join('');
+    const warnings = Array.isArray(stageDebug.warnings) ? stageDebug.warnings : [];
+    renderEventWarnings(stageDebug.warnings);
+    setEventStatus(warnings.length ? 'degraded' : 'ok', warnings.length ? '查询完成：存在降级阶段' : '查询完成：高级检索链路正常');
+    const warningHtml = warnings.length ? `<div class="mt-2 text-[10px] text-amber-300">${warnings.map(w => escapeHtml(`${w.stage || 'stage'}: ${w.reason || ''}`)).join(' · ')}</div>` : '';
+    const shortJson = (value, max=180) => escapeHtml(JSON.stringify(value ?? [], null, 0).slice(0, max));
+    const stageTabs = `<div class="mt-3 grid grid-cols-1 gap-2 text-[9px] text-slate-400">
+        <div class="rounded-lg bg-white/[.025] border border-white/5 p-2"><span class="text-purple-200 font-medium">总览</span> · stages=${escapeHtml(Object.keys(stageDebug.query?.stages || {}).filter(k => stageDebug.query.stages[k]).join('/') || 'vector')}</div>
+        <div class="rounded-lg bg-white/[.025] border border-white/5 p-2"><span class="text-purple-200 font-medium">EPA</span> · logic_depth=${escapeHtml(stageDebug.epa?.logic_depth ?? '-')} · entropy=${escapeHtml(stageDebug.epa?.entropy ?? '-')} · dominant_axis=${escapeHtml(stageDebug.epa?.dominant_axis ?? '-')}</div>
+        <div class="rounded-lg bg-white/[.025] border border-white/5 p-2"><span class="text-purple-200 font-medium">残差金字塔</span> · coverage=${escapeHtml(stageDebug.pyramid?.coverage ?? '-')} · levels=${shortJson(stageDebug.pyramid?.levels, 140)}</div>
+        <div class="rounded-lg bg-white/[.025] border border-white/5 p-2"><span class="text-purple-200 font-medium">脉冲传播</span> · seed=${shortJson(stageDebug.spike?.seed_tags, 120)} · activated=${shortJson(stageDebug.spike?.activated_tags, 120)} · energy_field_top=${shortJson(stageDebug.spike?.energy_field_top, 120)}</div>
+        <div class="rounded-lg bg-white/[.025] border border-white/5 p-2"><span class="text-purple-200 font-medium">向量召回</span> · used_vector=${escapeHtml(stageDebug.vector_search?.used_vector || 'raw')} · top_candidates=${shortJson(stageDebug.vector_search?.top_candidates, 140)}</div>
+        <div class="rounded-lg bg-white/[.025] border border-white/5 p-2"><span class="text-purple-200 font-medium">测地线</span> · mode=${escapeHtml(stageDebug.geodesic?.mode || stageDebug.geodesic?.reason || '-')} · reranked=${shortJson(stageDebug.geodesic?.reranked, 140)}</div>
+        <div class="rounded-lg bg-white/[.025] border border-white/5 p-2"><span class="text-purple-200 font-medium">最终结果</span> · score_breakdown=${shortJson(stageDebug.final?.score_breakdown, 160)}</div>
+        <div class="rounded-lg bg-white/[.025] border border-white/5 p-2"><span class="text-amber-200 font-medium">Warning</span> · ${shortJson(warnings, 160)}</div>
+    </div>`;
+    const stagePanel = `<div class="mb-3 rounded-xl border border-purple-500/20 bg-purple-500/[.04] p-3">
+        <div class="mb-2 flex items-center justify-between gap-2">
+            <span class="text-xs font-semibold text-purple-200">高级检索阶段</span>
+            <span class="text-[10px] text-slate-500">${escapeHtml(String(data.timing?.total_ms || '?'))}ms</span>
+        </div>
+        <div class="grid grid-cols-2 gap-2">${stageCards}</div>
+        ${stageTabs}
+        ${warningHtml}
+    </div>`;
+    memList.innerHTML = stagePanel + data.results.map(m => {
         const time = m.timestamp ? new Date(m.timestamp * 1000).toLocaleString('zh-CN', {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
         const score = m.score ? `<span class="text-purple-400/70 text-[9px]">${(m.score*100).toFixed(0)}%</span>` : '';
         return `<div class="p-2.5 rounded-lg bg-white/[.03] border border-white/5">
@@ -1887,6 +2038,41 @@ function updateStats() {
     badge.innerHTML = `<span class="text-purple-300 font-semibold">${graphState.nodes.size}</span> 节点 · <span class="text-blue-300 font-semibold">${graphState.edges.size}</span> 连线`;
 }
 
+function updateRuntimeConfigStatus() {
+    const viewEl = document.getElementById('runtime-status-view');
+    const queryEl = document.getElementById('runtime-status-query');
+    if (viewEl) viewEl.textContent = currentView || 'galaxy';
+    if (queryEl) {
+        const queryConfig = typeof readQueryConfig === 'function' ? readQueryConfig() : { stages: {} };
+        const labels = [];
+        if (queryConfig.stages?.epa) labels.push('EPA');
+        if (queryConfig.stages?.pyramid) labels.push('Pyramid');
+        if (queryConfig.stages?.spike) labels.push('Spike');
+        if (queryConfig.stages?.geodesic) labels.push('Geo');
+        queryEl.textContent = labels.length ? labels.join('/') : 'Vector Only';
+    }
+}
+
+function setEventStatus(status, action='') {
+    const statusEl = document.getElementById('event-status-current');
+    const actionEl = document.getElementById('event-status-last-action');
+    if (statusEl) {
+        statusEl.textContent = status || 'idle';
+        statusEl.className = `rounded-full border px-2 py-0.5 text-[9px] ${status === 'error' ? 'border-red-400/30 text-red-300' : status === 'degraded' ? 'border-amber-400/30 text-amber-300' : 'border-blue-400/20 text-blue-200/70'}`;
+    }
+    if (actionEl && action) actionEl.textContent = action;
+}
+
+function renderEventWarnings(warnings=[]) {
+    const list = document.getElementById('event-status-warning-list');
+    if (!list) return;
+    if (!Array.isArray(warnings) || !warnings.length) {
+        list.textContent = '';
+        return;
+    }
+    list.innerHTML = warnings.slice(0, 4).map(w => `<div>⚠ ${escapeHtml(`${w.stage || 'stage'}: ${w.reason || ''}`)}</div>`).join('');
+}
+
 function showLoading(text) {
     const el = document.getElementById('loading');
     const textEl = document.getElementById('loading-text');
@@ -1906,6 +2092,8 @@ function hideLoading() {
 // ─── View Switching ───
 function switchView(view) {
     currentView = view;
+    updateRuntimeConfigStatus();
+    setEventStatus('idle', `切换视图：${view || 'galaxy'}`);
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.view === view));
     document.getElementById('search-box').style.display = view === 'query' ? 'flex' : 'none';
     document.getElementById('path-input').style.display = view === 'path' ? 'flex' : 'none';

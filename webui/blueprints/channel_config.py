@@ -63,6 +63,33 @@ def _plugin_config(container_or_config: Any) -> Mapping[str, Any]:
     return getattr(container_or_config, "plugin_config", {}) or {}
 
 
+def _trace_store_from_container(container: Any) -> Any:
+    direct = getattr(container, "injection_trace_store", None)
+    if direct:
+        return direct
+    db = getattr(container, "db", None)
+    if not db:
+        return None
+    if getattr(db, "closed", False):
+        try:
+            db.reopen()
+        except Exception:
+            return None
+    conn = getattr(db, "conn", None)
+    if not conn:
+        return None
+    try:
+        try:
+            from services.injection.trace_store import InjectionTraceStore
+        except Exception:  # pragma: no cover - AstrBot 包导入路径
+            from ...services.injection.trace_store import InjectionTraceStore
+        store = InjectionTraceStore(conn)
+        store.ensure_schema()
+        return store
+    except Exception:
+        return None
+
+
 def _default_config(plugin_config: Mapping[str, Any]):
     mode = resolve_runtime_mode(plugin_config).mode
     return build_default_channel_config(
@@ -72,15 +99,62 @@ def _default_config(plugin_config: Mapping[str, Any]):
     )
 
 
-def build_channel_config_payload(plugin_config: Mapping[str, Any] | None, current_config: Any = None) -> dict[str, Any]:
+def _latest_channel_runtime_stats(trace_store: Any = None) -> dict[str, dict[str, Any]]:
+    conn = getattr(trace_store, "conn", None)
+    if not conn:
+        return {}
+    try:
+        rows = conn.execute(
+            """SELECT c.channel, c.status, c.latency_ms, c.item_count
+               FROM injection_trace_channels c
+               JOIN injection_traces t ON t.trace_id = c.trace_id
+               ORDER BY t.timestamp DESC, c.id DESC"""
+        ).fetchall()
+    except Exception:
+        return {}
+    stats: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        name = str(row[0] or "")
+        if not name or name in stats:
+            continue
+        try:
+            latency_ms = int(round(float(row[2] or 0)))
+        except (TypeError, ValueError):
+            latency_ms = 0
+        try:
+            hit_count = int(row[3] or 0)
+        except (TypeError, ValueError):
+            hit_count = 0
+        stats[name] = {
+            "status": str(row[1] or "unknown"),
+            "last_latency_ms": max(0, latency_ms),
+            "last_hit_count": max(0, hit_count),
+        }
+    return stats
+
+
+def _attach_runtime_status_defaults(config_payload: dict[str, Any], trace_store: Any = None) -> dict[str, Any]:
+    stats = _latest_channel_runtime_stats(trace_store)
+    for name, channel in (config_payload.get("channels") or {}).items():
+        if not isinstance(channel, dict):
+            continue
+        channel.setdefault("status", "unknown")
+        channel.setdefault("last_latency_ms", 0)
+        channel.setdefault("last_hit_count", 0)
+        channel.update(stats.get(name, {}))
+    return config_payload
+
+
+def build_channel_config_payload(plugin_config: Mapping[str, Any] | None, current_config: Any = None, *, trace_store: Any = None) -> dict[str, Any]:
     """构造 WebUI 通道配置页面所需 payload。"""
     plugin_config = plugin_config or {}
     defaults = _default_config(plugin_config)
     current = current_config or build_channel_config_from_plugin_config(plugin_config)
     runtime = resolve_runtime_mode(plugin_config).to_web_payload()
+    current_payload = _attach_runtime_status_defaults(current.to_dict(), trace_store)
     return {
         "runtime": runtime,
-        "current": current.to_dict(),
+        "current": current_payload,
         "defaults": defaults.to_dict(),
         "overrides": plugin_config.get("Channel_Settings", {}) or {},
         "diff": channel_config_diff(defaults, current),
@@ -178,7 +252,11 @@ def reset_channel_config_to_defaults(container: Any) -> dict[str, Any]:
 @require_auth
 async def get_channel_config():
     c = get_container()
-    return jsonify(build_channel_config_payload(_plugin_config(c), getattr(c, "injection_channel_config", None)))
+    return jsonify(build_channel_config_payload(
+        _plugin_config(c),
+        getattr(c, "injection_channel_config", None),
+        trace_store=_trace_store_from_container(c),
+    ))
 
 
 @channel_config_bp.route("/config/channels/validate", methods=["POST"])
