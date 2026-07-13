@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import time
 
 from quart import Blueprint, jsonify, request, Response
 
 from ..container import get_container
 from ..middleware.auth import require_auth
+from ..tag_execution import normalize_tag_execution_options, tag_memory_batch
 
 tags_bp = Blueprint("tags", __name__, url_prefix="/api/tags")
 
@@ -111,86 +113,103 @@ async def batch_delete_tags():
     return jsonify({"deleted": len(tag_ids)})
 
 
-@tags_bp.route("/quality", methods=["GET"])
-@require_auth
-async def tag_quality():
-    """Tag 质量概览：总数 + 覆盖率（有 tag 的记忆占比）。"""
-    c = get_container()
-    total_tags = c.db.conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0]
-    total_mem = c.db.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
-    tagged_mem = c.db.conn.execute(
-        "SELECT COUNT(DISTINCT memory_id) FROM memory_tags"
+def build_tag_quality_payload(conn) -> dict:
+    """构造 Tag 质量概览，所有 memory 口径都必须以真实 memories 表为准。
+
+    历史清理/删除可能留下 memory_tags 孤儿行；这些行不能算作“已标记记忆”，
+    否则前端待处理数量会被严重压低。
+    """
+    total_tags = conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0]
+    total_mem = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+    tagged_mem = conn.execute(
+        """SELECT COUNT(DISTINCT m.id)
+           FROM memories m
+           JOIN memory_tags mt ON mt.memory_id = m.id"""
+    ).fetchone()[0]
+    untagged_mem = conn.execute(
+        """SELECT COUNT(*) FROM memories m
+           WHERE NOT EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = m.id)"""
+    ).fetchone()[0]
+    extractable_untagged = conn.execute(
+        """SELECT COUNT(*) FROM memories m
+           WHERE NOT EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = m.id)
+           AND LENGTH(COALESCE(m.content, '')) >= 10"""
+    ).fetchone()[0]
+    skipped_short = conn.execute(
+        """SELECT COUNT(*) FROM memories m
+           WHERE NOT EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = m.id)
+           AND LENGTH(COALESCE(m.content, '')) < 10"""
+    ).fetchone()[0]
+    orphan_refs = conn.execute(
+        """SELECT COUNT(DISTINCT mt.memory_id)
+           FROM memory_tags mt
+           LEFT JOIN memories m ON m.id = mt.memory_id
+           WHERE m.id IS NULL"""
     ).fetchone()[0]
     coverage = (tagged_mem / total_mem) if total_mem else 0.0
-    return jsonify({
+    return {
         "total_tags": total_tags,
         "total_memories": total_mem,
         "tagged_memories": tagged_mem,
+        "untagged_memories": untagged_mem,
+        "extractable_untagged_memories": extractable_untagged,
+        "skipped_short_untagged_memories": skipped_short,
+        "orphan_memory_tag_refs": orphan_refs,
         "coverage": round(coverage, 4),
-    })
+    }
 
 
-@tags_bp.route("/audit/trigger", methods=["GET"])
+@tags_bp.route("/quality", methods=["GET"])
+@require_auth
+async def tag_quality():
+    """Tag 质量概览：总数 + 覆盖率（有 tag 的真实记忆占比）。"""
+    c = get_container()
+    return jsonify(build_tag_quality_payload(c.db.conn))
+
+
+@tags_bp.route("/audit/trigger", methods=["GET", "POST"])
 @require_auth
 async def trigger_audit():
-    """触发 Tag 审计（SSE 流）。strategy: mixed/lowconf/orphan/duplicate；total_count 上限。"""
+    """Queue Tag audit as a durable job and return its pollable job id."""
     c = get_container()
     strategy = request.args.get("strategy", "mixed")
-    total_count = int(request.args.get("total_count", 500))
-    total_count = max(10, min(2000, total_count))
+    if strategy not in {"mixed", "low_quality", "high_freq"}:
+        return jsonify({"ok": False, "error": "invalid_audit_strategy"}), 400
+    total_count = max(10, min(2000, int(request.args.get("total_count", 500))))
+    provider_id = str((c.plugin_config or {}).get("tag_llm_provider_id", ""))
+    if not provider_id:
+        return jsonify({"ok": False, "error": "tag_audit_provider_not_configured"}), 409
+    jobs = getattr(c, "durable_jobs", None)
+    if jobs is None:
+        return jsonify({"ok": False, "error": "durable_jobs_unavailable"}), 503
 
-    # TagAuditor 审计需 LLM：从 container 取 context + provider_id
-    context = None
-    provider_id = ""
-    try:
-        context = c.embedding_service.context if c.embedding_service else None
-        provider_id = (c.plugin_config or {}).get("tag_llm_provider_id", "")
-    except Exception:
-        pass
-
-    async def stream():
-        from ...services.tag_auditor import TagAuditor
-        yield f"data: {json.dumps({'progress': 0, 'message': '正在准备审计...'}, ensure_ascii=False)}\n\n"
-        if not provider_id or not context:
-            yield f"data: {json.dumps({'error': '未配置 Tag LLM Provider，无法审计', 'done': True}, ensure_ascii=False)}\n\n"
-            return
-        # 校验 provider 是否真实可用（WebUI 独立线程：get_provider_by_id 可能失效，
-        # 改用 get_all_providers 遍历 meta.id 兜底）
-        try:
-            def _has_provider():
-                try:
-                    if context.get_provider_by_id(provider_id):
-                        return True
-                except Exception:
-                    pass
-                try:
-                    return any(p.meta().id == provider_id for p in context.get_all_providers())
-                except Exception:
-                    return False
-            if not _has_provider():
-                avail = []
-                try:
-                    avail = [p.meta().id for p in context.get_all_providers()][:8]
-                except Exception:
-                    pass
-                yield f"data: {json.dumps({'error': f'Provider \"{provider_id}\" 不存在，请在配置中重新选择。可用: {avail}', 'done': True}, ensure_ascii=False)}\n\n"
-                return
-        except Exception:
-            pass
-        if _import_lock.locked():
-            yield f"data: {json.dumps({'error': '另一个任务正在运行', 'done': True}, ensure_ascii=False)}\n\n"
-            return
-        auditor = TagAuditor(db=c.db, context=context, provider_id=provider_id)
-        async with _import_lock:
-            try:
-                async for event in auditor.run_audit(strategy=strategy, total_count=total_count):
-                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-            except Exception as e:
-                yield f"data: {json.dumps({'error': str(e), 'done': True}, ensure_ascii=False)}\n\n"
-                return
-        yield f"data: {json.dumps({'progress': 100, 'done': True, 'message': '审计完成'}, ensure_ascii=False)}\n\n"
-
-    return Response(stream(), content_type="text/event-stream")
+    schedule_slot = str(
+        request.args.get("schedule_slot") or f"manual-{int(time.time() // 60)}"
+    )
+    job_request = await jobs.create_request(
+        idempotency_key=f"tag-audit:{strategy}:{total_count}:{schedule_slot}",
+        kind="maintenance.tag_audit.run",
+        scope={"kind": "system_maintenance"},
+        payload={
+            "strategy": strategy,
+            "total_count": total_count,
+            "provider_id": provider_id,
+            "requested_by": "webui",
+        },
+    )
+    run = await jobs.schedule_run(
+        request_id=job_request.request_id,
+        schedule_slot=schedule_slot,
+        cursor_generation=0,
+        cursor={"phase": "queued", "processed": 0},
+    )
+    return jsonify({
+        "ok": True,
+        "accepted": True,
+        "request_id": job_request.request_id,
+        "job_id": run.run_id,
+        "status": run.status,
+    }), 202
 
 
 @tags_bp.route("/audit/suggestions", methods=["GET"])
@@ -210,20 +229,56 @@ async def get_audit_suggestions():
     return jsonify({"suggestions": suggestions, "counts": counts})
 
 
+async def _resolve_audit_suggestion(c, suggestion_id: int, decision: str) -> dict:
+    gateway = getattr(c, "write_gateway", None)
+    if gateway is None:
+        return {"error": "write_gateway_unavailable"}
+
+    def _resolve(connection):
+        row = connection.execute(
+            "SELECT id, status FROM tag_audit_suggestions WHERE id=?",
+            (int(suggestion_id),),
+        ).fetchone()
+        if row is None:
+            return {"error": f"Suggestion {suggestion_id} not found"}
+        if row[1] != "pending":
+            return {"error": f"Suggestion already {row[1]}"}
+        if decision == "approve":
+            return {
+                "error": "scope_migration_required",
+                "message": "Legacy unscoped Tag audit suggestions cannot be applied to scoped_tags.",
+            }
+        connection.execute(
+            """UPDATE tag_audit_suggestions
+               SET status='rejected', resolved_at=?
+               WHERE id=? AND status='pending'""",
+            (time.time(), int(suggestion_id)),
+        )
+        return {
+            "suggestion_id": int(suggestion_id),
+            "decision": "reject",
+            "status": "rejected",
+        }
+
+    return await gateway.coordinator.transaction(
+        _resolve,
+        actor="webui.tag_audit.resolve",
+    )
+
+
 @tags_bp.route("/audit/resolve", methods=["POST"])
 @require_auth
 async def resolve_audit_suggestion():
     """批准或拒绝审计建议。"""
     c = get_container()
-    from ...services.tag_auditor import TagAuditor
     body = await request.get_json(silent=True) or {}
     suggestion_id = body.get("suggestion_id")
     decision = body.get("decision")
     if not suggestion_id or decision not in ("approve", "reject"):
         return jsonify({"error": "suggestion_id and decision (approve/reject) required"}), 400
-    auditor = TagAuditor(db=c.db)
-    result = auditor.resolve_suggestion(suggestion_id, decision)
-    return jsonify(result)
+    result = await _resolve_audit_suggestion(c, int(suggestion_id), decision)
+    status = 409 if result.get("error") == "scope_migration_required" else 200
+    return jsonify(result), status
 
 
 @tags_bp.route("/audit/resolve-batch", methods=["POST"])
@@ -231,7 +286,6 @@ async def resolve_audit_suggestion():
 async def resolve_audit_batch():
     """批量处理审计建议。"""
     c = get_container()
-    from ...services.tag_auditor import TagAuditor
     body = await request.get_json(silent=True) or {}
     items = body.get("items", [])
     if not items:
@@ -242,70 +296,268 @@ async def resolve_audit_batch():
     if not items:
         return jsonify({"error": "items or suggestion_ids+decision required"}), 400
 
-    auditor = TagAuditor(db=c.db)
     results = []
     for item in items:
         sid = item.get("id")
         dec = item.get("decision")
         if sid and dec in ("approve", "reject"):
-            results.append(auditor.resolve_suggestion(sid, dec))
+            results.append(await _resolve_audit_suggestion(c, int(sid), dec))
     return jsonify({"processed": len(results), "results": results})
+
+
+def _clamp_batch_size(value: object, *, default: int = 20, maximum: int = 50) -> int:
+    try:
+        size = int(value) if value is not None else default
+    except (TypeError, ValueError):
+        size = default
+    return max(1, min(maximum, size))
+
+
+def _untagged_memory_count(conn, min_length: int = 10, *, strict_scoped: bool = False) -> int:
+    if not strict_scoped:
+        return int(conn.execute(
+            """SELECT COUNT(*) FROM memories m
+               WHERE NOT EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id=m.id)
+                 AND LENGTH(COALESCE(m.content, '')) >= ?""",
+            (min_length,),
+        ).fetchone()[0])
+    return int(conn.execute(
+        """SELECT COUNT(*) FROM memories m
+           WHERE NOT EXISTS (
+               SELECT 1 FROM scoped_memory_tags smt WHERE smt.memory_id = m.id
+           )
+           AND EXISTS (
+               SELECT 1 FROM domain_outbox o
+               WHERE o.aggregate_kind='memory'
+                 AND o.aggregate_id=CAST(m.id AS TEXT)
+                 AND o.event_type='memory.created'
+           )
+           AND m.resolution_state='resolved'
+           AND COALESCE(m.quarantine, 0)=0
+           AND LENGTH(COALESCE(m.content, '')) >= ?""",
+        (min_length,),
+    ).fetchone()[0])
+
+
+def _load_untagged_memory_batch(
+    conn, limit: int, min_length: int = 10, *, strict_scoped: bool = False
+) -> list:
+    if not strict_scoped:
+        return [
+            (*row, None)
+            for row in conn.execute(
+                """SELECT m.id, m.content, m.sender_name FROM memories m
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM memory_tags mt WHERE mt.memory_id=m.id
+                   )
+                     AND LENGTH(COALESCE(m.content, '')) >= ?
+                   ORDER BY m.id DESC LIMIT ?""",
+                (min_length, limit),
+            ).fetchall()
+        ]
+    return conn.execute(
+        """SELECT m.id, m.content, m.sender_name, o.payload_json
+           FROM memories m
+           JOIN domain_outbox o
+             ON o.aggregate_kind='memory'
+            AND o.aggregate_id=CAST(m.id AS TEXT)
+            AND o.event_type='memory.created'
+           WHERE NOT EXISTS (
+               SELECT 1 FROM scoped_memory_tags smt WHERE smt.memory_id = m.id
+           )
+           AND LENGTH(COALESCE(m.content, '')) >= ?
+           AND m.resolution_state='resolved'
+           AND COALESCE(m.quarantine, 0)=0
+           ORDER BY m.id DESC LIMIT ?""",
+        (min_length, limit),
+    ).fetchall()
+
+
+async def iter_batch_extract_events(
+    c,
+    batch_size: int,
+    *,
+    tag_write_policy: str = "missing_only",
+    skip_short_min_length: int = 10,
+    runtime_budget_seconds: float = 45.0,
+    batch_timeout_seconds: float = 40.0,
+):
+    """生成单轮 Tag 提取进度事件。
+
+    注意：这是 WebUI 的一次 HTTP/SSE 请求，不是后台长任务。运行时存在约 60s 的
+    chunked 连接上限，所以这里每次只处理一批，并在安全时间窗内正常结束；前端可
+    根据 remaining/partial 继续发起下一轮，避免 ERR_INCOMPLETE_CHUNKED_ENCODING。
+    """
+    if not getattr(c, "tag_extractor", None):
+        yield {"error": "Tag extractor not configured", "done": True}
+        return
+    if tag_write_policy != "missing_only":
+        yield {"error": "全库补提取只允许 tag_write_policy=missing_only；append/replace 必须在选中范围内执行。", "done": True}
+        return
+
+    conn = c.db.conn
+    strict_scoped = getattr(c, "write_gateway", None) is not None
+    total_remaining_before = _untagged_memory_count(
+        conn, skip_short_min_length, strict_scoped=strict_scoped
+    )
+    if total_remaining_before == 0:
+        yield {
+            "progress": 1.0,
+            "processed": 0,
+            "total": 0,
+            "tagged": 0,
+            "errors": 0,
+            "remaining": 0,
+            "done": True,
+            "message": "所有可提取记忆均已有标签",
+        }
+        return
+
+    rows = _load_untagged_memory_batch(
+        conn, batch_size, skip_short_min_length, strict_scoped=strict_scoped
+    )
+    selected = len(rows)
+    yield {
+        "progress": 0,
+        "processed": 0,
+        "total": total_remaining_before,
+        "selected": selected,
+        "tagged": 0,
+        "errors": 0,
+        "remaining": total_remaining_before,
+        "message": f"本轮将处理 {selected} 条，当前剩余 {total_remaining_before} 条未标注记忆",
+    }
+
+    processed = tagged = errors = 0
+    started = time.monotonic()
+    messages = []
+    for mem_id, content, sender_name, payload_json in rows:
+        try:
+            scope = json.loads(payload_json).get("scope")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            scope = None
+        if strict_scoped and not isinstance(scope, dict):
+            errors += 1
+            continue
+        message = {
+            "id": mem_id,
+            "content": (content or "")[:800],
+            "sender": sender_name or "",
+        }
+        if isinstance(scope, dict):
+            message["scope"] = scope
+        messages.append(message)
+
+    if messages:
+        try:
+            remaining_budget = max(1.0, runtime_budget_seconds - (time.monotonic() - started))
+            timeout = max(1.0, min(batch_timeout_seconds, remaining_budget))
+            result = await asyncio.wait_for(
+                tag_memory_batch(
+                    c.db,
+                    getattr(c, "embedding_service", None),
+                    c.tag_extractor,
+                    messages,
+                    tag_batch_size=batch_size,
+                    tag_write_policy=tag_write_policy,
+                    skip_short_min_length=skip_short_min_length,
+                    write_gateway=getattr(c, "write_gateway", None),
+                ),
+                timeout=timeout,
+            )
+            processed = int(result.get("processed", 0))
+            tagged = int(result.get("tagged", 0))
+            errors = int(result.get("errors", 0))
+        except asyncio.TimeoutError:
+            yield {
+                "error": f"本轮 Tag LLM 提取超过 {int(batch_timeout_seconds)} 秒，已安全停止。请调小 tag_batch_size 后重试。",
+                "progress": round(processed / total_remaining_before, 3),
+                "processed": processed,
+                "total": total_remaining_before,
+                "tagged": tagged,
+                "errors": selected,
+                "remaining": total_remaining_before,
+                "done": True,
+            }
+            return
+        except Exception as exc:
+            yield {
+                "error": f"Tag LLM 批量提取失败: {type(exc).__name__}: {exc}",
+                "progress": round(processed / total_remaining_before, 3),
+                "processed": processed,
+                "total": total_remaining_before,
+                "tagged": tagged,
+                "errors": selected,
+                "remaining": total_remaining_before,
+                "done": True,
+            }
+            return
+
+    remaining_after = _untagged_memory_count(
+        conn, skip_short_min_length, strict_scoped=strict_scoped
+    )
+    partial = remaining_after > 0
+    yield {
+        "progress": round((total_remaining_before - remaining_after) / total_remaining_before, 3) if total_remaining_before else 1.0,
+        "processed": processed,
+        "total": total_remaining_before,
+        "selected": selected,
+        "tagged": tagged,
+        "errors": errors,
+        "remaining": remaining_after,
+        "partial": partial,
+        "done": True,
+        "message": (
+            f"本轮完成：处理 {processed} 条，写入标签 {tagged} 条，剩余 {remaining_after} 条。"
+            if partial else
+            f"本轮完成：处理 {processed} 条，写入标签 {tagged} 条，未标注队列已清空。"
+        ),
+    }
 
 
 @tags_bp.route("/batch-extract", methods=["POST"])
 @require_auth
 async def batch_extract_tags():
-    """批量 Tag 提取（SSE 流）。"""
+    """Queue one bounded Tag backfill batch as a durable job."""
     c = get_container()
-    batch_size = int(request.args.get("batch_size", 50))
-    batch_size = max(1, min(500, batch_size))
-
-    if _import_lock.locked():
-        async def locked_msg():
-            yield f"data: {json.dumps({'error': '另一个导入/提取任务正在运行'})}\n\n"
-        return Response(locked_msg(), content_type="text/event-stream")
-
-    async def run_batch():
-        async with _import_lock:
-            if not c.tag_extractor:
-                yield f"data: {json.dumps({'error': 'Tag extractor not configured'})}\n\n"
-                return
-            rows = c.db.conn.execute(
-                """SELECT m.id, m.content, m.sender_name FROM memories m
-                   WHERE m.id NOT IN (SELECT DISTINCT memory_id FROM memory_tags)
-                   AND LENGTH(m.content) >= 10
-                   ORDER BY m.id DESC LIMIT 5000"""
-            ).fetchall()
-            total = len(rows)
-            if total == 0:
-                yield f"data: {json.dumps({'progress': 1.0, 'message': 'All memories already have tags'})}\n\n"
-                return
-            yield f"data: {json.dumps({'progress': 0, 'total': total})}\n\n"
-            processed = tagged = errors = 0
-            for i in range(0, total, batch_size):
-                batch = rows[i:i + batch_size]
-                for mem_id, content, sender_name in batch:
-                    try:
-                        tags = await c.tag_extractor.extract_tags(content[:800], sender=sender_name or "")
-                        if tags:
-                            tag_names = [t["name"] for t in tags]
-                            tag_vecs = await c.embedding_service.get_embeddings(tag_names)
-                            tag_ids = []
-                            for tag_info, tag_vec in zip(tags, tag_vecs):
-                                tid = c.db.add_tag_extended(name=tag_info["name"], tag_type=tag_info.get("type", "keyword"), vector=tag_vec, confidence=tag_info.get("confidence", 0.8))
-                                tag_ids.append(tid)
-                            for pos, (tid, tag_info) in enumerate(zip(tag_ids, tags), 1):
-                                c.db.conn.execute("INSERT OR IGNORE INTO memory_tags (memory_id, tag_id, position, relevance) VALUES (?, ?, ?, ?)", (mem_id, tid, pos, tag_info.get("confidence", 0.8)))
-                            c.db.conn.commit()
-                            tagged += 1
-                    except Exception:
-                        errors += 1
-                    processed += 1
-                yield f"data: {json.dumps({'progress': round(processed/total, 3), 'processed': processed, 'total': total, 'tagged': tagged, 'errors': errors})}\n\n"
-                await asyncio.sleep(0.1)
-            yield f"data: {json.dumps({'progress': 1.0, 'processed': total, 'tagged': tagged, 'errors': errors})}\n\n"
-
-    return Response(run_batch(), content_type="text/event-stream")
+    try:
+        tag_options = normalize_tag_execution_options(request.args)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    if tag_options["tag_write_policy"] != "missing_only":
+        return jsonify({
+            "ok": False,
+            "error": "durable tag backfill only supports missing_only",
+        }), 400
+    jobs = getattr(c, "durable_jobs", None)
+    if jobs is None:
+        return jsonify({"ok": False, "error": "durable_jobs_unavailable"}), 503
+    schedule_slot = str(
+        request.args.get("schedule_slot") or f"manual-{int(time.time() // 60)}"
+    )
+    request_record = await jobs.create_request(
+        idempotency_key=f"tag-backfill:{schedule_slot}:{tag_options['tag_batch_size']}",
+        kind="maintenance.tag_backfill.run",
+        scope={"kind": "system_maintenance"},
+        payload={
+            "batch_size": tag_options["tag_batch_size"],
+            "skip_short_min_length": tag_options["skip_short_min_length"],
+            "requested_by": "webui",
+        },
+    )
+    run = await jobs.schedule_run(
+        request_id=request_record.request_id,
+        schedule_slot=schedule_slot,
+        cursor_generation=0,
+        cursor={"phase": "queued", "after_id": 0},
+    )
+    return jsonify({
+        "ok": True,
+        "accepted": True,
+        "request_id": request_record.request_id,
+        "job_id": run.run_id,
+        "status": run.status,
+    }), 202
 
 
 _import_lock = asyncio.Lock()

@@ -111,18 +111,20 @@ class WaveMemoryImporter:
         extract_tags: bool = True,
         batch_size: int = 20,
     ) -> AsyncGenerator[str, None]:
-        """执行导入，yield SSE 事件 JSON。"""
-        if source == "livingmemory":
-            async for event in self._import_livingmemory(re_embed, extract_tags, batch_size):
-                yield event
-        elif source == "self_learning":
-            async for event in self._import_self_learning(re_embed, extract_tags, batch_size):
-                yield event
-        elif source == "angel_memory":
-            async for event in self._import_angel_memory(re_embed, extract_tags, batch_size):
-                yield event
-        else:
-            yield json.dumps({"progress": 1.0, "message": f"Unknown source: {source}"})
+        """执行导入，yield SSE 事件 JSON。
+
+        外部历史数据没有可证明的 RuntimeScope，不能在 memories v2 阶段被
+        猜测为 resolved memory。后续由 RawArtifact/durable import job 接管。
+        """
+        if source in {"livingmemory", "self_learning", "angel_memory"}:
+            yield json.dumps({
+                "progress": 1.0,
+                "status": "blocked",
+                "reason_code": "unresolved_import_not_supported",
+                "message": "该历史导入缺少可验证的 Bot 与 canonical session，已拒绝写入正式记忆。",
+            })
+            return
+        yield json.dumps({"progress": 1.0, "message": f"Unknown source: {source}"})
 
     async def _import_livingmemory(
         self, re_embed: bool, extract_tags: bool, batch_size: int
@@ -187,8 +189,7 @@ class WaveMemoryImporter:
                     importance=importance,
                 )
 
-                if vec is not None and self.memory_index:
-                    self.memory_index.add([memory_id], vec.reshape(1, -1))
+                # Derived HNSW updates are deferred to a durable rebuild/outbox consumer.
 
                 self.db.mark_imported(content_hash)
                 imported += 1
@@ -218,9 +219,7 @@ class WaveMemoryImporter:
                 "message": f"Batch {i // batch_size + 1}: processed {processed}/{total}",
             })
 
-        # 保存索引
-        if self.memory_index:
-            self.memory_index.save()
+        # Index persistence is owned by the durable maintenance/outbox pipeline.
 
         yield json.dumps({
             "progress": 1.0,
@@ -295,8 +294,7 @@ class WaveMemoryImporter:
                     importance=0.5,
                 )
 
-                if vec is not None and self.memory_index:
-                    self.memory_index.add([memory_id], vec.reshape(1, -1))
+                # Derived HNSW updates are deferred to a durable rebuild/outbox consumer.
 
                 self.db.mark_imported(content_hash)
                 imported += 1
@@ -312,8 +310,7 @@ class WaveMemoryImporter:
                 "message": f"Batch {i // batch_size + 1}: processed {processed}/{total}",
             })
 
-        if self.memory_index:
-            self.memory_index.save()
+        # Index persistence is owned by the durable maintenance/outbox pipeline.
 
         yield json.dumps({
             "progress": 1.0,
@@ -411,8 +408,7 @@ class WaveMemoryImporter:
                     sender_id="angel_memory_import", sender_name=f"[AM:{mem_type}]",
                     timestamp=time.time(), importance=min(float(strength), 1.0),
                 )
-                if vec is not None and self.memory_index:
-                    self.memory_index.add([memory_id], vec.reshape(1, -1))
+                # Derived HNSW updates are deferred to a durable rebuild/outbox consumer.
                 # 导入关联 Tag
                 tag_ids_for_record = memory_tags_map.get(rec_id, [])
                 if tag_ids_for_record:
@@ -431,7 +427,6 @@ class WaveMemoryImporter:
 
             yield json.dumps({"progress": round(processed / total, 3), "processed": processed, "total": total, "imported": imported, "skipped": skipped, "tags_imported": tags_imported, "message": f"Batch {i // batch_size + 1}: {processed}/{total} (tags: {tags_imported})"})
 
-        if self.memory_index:
-            self.memory_index.save()
+        # Index persistence is owned by the durable maintenance/outbox pipeline.
 
         yield json.dumps({"progress": 1.0, "processed": total, "total": total, "imported": imported, "skipped": skipped, "tags_imported": tags_imported, "message": f"Complete: {imported} memories + {tags_imported} tags, {skipped} skipped"})

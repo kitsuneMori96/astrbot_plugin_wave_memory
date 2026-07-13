@@ -14,6 +14,11 @@ except Exception:  # pragma: no cover - 本地单测未安装 Quart 时的轻量
                 return func
             return deco
 
+        def app_errorhandler(self, *args, **kwargs):
+            def deco(func):
+                return func
+            return deco
+
 
 pages_bp = Blueprint("pages", __name__)
 
@@ -53,3 +58,12 @@ async def explore():
 @pages_bp.route("/maintain")
 async def maintain():
     return _html_response(_STATIC_DIR / "maintain.html", "<h1>Wave Memory</h1><p>maintain.html not found</p>")
+
+
+@pages_bp.app_errorhandler(404)
+async def handle_404(err):
+    from quart import request
+    path = request.path.strip("/")
+    if path.startswith("api/") or path.startswith("static/") or path.startswith("assets/"):
+        return "Not Found", 404
+    return _html_response(_STATIC_DIR / "app" / "index.html", _legacy_index_body())

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from functools import wraps
 import re
 import time
 from pathlib import Path
@@ -13,6 +14,13 @@ from quart import Blueprint, jsonify, request
 
 from ..container import get_container
 from ..middleware.auth import require_auth
+
+try:
+    from ...domain.scope import RuntimeScope, ScopeCodec, ScopeValidationError, SessionRef
+    from ...engine.db.scoped_knowledge_repo import ScopedKnowledgeScopeError
+except ImportError:  # pragma: no cover - plugin root is sometimes imported directly
+    from domain.scope import RuntimeScope, ScopeCodec, ScopeValidationError, SessionRef
+    from engine.db.scoped_knowledge_repo import ScopedKnowledgeScopeError
 
 try:
     from ...services.jargon.holyman_assets import content_entries, is_generic_meaning
@@ -207,6 +215,80 @@ def _safe_json_list(val):
         return []
 
 
+def _scope_error(code: str, status: int):
+    return jsonify({"error": {"code": code}}), status
+
+
+def _scoped_repo(container):
+    repo = getattr(getattr(container, "db", None), "scoped_knowledge", None)
+    if repo is None:
+        raise ScopedKnowledgeScopeError("scoped_repository_unavailable")
+    return repo
+
+
+def _group_scope_from_query():
+    args = request.args
+    required = ("bot_id", "session_id", "visibility")
+    if any(args.get(field) is None for field in required):
+        raise ScopedKnowledgeScopeError("scope_required")
+    bot_id, session_id, visibility = (args.get(field) for field in required)
+    if visibility != "group":
+        raise ScopedKnowledgeScopeError("derived_scope_visibility_unsupported")
+    try:
+        platform_id, kind, conversation_id = str(session_id).split(":", 2)
+    except ValueError as exc:
+        raise ScopeValidationError("invalid_session_id", "session_id must be canonical") from exc
+    return RuntimeScope(str(bot_id), visibility, SessionRef(str(session_id), platform_id, kind, conversation_id))
+
+
+def _scope_from_envelope(body: dict) -> RuntimeScope:
+    if "scope" not in body:
+        raise ScopedKnowledgeScopeError("scope_required")
+    scope = ScopeCodec.from_dict(body["scope"])
+    if not isinstance(scope, RuntimeScope) or scope.visibility != "group":
+        raise ScopedKnowledgeScopeError("derived_scope_visibility_unsupported")
+    return scope
+
+
+def _page_from_query() -> tuple[int, int]:
+    if request.args.get("page") is None or request.args.get("page_size") is None:
+        raise ScopedKnowledgeScopeError("pagination_required")
+    try:
+        page, page_size = int(request.args["page"]), int(request.args["page_size"])
+    except (TypeError, ValueError) as exc:
+        raise ScopedKnowledgeScopeError("invalid_pagination") from exc
+    if page < 1 or page_size < 1 or page_size > 100:
+        raise ScopedKnowledgeScopeError("invalid_pagination")
+    return page, page_size
+
+
+def _scoped_page(items: list[dict], *, page: int, page_size: int) -> dict:
+    start = (page - 1) * page_size
+    return {
+        "items": items[start:start + page_size],
+        "page": {
+            "number": page,
+            "page_size": page_size,
+            "total": len(items),
+            "total_status": "exact",
+            "has_next": start + page_size < len(items),
+        },
+    }
+
+
+def _scope_failure(exc: Exception):
+    code = getattr(exc, "reason_code", None) or getattr(exc, "code", None) or "invalid_scope"
+    return _scope_error(str(code), 400 if code in {"scope_required", "pagination_required"} else 422)
+
+
+def _legacy_mutation_disabled(handler):
+    """Legacy Jargon/Catalog rows stay auditable but cannot be mutated by formal routes."""
+    @wraps(handler)
+    async def reject(*args, **kwargs):
+        return _scope_error("legacy_mutation_disabled", 410)
+    return reject
+
+
 def _normalize_holyman_corpus(corpus) -> list[dict]:
     """Normalize raw Holyman corpus into read-only display cards."""
     normalized: list[dict] = []
@@ -255,7 +337,26 @@ def _clamp_int(val, default, min_value=0, max_value=50):
 @jargon_bp.route("/", methods=["GET"])
 @require_auth
 async def list_jargon():
-    """列出黑话（支持 group_id / status 筛选，支持内容搜索）。"""
+    """正式 scoped 黑话列表；每次请求必须携带完整 Scope 与分页。"""
+    try:
+        scope = _group_scope_from_query()
+        page, page_size = _page_from_query()
+        repo = _scoped_repo(get_container())
+        rows = repo.list_scoped_jargon(scope, status=request.args.get("status"), limit=page * page_size + 1)
+        search = (request.args.get("search") or "").strip()
+        if search:
+            rows = [row for row in rows if search in row.get("word", "") or search in row.get("meaning", "")]
+        payload = _scoped_page(rows, page=page, page_size=page_size)
+        payload["scope"] = ScopeCodec.to_dict(scope)
+        return jsonify(payload)
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        return _scope_failure(exc)
+
+
+@jargon_bp.route("/legacy/audit", methods=["GET"])
+@require_auth
+async def legacy_list_jargon():
+    """Legacy 审查/导出视图；只读且不属于正式 scoped API。"""
     c = get_container()
     if not _table_exists(c.db.conn, "jargon"):
         return jsonify({"items": [], "total": 0})
@@ -343,45 +444,88 @@ async def list_jargon():
         f"SELECT COUNT(*) FROM jargon WHERE {' AND '.join(pending_where)}",
         pending_params,
     ).fetchone()[0]
-    return jsonify({"items": items, "total": total, "pending_count": pending_count})
+    return jsonify({
+        "items": items,
+        "total": total,
+        "pending_count": pending_count,
+        "legacy": True,
+        "readonly": True,
+        "page": {
+            "number": offset // limit + 1,
+            "page_size": limit,
+            "total": total,
+            "total_status": "exact",
+            "has_next": offset + len(items) < total,
+        },
+    })
 
 
 @jargon_bp.route("/", methods=["POST"])
 @require_auth
 async def create_jargon():
     """手动创建黑话词条。"""
-    c = get_container()
-    if not _table_exists(c.db.conn, "jargon"):
-        return jsonify({"ok": False, "error": "jargon table not found"}), 500
+    body = await request.get_json(silent=True) or {}
 
-    body = await request.get_json() or {}
-    word = body.get("word", "").strip()
-    meaning = body.get("meaning", "").strip()
-    group_id = body.get("group_id")
-    if group_id:
-        group_id = str(group_id).strip()
+    # 兼容仍以 group_id 寻址的旧客户端；写入必须在单一事务中完成，
+    # 且响应 ID 直接取自执行 INSERT 的写游标，不能跨连接查询 last_insert_rowid()。
+    if "scope" not in body and "group_id" in body:
+        c = get_container()
+        if not _table_exists(c.db.conn, "jargon"):
+            return jsonify({"ok": False, "error": "jargon table not found"}), 500
+        word = body.get("word", "")
+        meaning = body.get("meaning", "")
+        group_id = body.get("group_id")
+        if not isinstance(word, str) or not word.strip():
+            return jsonify({"ok": False, "error": "Word is required"}), 400
+        if not isinstance(meaning, str):
+            return jsonify({"ok": False, "error": "invalid meaning"}), 400
+        word = word.strip()
+        group_id = None if group_id is None else str(group_id).strip()
+        now = int(time.time())
+        with c.db.conn.write_transaction() as tx:
+            duplicate = tx.execute(
+                "SELECT id FROM jargon WHERE word = ? AND (group_id = ? OR (group_id IS NULL AND ? IS NULL))",
+                (word, group_id, group_id),
+            ).fetchone()
+            if duplicate:
+                return jsonify({"ok": False, "error": f"Jargon '{word}' already exists"}), 400
+            cursor = tx.execute(
+                "INSERT INTO jargon (word, meaning, is_jargon, status, frequency, confidence, is_global, group_id, contexts, created_at, updated_at) VALUES (?, ?, 1, 'confirmed', 1, 1.0, ?, ?, '[]', ?, ?)",
+                (word, meaning, int(group_id is None), group_id, now, now),
+            )
+            jargon_id = cursor.lastrowid
+        if jargon_id is None:  # pragma: no cover - sqlite INSERT cursors always provide it
+            raise RuntimeError("jargon insert did not return lastrowid")
+        return jsonify({"ok": True, "id": int(jargon_id)})
 
-    if not word:
-        return jsonify({"ok": False, "error": "Word is required"}), 400
+    try:
+        scope = _scope_from_envelope(body)
+        word = body.get("word", "")
+        meaning = body.get("meaning", "")
+        if not isinstance(word, str) or not word.strip() or word != word.strip():
+            raise ScopedKnowledgeScopeError("word_required")
+        if not isinstance(meaning, str):
+            raise ScopedKnowledgeScopeError("invalid_meaning")
+        jargon_id = _scoped_repo(get_container()).upsert_scoped_jargon(
+            scope,
+            word=word,
+            meaning=meaning,
+            status=str(body.get("status") or "confirmed"),
+            is_jargon=bool(body.get("is_jargon", True)),
+            frequency=_safe_int(body.get("frequency"), 1),
+            confidence=float(body.get("confidence", 1.0)),
+            contexts=body.get("contexts") or [],
+            source_memory_id=body.get("source_memory_id"),
+            source_context=body.get("source_context"),
+            provenance=body.get("provenance") or {},
+        )
+        return jsonify({"ok": True, "id": jargon_id, "scope": ScopeCodec.to_dict(scope)})
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        return _scope_failure(exc)
 
-    # 检查是否已存在
-    dup = c.db.conn.execute("SELECT id FROM jargon WHERE word = ? AND (group_id = ? OR (group_id IS NULL AND ? IS NULL))", (word, group_id, group_id)).fetchone()
-    if dup:
-        return jsonify({"ok": False, "error": f"Jargon '{word}' already exists"}), 400
 
-    now = int(time.time())
-    is_global = 1 if not group_id else 0
-    c.db.conn.execute(
-        "INSERT INTO jargon (word, meaning, is_jargon, status, frequency, confidence, is_global, group_id, contexts, created_at, updated_at) VALUES (?, ?, 1, 'confirmed', 1, 1.0, ?, ?, '[]', ?, ?)",
-        (word, meaning, is_global, group_id, now, now)
-    )
-    c.db.conn.commit()
-    new_id = c.db.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    return jsonify({"ok": True, "id": new_id})
-
-
-@jargon_bp.route("/<int:jargon_id>/context", methods=["GET"])
-@jargon_bp.route("/<int:jargon_id>/evidence", methods=["GET"])
+@jargon_bp.route("/legacy/<int:jargon_id>/context", methods=["GET"])
+@jargon_bp.route("/legacy/<int:jargon_id>/evidence", methods=["GET"])
 @require_auth
 async def get_jargon_context(jargon_id: int):
     """按黑话锚点动态截取原始聊天上下文。"""
@@ -434,9 +578,10 @@ async def get_jargon_context(jargon_id: int):
             (jargon["group_id"], float(jargon["source_message_ts"]) - 60, float(jargon["source_message_ts"]) + 60,
              sender_id, sender_id, word_like, float(jargon["source_message_ts"])),
         ).fetchone()
-        if anchor and "source_memory_id" in cols:
-            c.db.conn.execute("UPDATE jargon SET source_memory_id = ? WHERE id = ?", (anchor[0], jargon_id))
-            c.db.conn.commit()
+        # Legacy audit lookup must stay read-only.  A recovered anchor can be
+        # returned for inspection, but cannot retroactively assign Scope or mutate
+        # the unresolved legacy row.
+        if anchor:
             jargon["source_memory_id"] = anchor[0]
 
     def _row_to_msg(r, role):
@@ -494,6 +639,7 @@ async def list_holyman_candidates():
 
 @jargon_bp.route("/holyman/candidates/<int:candidate_id>/<action>", methods=["POST"])
 @require_auth
+@_legacy_mutation_disabled
 async def review_holyman_candidate(candidate_id: int, action: str):
     c = get_container()
     if not _table_exists(c.db.conn, "jargon_candidates"):
@@ -508,6 +654,7 @@ async def review_holyman_candidate(candidate_id: int, action: str):
 
 @jargon_bp.route("/holyman/candidates/batch-review", methods=["POST"])
 @require_auth
+@_legacy_mutation_disabled
 async def batch_review_holyman_candidates():
     c = get_container()
     if not _table_exists(c.db.conn, "jargon_candidates"):
@@ -611,20 +758,13 @@ async def holyman_blocklist():
     if getattr(request, "method", "GET") == "GET":
         rows = c.db.conn.execute("SELECT id, word, reason, source, created_at FROM jargon_blocklist ORDER BY created_at DESC, word ASC").fetchall()
         return jsonify({"items": [{"id": r[0], "word": r[1], "reason": r[2], "source": r[3], "created_at": r[4]} for r in rows]})
-    body = await request.get_json(silent=True) or {}
-    word = str(body.get("word", "")).strip()
-    reason = str(body.get("reason", "manual_block") or "manual_block")
-    if not word:
-        return jsonify({"ok": False, "error": "word is required"}), 400
-    now = int(time.time())
-    c.db.conn.execute("INSERT OR REPLACE INTO jargon_blocklist (word, reason, source, created_at) VALUES (?, ?, ?, ?)", (word, reason, 'holyman_review', now))
-    c.db.conn.commit()
-    return jsonify({"ok": True, "word": word})
+    return _scope_error("legacy_mutation_disabled", 410)
 
 
 @jargon_bp.route("/<int:jargon_id>", methods=["PUT"])
 
 @require_auth
+@_legacy_mutation_disabled
 async def edit_jargon(jargon_id: int):
     """编辑黑话词条/释义。"""
     c = get_container()
@@ -656,6 +796,7 @@ async def edit_jargon(jargon_id: int):
 
 @jargon_bp.route("/<int:jargon_id>", methods=["DELETE"])
 @require_auth
+@_legacy_mutation_disabled
 async def delete_jargon(jargon_id: int):
     """删除黑话。"""
     c = get_container()
@@ -669,6 +810,7 @@ async def delete_jargon(jargon_id: int):
 @jargon_bp.route("/<int:jargon_id>/toggle_global", methods=["POST"])
 @jargon_bp.route("/<int:jargon_id>/toggle-global", methods=["POST"])
 @require_auth
+@_legacy_mutation_disabled
 async def toggle_global(jargon_id: int):
     """切换全局状态。"""
     c = get_container()
@@ -686,6 +828,7 @@ async def toggle_global(jargon_id: int):
 @jargon_bp.route("/batch-review", methods=["POST"])
 @jargon_bp.route("/batch/review", methods=["POST"])
 @require_auth
+@_legacy_mutation_disabled
 async def batch_review_jargon():
     """批量审核确认/否决黑话词条（支持 all_matching 跨页全选）。"""
     c = get_container()
@@ -755,6 +898,7 @@ async def batch_review_jargon():
 @jargon_bp.route("/batch-delete", methods=["POST"])
 @jargon_bp.route("/batch/delete", methods=["POST"])
 @require_auth
+@_legacy_mutation_disabled
 async def batch_delete_jargon():
     """批量删除黑话词条（支持 all_matching 跨页全选）。"""
     c = get_container()
@@ -1112,6 +1256,7 @@ async def get_holyman():
 
 @jargon_bp.route("/holyman/toggle", methods=["POST"])
 @require_auth
+@_legacy_mutation_disabled
 async def toggle_holyman():
     """激活或去激活预设 Holyman 词条。"""
     c = get_container()

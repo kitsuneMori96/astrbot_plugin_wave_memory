@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import time
 from datetime import datetime, timedelta
+from typing import Any, Mapping
 
 try:
     from quart import Blueprint, jsonify, request
@@ -33,13 +34,138 @@ except Exception:  # pragma: no cover - 本地单测未安装 Quart 时直接放
 system_bp = Blueprint("system", __name__, url_prefix="/api")
 
 
+_CORE_SERVICE_NAMES = {
+    "向量索引",
+    "Tag 索引",
+    "Embedding",
+    "Tag 提取",
+}
+
+_DERIVED_SERVICE_NAMES = {
+    "共现矩阵",
+    "脉冲传播",
+    "残差金字塔",
+    "测地线重排",
+    "EPA 基底",
+}
+
+_OPTIONAL_SERVICE_NAMES = {
+    "MetaThinking",
+    "做梦系统",
+    "自主学习",
+    "自省系统",
+    "记忆整合",
+    "记忆淘汰",
+    "信念引擎",
+    "关切追踪",
+    "情绪轨迹",
+    "黑话系统",
+    "风格学习",
+}
+
+
+def _service_role(name: str) -> str:
+    if name in _CORE_SERVICE_NAMES:
+        return "core"
+    if name in _DERIVED_SERVICE_NAMES:
+        return "derived"
+    if name in _OPTIONAL_SERVICE_NAMES:
+        return "optional"
+    return "core"
+
+
+def _service_severity(name: str, status: str) -> str:
+    role = _service_role(name)
+    if status == "ok":
+        return "ok"
+    if status in {"error", "timeout"}:
+        return "critical"
+    if status == "off":
+        if role == "core":
+            return "critical"
+        if role == "optional":
+            return "disabled"
+        return "degraded"
+    if status == "degraded":
+        return "degraded"
+    return "degraded"
+
+
+def refresh_dynamic_services_health(c: Any, services: list[Mapping[str, Any]] | None) -> list[dict]:
+    """用容器 live 状态覆盖启动时注册表里的异步初始化状态。"""
+    refreshed = [dict(service or {}) for service in (services or [])]
+
+    def upsert(name: str, status: str, reason: str, dependency: str = "") -> None:
+        for item in refreshed:
+            if item.get("name") == name:
+                item["status"] = status
+                item["reason"] = reason
+                if dependency:
+                    item["dependency"] = dependency
+                item["ts"] = time.time()
+                return
+        refreshed.append({"name": name, "status": status, "reason": reason, "dependency": dependency, "ts": time.time()})
+
+    epa = getattr(c, "epa", None)
+    if epa is not None:
+        initialized = bool(getattr(epa, "initialized", False))
+        min_tags = int(getattr(epa, "min_tags", 20) or 20)
+        upsert(
+            "EPA 基底",
+            "ok" if initialized else "degraded",
+            "" if initialized else f"需 ≥{min_tags} 个 tag 向量",
+            "Tag 覆盖率 > 20%",
+        )
+    return refreshed
+
+
+def classify_services_health(services: list[Mapping[str, Any]] | None) -> tuple[list[dict], dict]:
+    """给服务状态添加角色/严重度，并构造真实但不夸大的总览摘要。"""
+    annotated: list[dict] = []
+    for service in services or []:
+        item = dict(service or {})
+        name = str(item.get("name") or "未知服务")
+        status = str(item.get("status") or "unknown")
+        role = _service_role(name)
+        severity = _service_severity(name, status)
+        item["name"] = name
+        item["status"] = status
+        item["role"] = role
+        item["severity"] = severity
+        annotated.append(item)
+
+    critical_count = sum(1 for item in annotated if item.get("severity") == "critical")
+    degraded_count = sum(1 for item in annotated if item.get("severity") == "degraded")
+    optional_off_count = sum(1 for item in annotated if item.get("severity") == "disabled")
+    ok_count = sum(1 for item in annotated if item.get("severity") == "ok")
+    if critical_count > 0:
+        overall = "critical"
+        label = "异常"
+    elif degraded_count > 0 or optional_off_count > 0:
+        overall = "degraded"
+        label = "可用但降级"
+    else:
+        overall = "healthy"
+        label = "健康"
+
+    return annotated, {
+        "overall": overall,
+        "label": label,
+        "total": len(annotated),
+        "ok_count": ok_count,
+        "critical_count": critical_count,
+        "degraded_count": degraded_count,
+        "optional_off_count": optional_off_count,
+    }
+
+
 def _get_services_health(c) -> list:
     """从健康注册表获取所有服务状态（main.py 初始化时注册）。"""
     try:
         from ...utils.health_registry import get_all_services
         services = get_all_services()
         if services:
-            return services
+            return refresh_dynamic_services_health(c, services)
     except Exception:
         pass
     # fallback：如果 registry 为空,用旧逻辑
@@ -52,7 +178,24 @@ def _get_services_health(c) -> list:
     _add("向量索引", c.memory_index)
     _add("Embedding", c.embedding_service)
     _add("Tag 提取", c.tag_extractor)
-    return svcs
+    return refresh_dynamic_services_health(c, svcs)
+
+
+def count_existing_tagged_memories(conn) -> int:
+    """只统计仍存在于 memories 表中的已打 tag 记忆，排除 memory_tags 孤儿引用。"""
+    return int(conn.execute(
+        """SELECT COUNT(DISTINCT m.id)
+           FROM memories m
+           JOIN memory_tags mt ON mt.memory_id = m.id"""
+    ).fetchone()[0])
+
+
+def count_untagged_memories(conn) -> int:
+    """统计真实 memories 表中没有任何 tag 关联的记忆。"""
+    return int(conn.execute(
+        """SELECT COUNT(*) FROM memories m
+           WHERE NOT EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = m.id)"""
+    ).fetchone()[0])
 
 
 @system_bp.route("/system", methods=["GET"])
@@ -77,9 +220,7 @@ async def system_status():
     except Exception:
         pass
 
-    tagged_memories = c.db.conn.execute(
-        "SELECT COUNT(DISTINCT memory_id) FROM memory_tags"
-    ).fetchone()[0]
+    tagged_memories = count_existing_tagged_memories(c.db.conn)
 
     structured_tags = c.db.conn.execute(
         "SELECT COUNT(*) FROM tags WHERE tag_type != 'keyword'"
@@ -107,6 +248,37 @@ async def system_status():
         "SELECT nickname, interaction_count FROM user_profiles WHERE interaction_count > 0 ORDER BY interaction_count DESC LIMIT 5"
     ).fetchall()
 
+    # 获取已注册的 Bot 列表
+    registry_bots = []
+    try:
+        registry = getattr(c, "_bot_registry", {})
+        if registry:
+            for bp in registry.values():
+                registry_bots.append({
+                    "qq_id": bp.qq_id,
+                    "name": bp.name,
+                    "db_id": bp.db_id,
+                    "aliases": bp.aliases,
+                })
+    except Exception:
+        pass
+
+    untagged_count = count_untagged_memories(c.db.conn)
+    pending_fewshot = 0
+    try:
+        pending_fewshot = c.db.conn.execute("SELECT COUNT(*) FROM few_shot_examples WHERE status = 'pending'").fetchone()[0]
+    except Exception:
+        pass
+    has_errors = False
+    try:
+        from ...utils.health_registry import get_recent_errors
+        recent_errs = get_recent_errors(10)
+        has_errors = any(e.get("level") == "error" for e in recent_errs)
+    except Exception:
+        pass
+
+    services_health, services_summary = classify_services_health(_get_services_health(c))
+
     return jsonify({
         "memories": {"total": total_mem, "with_vector": with_vec, "with_tags": tagged_memories},
         "tags": {"total": total_tags, "structured": structured_tags, "type_distribution": {r[0]: r[1] for r in type_dist}},
@@ -122,7 +294,8 @@ async def system_status():
                 f"需要至少 {c.epa.min_tags} 个带向量的 tag（当前数据不足，持续聊天自动积累后就绪）" if c.epa else "EPA 模块未加载"
             ),
         },
-        "services_health": _get_services_health(c),
+        "services_health": services_health,
+        "services_summary": services_summary,
         "lifecycle": {
             "facts": facts_count,
             "persons": person_count,
@@ -131,6 +304,12 @@ async def system_status():
             "top_users": [{"name": r[0] or "?", "interactions": r[1]} for r in top_users],
             "active_moods": [{"group_id": m[0], "type": m[1], "intensity": m[2], "desc": m[3]} for m in active_moods],
         },
+        "todos": {
+            "untagged_count": untagged_count,
+            "pending_fewshot": pending_fewshot,
+            "has_errors": has_errors,
+        },
+        "registry_bots": registry_bots
     })
 
 
@@ -191,6 +370,39 @@ async def metrics():
     })
 
 
+def _metric_number(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _round_metric(value: float) -> float | int:
+    rounded = round(float(value), 2)
+    return int(rounded) if rounded.is_integer() else rounded
+
+
+def build_injection_metric_window(summary: Mapping[str, Any] | None, count: int, from_ts: float, to_ts: float) -> dict:
+    """补充时间窗口径摘要，明确 sum 是窗口累计而非单次消耗。"""
+    total_summary = (summary or {}).get("total_tokens") if isinstance(summary, Mapping) else {}
+    if not isinstance(total_summary, Mapping):
+        total_summary = {}
+    total_sum = _metric_number(total_summary.get("sum"))
+    avg_per_sample = _metric_number(total_summary.get("avg"))
+    duration_seconds = max(0.0, float(to_ts) - float(from_ts))
+    duration_days = max(duration_seconds / 86400, 1 / 86400)
+    return {
+        "sample_count": int(count or 0),
+        "duration_seconds": _round_metric(duration_seconds),
+        "duration_days": _round_metric(duration_days),
+        "total_tokens_sum": _round_metric(total_sum),
+        "avg_tokens_per_sample": _round_metric(avg_per_sample),
+        "avg_tokens_per_day": _round_metric(total_sum / duration_days),
+        "p95_tokens_per_sample": _round_metric(_metric_number(total_summary.get("p95"))),
+        "max_tokens_per_sample": _round_metric(_metric_number(total_summary.get("max"))),
+    }
+
+
 def _parse_injection_metric_range():
     """解析注入指标查询时间范围。"""
     now = time.time()
@@ -239,15 +451,18 @@ def build_injection_metrics_payload(db, stats: dict | None, *, range_key: str, f
     payload = dict(stats or {})
     try:
         persisted = db.get_injection_metrics(from_ts, to_ts, bucket_seconds)
+        summary = persisted.get("summary", {})
+        count = int(persisted.get("count", payload.get("count", 0)) or 0)
         payload.update({
             "range": range_key,
             "from": from_ts,
             "to": to_ts,
             "bucket_seconds": bucket_seconds,
-            "summary": persisted.get("summary", {}),
+            "summary": summary,
             "series": persisted.get("series", []),
             "ranking": persisted.get("ranking", []),
-            "count": persisted.get("count", payload.get("count", 0)),
+            "count": count,
+            "window": build_injection_metric_window(summary, count, from_ts, to_ts),
         })
     except Exception as e:
         payload.update({
@@ -258,6 +473,8 @@ def build_injection_metrics_payload(db, stats: dict | None, *, range_key: str, f
             "summary": {},
             "series": [],
             "ranking": [],
+            "count": int(payload.get("count", 0) or 0),
+            "window": build_injection_metric_window({}, int(payload.get("count", 0) or 0), from_ts, to_ts),
             "error": str(e),
         })
     return payload

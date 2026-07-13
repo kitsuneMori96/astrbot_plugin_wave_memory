@@ -44,7 +44,18 @@ def require_auth(f: Callable) -> Callable:
         auth_header = request.headers.get("Authorization", "")
         token = auth_header.replace("Bearer ", "").strip()
         if not token or not verify_token(token):
-            return jsonify({"detail": "Unauthorized"}), 401
+            # 学习中心及旧客户端均可读取稳定错误码；保留 detail 兼容旧前端。
+            return jsonify({
+                "error": {
+                    "code": "unauthorized",
+                    "message": "Unauthorized",
+                    "retryable": False,
+                },
+                "code": "unauthorized",
+                "message": "Unauthorized",
+                "retryable": False,
+                "detail": "Unauthorized",
+            }), 401
         return await f(*args, **kwargs)
 
     return decorated

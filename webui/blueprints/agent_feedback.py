@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 try:
-    from quart import Blueprint, jsonify
+    from quart import Blueprint, jsonify, request
 except Exception:  # pragma: no cover - 本地单测未安装 Quart 时的轻量兜底
     class Blueprint:  # type: ignore[no-redef]
         def __init__(self, *args, **kwargs): pass
@@ -16,6 +16,8 @@ except Exception:  # pragma: no cover - 本地单测未安装 Quart 时的轻量
 
     def jsonify(value=None, **kwargs):  # type: ignore[no-redef]
         return value if value is not None else kwargs
+
+    request = None  # type: ignore[assignment]
 
 try:
     from ..container import get_container
@@ -125,7 +127,29 @@ async def get_agent_feedback():
     conn = _conn_from_container()
     if not conn:
         return jsonify({"error": "agent_feedback_store_unavailable", "feedback_records": [], "config_suggestions": [], "review_candidates": [], "history": {}, "summary": {}})
-    return jsonify(build_agent_feedback_payload(conn))
+    payload = build_agent_feedback_payload(conn)
+    # 兼容期显式指定 Bot 时，将候选列表投影到学习中心新 service；配置建议
+    # 仍保持在原配置域，绝不混入 learning_promotions。
+    bot_id = str(request.args.get("bot_id") or "").strip() if request is not None else ""
+    if bot_id:
+        try:
+            from engine.db.learning_repository import LearningRepositories
+            container = get_container()
+            repositories = getattr(container, "learning_repositories", None) or LearningRepositories.from_connection(conn)
+            container.learning_repositories = repositories
+            candidates, _ = repositories.candidates.list(bot_id=bot_id, limit=100)
+            pending = [item for item in candidates if item.get("review_status") == "pending"]
+            history = [item for item in candidates if item.get("review_status") != "pending"]
+            payload["review_candidates"] = pending
+            payload["history"]["review_candidates"] = history
+            payload["summary"]["pending_candidates"] = len(pending)
+            payload["summary"]["history_items"] = len(payload["history"].get("config_suggestions", [])) + len(history)
+        except Exception:
+            # 作用域错误不回退到无 Bot 的旧全局列表，避免跨 Bot 泄漏。
+            payload["review_candidates"] = []
+            payload["history"]["review_candidates"] = []
+            payload["summary"]["pending_candidates"] = 0
+    return jsonify(payload)
 
 
 @agent_feedback_bp.route("/config-suggestions/<int:suggestion_id>/<action>", methods=["POST"])
@@ -143,9 +167,62 @@ async def update_config_suggestion(suggestion_id: int, action: str):
         return jsonify({"ok": False, "error": str(exc)}), 400
 
 
+def _learning_compat_review(candidate_id: int, action: str, bot_id: str, reviewer: str):
+    """兼容旧 Agent 路径：命中新候选时只代理 LearningReviewService。"""
+    try:
+        from engine.db.learning_repository import LearningRepositories
+        from services.learning.review import LearningReviewService
+    except Exception:  # pragma: no cover
+        from ...engine.db.learning_repository import LearningRepositories
+        from ...services.learning.review import LearningReviewService
+    container = get_container()
+    repositories = getattr(container, "learning_repositories", None)
+    if repositories is None:
+        db = getattr(container, "db", None)
+        repositories = getattr(db, "learning", None) if db is not None else None
+        if repositories is None:
+            conn = _conn_from_container()
+            if conn is not None:
+                repositories = LearningRepositories.from_connection(conn)
+                container.learning_repositories = repositories
+    if repositories is None:
+        return None
+    candidate = repositories.candidates.get(int(candidate_id), bot_id=str(bot_id or "").strip())
+    if candidate is None:
+        return None
+    review = getattr(container, "learning_review_service", None) or LearningReviewService(repositories)
+    container.learning_review_service = review
+    result = review.review(
+        int(candidate_id), bot_id=str(bot_id).strip(), action=action,
+        reviewer=str(reviewer or "legacy-agent-feedback"),
+    )
+    return result
+
+
 @agent_feedback_bp.route("/review-candidates/<int:candidate_id>/<action>", methods=["POST"])
 @require_auth
 async def update_review_candidate(candidate_id: int, action: str):
+    # 兼容期新客户端可显式携带 bot_id；未携带时继续读取旧 review_candidates。
+    body = {}
+    if request is not None:
+        try:
+            body = await request.get_json(silent=True) or {}
+        except Exception:
+            body = {}
+    bot_id = str((request.args.get("bot_id") if request is not None else None) or body.get("bot_id") or "").strip()
+    if bot_id:
+        try:
+            result = _learning_compat_review(
+                candidate_id, action, bot_id,
+                str(body.get("reviewer") or body.get("actor") or "legacy-agent-feedback"),
+            )
+            if result is not None:
+                candidate = dict(result.get("candidate") or {})
+                # 保留旧 API 的顶层候选字段，同时附带新晋升观察视图。
+                payload = {"ok": True, **candidate, "candidate": candidate, "promotions": result.get("promotions", [])}
+                return jsonify(payload)
+        except Exception as exc:
+            return jsonify({"ok": False, "error": {"code": getattr(exc, "code", "learning_review_error"), "message": str(exc)[:300], "retryable": False}}), 400
     conn = _conn_from_container()
     if not conn:
         return jsonify({"ok": False, "error": "agent_feedback_store_unavailable"}), 503

@@ -35,6 +35,10 @@ try:
     except Exception:  # pragma: no cover - 新旧版本兼容
         agent_feedback_bp = None
     try:
+        from .learning_center import learning_center_bp
+    except Exception:  # pragma: no cover - 新旧版本兼容
+        learning_center_bp = None
+    try:
         from .compatibility import compatibility_bp
     except Exception:  # pragma: no cover - 新旧版本兼容
         compatibility_bp = None
@@ -47,7 +51,7 @@ except Exception:  # pragma: no cover - 本地单测未安装 Quart 时只导入
         pass
 
     auth_bp = pages_bp = explore_bp = memories_bp = tags_bp = config_bp = system_bp = None
-    beliefs_bp = soul_bp = jargon_bp = kg_bp = injection_observatory_bp = channel_config_bp = learning_object_review_bp = agent_feedback_bp = compatibility_bp = blackbox_bp = None
+    beliefs_bp = soul_bp = jargon_bp = kg_bp = injection_observatory_bp = channel_config_bp = learning_object_review_bp = agent_feedback_bp = learning_center_bp = compatibility_bp = blackbox_bp = None
 
 
 def get_blueprints() -> List[Blueprint]:
@@ -69,6 +73,7 @@ def get_blueprints() -> List[Blueprint]:
             channel_config_bp,
             learning_object_review_bp,
             agent_feedback_bp,
+            learning_center_bp,
             compatibility_bp,
             blackbox_bp,
         ] if bp is not None

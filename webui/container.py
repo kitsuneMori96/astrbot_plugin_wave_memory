@@ -38,6 +38,9 @@ class ServiceContainer:
         self.geodesic: Any = None
         self.tag_extractor: Any = None
         self.writer: Any = None
+        self.write_gateway: Any = None
+        self.durable_jobs: Any = None
+        self.task_supervisor: Any = None
         self.jargon_service: Any = None
         self.plugin_config: dict = {}
         self.injection_channel_config: Any = None
@@ -46,6 +49,15 @@ class ServiceContainer:
         self.livingmemory_facade_enabled: bool = False
         self.livingmemory_alias_tools_registered: bool = False
         self.detected_memory_plugins: list[dict[str, Any]] = []
+
+        # ─── 学习中心服务（由 WebUI/API 按需解析，避免循环依赖） ───
+        self.learning_repositories: Any = None
+        self.learning_source_registry: Any = None
+        self.learning_job_runner: Any = None
+        self.learning_review_service: Any = None
+        self.learning_promotion_orchestrator: Any = None
+        self.learning_dedicated_review_bridge: Any = None
+        self.learning_api_idempotency: dict[tuple[str, str, str], Any] = {}
 
         # ─── 认证 ───
         self.password: str = ""
@@ -66,6 +78,9 @@ class ServiceContainer:
         geodesic=None,
         tag_extractor=None,
         writer=None,
+        write_gateway=None,
+        durable_jobs=None,
+        task_supervisor=None,
         password: str = "",
         plugin_config: dict = None,
         injection_channel_config=None,
@@ -88,6 +103,9 @@ class ServiceContainer:
         self.geodesic = geodesic
         self.tag_extractor = tag_extractor
         self.writer = writer
+        self.write_gateway = write_gateway
+        self.durable_jobs = durable_jobs
+        self.task_supervisor = task_supervisor
         self.jargon_service = None
         self.password = password
         self.plugin_config = plugin_config or {}
@@ -97,6 +115,24 @@ class ServiceContainer:
         self.livingmemory_facade_enabled = bool(livingmemory_facade if livingmemory_facade_enabled is None else livingmemory_facade_enabled)
         self.livingmemory_alias_tools_registered = bool(livingmemory_alias_tools_registered)
         self.detected_memory_plugins = list(detected_memory_plugins or [])
+
+    def configure_learning_services(
+        self,
+        *,
+        repositories: Any,
+        source_registry: Any = None,
+        job_runner: Any = None,
+        review_service: Any = None,
+        promotion_orchestrator: Any = None,
+        dedicated_review_bridge: Any = None,
+    ) -> None:
+        """注入主插件已经创建的学习服务，禁止 WebUI 重新创建空 registry。"""
+        self.learning_repositories = repositories
+        self.learning_source_registry = source_registry
+        self.learning_job_runner = job_runner
+        self.learning_review_service = review_service
+        self.learning_promotion_orchestrator = promotion_orchestrator
+        self.learning_dedicated_review_bridge = dedicated_review_bridge
 
     @classmethod
     def reset(cls) -> None:

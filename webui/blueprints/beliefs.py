@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import json
 import time
+from functools import wraps
 
 from quart import Blueprint, jsonify, request
 
 from ..container import get_container
 from ..middleware.auth import require_auth
+
+try:
+    from ...domain.scope import RuntimeScope, ScopeCodec, ScopeValidationError, SessionRef
+    from ...engine.db.scoped_knowledge_repo import ScopedKnowledgeScopeError
+except ImportError:  # pragma: no cover - plugin root may be imported directly
+    from domain.scope import RuntimeScope, ScopeCodec, ScopeValidationError, SessionRef
+    from engine.db.scoped_knowledge_repo import ScopedKnowledgeScopeError
 
 beliefs_bp = Blueprint("beliefs", __name__, url_prefix="/api/beliefs")
 
@@ -67,10 +75,112 @@ def _belief_level(strength) -> str:
     return "微弱"
 
 
-@beliefs_bp.route("/", methods=["GET"])
+def _scope_error(code: str, status: int):
+    return jsonify({"error": {"code": code}}), status
+
+
+def _scope_failure(exc: Exception):
+    code = getattr(exc, "reason_code", None) or getattr(exc, "code", None) or "invalid_scope"
+    return _scope_error(str(code), 400 if code in {"scope_required", "pagination_required"} else 422)
+
+
+def _legacy_mutation_disabled(handler):
+    """Keep unresolved legacy rows auditable but permanently non-mutable in formal APIs."""
+    @wraps(handler)
+    async def reject(*args, **kwargs):
+        return _scope_error("legacy_mutation_disabled", 410)
+    return reject
+
+
+def _scoped_repo(container):
+    repo = getattr(getattr(container, "db", None), "scoped_knowledge", None)
+    if repo is None:
+        raise ScopedKnowledgeScopeError("scoped_repository_unavailable")
+    return repo
+
+
+def _group_scope_from_query() -> RuntimeScope:
+    required = ("bot_id", "session_id", "visibility")
+    if any(request.args.get(field) is None for field in required):
+        raise ScopedKnowledgeScopeError("scope_required")
+    bot_id, session_id, visibility = (request.args.get(field) for field in required)
+    if visibility != "group":
+        raise ScopedKnowledgeScopeError("derived_scope_visibility_unsupported")
+    try:
+        platform_id, kind, conversation_id = str(session_id).split(":", 2)
+    except ValueError as exc:
+        raise ScopeValidationError("invalid_session_id", "session_id must be canonical") from exc
+    return RuntimeScope(str(bot_id), visibility, SessionRef(str(session_id), platform_id, kind, conversation_id))
+
+
+def _scope_from_envelope(body: dict) -> RuntimeScope:
+    if "scope" not in body:
+        raise ScopedKnowledgeScopeError("scope_required")
+    scope = ScopeCodec.from_dict(body["scope"])
+    if not isinstance(scope, RuntimeScope) or scope.visibility != "group":
+        raise ScopedKnowledgeScopeError("derived_scope_visibility_unsupported")
+    return scope
+
+
+def _page_from_query() -> tuple[int, int]:
+    if request.args.get("page") is None or request.args.get("page_size") is None:
+        raise ScopedKnowledgeScopeError("pagination_required")
+    try:
+        page, page_size = int(request.args["page"]), int(request.args["page_size"])
+    except (TypeError, ValueError) as exc:
+        raise ScopedKnowledgeScopeError("invalid_pagination") from exc
+    if page < 1 or page_size < 1 or page_size > 100:
+        raise ScopedKnowledgeScopeError("invalid_pagination")
+    return page, page_size
+
+
+def _scoped_page(items: list[dict], *, page: int, page_size: int) -> dict:
+    start = (page - 1) * page_size
+    return {
+        "items": items[start:start + page_size],
+        "page": {
+            "number": page,
+            "page_size": page_size,
+            "total": len(items),
+            "total_status": "exact",
+            "has_next": start + page_size < len(items),
+        },
+    }
+
+
+def _find_scoped_belief(repo, scope: RuntimeScope, belief_id: int) -> dict:
+    for row in repo.list_scoped_beliefs(scope, limit=10000):
+        if row.get("id") == belief_id:
+            return row
+    raise LookupError("scoped_object_not_found")
+
+
+def _formal_belief(row: dict) -> dict:
+    item = dict(row)
+    item["type"] = _normalize_belief_type(item.pop("belief_type", "")) or "world_view"
+    item["confidence"] = item.get("strength", 0.0)
+    item["level"] = _belief_level(item.get("strength"))
+    return item
+
+
+def _delete_scoped_belief(repo, scope: RuntimeScope, belief_id: int) -> bool:
+    """仓储尚未暴露删除端口时，仍经其连接执行严格 Scope 谓词删除。"""
+    session_id = scope.session.id if scope.session else ""
+    cm = getattr(repo, "cm", None)
+    if cm is None:
+        raise ScopedKnowledgeScopeError("scoped_repository_unavailable")
+    cur = cm.execute_write(
+        "DELETE FROM scoped_beliefs WHERE id=? AND bot_id=? AND session_id=? AND visibility=?",
+        (belief_id, scope.bot_id, session_id, scope.visibility),
+    )
+    cm.commit()
+    return bool(getattr(cur, "rowcount", 0))
+
+
+@beliefs_bp.route("/legacy/audit", methods=["GET"])
 @require_auth
-async def list_beliefs():
-    """列出信念（支持 status / bot_id / type 筛选，支持内容搜索）。"""
+async def legacy_list_beliefs():
+    """旧 beliefs 表的只读审查视图；不属于正式 Scope API。"""
     c = get_container()
     if not _table_exists(c.db.conn, "beliefs"):
         return jsonify({"items": [], "total": 0, "pending_count": 0})
@@ -141,90 +251,93 @@ async def list_beliefs():
             "bot_id": r[4], "source": evidence_type, "evidence_type": evidence_type,
             "sources": evidence_ids or sources, "raw_sources": sources, "status": r[6],
             "created_at": r[7], "updated_at": r[8], "level": _belief_level(r[3]),
+            "legacy": True, "unresolved_legacy": True, "scope": None,
         })
-    return jsonify({"items": items, "total": total, "pending_count": pending_count})
+    return jsonify({
+        "items": items, "total": total, "pending_count": pending_count,
+        "legacy": True, "unresolved_legacy": True, "scope": None, "readonly": True,
+        "page": {"number": offset // limit + 1, "page_size": limit, "total": total,
+                 "total_status": "exact", "has_next": offset + len(items) < total},
+    })
+
+
+@beliefs_bp.route("/", methods=["GET"])
+@require_auth
+async def list_beliefs():
+    """正式 scoped beliefs 列表；完整 Scope 和分页均为必填。"""
+    try:
+        scope = _group_scope_from_query()
+        page, page_size = _page_from_query()
+        rows = _scoped_repo(get_container()).list_scoped_beliefs(
+            scope, status=request.args.get("status"), limit=10000,
+        )
+        belief_type = _normalize_belief_type(request.args.get("type"))
+        search = (request.args.get("search") or "").strip()
+        if belief_type:
+            rows = [row for row in rows if _normalize_belief_type(row.get("belief_type")) == belief_type]
+        if search:
+            rows = [row for row in rows if search in str(row.get("content") or "")]
+        payload = _scoped_page([_formal_belief(row) for row in rows], page=page, page_size=page_size)
+        payload["scope"] = ScopeCodec.to_dict(scope)
+        return jsonify(payload)
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        return _scope_failure(exc)
 
 
 @beliefs_bp.route("/", methods=["POST"])
 @require_auth
 async def create_belief():
-    """手动创建信念。"""
-    c = get_container()
-    if not _table_exists(c.db.conn, "beliefs"):
-        return jsonify({"ok": False, "error": "beliefs table not found"}), 500
-
+    """手动创建 scoped 信念；scope 必须为 ScopeCodec envelope。"""
     body = await request.get_json(silent=True) or {}
-    content = (body.get("content") or "").strip()
-    if not content or len(content) < 5:
-        return jsonify({"ok": False, "error": "content required (min 5 chars)"}), 400
-
-    belief_type = _normalize_belief_type(body.get("type", "world_view"))
-    if belief_type not in _VALID_BELIEF_TYPES:
-        belief_type = "world_view"
     try:
-        strength = float(body.get("strength", body.get("confidence", 0.5)))
-    except (ValueError, TypeError):
-        strength = 0.5
-    strength = max(0.0, min(1.0, strength))
-    bot_id = body.get("bot_id", "bot")
-    sources = body.get("sources") or []
-    if not isinstance(sources, list):
-        sources = []
-
-    try:
-        belief_id = c.db.add_belief(
-            content=content,
-            belief_type=belief_type,
-            bot_id=bot_id,
-            strength=strength,
-            sources=sources[:20],
-            status="pending",  # 手动创建也进入待审
+        scope = _scope_from_envelope(body)
+        content = body.get("content")
+        belief_key = body.get("belief_key")
+        belief_type = _normalize_belief_type(body.get("type", "world_view"))
+        if belief_type not in _VALID_BELIEF_TYPES:
+            raise ScopedKnowledgeScopeError("invalid_belief_type")
+        strength = max(0.0, min(1.0, float(body.get("strength", body.get("confidence", 0.5)))))
+        belief_id = _scoped_repo(get_container()).upsert_scoped_belief(
+            scope, belief_key=belief_key, content=content, belief_type=belief_type,
+            strength=strength, status=str(body.get("status") or "pending"),
+            source_memory_id=body.get("source_memory_id"), provenance=body.get("provenance") or {},
         )
-        return jsonify({"ok": True, "belief_id": belief_id})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": True, "belief_id": belief_id, "scope": ScopeCodec.to_dict(scope)})
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        return _scope_failure(exc)
 
 
 @beliefs_bp.route("/<int:belief_id>", methods=["PUT"])
 @require_auth
 async def edit_belief(belief_id: int):
-    """编辑信念 content/strength/type。"""
-    c = get_container()
-    if not _table_exists(c.db.conn, "beliefs"):
-        return jsonify({"ok": False, "error": "beliefs table not found"}), 500
-
+    """编辑一个 scoped 信念；跨 Scope ID 以 404 隐藏。"""
     body = await request.get_json(silent=True) or {}
-    sets = []
-    params = []
-    if "content" in body and body["content"]:
-        sets.append("content = ?")
-        params.append(str(body["content"]).strip())
-    strength_value = body.get("strength", body.get("confidence"))
-    if strength_value is not None:
-        try:
-            sets.append("strength = ?")
-            params.append(max(0.0, min(1.0, float(strength_value))))
-        except (ValueError, TypeError):
-            pass
-    if "type" in body and body["type"]:
-        t = _normalize_belief_type(body["type"])
-        if t in _VALID_BELIEF_TYPES:
-            sets.append("type = ?")
-            params.append(t)
-    if not sets:
-        return jsonify({"ok": False, "error": "No valid fields to update"}), 400
-    sets.append("last_reinforced = ?")
-    params.append(int(time.time()))
-    params.append(belief_id)
-    c.db.conn.execute(f"UPDATE beliefs SET {', '.join(sets)} WHERE id = ?", params)
-    c.db.conn.commit()
-    return jsonify({"ok": True, "belief_id": belief_id})
+    try:
+        scope = _scope_from_envelope(body)
+        repo = _scoped_repo(get_container())
+        current = _find_scoped_belief(repo, scope, belief_id)
+        belief_type = _normalize_belief_type(body.get("type", current["belief_type"]))
+        if belief_type not in _VALID_BELIEF_TYPES:
+            raise ScopedKnowledgeScopeError("invalid_belief_type")
+        content = body.get("content", current["content"])
+        strength = max(0.0, min(1.0, float(body.get("strength", body.get("confidence", current["strength"])))) )
+        updated_id = repo.upsert_scoped_belief(
+            scope, belief_key=current["belief_key"], content=content, belief_type=belief_type,
+            strength=strength, status=str(body.get("status", current["status"])),
+            source_memory_id=body.get("source_memory_id", current.get("source_memory_id")),
+            provenance=body.get("provenance", current.get("provenance") or {}),
+        )
+        return jsonify({"ok": True, "belief_id": updated_id, "scope": ScopeCodec.to_dict(scope)})
+    except LookupError:
+        return _scope_error("scoped_object_not_found", 404)
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        return _scope_failure(exc)
 
 
-@beliefs_bp.route("/<int:belief_id>/evidence", methods=["GET"])
+@beliefs_bp.route("/legacy/<int:belief_id>/evidence", methods=["GET"])
 @require_auth
-async def belief_evidence(belief_id: int):
-    """返回 sources/evidence_ids 关联的 memories / episodes / relationship_events。"""
+async def legacy_belief_evidence(belief_id: int):
+    """旧 belief 的只读证据审查路径。"""
     c = get_container()
     if not _table_exists(c.db.conn, "beliefs"):
         return jsonify({"ok": False, "error": "beliefs table not found"}), 500
@@ -317,68 +430,77 @@ async def belief_evidence(belief_id: int):
         "relationship_events": relationship_events,
         "memories": memories,
         "items": memories,
+        "legacy": True,
+        "unresolved_legacy": True,
+        "scope": None,
+        "readonly": True,
     })
 
 
 @beliefs_bp.route("/<int:belief_id>/approve", methods=["POST"])
 @require_auth
 async def approve_belief(belief_id: int):
-    """审核通过：pending → active。检查 evidence（sources 不能为空）。"""
-    c = get_container()
-    if not _table_exists(c.db.conn, "beliefs"):
-        return jsonify({"ok": False, "error": "beliefs table not found"}), 500
-
-    # 检查是否有 evidence
-    cols = {r[1] for r in c.db.conn.execute("PRAGMA table_info(beliefs)").fetchall()}
-    evidence_ids_expr = "evidence_ids" if "evidence_ids" in cols else "'[]' AS evidence_ids"
-    row = c.db.conn.execute(
-        f"SELECT sources, {evidence_ids_expr} FROM beliefs WHERE id = ?", (belief_id,)
-    ).fetchone()
-    if not row:
-        return jsonify({"ok": False, "error": "belief not found"}), 404
-
-    sources = json.loads(row[0] or "[]")
-    evidence_ids = json.loads(row[1] or "[]")
-    if not (sources or evidence_ids):
-        return jsonify({"ok": False, "error": "Cannot approve belief without evidence (sources/evidence_ids is empty)"}), 400
-
-    c.db.conn.execute(
-        "UPDATE beliefs SET status = 'active', last_reinforced = ? WHERE id = ? AND status IN ('pending','challenged','pending_legacy')",
-        (int(time.time()), belief_id),
-    )
-    c.db.conn.commit()
-    return jsonify({"ok": True, "belief_id": belief_id, "new_status": "active"})
+    """审核通过 scoped belief；证据只接受同 Scope 的 source_memory_id。"""
+    body = await request.get_json(silent=True) or {}
+    try:
+        scope = _scope_from_envelope(body)
+        repo = _scoped_repo(get_container())
+        current = _find_scoped_belief(repo, scope, belief_id)
+        if not current.get("source_memory_id"):
+            return jsonify({"ok": False, "error": "Cannot approve belief without scoped source_memory_id"}), 400
+        repo.upsert_scoped_belief(
+            scope, belief_key=current["belief_key"], content=current["content"],
+            belief_type=current["belief_type"], strength=current["strength"], status="active",
+            source_memory_id=current["source_memory_id"], provenance=current.get("provenance") or {},
+        )
+        return jsonify({"ok": True, "belief_id": belief_id, "new_status": "active", "scope": ScopeCodec.to_dict(scope)})
+    except LookupError:
+        return _scope_error("scoped_object_not_found", 404)
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        return _scope_failure(exc)
 
 
 @beliefs_bp.route("/<int:belief_id>/archive", methods=["POST"])
 @require_auth
 async def archive_belief(belief_id: int):
-    """归档信念。"""
-    c = get_container()
-    if not _table_exists(c.db.conn, "beliefs"):
-        return jsonify({"ok": False, "error": "beliefs table not found"}), 500
-    c.db.conn.execute(
-        "UPDATE beliefs SET status = 'archived', archived_reason = ? WHERE id = ?",
-        ("webui_manual", belief_id),
-    )
-    c.db.conn.commit()
-    return jsonify({"ok": True, "belief_id": belief_id, "new_status": "archived"})
+    """归档 scoped 信念。"""
+    body = await request.get_json(silent=True) or {}
+    try:
+        scope = _scope_from_envelope(body)
+        repo = _scoped_repo(get_container())
+        current = _find_scoped_belief(repo, scope, belief_id)
+        repo.upsert_scoped_belief(
+            scope, belief_key=current["belief_key"], content=current["content"],
+            belief_type=current["belief_type"], strength=current["strength"], status="archived",
+            source_memory_id=current.get("source_memory_id"), provenance=current.get("provenance") or {},
+        )
+        return jsonify({"ok": True, "belief_id": belief_id, "new_status": "archived", "scope": ScopeCodec.to_dict(scope)})
+    except LookupError:
+        return _scope_error("scoped_object_not_found", 404)
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        return _scope_failure(exc)
 
 
 @beliefs_bp.route("/<int:belief_id>", methods=["DELETE"])
 @require_auth
 async def delete_belief(belief_id: int):
-    """删除信念。"""
-    c = get_container()
-    if not _table_exists(c.db.conn, "beliefs"):
-        return jsonify({"ok": False, "error": "beliefs table not found"}), 500
-    c.db.conn.execute("DELETE FROM beliefs WHERE id = ?", (belief_id,))
-    c.db.conn.commit()
-    return jsonify({"ok": True, "deleted": belief_id})
+    """删除 scoped 信念；不会触及 legacy beliefs 表。"""
+    body = await request.get_json(silent=True) or {}
+    try:
+        scope = _scope_from_envelope(body)
+        repo = _scoped_repo(get_container())
+        _find_scoped_belief(repo, scope, belief_id)
+        _delete_scoped_belief(repo, scope, belief_id)
+        return jsonify({"ok": True, "deleted": belief_id, "scope": ScopeCodec.to_dict(scope)})
+    except LookupError:
+        return _scope_error("scoped_object_not_found", 404)
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        return _scope_failure(exc)
 
 
 @beliefs_bp.route("/batch-archive", methods=["POST"])
 @require_auth
+@_legacy_mutation_disabled
 async def batch_archive():
     """批量归档旧信念（v1.1.0 #2.2）。
     body 可选: {"before_ts": 1718000000} 不传则归档所有 active 信念。
@@ -403,6 +525,7 @@ async def batch_archive():
 
 @beliefs_bp.route("/batch-archive-selected", methods=["POST"])
 @require_auth
+@_legacy_mutation_disabled
 async def batch_archive_selected_beliefs():
     """批量归档前端已勾选的信念。"""
     c = get_container()
@@ -452,6 +575,7 @@ async def batch_archive_selected_beliefs():
 
 @beliefs_bp.route("/batch-approve", methods=["POST"])
 @require_auth
+@_legacy_mutation_disabled
 async def batch_approve_beliefs():
     """批量审核通过信念（支持 all_matching 跨页全选）。"""
     c = get_container()

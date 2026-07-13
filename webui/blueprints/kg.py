@@ -8,11 +8,19 @@ from __future__ import annotations
 
 import json
 import time
+from functools import wraps
 
 from quart import Blueprint, jsonify, request
 
 from ..container import get_container
 from ..middleware.auth import require_auth
+
+try:
+    from ...domain.scope import RuntimeScope, ScopeCodec, ScopeValidationError, SessionRef
+    from ...engine.db.scoped_knowledge_repo import ScopedKnowledgeScopeError
+except ImportError:  # pragma: no cover - plugin root may be imported directly
+    from domain.scope import RuntimeScope, ScopeCodec, ScopeValidationError, SessionRef
+    from engine.db.scoped_knowledge_repo import ScopedKnowledgeScopeError
 
 kg_bp = Blueprint("kg", __name__, url_prefix="/api/kg")
 
@@ -51,6 +59,238 @@ def _json_loads_safe(value, default=None):
         return json.loads(value)
     except Exception:
         return default
+
+
+def _scope_error(code: str, status: int):
+    return jsonify({"error": {"code": code}}), status
+
+
+def _scope_failure(exc: Exception):
+    code = getattr(exc, "reason_code", None) or getattr(exc, "code", None) or "invalid_scope"
+    return _scope_error(str(code), 400 if code in {"scope_required", "pagination_required"} else 422)
+
+
+def _legacy_mutation_disabled(handler):
+    """Keep legacy facts readable for migration only; formal APIs reject their mutation."""
+    @wraps(handler)
+    async def reject(*args, **kwargs):
+        return _scope_error("legacy_mutation_disabled", 410)
+    return reject
+
+
+def _scoped_repo(container):
+    repo = getattr(getattr(container, "db", None), "scoped_knowledge", None)
+    if repo is None:
+        raise ScopedKnowledgeScopeError("scoped_repository_unavailable")
+    return repo
+
+
+def _group_scope_from_query() -> RuntimeScope:
+    required = ("bot_id", "session_id", "visibility")
+    if any(request.args.get(field) is None for field in required):
+        raise ScopedKnowledgeScopeError("scope_required")
+    bot_id, session_id, visibility = (request.args.get(field) for field in required)
+    if visibility != "group":
+        raise ScopedKnowledgeScopeError("derived_scope_visibility_unsupported")
+    try:
+        platform_id, kind, conversation_id = str(session_id).split(":", 2)
+    except ValueError as exc:
+        raise ScopeValidationError("invalid_session_id", "session_id must be canonical") from exc
+    return RuntimeScope(str(bot_id), visibility, SessionRef(str(session_id), platform_id, kind, conversation_id))
+
+
+def _scope_from_envelope(body: dict) -> RuntimeScope:
+    if "scope" not in body:
+        raise ScopedKnowledgeScopeError("scope_required")
+    scope = ScopeCodec.from_dict(body["scope"])
+    if not isinstance(scope, RuntimeScope) or scope.visibility != "group":
+        raise ScopedKnowledgeScopeError("derived_scope_visibility_unsupported")
+    return scope
+
+
+def _page_from_query() -> tuple[int, int]:
+    if request.args.get("page") is None or request.args.get("page_size") is None:
+        raise ScopedKnowledgeScopeError("pagination_required")
+    try:
+        page, page_size = int(request.args["page"]), int(request.args["page_size"])
+    except (TypeError, ValueError) as exc:
+        raise ScopedKnowledgeScopeError("invalid_pagination") from exc
+    if page < 1 or page_size < 1 or page_size > 100:
+        raise ScopedKnowledgeScopeError("invalid_pagination")
+    return page, page_size
+
+
+def _scoped_page(items: list[dict], *, page: int, page_size: int) -> dict:
+    start = (page - 1) * page_size
+    return {
+        "items": items[start:start + page_size],
+        "page": {"number": page, "page_size": page_size, "total": len(items),
+                 "total_status": "exact", "has_next": start + page_size < len(items)},
+    }
+
+
+def _scope_params(scope: RuntimeScope) -> tuple[str, str, str]:
+    assert scope.session is not None
+    return scope.bot_id, scope.session.id, scope.visibility
+
+
+def _find_scoped_fact(repo, scope: RuntimeScope, fact_id: int) -> dict:
+    for row in repo.list_scoped_facts(scope, limit=10000):
+        if row.get("id") == fact_id:
+            return row
+    raise LookupError("scoped_object_not_found")
+
+
+def _list_scoped_relations(repo, scope: RuntimeScope) -> list[dict]:
+    """关系仓储尚无 list 端口，仍经同一 scoped repo 的连接严格按 Scope 读取。"""
+    cm = getattr(repo, "cm", None)
+    if cm is None:
+        raise ScopedKnowledgeScopeError("scoped_repository_unavailable")
+    rows = cm.execute_read(
+        """SELECT r.id, r.source_tag_id, r.target_tag_id, r.relation_type, r.weight, r.confidence,
+                  r.metadata, r.created_at, r.updated_at, source.name, target.name
+             FROM scoped_tag_relations r
+             JOIN scoped_tags source ON source.id=r.source_tag_id
+              AND source.bot_id=r.bot_id AND source.session_id=r.session_id AND source.visibility=r.visibility
+             JOIN scoped_tags target ON target.id=r.target_tag_id
+              AND target.bot_id=r.bot_id AND target.session_id=r.session_id AND target.visibility=r.visibility
+             WHERE r.bot_id=? AND r.session_id=? AND r.visibility=?
+             ORDER BY r.updated_at DESC, r.id DESC""",
+        _scope_params(scope),
+    ).fetchall()
+    return [{"id": row[0], "source_tag_id": row[1], "target_tag_id": row[2], "relation_type": row[3],
+             "weight": row[4], "confidence": row[5], "metadata": _json_loads_safe(row[6], {}),
+             "created_at": row[7], "updated_at": row[8], "source": row[9], "target": row[10]}
+            for row in rows]
+
+
+def _delete_scoped(repo, scope: RuntimeScope, table: str, object_id: int) -> bool:
+    if table not in {"scoped_facts", "scoped_tag_relations"}:
+        raise ValueError("unsupported scoped table")
+    cm = getattr(repo, "cm", None)
+    if cm is None:
+        raise ScopedKnowledgeScopeError("scoped_repository_unavailable")
+    cur = cm.execute_write(
+        f"DELETE FROM {table} WHERE id=? AND bot_id=? AND session_id=? AND visibility=?",
+        (object_id, *_scope_params(scope)),
+    )
+    cm.commit()
+    return bool(getattr(cur, "rowcount", 0))
+
+
+@kg_bp.route("/facts", methods=["GET"])
+@require_auth
+async def list_scoped_facts():
+    """正式 facts 列表；只读取 scoped_facts。"""
+    try:
+        scope = _group_scope_from_query()
+        page, page_size = _page_from_query()
+        rows = _scoped_repo(get_container()).list_scoped_facts(
+            scope, subject=request.args.get("subject"), limit=10000,
+        )
+        payload = _scoped_page(rows, page=page, page_size=page_size)
+        payload["scope"] = ScopeCodec.to_dict(scope)
+        return jsonify(payload)
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        return _scope_failure(exc)
+
+
+@kg_bp.route("/facts", methods=["POST"])
+@require_auth
+async def create_scoped_fact():
+    """正式 facts 创建；写入 scoped_facts，拒绝 legacy fallback。"""
+    body = await request.get_json(silent=True) or {}
+    try:
+        scope = _scope_from_envelope(body)
+        fact_id = _scoped_repo(get_container()).upsert_scoped_fact(
+            scope, subject=body.get("subject"), predicate=body.get("predicate"), object=body.get("object"),
+            confidence=max(0.0, min(1.0, float(body.get("confidence", 0.8)))),
+            status=str(body.get("status") or "pending"), source_memory_id=body.get("source_memory_id"),
+            provenance=body.get("provenance") or {}, valid_from=body.get("valid_from"), valid_until=body.get("valid_until"),
+        )
+        clear_kg_cache()
+        return jsonify({"ok": True, "fact_id": fact_id, "scope": ScopeCodec.to_dict(scope)})
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        return _scope_failure(exc)
+
+
+@kg_bp.route("/tag-relations", methods=["GET"])
+@require_auth
+async def list_scoped_relations():
+    """正式关系列表；只读取 scoped_tag_relations。"""
+    try:
+        scope = _group_scope_from_query()
+        page, page_size = _page_from_query()
+        rows = _list_scoped_relations(_scoped_repo(get_container()), scope)
+        payload = _scoped_page(rows, page=page, page_size=page_size)
+        payload["scope"] = ScopeCodec.to_dict(scope)
+        return jsonify(payload)
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        return _scope_failure(exc)
+
+
+@kg_bp.route("/tag-relations", methods=["POST"])
+@require_auth
+async def create_scoped_relation():
+    """正式关系创建；两端 tag 必须属于同一 Scope。"""
+    body = await request.get_json(silent=True) or {}
+    try:
+        scope = _scope_from_envelope(body)
+        relation_id = _scoped_repo(get_container()).upsert_scoped_tag_relation(
+            scope, source_tag_id=body.get("source_tag_id"), target_tag_id=body.get("target_tag_id"),
+            relation_type=body.get("relation_type", body.get("type")), weight=float(body.get("weight", 1.0)),
+            confidence=float(body.get("confidence", 0.0)), metadata=body.get("metadata") or {},
+        )
+        clear_kg_cache()
+        return jsonify({"ok": True, "relation_id": relation_id, "scope": ScopeCodec.to_dict(scope)})
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        return _scope_failure(exc)
+
+
+def _legacy_audit_payload(rows: list[dict], *, page: int, page_size: int) -> dict:
+    for row in rows:
+        row.update({"legacy": True, "unresolved_legacy": True, "scope": None})
+    payload = _scoped_page(rows, page=page, page_size=page_size)
+    payload.update({"legacy": True, "unresolved_legacy": True, "scope": None, "readonly": True})
+    return payload
+
+
+@kg_bp.route("/legacy/audit/facts", methods=["GET"])
+@require_auth
+async def legacy_audit_facts():
+    """旧 facts 表的只读审查页。"""
+    c = get_container()
+    if not _table_exists(c.db.conn, "facts"):
+        return jsonify(_legacy_audit_payload([], page=1, page_size=50))
+    page = max(1, int(request.args.get("page", 1) or 1))
+    page_size = max(1, min(500, int(request.args.get("page_size", request.args.get("limit", 50)) or 50)))
+    rows = c.db.conn.execute(
+        "SELECT id, subject, predicate, object, confidence, created_at FROM facts ORDER BY created_at DESC, id DESC"
+    ).fetchall()
+    return jsonify(_legacy_audit_payload([
+        {"id": row[0], "subject": row[1], "predicate": row[2], "object": row[3], "confidence": row[4], "created_at": row[5]}
+        for row in rows
+    ], page=page, page_size=page_size))
+
+
+@kg_bp.route("/legacy/audit/relations", methods=["GET"])
+@require_auth
+async def legacy_audit_relations():
+    """旧 tag_relations 表的只读审查页。"""
+    c = get_container()
+    if not _table_exists(c.db.conn, "tag_relations"):
+        return jsonify(_legacy_audit_payload([], page=1, page_size=50))
+    page = max(1, int(request.args.get("page", 1) or 1))
+    page_size = max(1, min(500, int(request.args.get("page_size", request.args.get("limit", 50)) or 50)))
+    rows = c.db.conn.execute(
+        """SELECT r.id, source.name, r.relation_type, target.name, r.weight
+             FROM tag_relations r JOIN tags source ON source.id=r.source_tag_id
+             JOIN tags target ON target.id=r.target_tag_id ORDER BY r.id DESC"""
+    ).fetchall()
+    return jsonify(_legacy_audit_payload([
+        {"id": row[0], "source": row[1], "relation_type": row[2], "target": row[3], "weight": row[4]}
+        for row in rows
+    ], page=page, page_size=page_size))
 
 
 @kg_bp.route("/overview")
@@ -353,25 +593,8 @@ async def entity_detail(entity_name: str):
 @kg_bp.route("/add-fact", methods=["POST"])
 @require_auth
 async def add_fact():
-    """手动添加事实三元组到知识图谱。"""
-    c = get_container()
-    body = await request.get_json(silent=True) or {}
-    subject = (body.get("subject") or "").strip()
-    predicate = (body.get("predicate") or "").strip()
-    obj = (body.get("object") or "").strip()
-    try:
-        confidence = float(body.get("confidence", 0.8))
-    except (TypeError, ValueError):
-        confidence = 0.8
-    confidence = max(0.0, min(1.0, confidence))
-    if not subject or not predicate or not obj:
-        return jsonify({"ok": False, "error": "subject/predicate/object required"})
-    try:
-        c.db.insert_fact(subject, predicate, obj, confidence=confidence)
-        clear_kg_cache()
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)})
+    """兼容别名；仍执行正式 scoped 创建，不允许写入 legacy facts。"""
+    return await create_scoped_fact()
 
 
 @kg_bp.route("/payment", methods=["POST"])
@@ -409,11 +632,8 @@ async def payment_webhook():
     else:
         bonus = 1
 
-    # 记录到 facts（留痕）
-    try:
-        c.db.insert_fact("好感符", f"收到{amount}元", f"好感+{bonus}", confidence=1.0)
-    except Exception:
-        pass
+    # scope-less 外部 webhook 不能创建事实：没有 canonical RuntimeScope、证据
+    # 或目标主体时，写入 legacy facts 会把跨会话归属伪装成可信知识。
 
     # 返回结果（实际加好感需要知道是谁付的——由前端/群内认领机制处理）
     return jsonify({
@@ -872,111 +1092,94 @@ async def kg_path():
 @kg_bp.route("/facts/<int:fact_id>", methods=["DELETE"])
 @require_auth
 async def delete_fact(fact_id: int):
-    """删除事实。"""
-    c = get_container()
-    if not _table_exists(c.db.conn, "facts"):
-        return jsonify({"ok": False, "error": "facts table not found"})
-    cur = c.db.conn.execute("DELETE FROM facts WHERE rowid = ?", (fact_id,))
-    c.db.conn.commit()
-    if (cur.rowcount or 0) == 0:
-        return jsonify({"ok": False, "error": "fact not found"}), 404
-    clear_kg_cache()
-    return jsonify({"ok": True, "deleted": fact_id})
+    """删除 scoped fact；跨 Scope 或 legacy ID 一律不可见。"""
+    body = await request.get_json(silent=True) or {}
+    try:
+        scope = _scope_from_envelope(body)
+        repo = _scoped_repo(get_container())
+        _find_scoped_fact(repo, scope, fact_id)
+        _delete_scoped(repo, scope, "scoped_facts", fact_id)
+        clear_kg_cache()
+        return jsonify({"ok": True, "deleted": fact_id, "scope": ScopeCodec.to_dict(scope)})
+    except LookupError:
+        return _scope_error("scoped_object_not_found", 404)
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        return _scope_failure(exc)
 
 
 @kg_bp.route("/facts/<int:fact_id>", methods=["PUT"])
 @require_auth
 async def update_fact(fact_id: int):
-    """修改事实（subject/predicate/object/confidence）。"""
-    c = get_container()
-    if not _table_exists(c.db.conn, "facts"):
-        return jsonify({"ok": False, "error": "facts table not found"})
+    """修改 scoped fact；更新保持其原 Scope 与证据归属。"""
     body = await request.get_json(silent=True) or {}
-    sets = []
-    params = []
-    for field in ("subject", "predicate", "object"):
-        if field in body and body[field] is not None:
-            sets.append(f"{field} = ?")
-            params.append(str(body[field]).strip())
-    if "confidence" in body and body["confidence"] is not None:
-        try:
-            sets.append("confidence = ?")
-            params.append(float(body["confidence"]))
-        except (ValueError, TypeError):
-            pass
-    if not sets:
-        return jsonify({"ok": False, "error": "No valid fields to update"}), 400
-    params.append(fact_id)
-    cur = c.db.conn.execute(f"UPDATE facts SET {', '.join(sets)} WHERE rowid = ?", params)
-    c.db.conn.commit()
-    if (cur.rowcount or 0) == 0:
-        return jsonify({"ok": False, "error": "fact not found"}), 404
-    clear_kg_cache()
-    return jsonify({"ok": True, "fact_id": fact_id})
+    try:
+        scope = _scope_from_envelope(body)
+        repo = _scoped_repo(get_container())
+        current = _find_scoped_fact(repo, scope, fact_id)
+        updated_id = repo.upsert_scoped_fact(
+            scope, subject=body.get("subject", current["subject"]),
+            predicate=body.get("predicate", current["predicate"]), object=body.get("object", current["object"]),
+            confidence=max(0.0, min(1.0, float(body.get("confidence", current["confidence"])))),
+            status=str(body.get("status", current["status"])),
+            source_memory_id=body.get("source_memory_id", current.get("source_memory_id")),
+            provenance=body.get("provenance", current.get("provenance") or {}),
+            valid_from=body.get("valid_from", current.get("valid_from")), valid_until=body.get("valid_until", current.get("valid_until")),
+        )
+        clear_kg_cache()
+        return jsonify({"ok": True, "fact_id": updated_id, "scope": ScopeCodec.to_dict(scope)})
+    except LookupError:
+        return _scope_error("scoped_object_not_found", 404)
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        return _scope_failure(exc)
 
 
 @kg_bp.route("/tag-relations/<int:rel_id>", methods=["DELETE"])
 @require_auth
 async def delete_tag_relation(rel_id: int):
-    """删除 tag 关系。"""
-    c = get_container()
-    if not _table_exists(c.db.conn, "tag_relations"):
-        return jsonify({"ok": False, "error": "tag_relations table not found"})
-    cur = c.db.conn.execute("DELETE FROM tag_relations WHERE id = ?", (rel_id,))
-    c.db.conn.commit()
-    if (cur.rowcount or 0) == 0:
-        return jsonify({"ok": False, "error": "tag relation not found"}), 404
-    clear_kg_cache()
-    return jsonify({"ok": True, "deleted": rel_id})
+    """删除 scoped tag relation；不触及 legacy tag_relations。"""
+    body = await request.get_json(silent=True) or {}
+    try:
+        scope = _scope_from_envelope(body)
+        repo = _scoped_repo(get_container())
+        if not any(row["id"] == rel_id for row in _list_scoped_relations(repo, scope)):
+            raise LookupError("scoped_object_not_found")
+        _delete_scoped(repo, scope, "scoped_tag_relations", rel_id)
+        clear_kg_cache()
+        return jsonify({"ok": True, "deleted": rel_id, "scope": ScopeCodec.to_dict(scope)})
+    except LookupError:
+        return _scope_error("scoped_object_not_found", 404)
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        return _scope_failure(exc)
 
 
 @kg_bp.route("/tag-relations/<int:rel_id>", methods=["PUT"])
 @require_auth
 async def update_tag_relation(rel_id: int):
-    """修改 tag 关系（relation_type/weight/confidence/metadata）。"""
-    c = get_container()
-    conn = c.db.conn
-    if not _table_exists(conn, "tag_relations"):
-        return jsonify({"ok": False, "error": "tag_relations table not found"})
+    """修改 scoped tag relation；关系端点始终保持当前 Scope。"""
     body = await request.get_json(silent=True) or {}
-    columns = _table_columns(conn, "tag_relations")
-    sets: list[str] = []
-    params: list = []
-    relation_type = body.get("relation_type", body.get("type"))
-    if relation_type is not None:
-        value = str(relation_type).strip()
-        if not value:
-            return jsonify({"ok": False, "error": "relation_type cannot be empty"}), 400
-        sets.append("relation_type = ?")
-        params.append(value)
-    if "weight" in body and body["weight"] is not None:
-        try:
-            sets.append("weight = ?")
-            params.append(max(0.0, float(body["weight"])))
-        except (TypeError, ValueError):
-            return jsonify({"ok": False, "error": "invalid weight"}), 400
-    if "confidence" in body and body["confidence"] is not None and "confidence" in columns:
-        try:
-            sets.append("confidence = ?")
-            params.append(max(0.0, min(1.0, float(body["confidence"]))))
-        except (TypeError, ValueError):
-            return jsonify({"ok": False, "error": "invalid confidence"}), 400
-    if "metadata" in body and "metadata" in columns:
-        sets.append("metadata = ?")
-        params.append(json.dumps(body.get("metadata") or {}, ensure_ascii=False))
-    if not sets:
-        return jsonify({"ok": False, "error": "No valid fields to update"}), 400
-    params.append(rel_id)
-    cur = conn.execute(f"UPDATE tag_relations SET {', '.join(sets)} WHERE id = ?", params)
-    conn.commit()
-    if (cur.rowcount or 0) == 0:
-        return jsonify({"ok": False, "error": "tag relation not found"}), 404
-    clear_kg_cache()
-    return jsonify({"ok": True, "relation_id": rel_id})
+    try:
+        scope = _scope_from_envelope(body)
+        repo = _scoped_repo(get_container())
+        current = next((row for row in _list_scoped_relations(repo, scope) if row["id"] == rel_id), None)
+        if current is None:
+            raise LookupError("scoped_object_not_found")
+        relation_id = repo.upsert_scoped_tag_relation(
+            scope, source_tag_id=current["source_tag_id"], target_tag_id=current["target_tag_id"],
+            relation_type=body.get("relation_type", body.get("type", current["relation_type"])),
+            weight=float(body.get("weight", current["weight"])), confidence=float(body.get("confidence", current["confidence"])),
+            metadata=body.get("metadata", current.get("metadata") or {}),
+        )
+        clear_kg_cache()
+        return jsonify({"ok": True, "relation_id": relation_id, "scope": ScopeCodec.to_dict(scope)})
+    except LookupError:
+        return _scope_error("scoped_object_not_found", 404)
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        return _scope_failure(exc)
 
 
 @kg_bp.route("/tags/<int:tag_id>", methods=["PUT"])
 @require_auth
+@_legacy_mutation_disabled
 async def update_tag(tag_id: int):
     """修改 tag 节点元信息（name/tag_type/description/aliases）。"""
     c = get_container()
@@ -1057,6 +1260,7 @@ async def rename_entity_preview():
 
 @kg_bp.route("/entities/rename", methods=["POST"])
 @require_auth
+@_legacy_mutation_disabled
 async def rename_entity():
     """事务性重命名 facts 中的实体 subject/object。"""
     c = get_container()

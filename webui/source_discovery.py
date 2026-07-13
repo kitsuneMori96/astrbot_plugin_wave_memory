@@ -15,6 +15,8 @@ import numpy as np
 
 from astrbot.api import logger
 
+from .tag_execution import tag_memory_batch
+
 
 # ─── 已知插件的导入适配器（免 LLM 分析） ───
 
@@ -478,6 +480,26 @@ class UniversalImporter:
         self.tag_extractor = tag_extractor
         self.memory_index = memory_index
 
+    async def _tag_imported_memories(self, messages: list[dict], tag_batch_size: int = 20,
+                                     tag_write_policy: str = "missing_only") -> tuple[int, int]:
+        """对刚导入的 memories 使用同一个 TagExtractor 批量打标签。"""
+        if not messages or not self.tag_extractor:
+            return 0, 0
+        try:
+            result = await tag_memory_batch(
+                self.db,
+                self.embedding_service,
+                self.tag_extractor,
+                messages,
+                tag_batch_size=tag_batch_size,
+                tag_write_policy=tag_write_policy,
+                skip_short_min_length=0,
+            )
+            return int(result.get("tagged", 0)), int(result.get("errors", 0))
+        except Exception as e:
+            logger.warning(f"[WaveMemory] Import tag extraction batch error: {e}")
+            return 0, len(messages)
+
     async def validate_mapping(self, db_path: str, table: str, fields: dict) -> dict:
         """用 LLM 验证字段映射是否正确。
 
@@ -557,12 +579,25 @@ class UniversalImporter:
             return {"valid": True, "skipped": True}
 
     async def import_known(self, source: dict, limit: int = 5000,
-                           extract_tags: bool = False) -> AsyncGenerator[str, None]:
+                           extract_tags: bool = False,
+                           tag_batch_size: int = 20,
+                           tag_write_policy: str = "missing_only") -> AsyncGenerator[str, None]:
         """导入已知适配器的数据源。"""
         adapter = source["adapter"]
         db_path = source["db_path"]
         table = adapter["table"]
         target = adapter.get("target", "memories")  # 目标表：memories / jargon / facts
+
+        # 历史导入仅带裸字段，不能为 memories v2 猜测 Bot/canonical session。
+        # RawArtifact/durable import job 落地前，只允许预览，禁止写入正式记忆。
+        if target == "memories":
+            yield json.dumps({
+                "progress": 1.0,
+                "status": "blocked",
+                "reason_code": "unresolved_import_not_supported",
+                "message": "该数据源没有可验证的 RuntimeScope，已拒绝写入正式记忆。",
+            })
+            return
 
         # ─── 精细适配：特殊目标表走专用导入路径 ───
         if target == "jargon":
@@ -610,7 +645,6 @@ class UniversalImporter:
             if corrected.get("filter"):
                 where = corrected["filter"]
 
-        conn = sqlite3.connect(db_path)
         content_field = fields.get("content", "content")
         select_fields = [content_field]
 
@@ -664,6 +698,7 @@ class UniversalImporter:
         imported = 0
         skipped = 0
         errors = 0
+        tagged = 0
         batch_size = 50
         consecutive_errors = 0  # 连续错误计数
         llm_fallback_attempted = False  # 是否已尝试 LLM 降级
@@ -683,6 +718,7 @@ class UniversalImporter:
             batch_last_rowid = batch[-1][0] if batch else max_rowid_seen
             texts_to_embed = []
             records = []
+            imported_for_tag = []
 
             # 批量去重：一次查询整批 content
             batch_contents = []
@@ -775,9 +811,14 @@ class UniversalImporter:
                                     vector=vec,
                                     timestamp=rec["timestamp"] or time.time(),
                                 )
-                                if vec is not None and self.memory_index:
-                                    self.memory_index.add([mem_id], np.array(vec).reshape(1, -1))
+                                # Derived HNSW updates are deferred to durable maintenance.
                                 imported += 1
+                                if extract_tags:
+                                    imported_for_tag.append({
+                                        "id": mem_id,
+                                        "content": rec["content"][:800],
+                                        "sender": rec["sender"] or "",
+                                    })
                                 consecutive_errors = 0  # 成功则重置
                             except Exception as e:
                                 errors += 1
@@ -809,6 +850,11 @@ class UniversalImporter:
                     errors += len(texts_to_embed)
                     logger.warning(f"[WaveMemory] Batch embed error: {e}")
 
+            if imported_for_tag:
+                tagged_now, tag_errors = await self._tag_imported_memories(imported_for_tag, tag_batch_size, tag_write_policy)
+                tagged += tagged_now
+                errors += tag_errors
+
             # 这批没有新增 error 才推进游标（有 error 的批次下次会重试）
             if errors == errors_before_batch and batch_last_rowid > max_rowid_seen:
                 max_rowid_seen = batch_last_rowid
@@ -819,7 +865,8 @@ class UniversalImporter:
                 "imported": imported,
                 "skipped": skipped,
                 "errors": errors,
-                "message": f"扫描 {processed_rows}/{total} | 导入:{imported}/{limit} 跳过:{skipped} 失败:{errors}"
+                "tagged": tagged,
+                "message": f"扫描 {processed_rows}/{total} | 导入:{imported}/{limit} 打标:{tagged} 跳过:{skipped} 失败:{errors}"
             })
 
             import asyncio
@@ -836,8 +883,7 @@ class UniversalImporter:
             except Exception as e:
                 logger.warning(f"[WaveMemory] Failed to save import cursor: {e}")
 
-        if self.memory_index:
-            self.memory_index.save()
+        # Index persistence is owned by the durable maintenance/outbox pipeline.
 
         logger.info(f"[WaveMemory] Import done: {source['name']} — imported={imported}, skipped={skipped}, errors={errors}, cursor={max_rowid_seen}")
 
@@ -846,7 +892,8 @@ class UniversalImporter:
             "imported": imported,
             "skipped": skipped,
             "errors": errors,
-            "message": f"✓ 完成: 导入 {imported} 条, 跳过 {skipped} 条 (重复), 错误 {errors} 条"
+            "tagged": tagged,
+            "message": f"✓ 完成: 导入 {imported} 条, 同步打标 {tagged} 条, 跳过 {skipped} 条 (重复), 错误 {errors} 条"
         })
 
     # ─── 精细适配：黑话导入（Self Learning jargon → 我们的 jargon 表）───
@@ -931,8 +978,14 @@ class UniversalImporter:
                           "message": f"✓ 知识导入: {imported} 条写入 facts 表, {skipped} 条已存在"})
 
     async def import_with_llm_mapping(self, source: dict, mapping: dict,
-                                      limit: int = 500) -> AsyncGenerator[str, None]:
+                                      limit: int = 500,
+                                      extract_tags: bool = False,
+                                      tag_batch_size: int = 20,
+                                      tag_write_policy: str = "missing_only") -> AsyncGenerator[str, None]:
         """根据 LLM 生成的字段映射导入未知数据源。
+
+        此路径只有 LLM 映射出的裸字段，不能为 memories v2 伪造 Scope；
+        后续应转入可审计的 RawArtifact/durable import workflow。
 
         mapping 格式:
         {
@@ -944,6 +997,14 @@ class UniversalImporter:
             "filter": "WHERE clause" | null,
         }
         """
+        yield json.dumps({
+            "progress": 1.0,
+            "status": "blocked",
+            "reason_code": "unresolved_import_not_supported",
+            "message": "LLM 映射不能证明 Bot 与 canonical session，已拒绝写入正式记忆。",
+        })
+        return
+
         db_path = source["db_path"]
         table = mapping["table"]
         content_field = mapping["content_field"]
@@ -975,6 +1036,8 @@ class UniversalImporter:
         imported = 0
         skipped = 0
         errors = 0
+        tagged = 0
+        imported_for_tag = []
 
         for i, row in enumerate(rows):
             try:
@@ -1010,30 +1073,48 @@ class UniversalImporter:
                     skipped += 1
                     continue
 
-                vec = await self.embedding_service.get_embedding(content[:500])
-                self.db.add_memory(group_id=group_id, content=content, sender_name=sender, vector=vec, timestamp=ts)
+                if self.embedding_service and hasattr(self.embedding_service, "get_embedding"):
+                    vec = await self.embedding_service.get_embedding(content[:500])
+                else:
+                    vecs = await self.embedding_service.get_embeddings([content[:500]]) if self.embedding_service else [None]
+                    vec = vecs[0] if vecs else None
+                mem_id = self.db.add_memory(group_id=group_id, content=content, sender_name=sender, vector=vec, timestamp=ts)
                 imported += 1
+                if extract_tags:
+                    imported_for_tag.append({"id": mem_id, "content": content[:800], "sender": sender})
             except Exception as e:
                 errors += 1
                 if errors <= 3:
                     logger.warning(f"[WaveMemory] LLM mapping import error: {e}")
 
             if (i + 1) % 20 == 0:
+                if imported_for_tag:
+                    tagged_now, tag_errors = await self._tag_imported_memories(imported_for_tag, tag_batch_size, tag_write_policy)
+                    tagged += tagged_now
+                    errors += tag_errors
+                    imported_for_tag = []
                 yield json.dumps({
                     "progress": round((i + 1) / total, 3),
                     "imported": imported,
                     "skipped": skipped,
                     "errors": errors,
+                    "tagged": tagged,
                 })
                 import asyncio
                 await asyncio.sleep(0.02)
+
+        if imported_for_tag:
+            tagged_now, tag_errors = await self._tag_imported_memories(imported_for_tag, tag_batch_size, tag_write_policy)
+            tagged += tagged_now
+            errors += tag_errors
 
         yield json.dumps({
             "progress": 1.0,
             "imported": imported,
             "skipped": skipped,
             "errors": errors,
-            "message": f"✓ 完成: 导入 {imported} 条, 跳过 {skipped} 条, 错误 {errors} 条"
+            "tagged": tagged,
+            "message": f"✓ 完成: 导入 {imported} 条, 同步打标 {tagged} 条, 跳过 {skipped} 条, 错误 {errors} 条"
         })
 
 

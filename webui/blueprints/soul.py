@@ -12,6 +12,13 @@ from ..middleware.auth import require_auth
 soul_bp = Blueprint("soul", __name__, url_prefix="/api")
 
 
+@soul_bp.before_request
+async def _reject_unscoped_soul_mutations():
+    if request.method not in {"GET", "HEAD", "OPTIONS"}:
+        return jsonify({"error": {"code": "scoped_soul_mutation_unavailable"}}), 410
+    return None
+
+
 def _table_exists(conn, table: str) -> bool:
     """检查表是否存在。"""
     row = conn.execute(
@@ -32,6 +39,14 @@ def _safe_float(val, default):
         return float(val)
     except (ValueError, TypeError):
         return default
+
+
+def _legacy_soul_mutation_disabled(handler):
+    """Legacy soul tables cannot persist canonical RuntimeScope or evidence."""
+    @wraps(handler)
+    async def reject(*args, **kwargs):
+        return jsonify({"error": {"code": "scoped_soul_mutation_unavailable"}}), 410
+    return reject
 
 
 # ═══════════════════════════════════════════

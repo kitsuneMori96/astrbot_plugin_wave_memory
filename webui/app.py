@@ -54,4 +54,12 @@ def create_app() -> Quart:
         app.register_blueprint(bp)
         logger.debug(f"[WaveMemory WebUI] registered blueprint: {bp.name}")
 
+    # Stage 3 diagnostics is independently registered so older blueprint registries
+    # can load it without gaining any database/provider fallback behavior.
+    from .blueprints.diagnostics import diagnostics_bp
+
+    if diagnostics_bp.name not in app.blueprints:
+        app.register_blueprint(diagnostics_bp)
+        logger.debug(f"[WaveMemory WebUI] registered blueprint: {diagnostics_bp.name}")
+
     return app

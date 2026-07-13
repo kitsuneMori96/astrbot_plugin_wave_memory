@@ -18,6 +18,7 @@ except ImportError:  # pragma: no cover - 本地单测可能注入不完整 fake
 
 from ..container import get_container
 from ..middleware.auth import require_auth
+from ..tag_execution import normalize_tag_execution_options, tag_memory_batch
 
 memories_bp = Blueprint("memories", __name__, url_prefix="/api")
 
@@ -26,6 +27,25 @@ _import_lock = asyncio.Lock()
 # 无过滤全表计数缓存（COUNT(*) 在十万行约 110ms，过滤计数则更慢，故仅缓存全表）
 _total_cache: dict = {"value": None, "ts": 0.0}
 _TOTAL_TTL = 30.0
+
+
+async def _queue_memory_index_repair(container, *, reason: str) -> str | None:
+    jobs = getattr(container, "durable_jobs", None)
+    if jobs is None:
+        return None
+    token = f"memory_index:{reason}:{time.time_ns()}"
+    request_row = await jobs.create_request(
+        idempotency_key=f"maintenance:{token}",
+        kind="maintenance.memory_index.rebuild",
+        scope={"kind": "system_maintenance"},
+        payload={"kind": "memory_index", "reason": reason, "preflight_token": token},
+    )
+    run = await jobs.schedule_run(
+        request_id=request_row.request_id,
+        schedule_slot=token,
+        cursor={"phase": "queued"},
+    )
+    return run.run_id
 
 
 def _table_exists(conn, table: str) -> bool:
@@ -197,12 +217,8 @@ async def re_embed_memory(memory_id: int):
     if vec is None:
         return jsonify({"ok": False, "error": "embedding failed"}), 500
     c.db.update_memory_vector(memory_id, vec)
-    try:
-        if c.memory_index:
-            c.memory_index.add([memory_id], [vec])
-    except Exception:
-        pass
-    return jsonify({"ok": True, "memory_id": memory_id})
+    job_id = await _queue_memory_index_repair(c, reason=f"reembed:{memory_id}")
+    return jsonify({"ok": True, "memory_id": memory_id, "repair_job_id": job_id})
 
 
 @memories_bp.route("/memories/batch/delete", methods=["POST"])
@@ -248,13 +264,12 @@ async def batch_re_embed():
                     vec = await c.embedding_service.get_embedding(detail["content"])
                     if vec is not None:
                         c.db.update_memory_vector(mid, vec)
-                        if c.memory_index:
-                            c.memory_index.add([mid], [vec])
             except Exception:
                 errors += 1
             done += 1
             yield f"data: {json.dumps({'progress': round(done/total, 3) if total else 1, 'processed': done, 'total': total, 'errors': errors})}\n\n"
-        yield f"data: {json.dumps({'progress': 1.0, 'processed': done, 'total': total, 'errors': errors, 'done': True})}\n\n"
+        repair_job_id = await _queue_memory_index_repair(c, reason="batch_reembed")
+        yield f"data: {json.dumps({'progress': 1.0, 'processed': done, 'total': total, 'errors': errors, 'done': True, 'repair_job_id': repair_job_id})}\n\n"
 
     return Response(stream(), content_type="text/event-stream")
 
@@ -265,121 +280,43 @@ async def batch_extract_tags_for_ids():
     """对选中记忆批量提取 Tag（SSE 流）。"""
     c = get_container()
     body = await request.get_json(silent=True) or {}
+    try:
+        tag_options = normalize_tag_execution_options(body)
+    except ValueError as exc:
+        tag_options = {"error": str(exc)}
     ids = [_safe_int(x, 0) for x in (body.get("ids") or [])]
     ids = [i for i in ids if i > 0]
 
     async def stream():
         total = len(ids)
+        if tag_options.get("error"):
+            yield f"data: {json.dumps({'error': tag_options['error'], 'done': True})}\n\n"
+            return
         if not c.tag_extractor:
             yield f"data: {json.dumps({'error': 'Tag extractor 未配置'})}\n\n"
             return
-        yield f"data: {json.dumps({'progress': 0, 'total': total})}\n\n"
-        done = tagged = errors = 0
+        yield f"data: {json.dumps({'progress': 0, 'processed': 0, 'total': total, 'tagged': 0, 'errors': 0})}\n\n"
+        messages = []
         for mid in ids:
-            try:
-                row = c.db.conn.execute("SELECT content, sender_name FROM memories WHERE id=?", (mid,)).fetchone()
-                if row and row[0] and len(row[0]) >= 4:
-                    tags = await c.tag_extractor.extract_tags(row[0][:800], sender=row[1] or "")
-                    if tags:
-                        names = [t["name"] for t in tags]
-                        vecs = await c.embedding_service.get_embeddings(names)
-                        for tag_info, tv in zip(tags, vecs):
-                            tid = c.db.add_tag_extended(name=tag_info["name"], tag_type=tag_info.get("type", "keyword"), vector=tv, confidence=tag_info.get("confidence", 0.8))
-                            c.db.conn.execute("INSERT OR IGNORE INTO memory_tags (memory_id, tag_id, position, relevance) VALUES (?, ?, ?, ?)", (mid, tid, 1, tag_info.get("confidence", 0.8)))
-                        c.db.conn.commit()
-                        tagged += 1
-            except Exception:
-                errors += 1
-            done += 1
-            yield f"data: {json.dumps({'progress': round(done/total, 3) if total else 1, 'processed': done, 'total': total, 'tagged': tagged, 'errors': errors})}\n\n"
-        yield f"data: {json.dumps({'progress': 1.0, 'processed': done, 'total': total, 'tagged': tagged, 'errors': errors, 'done': True})}\n\n"
+            row = c.db.conn.execute("SELECT content, sender_name FROM memories WHERE id=?", (mid,)).fetchone()
+            if row:
+                messages.append({"id": mid, "content": row[0] or "", "sender": row[1] or ""})
+        result = await tag_memory_batch(
+            c.db,
+            getattr(c, "embedding_service", None),
+            c.tag_extractor,
+            messages,
+            tag_batch_size=tag_options["tag_batch_size"],
+            tag_write_policy=tag_options["tag_write_policy"],
+            skip_short_min_length=tag_options["skip_short_min_length"],
+        )
+        done = int(result.get("processed", 0)) + int(result.get("skipped", 0))
+        tagged = int(result.get("tagged", 0))
+        errors = int(result.get("errors", 0))
+        yield f"data: {json.dumps({'progress': 1.0, 'processed': done, 'total': total, 'tagged': tagged, 'errors': errors, 'done': True, 'message': f'选中记忆 Tag 提取完成：处理 {done}/{total}，写入 {tagged}，失败 {errors}'})}\n\n"
 
     return Response(stream(), content_type="text/event-stream")
 
-
-
-@memories_bp.route("/memories/clusters", methods=["GET"])
-@require_auth
-async def memory_clusters():
-    """获取长期记忆相似度聚类星云图坐标，无复杂依赖的高效降维迭代算法。"""
-    c = get_container()
-    # 读取最多 500 条带 vector 的长期记忆
-    rows = c.db.conn.execute(
-        "SELECT id, content, sender_name, timestamp, vector FROM memories WHERE vector IS NOT NULL ORDER BY id DESC LIMIT 500"
-    ).fetchall()
-    
-    if not rows:
-        return jsonify({"clusters": [], "points": []})
-        
-    points = []
-    import random
-    import math
-    
-    # 纯 Python 轻量多维尺度变换/随机聚类算法：将 vector 映射至 2D 平面 [-100, 100] 区域
-    # 为了避免依赖外部 numpy/sklearn，我们使用经典质点重定位/基于名称哈希的随机散度算法
-    for r in rows:
-        mid, content, sender, ts, vec_raw = r
-        try:
-            vec = json.loads(vec_raw) if isinstance(vec_raw, str) else vec_raw
-        except Exception:
-            vec = []
-            
-        if not isinstance(vec, list) or not vec:
-            # 降级退路
-            h = hash(content or "") % 1000
-            x = (h % 200) - 100
-            y = ((h // 10) % 200) - 100
-        else:
-            # 抽取向量中前 8 维和最后 8 维的特征投影，结合内容散度做轻量映射
-            v_sum1 = sum(vec[i] for i in range(min(len(vec), 8)))
-            v_sum2 = sum(vec[-i-1] for i in range(min(len(vec), 8)))
-            # 投影到 2D 区间
-            angle = (v_sum1 * 23.456) % (2 * math.pi)
-            radius = 12 + (abs(v_sum2) * 56.789) % 78
-            x = math.cos(angle) * radius
-            y = math.sin(angle) * radius
-            
-        # 聚类分类，通过记忆高频词和 sender 自动打上星云簇标签
-        if any(w in content for w in ("好感", "感情", "互动", "亲近", "心境")):
-            cluster = "灵魂羁绊"
-        elif any(w in content for w in ("黑话", "口癖", "神言", "Holyman", "语录")):
-            cluster = "黑话口癖"
-        elif any(w in content for w in ("规则", "设定", "世界观", "人格", "自我")):
-            cluster = "世界设定"
-        else:
-            cluster = "日常见闻"
-            
-        points.append({
-            "id": mid,
-            "content": content[:120] + ("..." if len(content) > 120 else ""),
-            "sender": sender or "未知",
-            "ts": ts,
-            "x": round(x, 2),
-            "y": round(y, 2),
-            "cluster": cluster
-        })
-        
-    # 计算聚类中心
-    cluster_centers = {}
-    for p in points:
-        c_name = p["cluster"]
-        if c_name not in cluster_centers:
-            cluster_centers[c_name] = {"x": 0.0, "y": 0.0, "count": 0}
-        cluster_centers[c_name]["x"] += p["x"]
-        cluster_centers[c_name]["y"] += p["y"]
-        cluster_centers[c_name]["count"] += 1
-        
-    clusters = []
-    for name, stat in cluster_centers.items():
-        cnt = stat["count"]
-        clusters.append({
-            "name": name,
-            "cx": round(stat["x"] / cnt, 2) if cnt else 0,
-            "cy": round(stat["y"] / cnt, 2) if cnt else 0,
-            "count": cnt
-        })
-        
-    return jsonify({"clusters": clusters, "points": points})
 
 
 @memories_bp.route("/memories/stats", methods=["GET"])
@@ -865,6 +802,122 @@ async def query_test():
     return jsonify({"results": results, "timing": timing, "debug": debug_info if debug_requested else {}})
 
 
+@memories_bp.route("/memories/<int:memory_id>/similar", methods=["GET"])
+@require_auth
+async def get_similar_memories(memory_id: int):
+    """基于内存 C-HNSW 检索单条记忆的 Top 3 相似推荐（≤15ms 高性能，零 SQLite 向量扫描）。"""
+    c = get_container()
+    row = c.db.conn.execute("SELECT vector FROM memories WHERE id=?", (memory_id,)).fetchone()
+    if not row or not row[0]:
+        return jsonify({"items": [], "reason": "no_vector"})
+
+    vec_blob = row[0]
+    import struct
+    try:
+        num_floats = len(vec_blob) // 4
+        vector = list(struct.unpack(f"{num_floats}f", vec_blob))
+    except Exception as exc:
+        return jsonify({"items": [], "reason": f"unpack_failed: {exc}"})
+
+    if not getattr(c, "memory_index", None):
+        return jsonify({"items": [], "reason": "hnsw_index_unavailable"})
+
+    # 1. knn 快速查询
+    try:
+        candidates = c.memory_index.search(vector, k=5)  # 多取几条，过滤掉自身
+    except Exception as exc:
+        return jsonify({"items": [], "reason": f"hnsw_query_failed: {exc}"})
+
+    similar_ids = []
+    distances = {}
+    for mid, dist in candidates:
+        if mid != memory_id:
+            similar_ids.append(mid)
+            distances[mid] = dist
+        if len(similar_ids) >= 3:
+            break
+
+    if not similar_ids:
+        return jsonify({"items": []})
+
+    # 2. SQLite 主键点查
+    placeholders = ",".join("?" for _ in similar_ids)
+    rows = c.db.conn.execute(
+        f"SELECT id, content, source FROM memories WHERE id IN ({placeholders})",
+        similar_ids
+    ).fetchall()
+
+    items = []
+    for r in rows:
+        mid = r[0]
+        dist = distances.get(mid, 0.5)
+        # 相似度 = 1.0 - 距离 (100% 格式展示)
+        similarity = round((1.0 - float(dist)) * 100, 1)
+        items.append({
+            "id": mid,
+            "content": r[1] or "",
+            "source": r[2] or "",
+            "similarity": similarity
+        })
+
+    # 按相似度降序排序
+    items.sort(key=lambda x: x["similarity"], reverse=True)
+    return jsonify({"items": items})
+
+
+@memories_bp.route("/memories/<int:memory_id>/tags", methods=["POST"])
+@require_auth
+async def add_memory_tag(memory_id: int):
+    """手动往单条记忆绑定一个标签。若该标签不存在，则在 tags 字典表一秒自动建标。"""
+    c = get_container()
+    body = await request.get_json(silent=True) or {}
+    tag_name = str(body.get("tag_name") or "").strip()
+    if not tag_name:
+        return jsonify({"error": "tag_name required"}), 400
+
+    # 1. 查找或在 tags 中插入新标签
+    tag_row = c.db.conn.execute("SELECT id FROM tags WHERE name=?", (tag_name,)).fetchone()
+    if tag_row:
+        tag_id = tag_row[0]
+    else:
+        cursor = c.db.conn.execute("INSERT INTO tags (name, category) VALUES (?, 'custom')", (tag_name,))
+        tag_id = cursor.lastrowid
+
+    # 2. 在 memory_tags 中做主键幂等绑定
+    c.db.conn.execute(
+        "INSERT OR IGNORE INTO memory_tags (memory_id, tag_id, relevance) VALUES (?, ?, 1.0)",
+        (memory_id, tag_id)
+    )
+    c.db.conn.commit()
+    return jsonify({"ok": True})
+
+
+@memories_bp.route("/memories/<int:memory_id>/tags/<tag_name>", methods=["DELETE"])
+@require_auth
+async def delete_memory_tag(memory_id: int, tag_name: str):
+    """物理移除单条记忆与指定标签的关联关系。"""
+    c = get_container()
+    tag_name = str(tag_name).strip()
+    if not tag_name:
+        return jsonify({"error": "tag_name required"}), 400
+
+    # 1. 查询对应 tag_id
+    tag_row = c.db.conn.execute("SELECT id FROM tags WHERE name=?", (tag_name,)).fetchone()
+    if not tag_row:
+        return jsonify({"ok": True, "message": "tag not associated"})
+
+    tag_id = tag_row[0]
+
+    # 2. 移除绑定
+    c.db.conn.execute(
+        "DELETE FROM memory_tags WHERE memory_id=? AND tag_id=?",
+        (memory_id, tag_id)
+    )
+    c.db.conn.commit()
+    return jsonify({"ok": True})
+
+
+@memories_bp.route("/memories/import/sources", methods=["GET"])
 @memories_bp.route("/import/sources", methods=["GET"])
 @require_auth
 async def discover_sources():
@@ -913,19 +966,39 @@ async def import_start():
     extract_tags = body.get("extract_tags", True)
     batch_size = _safe_int(body.get("batch_size", 20), 20)
 
-    from ..importer import WaveMemoryImporter
-    importer = WaveMemoryImporter(
-        c.db, c.embedding_service, c.tag_extractor,
-        memory_index=c.memory_index, writer=c.writer,
+    jobs = getattr(c, "durable_jobs", None)
+    if jobs is None:
+        return jsonify({"ok": False, "error": "durable_jobs_unavailable"}), 503
+    schedule_slot = str(body.get("schedule_slot") or f"manual-{int(time.time() // 60)}")
+    request_record = await jobs.create_request(
+        idempotency_key=f"import:legacy:{source}:{schedule_slot}",
+        kind="maintenance.import.run",
+        scope={"kind": "system_maintenance"},
+        payload={
+            "mode": "legacy",
+            "source": source,
+            "re_embed": bool(re_embed),
+            "extract_tags": bool(extract_tags),
+            "batch_size": batch_size,
+            "requested_by": "webui",
+        },
     )
+    run = await jobs.schedule_run(
+        request_id=request_record.request_id,
+        schedule_slot=schedule_slot,
+        cursor_generation=0,
+        cursor={"phase": "queued"},
+    )
+    return jsonify({
+        "ok": True,
+        "accepted": True,
+        "request_id": request_record.request_id,
+        "job_id": run.run_id,
+        "status": run.status,
+    }), 202
 
-    async def event_stream():
-        async for event in importer.run(source=source, re_embed=re_embed, extract_tags=extract_tags, batch_size=batch_size):
-            yield f"data: {event}\n\n"
 
-    return Response(event_stream(), content_type="text/event-stream")
-
-
+@memories_bp.route("/memories/import/run", methods=["POST"])
 @memories_bp.route("/import/from-source", methods=["POST"])
 @require_auth
 async def import_from_source():
@@ -933,13 +1006,15 @@ async def import_from_source():
     c = get_container()
     source_id = request.args.get("source_id", "")
     limit = _safe_int(request.args.get("limit", 5000), 5000)
+    try:
+        tag_options = normalize_tag_execution_options(request.args, defaults={"extract_tags": False})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    extract_tags = tag_options["extract_tags"]
+    tag_batch_size = tag_options["tag_batch_size"]
+    tag_write_policy = tag_options["tag_write_policy"]
 
-    if _import_lock.locked():
-        async def locked_msg():
-            yield f"data: {json.dumps({'error': '另一个导入/提取任务正在运行'})}\n\n"
-        return Response(locked_msg(), content_type="text/event-stream")
-
-    from ..source_discovery import SourceDiscovery, UniversalImporter
+    from ..source_discovery import SourceDiscovery
     discovery = SourceDiscovery()
     all_sources = discovery.discover_all()
     source = next((s for s in all_sources if s["id"] == source_id), None)
@@ -947,38 +1022,51 @@ async def import_from_source():
     if not source:
         return jsonify({"error": f"Source not found: {source_id}"}), 404
 
-    importer = UniversalImporter(
-        c.db, c.embedding_service,
-        tag_extractor=c.tag_extractor,
-        memory_index=c.memory_index,
+    jobs = getattr(c, "durable_jobs", None)
+    if jobs is None:
+        return jsonify({"ok": False, "error": "durable_jobs_unavailable"}), 503
+    schedule_slot = str(
+        request.args.get("schedule_slot") or f"manual-{int(time.time() // 60)}"
     )
+    request_record = await jobs.create_request(
+        idempotency_key=f"import:source:{source_id}:{schedule_slot}",
+        kind="maintenance.import.run",
+        scope={"kind": "system_maintenance"},
+        payload={
+            "mode": "discovered_source",
+            "source_id": source_id,
+            "limit": limit,
+            "extract_tags": extract_tags,
+            "tag_batch_size": tag_batch_size,
+            "tag_write_policy": tag_write_policy,
+            "requested_by": "webui",
+        },
+    )
+    run = await jobs.schedule_run(
+        request_id=request_record.request_id,
+        schedule_slot=schedule_slot,
+        cursor_generation=0,
+        cursor={"phase": "queued"},
+    )
+    return jsonify({
+        "ok": True,
+        "accepted": True,
+        "request_id": request_record.request_id,
+        "job_id": run.run_id,
+        "status": run.status,
+    }), 202
 
-    async def event_stream():
-        async with _import_lock:
-            if source["type"] == "known":
-                async for event in importer.import_known(source, limit=limit):
-                    yield f"data: {event}\n\n"
-            else:
-                analysis = source.get("analysis", {})
-                importable = analysis.get("importable_tables", [])
-                if importable:
-                    table_info = importable[0]
-                    cols = [col.lower() for col in table_info["columns"]]
-                    content_field = next((col for col in cols if col in ("content", "text", "message")), cols[0] if cols else "content")
-                    sender_field = next((col for col in cols if col in ("sender", "sender_name", "sender_id")), None)
-                    ts_field = next((col for col in cols if col in ("timestamp", "created_at", "time", "ts")), None)
-                    group_field = next((col for col in cols if col in ("group_id", "group", "session_id")), None)
-                    mapping = {
-                        "table": table_info["name"],
-                        "content_field": content_field,
-                        "sender_field": sender_field,
-                        "timestamp_field": ts_field,
-                        "group_field": group_field,
-                        "filter": f"LENGTH({content_field}) >= 10",
-                    }
-                    async for event in importer.import_with_llm_mapping({"db_path": source["db_path"]}, mapping, limit=limit):
-                        yield f"data: {event}\n\n"
-                else:
-                    yield f"data: {json.dumps({'error': 'No importable tables found'})}\n\n"
 
-    return Response(event_stream(), content_type="text/event-stream")
+@memories_bp.route("/memories/import/llm-extract", methods=["POST"])
+@require_auth
+async def legacy_import_llm_extract():
+    """旧前端兼容：转发到当前批量 Tag 提取 SSE。"""
+    from .tags import batch_extract_tags
+    return await batch_extract_tags()
+
+
+@memories_bp.route("/memories/import/llm-extract/stop", methods=["POST"])
+@require_auth
+async def legacy_import_llm_extract_stop():
+    """旧前端兼容：当前批量 Tag 提取不支持安全中止，避免旧包触发 404。"""
+    return jsonify({"ok": False, "message": "当前批量标签提取任务不支持安全中止"})

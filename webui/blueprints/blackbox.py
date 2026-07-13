@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
 from typing import Any
 
 try:
@@ -46,6 +48,30 @@ def _conn_from_container() -> Any | None:
     return getattr(db, "conn", None)
 
 
+def _conn_lore_from_container() -> Any | None:
+    candidates = [
+        "/AstrBot/data/plugin_data/astrbot_plugin_wave_memory/book_lore.db",
+        "book_lore.db",
+        "astrbot_plugin_wave_memory/book_lore.db",
+        "data/plugin_data/astrbot_plugin_wave_memory/book_lore.db",
+        "AstrBot-master/data/plugin_data/astrbot_plugin_wave_memory/book_lore.db",
+    ]
+    c = get_container()
+    if c:
+        p = getattr(c, "lore_db_path", None)
+        if p:
+            candidates.insert(0, p)
+    for p in candidates:
+        if os.path.exists(p):
+            try:
+                conn = sqlite3.connect(p)
+                conn.row_factory = sqlite3.Row
+                return conn
+            except Exception:
+                continue
+    return None
+
+
 def _table_exists(conn: Any, table: str) -> bool:
     try:
         row = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
@@ -67,8 +93,19 @@ def _row_dict(row: Any) -> dict[str, Any]:
     if row is None:
         return {}
     if hasattr(row, "keys"):
-        return {key: row[key] for key in row.keys()}
-    return dict(row)
+        d = {}
+        for key in row.keys():
+            val = row[key]
+            if isinstance(val, bytes):
+                d[key] = f"<bytes:{len(val)}>"
+            else:
+                d[key] = val
+        return d
+    try:
+        raw = dict(row)
+        return {k: (f"<bytes:{len(v)}>" if isinstance(v, bytes) else v) for k, v in raw.items()}
+    except Exception:
+        return {}
 
 
 def _safe_json(value: Any) -> Any:
@@ -304,57 +341,229 @@ def _query_options(default_sort: str = "id") -> dict[str, Any]:
     }
 
 
-@blackbox_bp.route("/book-lore/summary", methods=["GET"])
+@blackbox_bp.route("/fewshot/examples/<int:example_id>", methods=["DELETE", "PUT"])
 @require_auth
-async def get_book_lore_summary():
+async def modify_fewshot_example(example_id: int):
     conn = _conn_from_container()
     if not conn:
         return jsonify(_error_payload("database_unavailable")), 503
-    return jsonify(build_book_lore_summary(conn))
+    if not _table_exists(conn, "few_shot_examples"):
+        return jsonify({"ok": False, "error": "table_missing"}), 404
+    if request.method == "DELETE":
+        conn.execute("DELETE FROM few_shot_examples WHERE id=?", (example_id,))
+        conn.commit()
+        return jsonify({"ok": True, "deleted": example_id})
+    body = await request.get_json() or {}
+    status = body.get("status")
+    content = body.get("content")
+    if status is not None:
+        conn.execute("UPDATE few_shot_examples SET status=? WHERE id=?", (status, example_id))
+    if content is not None:
+        conn.execute("UPDATE few_shot_examples SET content=? WHERE id=?", (content, example_id))
+    conn.commit()
+    return jsonify({"ok": True, "updated": example_id})
+
+
+@blackbox_bp.route("/facts/<int:fact_id>", methods=["DELETE", "PUT"])
+@require_auth
+async def modify_fact(fact_id: int):
+    conn = _conn_from_container()
+    if not conn:
+        return jsonify(_error_payload("database_unavailable")), 503
+    if not _table_exists(conn, "facts"):
+        return jsonify({"ok": False, "error": "table_missing"}), 404
+    if request.method == "DELETE":
+        conn.execute("DELETE FROM facts WHERE id=?", (fact_id,))
+        conn.commit()
+        return jsonify({"ok": True, "deleted": fact_id})
+    body = await request.get_json() or {}
+    confidence = body.get("confidence")
+    predicate = body.get("predicate")
+    obj = body.get("object")
+    if confidence is not None:
+        conn.execute("UPDATE facts SET confidence=? WHERE id=?", (float(confidence), fact_id))
+    if predicate is not None:
+        conn.execute("UPDATE facts SET predicate=? WHERE id=?", (str(predicate), fact_id))
+    if obj is not None:
+        conn.execute("UPDATE facts SET object=? WHERE id=?", (str(obj), fact_id))
+    conn.commit()
+    return jsonify({"ok": True, "updated": fact_id})
+
+
+@blackbox_bp.route("/book-lore/<string:table_type>/<int:id_val>", methods=["DELETE"])
+@require_auth
+async def delete_book_lore_item(table_type: str, id_val: int):
+    # 优先连接独立的 book_lore.db 专属书设库
+    is_lore_db = True
+    conn = _conn_lore_from_container()
+    if not conn:
+        is_lore_db = False
+        conn = _conn_from_container()
+    if not conn:
+        return jsonify(_error_payload("database_unavailable")), 503
+    table_map = {
+        "entities": "book_entities",
+        "communities": "book_communities",
+        "relations": "book_relations",
+        "notes": "book_notes"
+    }
+    table = table_map.get(table_type)
+    if not table or not _table_exists(conn, table):
+        if is_lore_db:
+            conn.close()
+        return jsonify({"ok": False, "error": "invalid_table_or_missing"}), 400
+    try:
+        conn.execute(f"DELETE FROM {table} WHERE id=?", (id_val,))
+        conn.commit()
+        return jsonify({"ok": True, "deleted": id_val, "table": table})
+    finally:
+        if is_lore_db:
+            conn.close()
+
+
+@blackbox_bp.route("/indexes/rebuild", methods=["POST"])
+@require_auth
+async def rebuild_indexes_action():
+    """Compatibility boundary: create a durable Maintenance job, never rebuild inline."""
+    # Legacy ``memory_index.rebuild`` execution was intentionally removed from this route.
+    container = get_container()
+    jobs = getattr(container, "durable_jobs", None) if container is not None else None
+    if jobs is None:
+        return jsonify({"ok": False, "error": "maintenance_unavailable"}), 503
+    body = await request.get_json() or {}
+    kind = str(body.get("kind") or "memory_index").strip()
+    if kind not in {"memory_index", "tag_index", "cooccurrence"}:
+        return jsonify({"ok": False, "error": "unsupported_repair_kind"}), 400
+    preflight_token = str(body.get("preflight_token") or "").strip()
+    confirmation = str(body.get("confirmation") or "").strip()
+    if not preflight_token or confirmation != "rebuild":
+        return jsonify({
+            "ok": False,
+            "error": "maintenance_confirmation_required",
+            "required_confirmation": "rebuild",
+        }), 409
+    schedule_slot = str(body.get("schedule_slot") or preflight_token).strip()
+    idempotency_key = str(
+        body.get("idempotency_key")
+        or f"maintenance:{kind}:{preflight_token}"
+    )
+    job_request = await jobs.create_request(
+        idempotency_key=idempotency_key,
+        kind=f"maintenance.{kind}.rebuild",
+        scope={"kind": "system_maintenance"},
+        payload={
+            "kind": kind,
+            "preflight_token": preflight_token,
+            "requested_by": "webui",
+        },
+    )
+    run = await jobs.schedule_run(
+        request_id=job_request.request_id,
+        schedule_slot=schedule_slot,
+        cursor_generation=int(body.get("cursor_generation") or 0),
+        cursor={"phase": "queued"},
+    )
+    return jsonify({
+        "ok": True,
+        "accepted": True,
+        "request_id": job_request.request_id,
+        "job_id": run.run_id,
+        "status": run.status,
+        "repair_kind": kind,
+    }), 202
+
+
+@blackbox_bp.route("/book-lore/summary", methods=["GET"])
+@require_auth
+async def get_book_lore_summary():
+    is_lore_db = True
+    conn = _conn_lore_from_container()
+    if not conn:
+        is_lore_db = False
+        conn = _conn_from_container()
+    if not conn:
+        return jsonify(_error_payload("database_unavailable")), 503
+    try:
+        return jsonify(build_book_lore_summary(conn))
+    finally:
+        if is_lore_db:
+            conn.close()
 
 
 @blackbox_bp.route("/book-lore/entities", methods=["GET"])
 @require_auth
 async def list_book_lore_entities():
-    conn = _conn_from_container()
+    is_lore_db = True
+    conn = _conn_lore_from_container()
+    if not conn:
+        is_lore_db = False
+        conn = _conn_from_container()
     if not conn:
         return jsonify(_error_payload("database_unavailable")), 503
-    payload = _list_table(conn, "book_entities", **_query_options("name"), search_columns=("name", "summary", "source_book"))
-    payload.update({"readonly": True, "route_prefix": "/api/blackbox/book-lore/entities"})
-    return jsonify(payload)
+    try:
+        payload = _list_table(conn, "book_entities", **_query_options("name"), search_columns=("name", "summary", "source_book"))
+        payload.update({"readonly": True, "route_prefix": "/api/blackbox/book-lore/entities"})
+        return jsonify(payload)
+    finally:
+        if is_lore_db:
+            conn.close()
 
 
 @blackbox_bp.route("/book-lore/communities", methods=["GET"])
 @require_auth
 async def list_book_lore_communities():
-    conn = _conn_from_container()
+    is_lore_db = True
+    conn = _conn_lore_from_container()
+    if not conn:
+        is_lore_db = False
+        conn = _conn_from_container()
     if not conn:
         return jsonify(_error_payload("database_unavailable")), 503
-    payload = _list_table(conn, "book_communities", **_query_options("title"), search_columns=("title", "summary"))
-    payload.update({"readonly": True, "route_prefix": "/api/blackbox/book-lore/communities"})
-    return jsonify(payload)
+    try:
+        payload = _list_table(conn, "book_communities", **_query_options("title"), search_columns=("title", "summary"))
+        payload.update({"readonly": True, "route_prefix": "/api/blackbox/book-lore/communities"})
+        return jsonify(payload)
+    finally:
+        if is_lore_db:
+            conn.close()
 
 
 @blackbox_bp.route("/book-lore/relations", methods=["GET"])
 @require_auth
 async def list_book_lore_relations():
-    conn = _conn_from_container()
+    is_lore_db = True
+    conn = _conn_lore_from_container()
+    if not conn:
+        is_lore_db = False
+        conn = _conn_from_container()
     if not conn:
         return jsonify(_error_payload("database_unavailable")), 503
-    payload = _list_table(conn, "book_relations", **_query_options("source"), search_columns=("source", "target", "relation"))
-    payload.update({"readonly": True, "route_prefix": "/api/blackbox/book-lore/relations"})
-    return jsonify(payload)
+    try:
+        payload = _list_table(conn, "book_relations", **_query_options("source"), search_columns=("source", "target", "relation"))
+        payload.update({"readonly": True, "route_prefix": "/api/blackbox/book-lore/relations"})
+        return jsonify(payload)
+    finally:
+        if is_lore_db:
+            conn.close()
 
 
 @blackbox_bp.route("/book-lore/notes", methods=["GET"])
 @require_auth
 async def list_book_lore_notes():
-    conn = _conn_from_container()
+    is_lore_db = True
+    conn = _conn_lore_from_container()
+    if not conn:
+        is_lore_db = False
+        conn = _conn_from_container()
     if not conn:
         return jsonify(_error_payload("database_unavailable")), 503
-    payload = _list_table(conn, "book_notes", **_query_options("title"), search_columns=("title", "content"))
-    payload.update({"readonly": True, "route_prefix": "/api/blackbox/book-lore/notes"})
-    return jsonify(payload)
+    try:
+        payload = _list_table(conn, "book_notes", **_query_options("title"), search_columns=("title", "content"))
+        payload.update({"readonly": True, "route_prefix": "/api/blackbox/book-lore/notes"})
+        return jsonify(payload)
+    finally:
+        if is_lore_db:
+            conn.close()
 
 
 @blackbox_bp.route("/fewshot/summary", methods=["GET"])

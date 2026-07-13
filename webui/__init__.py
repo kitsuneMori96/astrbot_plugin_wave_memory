@@ -47,6 +47,9 @@ class WaveMemoryWebUI:
         geodesic=None,
         tag_extractor=None,
         writer=None,
+        write_gateway=None,
+        durable_jobs=None,
+        task_supervisor=None,
         host: str = "0.0.0.0",
         port: int = 7890,
         password: str = "",
@@ -73,6 +76,9 @@ class WaveMemoryWebUI:
             geodesic=geodesic,
             tag_extractor=tag_extractor,
             writer=writer,
+            write_gateway=write_gateway,
+            durable_jobs=durable_jobs,
+            task_supervisor=task_supervisor,
             password=password,
             plugin_config=plugin_config,
             injection_channel_config=injection_channel_config,
@@ -83,6 +89,8 @@ class WaveMemoryWebUI:
             detected_memory_plugins=detected_memory_plugins,
         )
 
+        self._task_supervisor = task_supervisor
+
         # 创建服务器实例
         if Server is None:
             raise RuntimeError("WebUI runtime dependencies are unavailable")
@@ -92,7 +100,14 @@ class WaveMemoryWebUI:
     async def start(self) -> None:
         """启动 WebUI 服务器，并后台预热 KG 星图缓存。"""
         await self._server.start()
-        self._kg_warmup_task = asyncio.create_task(self._async_kg_cache_warmup())
+        if self._task_supervisor is None:
+            self._kg_warmup_task = asyncio.create_task(self._async_kg_cache_warmup())
+        else:
+            self._kg_warmup_task = self._task_supervisor.start(
+                "wave-memory:webui-kg-warmup",
+                self._async_kg_cache_warmup(),
+                owner="webui",
+            )
         self._kg_warmup_task.add_done_callback(self._log_kg_warmup_result)
 
     async def _async_kg_cache_warmup(self) -> dict:
