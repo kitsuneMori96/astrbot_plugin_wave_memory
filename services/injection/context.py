@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+try:
+    from ...domain.scope import RuntimeScope
+except ImportError:  # 兼容独立测试/外部调用 services.injection
+    from domain.scope import RuntimeScope
+
 
 @dataclass(frozen=True)
 class InjectionContext:
@@ -21,6 +26,7 @@ class InjectionContext:
     sender_name: str
     bot_id: str
     bot_profile_id: str
+    scope: RuntimeScope | None = None
     recent_context: list[str] = field(default_factory=list)
     mode: str = "full"
     config: dict[str, Any] = field(default_factory=dict)

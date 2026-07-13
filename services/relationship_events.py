@@ -7,6 +7,11 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+try:  # 兼容插件包导入和仓库测试直接导入
+    from ..domain.scope import RuntimeScope, ScopeValidationError
+except ImportError:  # pragma: no cover - 由仓库测试直接导入 services 使用
+    from domain.scope import RuntimeScope, ScopeValidationError
+
 
 DIMENSION_WEIGHTS = {
     "familiarity": 0.25,
@@ -61,6 +66,30 @@ def get_attitude_level(affection: int) -> str:
     return "hostile"
 
 
+def _project_group_subject_scope(scope: RuntimeScope) -> tuple[str, str, str]:
+    """Project an already-resolved group RuntimeScope into legacy relationship keys.
+
+    This boundary never builds a Scope from bot/group/user strings.  Legacy callers
+    may still supply those fields while their explicit projection adapters remain,
+    but new callers must give the canonical Scope object.
+    """
+    if not isinstance(scope, RuntimeScope):
+        raise ScopeValidationError("scope_required", "relationship event requires RuntimeScope")
+    if scope.visibility != "group" or scope.session is None:
+        raise ScopeValidationError(
+            "scope_visibility_not_allowed",
+            "relationship events currently require a group RuntimeScope",
+        )
+    principal = scope.subject_principal_id or ""
+    prefix = f"{scope.session.platform_id}:user:"
+    if not principal.startswith(prefix) or principal == prefix:
+        raise ScopeValidationError(
+            "scope_subject_required",
+            "relationship event target must be a scoped platform user",
+        )
+    return scope.bot_id, scope.session.conversation_id, principal[len(prefix):]
+
+
 @dataclass
 class RelationshipEventResult:
     event_id: int
@@ -112,9 +141,10 @@ class RelationshipEventService:
     def record_event(
         self,
         *,
-        bot_id: str,
-        group_id: str,
-        user_id: str,
+        bot_id: str | None = None,
+        group_id: str | None = None,
+        user_id: str | None = None,
+        scope: RuntimeScope | None = None,
         event_type: str,
         dimension: str,
         delta: float,
@@ -123,9 +153,21 @@ class RelationshipEventService:
         source_memory_id: int | None = None,
         created_at: float | None = None,
     ) -> RelationshipEventResult:
-        bot_id = (bot_id or "").strip()
-        group_id = (group_id or "").strip()
-        user_id = (user_id or "").strip()
+        legacy_bot_id = (bot_id or "").strip()
+        legacy_group_id = (group_id or "").strip()
+        legacy_user_id = (user_id or "").strip()
+        if scope is not None:
+            scoped_bot_id, scoped_group_id, scoped_user_id = _project_group_subject_scope(scope)
+            supplied = (legacy_bot_id, legacy_group_id, legacy_user_id)
+            projected = (scoped_bot_id, scoped_group_id, scoped_user_id)
+            if any(value for value in supplied) and supplied != projected:
+                raise ScopeValidationError(
+                    "scope_legacy_mismatch",
+                    "relationship legacy keys must match the supplied RuntimeScope",
+                )
+            bot_id, group_id, user_id = projected
+        else:
+            bot_id, group_id, user_id = legacy_bot_id, legacy_group_id, legacy_user_id
         event_type = (event_type or "").strip()
         dimension = (dimension or "").strip()
         reason = (reason or "").strip()

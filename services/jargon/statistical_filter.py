@@ -1,163 +1,104 @@
-"""黑话统计预筛 — jieba 分词 + 词频统计 (US-4.1)
-
-不依赖 LLM，纯统计发现高频非常规词。
-"""
+"""黑话统计预筛：所有运行时状态均以 RuntimeScope 三元组隔离。"""
 
 from __future__ import annotations
 
 import re
 import time
 from collections import defaultdict
-from typing import Dict, List, Set
+from typing import Any, Callable, Dict, List, Set
 
+try:
+    from ...domain.scope import RuntimeScope
+except ImportError:
+    from domain.scope import RuntimeScope
 from astrbot.api import logger
 
-# jieba 可选依赖
 try:
     import jieba
     _HAS_JIEBA = True
 except ImportError:
     _HAS_JIEBA = False
 
+_STOPWORDS: Set[str] = {"的", "了", "是", "在", "我", "有", "和", "就", "不", "人", "都", "一", "一个", "上", "也", "很", "到", "说", "要", "去", "你", "会", "着", "没有", "看", "好", "自己", "这", "他", "她", "吗", "什么", "啊", "呢", "吧", "哦", "嗯", "哈", "呀", "啦", "那", "还", "能", "把", "让", "被", "从", "对", "但", "可以", "这个", "那个", "就是", "没", "来", "出", "想", "做", "里"}
+_COMMON_WORDS: Set[str] = {"哈哈", "哈哈哈", "好的", "可以", "谢谢", "不是", "知道", "怎么", "为什么", "因为", "所以", "但是", "然后", "如果", "已经", "可能", "应该", "需要", "觉得", "感觉", "喜欢"}
 
-# 停用词（高频无意义）
-_STOPWORDS: Set[str] = {
-    "的", "了", "是", "在", "我", "有", "和", "就", "不", "人",
-    "都", "一", "一个", "上", "也", "很", "到", "说", "要", "去",
-    "你", "会", "着", "没有", "看", "好", "自己", "这", "他", "她",
-    "吗", "什么", "啊", "呢", "吧", "哦", "嗯", "哈", "呀", "啦",
-    "那", "还", "能", "把", "让", "被", "从", "对", "但", "可以",
-    "这个", "那个", "就是", "没", "来", "出", "想", "做", "里",
-}
 
-# 常见日常词过滤
-_COMMON_WORDS: Set[str] = {
-    "哈哈", "哈哈哈", "好的", "可以", "谢谢", "不是", "知道",
-    "怎么", "为什么", "因为", "所以", "但是", "然后", "如果",
-    "已经", "可能", "应该", "需要", "觉得", "感觉", "喜欢",
-}
+def scope_key(scope: RuntimeScope | None) -> tuple[str, str, str] | None:
+    """返回唯一正式 Jargon 键；非已解析群 Scope 一律拒绝。"""
+    if not isinstance(scope, RuntimeScope) or scope.visibility != "group" or scope.session is None:
+        return None
+    return (scope.bot_id, scope.session.id, scope.visibility)
 
 
 class JargonStatisticalFilter:
-    """词频统计器 — 发现高频非常规词作为黑话候选。"""
+    """词频统计器；不允许 group_id-only 的内存状态。"""
 
-    def __init__(self, context_keep: int = 10, window_days: int = 7,
-                 jieba_threshold: int = 100,
-                 weight_idf: float = 0.4, weight_burst: float = 0.3,
-                 weight_concentration: float = 0.3):
-        self._context_keep = context_keep
-        self._window_days = window_days
-        self._jieba_threshold = jieba_threshold
-        self._weight_idf = weight_idf
-        self._weight_burst = weight_burst
-        self._weight_concentration = weight_concentration
-        # group_id -> {word: count}
-        self._group_freq: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
-        # group_id -> {word: first_seen_ts}
-        self._first_seen: Dict[str, Dict[str, float]] = defaultdict(dict)
-        # group_id -> {word: set(user_ids)}
-        self._user_freq: Dict[str, Dict[str, Set[str]]] = defaultdict(lambda: defaultdict(set))
-        # group_id -> {word: [context metadata]}
-        self._contexts: Dict[str, Dict[str, List[Dict]]] = defaultdict(lambda: defaultdict(list))
+    def __init__(self, context_keep: int = 10, window_days: int = 7, jieba_threshold: int = 100,
+                 weight_idf: float = 0.4, weight_burst: float = 0.3, weight_concentration: float = 0.3,
+                 candidate_router: Callable[..., Dict[str, Any]] | None = None):
+        self._context_keep, self._window_days, self._jieba_threshold = context_keep, window_days, jieba_threshold
+        self._weight_idf, self._weight_burst, self._weight_concentration = weight_idf, weight_burst, weight_concentration
+        self._candidate_router = candidate_router
+        self._group_freq: Dict[tuple[str, str, str], Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        self._first_seen: Dict[tuple[str, str, str], Dict[str, float]] = defaultdict(dict)
+        self._user_freq: Dict[tuple[str, str, str], Dict[str, Set[str]]] = defaultdict(lambda: defaultdict(set))
+        self._contexts: Dict[tuple[str, str, str], Dict[str, List[Dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
 
-    def feed(self, text: str, group_id: str, sender_id: str = "", timestamp: float = None) -> None:
-        """喂入一条消息，更新词频统计。"""
-        if not _HAS_JIEBA:
+    def feed(self, text: str, scope: RuntimeScope | None, sender_id: str = "", timestamp: float | None = None) -> None:
+        key = scope_key(scope)
+        if key is None or not _HAS_JIEBA or self._is_bot_sender(sender_id):
             return
-        if self._is_bot_sender(sender_id):
-            return
-        words = self._tokenize(text)
         now = timestamp or time.time()
-        for w in words:
-            self._group_freq[group_id][w] += 1
-            if w not in self._first_seen[group_id]:
-                self._first_seen[group_id][w] = now
+        source_context = {
+            "content": text[:300],
+            "timestamp": now,
+            "sender_id": sender_id or "",
+            "bot_id": scope.bot_id if scope else "",
+        }
+        group_id = scope.session.conversation_id if scope and scope.session else ""
+        for word in self._tokenize(text):
+            if self._candidate_router is not None:
+                route = self._candidate_router(word, group_id, source_context, [text])
+                if not route.get("enter_llm", False):
+                    continue
+            self._group_freq[key][word] += 1
+            self._first_seen[key].setdefault(word, now)
             if sender_id:
-                self._user_freq[group_id][w].add(sender_id)
-            # 保留上下文锚点元数据，同时让 get_candidates 输出旧 contexts 文本数组兼容 UI。
-            ctx_list = self._contexts[group_id][w]
-            if len(ctx_list) < self._context_keep:
-                ctx_list.append({
-                    "content": text[:300],
-                    "timestamp": now,
-                    "sender_id": sender_id or "",
-                })
+                self._user_freq[key][word].add(sender_id)
+            contexts = self._contexts[key][word]
+            if len(contexts) < self._context_keep:
+                contexts.append({"content": text[:300], "timestamp": now, "sender_id": sender_id or ""})
 
-    def get_candidates(self, group_id: str, min_freq: int = 5, top_k: int = 20) -> List[Dict]:
-        """获取候选黑话词（window_days 天内频率 >= min_freq 的非常规词）。
-
-        Returns: [{"word": str, "frequency": int, "score": float, "contexts": [...]}]
-        """
-        if not _HAS_JIEBA:
+    def get_candidates(self, scope: RuntimeScope | None, min_freq: int = 5, top_k: int = 20) -> List[Dict[str, Any]]:
+        key = scope_key(scope)
+        if key is None or not _HAS_JIEBA:
             return []
-
-        now = time.time()
-        window_ago = now - self._window_days * 86400
-        freq = self._group_freq.get(group_id, {})
-        total_groups = len(self._group_freq) or 1
-
-        candidates = []
+        now, window_ago = time.time(), time.time() - self._window_days * 86400
+        freq, total_scopes = self._group_freq.get(key, {}), max(len(self._group_freq), 1)
+        candidates: List[Dict[str, Any]] = []
         for word, count in freq.items():
-            if count < min_freq:
+            first_seen = self._first_seen[key].get(word, now)
+            if count < min_freq or first_seen < window_ago or self._is_standard_word(word):
                 continue
-            first_seen = self._first_seen.get(group_id, {}).get(word, now)
-            if first_seen < window_ago:
-                continue  # 超出窗口的词不算
-
-            # 是否为标准词
-            if self._is_standard_word(word):
-                continue
-
-            # 计算得分
-            # IDF: 越少群用越可能是黑话
-            groups_with_word = sum(1 for g_freq in self._group_freq.values() if word in g_freq)
             import math
-            idf = math.log(total_groups / max(groups_with_word, 1) + 1)
-
-            # Burst: 短时间高频
-            age_days = max((now - first_seen) / 86400, 0.1)
-            burst = count / age_days
-
-            # Concentration: 少数人使用
-            unique_users = len(self._user_freq.get(group_id, {}).get(word, set())) or 1
-            concentration = 1.0 / unique_users
-
-            score = (self._weight_idf * idf +
-                     self._weight_burst * min(burst / 10, 1.0) +
-                     self._weight_concentration * concentration)
-
-            source_contexts = self._contexts.get(group_id, {}).get(word, [])[:self._context_keep]
-            candidates.append({
-                "word": word,
-                "frequency": count,
-                "score": round(score, 3),
-                "contexts": [ctx.get("content", "") for ctx in source_contexts],
-                "source_contexts": source_contexts,
-            })
-
-        candidates.sort(key=lambda x: x["score"], reverse=True)
+            scopes_with_word = sum(1 for values in self._group_freq.values() if word in values)
+            idf = math.log(total_scopes / max(scopes_with_word, 1) + 1)
+            burst = count / max((now - first_seen) / 86400, 0.1)
+            concentration = 1.0 / max(len(self._user_freq[key].get(word, set())), 1)
+            contexts = self._contexts[key].get(word, [])[:self._context_keep]
+            candidates.append({"word": word, "frequency": count,
+                "score": round(self._weight_idf * idf + self._weight_burst * min(burst / 10, 1.0) + self._weight_concentration * concentration, 3),
+                "contexts": [ctx.get("content", "") for ctx in contexts], "source_contexts": contexts})
+        candidates.sort(key=lambda item: item["score"], reverse=True)
         return candidates[:top_k]
 
     def _tokenize(self, text: str) -> List[str]:
-        """jieba 分词 + 过滤。"""
-        # 预处理：去除 URL、@mention、[图片] 等
-        text = re.sub(r'https?://\S+', '', text)
-        text = re.sub(r'@\S+', '', text)
-        text = re.sub(r'\[.*?\]', '', text)
-
-        words = jieba.cut(text)
+        text = re.sub(r'https?://\S+|@\S+|\[.*?\]', '', text or '')
         result = []
-        for w in words:
-            w = w.strip()
-            if len(w) < 2:
-                continue
-            if w in _STOPWORDS or w in _COMMON_WORDS:
-                continue
-            if re.match(r'^[\d\s\W]+$', w):  # 纯数字/标点
-                continue
-            if self._is_vocal_noise(w):
-                continue
-            result.append(w)
+        for word in jieba.cut(text):
+            word = word.strip()
+            if len(word) >= 2 and word not in _STOPWORDS and word not in _COMMON_WORDS and not re.match(r'^[\d\s\W]+$', word) and not self._is_vocal_noise(word):
+                result.append(word)
         return result
 
     @staticmethod
@@ -170,18 +111,11 @@ class JargonStatisticalFilter:
         word = (word or "").strip()
         if re.fullmatch(r"[呜嗷啊哈呵嗯喵汪]+", word) and len(set(word)) <= 4 and len(word) >= 3:
             return True
-        if len(word) >= 4:
-            chars = [ch for ch in word if ch.strip()]
-            if chars:
-                most = max(chars.count(ch) for ch in set(chars))
-                if most / len(chars) >= 0.75:
-                    return True
-        return False
+        chars = [char for char in word if char.strip()]
+        return bool(len(word) >= 4 and chars and max(chars.count(char) for char in set(chars)) / len(chars) >= .75)
 
     def _is_standard_word(self, word: str) -> bool:
-        """检查是否为标准词典词。"""
-        if not _HAS_JIEBA:
-            return False
-        # jieba 内置词频 > jieba_threshold 视为常用词
-        freq = getattr(jieba.dt, 'FREQ', {}).get(word, 0)
-        return freq > self._jieba_threshold
+        return bool(_HAS_JIEBA and getattr(jieba.dt, 'FREQ', {}).get(word, 0) > self._jieba_threshold)
+
+
+__all__ = ["JargonStatisticalFilter", "scope_key"]

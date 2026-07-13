@@ -87,8 +87,12 @@ class BeliefRepo:
         belief_type: str = None,
         status: str = "active",
         limit: int = 50,
+        *,
+        include_unresolved_legacy: bool = False,
     ) -> list[dict]:
-        """查询信念。"""
+        """读取 legacy beliefs 审计数据；默认不把它们暴露为正式 active 信念。"""
+        if not include_unresolved_legacy:
+            return []
         conditions = ["status = ?"]
         params: list = [status]
 
@@ -163,8 +167,17 @@ class BeliefRepo:
                 )
                 self.cm.commit()
 
-    def search_by_content(self, keywords: list[str], bot_id: str = None, limit: int = 5) -> list[dict]:
-        """按关键词搜索信念（简单 LIKE 匹配）。"""
+    def search_by_content(
+        self,
+        keywords: list[str],
+        bot_id: str = None,
+        limit: int = 5,
+        *,
+        include_unresolved_legacy: bool = False,
+    ) -> list[dict]:
+        """搜索 legacy beliefs；默认 fail closed，避免进入正常注入。"""
+        if not include_unresolved_legacy:
+            return []
         conditions = ["status = 'active'"]
         params: list = []
 
@@ -215,4 +228,10 @@ class BeliefRepo:
             "archived_reason": row[10],
             "evidence_type": row[11] if len(row) > 11 else "memory",
             "evidence_ids": json.loads(row[12] or "[]") if len(row) > 12 else json.loads(row[5] or "[]"),
+            "policy_version": "legacy-unversioned",
+            "evidence_health": "legacy_unresolved",
+            "legacy": True,
+            "unresolved_legacy": True,
+            "scope": None,
+            "readonly": True,
         }

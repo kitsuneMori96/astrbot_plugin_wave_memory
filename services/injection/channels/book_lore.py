@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -10,6 +9,13 @@ from typing import Any
 from ...identity_safety import is_identity_contamination
 from ..channel_base import InjectionResult
 from .safety import is_channel_allowed_in_mode
+
+try:
+    from ....domain.scope import CatalogScope, validate_formal_command_scope
+    from ....engine.external_book_lore import ExternalBookLoreStore
+except ImportError:  # pragma: no cover - direct services imports in isolated tests
+    from domain.scope import CatalogScope, validate_formal_command_scope
+    from engine.external_book_lore import ExternalBookLoreStore
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -59,10 +65,20 @@ class BookLoreChannel:
 
     name = "book_lore"
 
-    def __init__(self, *, book_lore_index: Any = None, embedding_service: Any = None, lore_db_path: str = ""):
+    def __init__(
+        self,
+        *,
+        book_lore_index: Any = None,
+        embedding_service: Any = None,
+        lore_db_path: str = "",
+        catalog_scope: CatalogScope | None = None,
+        lore_store: ExternalBookLoreStore | None = None,
+    ):
         self.book_lore_index = book_lore_index
         self.embedding_service = embedding_service
         self.lore_db_path = lore_db_path
+        self.catalog_scope = catalog_scope
+        self.lore_store = lore_store
 
     async def build(self, ctx: Any) -> InjectionResult:
         started = time.perf_counter()
@@ -73,7 +89,12 @@ class BookLoreChannel:
         cfg = _channel_cfg(ctx)
         if not _as_bool(cfg.get("enabled"), True):
             return InjectionResult.disabled(self.name, reason="book_lore channel disabled by config")
-        if not self.book_lore_index or not self.embedding_service or not self.lore_db_path:
+        if not isinstance(self.catalog_scope, CatalogScope):
+            return InjectionResult.disabled(self.name, reason="catalog_scope_required")
+        scope_decision = validate_formal_command_scope("catalog.read", self.catalog_scope)
+        if not scope_decision.allowed:
+            return InjectionResult.disabled(self.name, reason=scope_decision.reason_code or "catalog_scope_required")
+        if not self.book_lore_index or not self.embedding_service or (not self.lore_store and not self.lore_db_path):
             return InjectionResult.empty(self.name, reason="book_lore dependencies unavailable")
 
         top_k = _as_int(cfg.get("top_k"), 1)
@@ -89,24 +110,23 @@ class BookLoreChannel:
             selected: list[dict[str, Any]] = []
             filtered: list[dict[str, Any]] = []
             if hits:
-                conn = sqlite3.connect(self.lore_db_path)
-                try:
-                    for cid, score in hits:
-                        score = float(score or 0.0)
-                        if score < min_score:
-                            filtered.append({"community_id": cid, "score": score, "filter_reason": "min_score", "filter_channel": "book_lore"})
-                            continue
-                        row = conn.execute("SELECT title, summary FROM book_communities WHERE id = ?", (cid,)).fetchone()
-                        if not row:
-                            filtered.append({"community_id": cid, "score": score, "filter_reason": "missing_community", "filter_channel": "book_lore"})
-                            continue
-                        item = {"community_id": cid, "score": score, "title": row[0] or "", "summary": row[1] or ""}
-                        if is_identity_contamination(f"{item['title']} {item['summary']}"):
-                            filtered.append({**item, "filter_reason": "identity_contamination", "filter_channel": "book_lore"})
-                            continue
-                        selected.append(item)
-                finally:
-                    conn.close()
+                store = self.lore_store or ExternalBookLoreStore(self.lore_db_path)
+                rows = store.communities_by_ids([cid for cid, _ in hits], scope=self.catalog_scope)
+                by_id = {str(row.get("id")): row for row in rows}
+                for cid, score in hits:
+                    score = float(score or 0.0)
+                    if score < min_score:
+                        filtered.append({"community_id": cid, "score": score, "filter_reason": "min_score", "filter_channel": "book_lore"})
+                        continue
+                    row = by_id.get(str(cid))
+                    if not row:
+                        filtered.append({"community_id": cid, "score": score, "filter_reason": "missing_community", "filter_channel": "book_lore"})
+                        continue
+                    item = {"community_id": cid, "score": score, "title": row.get("title") or "", "summary": row.get("summary") or ""}
+                    if is_identity_contamination(f"{item['title']} {item['summary']}"):
+                        filtered.append({**item, "filter_reason": "identity_contamination", "filter_channel": "book_lore"})
+                        continue
+                    selected.append(item)
 
             if not selected:
                 result = InjectionResult.empty(self.name, latency_ms=self._latency_ms(started), reason="no book lore hits")

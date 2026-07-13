@@ -7,6 +7,10 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
+try:
+    from ....domain.scope import validate_formal_command_scope
+except ImportError:
+    from domain.scope import validate_formal_command_scope
 from ...identity_safety import is_identity_contamination
 from ..channel_base import InjectionResult
 from .safety import is_channel_allowed_in_mode
@@ -100,14 +104,18 @@ class JargonChannel:
         cfg = _channel_cfg(ctx)
         if not _as_bool(cfg.get("enabled"), True):
             return InjectionResult.disabled(self.name, reason="jargon channel disabled by config")
-        group_id = getattr(ctx, "group_id", None)
-        if not group_id:
-            return InjectionResult.empty(self.name, reason="jargon requires group_id")
+        runtime_scope = getattr(ctx, "scope", None)
+        scope_decision = validate_formal_command_scope("jargon.inject", runtime_scope)
+        if not scope_decision.allowed:
+            return InjectionResult.empty(
+                self.name,
+                reason=scope_decision.reason_code or "scope_rejected",
+            )
         if not self.jargon_service:
             return InjectionResult.empty(self.name, reason="jargon service is unavailable")
 
         try:
-            text = self.jargon_service.get_injection(getattr(ctx, "message", "") or "", group_id) or ""
+            text = self.jargon_service.get_injection(getattr(ctx, "message", "") or "", runtime_scope) or ""
             text = str(text).strip()
             if not text:
                 return InjectionResult.empty(self.name, latency_ms=self._latency_ms(started), reason="no matching confirmed jargon")

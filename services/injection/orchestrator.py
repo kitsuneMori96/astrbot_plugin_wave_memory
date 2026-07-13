@@ -13,7 +13,7 @@ from typing import Any, Callable, Iterable
 
 from .channel_base import InjectionChannel, InjectionResult
 from .context import InjectionContext
-from .trace_store import InjectionTraceStore
+from .trace_store import InjectionTraceStore, runtime_scope_metadata
 from ..config.channel_config import ChannelConfigSet
 
 
@@ -78,6 +78,7 @@ class InjectionOrchestrator:
                     "sender_name": ctx.sender_name,
                     "bot_id": ctx.bot_id,
                     "bot_profile_id": ctx.bot_profile_id,
+                    "metadata": runtime_scope_metadata(ctx.scope),
                     "message": ctx.message,
                     "final_text": final_text,
                     "total_latency_ms": total_latency_ms,

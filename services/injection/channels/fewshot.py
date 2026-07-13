@@ -7,6 +7,10 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
+try:
+    from ....domain.scope import RuntimeScope
+except ImportError:
+    from domain.scope import RuntimeScope
 from ...identity_safety import is_identity_contamination
 from ..channel_base import InjectionResult
 from .safety import is_channel_allowed_in_mode
@@ -93,13 +97,19 @@ class FewShotChannel:
             return InjectionResult.disabled(self.name, reason="fewshot channel disabled by config")
         if not self.few_shot_service:
             return InjectionResult.empty(self.name, reason="few-shot service is unavailable")
+        runtime_scope = getattr(ctx, "scope", None)
+        if not isinstance(runtime_scope, RuntimeScope):
+            return InjectionResult.empty(self.name, reason="runtime_scope_required")
+        bot_profile_id = str(getattr(ctx, "bot_profile_id", "") or "").strip()
+        if not bot_profile_id or runtime_scope.bot_id != bot_profile_id:
+            return InjectionResult.empty(self.name, reason="runtime_scope_bot_mismatch")
         max_items = _as_int(cfg.get("max_items"), 3)
         if max_items <= 0:
             return InjectionResult.empty(self.name, reason="fewshot max_items is zero")
 
         try:
             text = self.few_shot_service.get_injection(
-                bot_id=getattr(ctx, "bot_id", "") or getattr(ctx, "bot_profile_id", "") or "",
+                bot_id=runtime_scope.bot_id,
                 max_items=max_items,
             ) or ""
             text = str(text).strip()

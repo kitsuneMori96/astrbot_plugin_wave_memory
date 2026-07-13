@@ -30,10 +30,12 @@ try:
     from services.agent.permission_policy import check_agent_action
     from services.injection.trace_store import InjectionTraceStore
     from services.review.candidate_store import ReviewCandidateStore, VALID_REVIEW_CANDIDATE_TYPES
+    from tools.scope_boundary import require_group_runtime_scope, scope_envelope, scope_error_message
 except Exception:  # pragma: no cover
     from ..services.agent.permission_policy import check_agent_action
     from ..services.injection.trace_store import InjectionTraceStore
     from ..services.review.candidate_store import ReviewCandidateStore, VALID_REVIEW_CANDIDATE_TYPES
+    from .scope_boundary import require_group_runtime_scope, scope_envelope, scope_error_message
 
 
 def _as_list(value: Any) -> list[str]:
@@ -122,43 +124,48 @@ class WaveMemorySubmitReviewCandidateTool(FunctionTool[AstrAgentContext]):
         self.candidate_store = store
         return store
 
-    def _memory_exists(self, memory_id: int) -> bool:
+    def _memory_in_scope(self, memory_id: int, scope) -> bool:
         conn = self._conn()
-        if not conn:
+        if not conn or scope.session is None:
             return False
         try:
-            row = conn.execute("SELECT 1 FROM memories WHERE id=?", (int(memory_id),)).fetchone()
+            row = conn.execute(
+                """SELECT 1 FROM memories
+                   WHERE id=? AND bot_id=? AND session_id=? AND visibility=?
+                     AND resolution_state='resolved' AND COALESCE(quarantine, 0)=0""",
+                (int(memory_id), scope.bot_id, scope.session.id, scope.visibility),
+            ).fetchone()
             return bool(row)
         except Exception:
             return False
 
-    def _validate_evidence(self, evidence: list[str]) -> str:
+    def _validate_evidence(self, evidence: list[str], scope) -> str:
         trace_store = self._trace_store()
         if not trace_store:
             return "注入 trace 存储未初始化"
         for item in evidence:
             if item.startswith("trace:"):
                 trace_id = item.split(":", 1)[1].strip()
-                if not trace_id or not trace_store.get(trace_id):
-                    return f"找不到证据 trace：{trace_id or item}"
+                if not trace_id or not trace_store.get_for_scope(trace_id, scope):
+                    return scope_error_message("审查候选证据校验", "scope_mismatch")
             elif item.startswith("memory:"):
                 raw_id = item.split(":", 1)[1].strip()
                 try:
                     memory_id = int(raw_id)
                 except (TypeError, ValueError):
                     return f"无效证据 memory：{raw_id or item}"
-                if not self._memory_exists(memory_id):
-                    return f"找不到证据 memory：{memory_id}"
+                if not self._memory_in_scope(memory_id, scope):
+                    return scope_error_message("审查候选证据校验", "scope_mismatch")
             else:
                 # 兼容裸 trace_id / 裸 memory_id。
-                if trace_store.get(item):
+                if trace_store.get_for_scope(item, scope):
                     continue
                 try:
                     memory_id = int(item)
                 except (TypeError, ValueError):
                     return f"未知证据格式：{item}"
-                if not self._memory_exists(memory_id):
-                    return f"找不到证据 memory：{memory_id}"
+                if not self._memory_in_scope(memory_id, scope):
+                    return scope_error_message("审查候选证据校验", "scope_mismatch")
         return ""
 
     async def call(self, context: ContextWrapper[AstrAgentContext], **kwargs) -> str:
@@ -179,10 +186,15 @@ class WaveMemorySubmitReviewCandidateTool(FunctionTool[AstrAgentContext]):
         if not reason:
             return "必须提供 reason"
 
+        runtime_scope, error_code = require_group_runtime_scope(context, "review.candidate.submit")
+        if error_code:
+            return scope_error_message("审查候选提交", error_code)
+        assert runtime_scope is not None
+
         store = self._candidate_store()
         if not store:
             return "审查候选存储未初始化"
-        evidence_error = self._validate_evidence(evidence)
+        evidence_error = self._validate_evidence(evidence, runtime_scope)
         if evidence_error:
             return evidence_error
 
@@ -192,7 +204,11 @@ class WaveMemorySubmitReviewCandidateTool(FunctionTool[AstrAgentContext]):
             evidence=evidence,
             reason=reason,
             actor="agent",
-            metadata={"promoted": False, "policy": "review_required"},
+            metadata={
+                "promoted": False,
+                "policy": "review_required",
+                "source_runtime_scope": scope_envelope(runtime_scope),
+            },
         )
         return json.dumps(
             {

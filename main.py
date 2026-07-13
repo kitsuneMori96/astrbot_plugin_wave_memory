@@ -17,6 +17,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .engine.database import WaveMemoryDB
 from .engine.vector_index import VectorIndex
+from .engine.db.outbox_repo import OutboxRepository
 from .engine.embedding import EmbeddingService
 from .engine.query_engine import QueryEngine
 from .engine.directed_cooccurrence import DirectedCooccurrence, CooccurrenceScheduler
@@ -28,8 +29,17 @@ from .engine.intrinsic_residual import IntrinsicResidualCalculator
 from .engine.semantic_gain import SemanticGainConfig
 from .services.message_writer import MessageWriter
 from .services.tag_extractor import TagExtractor
-from .services.tag_job import TagBackfillJob
 from .services.tag_worker import TagWorker
+from .services.system_convergence_runtime import ProductionWriteGateway
+from .services.derived_projections import (
+    CooccurrenceProjection,
+    MemoryIndexProjection,
+    TagIndexProjection,
+    RuntimeRefreshProjection,
+)
+from .services.task_supervisor import TaskSupervisor
+from .services.durable_jobs import DurableJobRunner
+from .services.quality_gate import QualityGate
 from .services.pair_similarity import PairSimilarityService
 from .services.hot_config import HotConfig
 from .services.runtime_mode import effective_native_injection_enabled, effective_query_feature, resolve_runtime_mode, runtime_capability_enabled, should_self_heal_advanced_query
@@ -39,9 +49,7 @@ from .services.consolidation import ConsolidationService
 from .services.persona_evolution import PersonaEvolution
 from .tools.memory_search import WaveMemorySearchTool, WaveMemoryRememberTool
 from .tools.deep_search import WaveMemoryDeepSearchTool
-from .tools.person_search import WaveMemoryPersonSearchTool
-from .tools.extra_tools import WaveMemoryAffinityTool, WaveMemoryFactsTool, WaveMemoryTagGraphTool
-from .tools.book_lore_search import BookLoreSearchTool, BookLoreGraphTool
+from .tools.extra_tools import WaveMemoryFactsTool
 from .tools.injection_explain import WaveMemoryExplainInjectionTool
 from .tools.memory_feedback import WaveMemoryFeedbackMemoryTool
 from .tools.config_suggestion import WaveMemorySuggestConfigTool
@@ -70,6 +78,19 @@ from .services.belief_engine import BeliefEngine
 from .services.belief_emergence import BeliefEmergenceService
 from .services.jargon.service import JargonService
 from .services.few_shot.service import FewShotService
+from .services.learning.config import diagnose_learning_config, resolve_learning_config
+from .services.learning.dedicated_review import DedicatedReviewBridge
+from .services.learning.domain_promotions import (
+    WorldviewInternalizationPromotionService,
+    register_learning_domain_targets,
+)
+from .services.learning.job_runner import LearningJobRunner
+from .services.learning.promotion import PromotionOrchestrator, PromotionTargetRegistry
+from .services.learning.review import LearningReviewService
+from .services.learning.source import LearningSourceRegistry
+from .services.learning.book_experience import register_book_experience_task
+from .services.relationship_events import RelationshipEventService
+from .domain.scope import RuntimeScope
 from .services.identity_safety import (
     build_identity_safety_injection,
     filter_identity_contamination_memories,
@@ -99,27 +120,110 @@ class BotProfile:
         return [w for w in words if w]
 
 
+_BUILTIN_BOT_PROFILE_CONFIGS = {
+    # v4.5.0 曾裁掉 MetaThinking_Bot1/2 schema，旧配置被 AstrBot 保存链路裁剪后，
+    # 这些身份会从运行时 config 里消失。兜底只用于内存启动，不写回用户 WebUI 配置。
+    "MetaThinking_Bot1": {
+        "qq_id": "2500447291",
+        "name": "羽书",
+        "db_id": "yushu",
+        "aliases": "羽书,羽书bot,器灵",
+        "exclude_sources": "bzz_experience,bzz_evolution,bzz_pending",
+        "interest_keywords": "没钱修什么仙,张羽,熊狼狗",
+        "proactive_enabled": True,
+        "proactive_interval_seconds": 600,
+        "proactive_max_per_hour": 3,
+    },
+    "MetaThinking_Bot2": {
+        "qq_id": "1336495069",
+        "name": "白真真",
+        "db_id": "baizz",
+        "aliases": "白真真,阿真,白主管",
+        "exclude_sources": "",
+        "interest_keywords": "白真真,张羽,安监局,灵币,极情剑道",
+        "proactive_enabled": False,
+        "proactive_interval_seconds": 900,
+        "proactive_max_per_hour": 2,
+    },
+}
+
+
+def _stringify_config_value(value, default: str = "") -> str:
+    if value is None:
+        return default
+    return str(value).strip()
+
+
+def _parse_csv_config_value(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [item.strip() for item in str(value).split(",") if item.strip()]
+
+
+def _parse_bool_config_value(value, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on", "是", "开启"}:
+            return True
+        if normalized in {"0", "false", "no", "off", "否", "关闭"}:
+            return False
+    return bool(value)
+
+
+def _parse_int_config_value(value, default: int) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _parse_bot_config(cfg: dict, fallback_db_id: str = "") -> BotProfile:
     """从配置字典解析出 BotProfile。"""
-    qq_id = cfg.get("qq_id", "").strip()
-    name = cfg.get("name", "").strip()
-    db_id = cfg.get("db_id", "").strip() or fallback_db_id or name.lower()
-    aliases = [a.strip() for a in cfg.get("aliases", "").split(",") if a.strip()]
-    meta_prompt = cfg.get("meta_prompt", "").strip()
-    exclude_sources = [s.strip() for s in cfg.get("exclude_sources", "").split(",") if s.strip()]
-    interest_keywords = [k.strip() for k in cfg.get("interest_keywords", "").split(",") if k.strip()]
+    cfg = cfg or {}
+    qq_id = _stringify_config_value(cfg.get("qq_id"))
+    name = _stringify_config_value(cfg.get("name"))
+    # BotProfile.db_id 必须来自稳定配置/注册表；绝不从显示名称推导，避免跨 Bot 串库。
+    db_id = _stringify_config_value(cfg.get("db_id")) or _stringify_config_value(fallback_db_id)
     return BotProfile(
         qq_id=qq_id,
         name=name,
         db_id=db_id,
-        aliases=aliases,
-        meta_prompt=meta_prompt,
-        proactive_enabled=cfg.get("proactive_enabled", True),
-        proactive_interval_seconds=int(cfg.get("proactive_interval_seconds", 600)),
-        proactive_max_per_hour=int(cfg.get("proactive_max_per_hour", 3)),
-        exclude_sources=exclude_sources,
-        interest_keywords=interest_keywords,
+        aliases=_parse_csv_config_value(cfg.get("aliases")),
+        meta_prompt=_stringify_config_value(cfg.get("meta_prompt")),
+        proactive_enabled=_parse_bool_config_value(cfg.get("proactive_enabled"), True),
+        proactive_interval_seconds=_parse_int_config_value(cfg.get("proactive_interval_seconds"), 600),
+        proactive_max_per_hour=_parse_int_config_value(cfg.get("proactive_max_per_hour"), 3),
+        exclude_sources=_parse_csv_config_value(cfg.get("exclude_sources")),
+        interest_keywords=_parse_csv_config_value(cfg.get("interest_keywords")),
     )
+
+
+def _build_bot_registry(config: dict) -> tuple[dict[str, BotProfile], bool]:
+    """构建 BotProfile registry；优先使用用户配置，缺键时只做内存兼容兜底。"""
+    registry: dict[str, BotProfile] = {}
+    for key in ("MetaThinking_Bot1", "MetaThinking_Bot2"):
+        bot_cfg = (config or {}).get(key, {}) or {}
+        if _stringify_config_value(bot_cfg.get("qq_id")):
+            fallback_cfg = _BUILTIN_BOT_PROFILE_CONFIGS.get(key, {})
+            merged_cfg = {**fallback_cfg, **bot_cfg}
+            profile = _parse_bot_config(merged_cfg, fallback_db_id=fallback_cfg.get("db_id", key.split("_")[-1].lower()))
+            registry[profile.qq_id] = profile
+    if registry:
+        return registry, False
+
+    fallback_registry: dict[str, BotProfile] = {}
+    for key, fallback_cfg in _BUILTIN_BOT_PROFILE_CONFIGS.items():
+        profile = _parse_bot_config(fallback_cfg, fallback_db_id=fallback_cfg.get("db_id", key.split("_")[-1].lower()))
+        fallback_registry[profile.qq_id] = profile
+    return fallback_registry, True
 
 
 @register(
@@ -137,16 +241,33 @@ class WaveMemoryPlugin(Star):
         self._terminated = False
         self._bot_qq_ids = ["2500447291", "1336495069"]  # 羽书 + 白真真
 
-        # 构建 Bot Registry（从配置解析多 bot 身份）
-        self._bot_registry: dict = {}
-        for key in ("MetaThinking_Bot1", "MetaThinking_Bot2"):
-            bot_cfg = self.config.get(key, {})
-            if bot_cfg.get("qq_id"):
-                profile = _parse_bot_config(bot_cfg, fallback_db_id=key.split("_")[-1].lower())
-                self._bot_registry[profile.qq_id] = profile
+        # 构建 Bot Registry（从配置解析多 bot 身份）；若 v4.5.0 schema 裁剪导致配置键缺失，
+        # 仅使用内存兜底恢复已存在的羽书/白真真身份，不写回、不覆盖用户 WebUI 配置。
+        self._bot_registry, self._bot_registry_compat_fallback = _build_bot_registry(self.config)
+        if self._bot_registry_compat_fallback:
+            logger.warning(
+                "[WaveMemory] MetaThinking_Bot1/2 未出现在运行时插件配置中，"
+                "已使用内存兼容兜底恢复 BotProfile；请在 AstrBot 插件配置页保存新版 schema 后以 WebUI 配置为准。"
+            )
         # 确保 _bot_qq_ids 与 registry 一致
         if self._bot_registry:
             self._bot_qq_ids = [p.qq_id for p in self._bot_registry.values()]
+
+        # Scope API 允许与主插件分切片落地：模块缺失时启动不崩溃，消息入口严格 fail closed。
+        self.scope_resolver = None
+        self._scope_resolution_failed_total: dict[str, int] = {}
+        self._scope_resolution_last_warning: dict[str, float] = {}
+
+        # 学习中心配置必须在来源/任务服务创建前集中解析；只传稳定 db_id，
+        # 不从显示名称或 QQ 号推导 Bot 归属。缺键/None 由配置服务应用安全默认。
+        self.learning_config = resolve_learning_config(
+            self.config,
+            bot_ids=(profile.db_id for profile in self._bot_registry.values()),
+        )
+        self.learning_config_warnings = diagnose_learning_config(
+            self.config,
+            bot_ids=(profile.db_id for profile in self._bot_registry.values()),
+        )
 
         # 解析配置（顶层字段 + 嵌套 object）
         query_cfg = self.config.get("Query_Settings", {})
@@ -357,16 +478,20 @@ class WaveMemoryPlugin(Star):
             dimension=self.dimension,
             max_elements=self.max_memories,
             index_path=index_path,
+            kind="memory",
+            strict_manifest=False,
         )
 
         self.tag_index = VectorIndex(
             dimension=self.dimension,
             max_elements=50000,
             index_path=tag_index_path,
+            kind="tag",
+            strict_manifest=False,
         )
 
-        # 关联 memory_index 到 db（用于删除时同步）
-        self.db.memory_index = self.memory_index
+        # DB facade 不再持有可写索引引用；索引只消费 committed outbox。
+        self.db.memory_index = None
 
         self.embedding_service = EmbeddingService(
             context=context,
@@ -455,6 +580,24 @@ class WaveMemoryPlugin(Star):
         if self.spike_router:
             self.hot_config.on_change(self.spike_router.on_config_change)
 
+        # Stage 1/3 生产写入口：领域真相由单 writer 提交，派生状态只消费 committed outbox。
+        self.memory_index_projection = MemoryIndexProjection(self.db.db_path, self.memory_index)
+        self.tag_index_projection = TagIndexProjection(self.tag_index)
+        self.cooccurrence_projection = CooccurrenceProjection(self.cooccurrence)
+        self.runtime_refresh_projection = RuntimeRefreshProjection(
+            callbacks={"memory": self._on_memory_projection_refresh}
+        )
+        self.write_gateway = ProductionWriteGateway(
+            self.db.db_path,
+            consumers={
+                self.memory_index_projection.consumer_name: self.memory_index_projection,
+                self.tag_index_projection.consumer_name: self.tag_index_projection,
+                self.cooccurrence_projection.consumer_name: self.cooccurrence_projection,
+                self.runtime_refresh_projection.consumer_name: self.runtime_refresh_projection,
+            },
+        )
+        self.quality_gate = QualityGate(repository=self.write_gateway.quality_repository)
+
         # 查询引擎
         self.query_engine = QueryEngine(
             db=self.db,
@@ -467,6 +610,7 @@ class WaveMemoryPlugin(Star):
             residual_pyramid=self.residual_pyramid,
             epa=self.epa,
             geodesic=self.geodesic,
+            write_gateway=self.write_gateway,
         )
 
         # Tag 提取器
@@ -494,6 +638,8 @@ class WaveMemoryPlugin(Star):
             embedding_service=self.embedding_service,
             bot_keywords=all_bot_keywords,
             noise_max_length=int(self.config.get("Eviction_Settings", {}).get("noise_max_length", 10)),
+            quality_gate=self.quality_gate,
+            write_gateway=self.write_gateway,
         )
 
         # LivingMemory-compatible surface（兼容已有记忆生态，不伪装插件名）
@@ -519,11 +665,26 @@ class WaveMemoryPlugin(Star):
                 tag_index=self.tag_index,
                 config=tag_worker_cfg,
                 bot_keywords=all_bot_keywords,
+                write_gateway=self.write_gateway,
             )
-            self.tag_worker.on_tags_written = self.cooccurrence_scheduler.notify_tag_change
+            # Cooccurrence refresh is driven by committed memory.tags_applied outbox events.
+            self.tag_worker.on_tags_written = None
 
-        # 后台任务追踪
-        self._bg_tasks: list[asyncio.Task] = []
+        # 所有插件级后台协程统一交由命名 TaskSupervisor 追踪。
+        self.task_supervisor = TaskSupervisor()
+        self._task_sequence = 0
+        self.maintenance_job_runner = DurableJobRunner(
+            self.write_gateway.jobs,
+            {
+                "maintenance.memory_index.rebuild": self._maintenance_rebuild_memory_index,
+                "maintenance.tag_index.rebuild": self._maintenance_rebuild_tag_index,
+                "maintenance.cooccurrence.rebuild": self._maintenance_rebuild_cooccurrence,
+                "maintenance.pair_similarity.rebuild": self._maintenance_rebuild_pair_similarity,
+                "maintenance.tag_audit.run": self._maintenance_run_tag_audit,
+                "maintenance.tag_backfill.run": self._maintenance_run_tag_backfill,
+                "maintenance.import.run": self._maintenance_run_import,
+            },
+        )
 
         # 服务占位（initialize 中实际创建，防止消息先到时 AttributeError）
         self.jargon_service = None
@@ -532,6 +693,12 @@ class WaveMemoryPlugin(Star):
         self.dream_service = None
         self.study_service = None
         self.self_reflect = None
+        self.learning_job_runner = None
+        self.learning_review_service = None
+        self.learning_promotion_orchestrator = None
+        self.learning_promotion_targets = None
+        self.learning_source_registry = None
+        self.learning_dedicated_review_bridge = None
         self.consolidation = None
         self.eviction_service = None
         self.belief_engine = None
@@ -556,11 +723,93 @@ class WaveMemoryPlugin(Star):
             f"epa={self.enable_epa}, geodesic={self.enable_geodesic}"
         )
 
-    def _spawn(self, coro) -> asyncio.Task:
-        """创建后台任务并追踪。"""
-        task = asyncio.create_task(coro)
-        self._bg_tasks.append(task)
-        return task
+    def _spawn(self, coro, *, name: str | None = None, owner: str = "plugin") -> asyncio.Task:
+        """通过统一 supervisor 创建可观察、可等待的命名后台任务。"""
+        self._task_sequence += 1
+        task_name = name or f"wave-memory:{owner}:{self._task_sequence}"
+        return self.task_supervisor.start(task_name, coro, owner=owner)
+
+    def _configure_learning_center_services(self) -> None:
+        """把主插件真实学习服务注入 WebUI，禁止 API 创建空 registry。"""
+        from .webui.container import get_container
+
+        repositories = self.db.learning
+        study = getattr(self, "study_service", None)
+        source_registry = getattr(study, "source_registry", None) if study else None
+        job_runner = getattr(study, "job_runner", None) if study else None
+        if source_registry is None:
+            source_registry = LearningSourceRegistry()
+        if job_runner is None:
+            job_runner = LearningJobRunner(repositories, source_registry)
+
+        # 书中经历 adapter 只在配置明确启用且有目标角色时注册；已有任务可立即复用。
+        for profile in self._bot_registry.values():
+            if not profile.db_id:
+                continue
+            try:
+                register_book_experience_task(
+                    source_registry,
+                    bot_id=profile.db_id,
+                    config=self.config,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[LearningCenter] book experience source registration failed bot_id=%s: %s",
+                    profile.db_id,
+                    exc,
+                )
+
+        target_registry = PromotionTargetRegistry()
+        memory_target = WorldviewInternalizationPromotionService(
+            self.db,
+            embedding_service=self.embedding_service,
+            memory_index=self.memory_index,
+        )
+        target_registry.register("memory", memory_target)
+        domain_services = {
+            "fact": self.db,
+            "relationship": RelationshipEventService(self.db.conn),
+            "book_experience_episode": self.db.conn,
+        }
+        if self.few_shot_service is not None:
+            domain_services["few_shot"] = self.few_shot_service
+        register_learning_domain_targets(target_registry, domain_services)
+
+        bridge = DedicatedReviewBridge(
+            jargon_service=self.jargon_service,
+            belief_service=self.belief_engine,
+        )
+        review_service = LearningReviewService(
+            repositories,
+            dedicated_review_bridge=bridge,
+        )
+        promotion_orchestrator = PromotionOrchestrator(
+            repositories,
+            registry=target_registry,
+            dedicated_review_bridge=bridge,
+        )
+
+        container = get_container()
+        container.configure_learning_services(
+            repositories=repositories,
+            source_registry=source_registry,
+            job_runner=job_runner,
+            review_service=review_service,
+            promotion_orchestrator=promotion_orchestrator,
+            dedicated_review_bridge=bridge,
+        )
+        self.learning_source_registry = source_registry
+        self.learning_job_runner = job_runner
+        self.learning_promotion_targets = target_registry
+        self.learning_dedicated_review_bridge = bridge
+        self.learning_review_service = review_service
+        self.learning_promotion_orchestrator = promotion_orchestrator
+        logger.info(
+            "[LearningCenter] production wiring ready: sources=%s targets=%s bot_id=%s",
+            len(source_registry),
+            len(target_registry),
+            getattr(job_runner, "bot_id", None),
+        )
 
     def _set_injection_channel_config(self, config) -> None:
         """WebUI 热应用通道配置时更新运行时注入编排器配置。"""
@@ -605,8 +854,6 @@ class WaveMemoryPlugin(Star):
             from .services.injection.channels.persona import PersonaChannel
             from .services.injection.channels.belief import BeliefChannel
             from .services.injection.channels.jargon import JargonChannel
-            from .services.injection.channels.fewshot import FewShotChannel
-            from .services.injection.channels.book_lore import BookLoreChannel
             from .services.injection.channels.fts5 import FTS5Channel
             from .services.persona_composer import PersonaComposer
 
@@ -632,15 +879,12 @@ class WaveMemoryPlugin(Star):
                 FTS5Channel(db=self.db),
                 TimelineChannel(db=self.db, safety_channel=safety),
                 FactsChannel(db=self.db, facts_decay_rate=getattr(self, "_facts_decay_rate", 0.005)),
-                PersonaChannel(composer=persona_composer, persona_evolution=getattr(self, "persona_evolution", None)),
+                # PersonaEvolution 仍依赖 legacy social/facts read-model，不能进入正式注入。
+                PersonaChannel(composer=persona_composer, persona_evolution=None),
                 BeliefChannel(belief_engine=getattr(self, "belief_engine", None)),
                 JargonChannel(jargon_service=getattr(self, "jargon_service", None)),
-                FewShotChannel(few_shot_service=getattr(self, "few_shot_service", None)),
-                BookLoreChannel(
-                    book_lore_index=getattr(self, "book_lore_index", None),
-                    embedding_service=getattr(self, "embedding_service", None),
-                    lore_db_path=getattr(self, "lore_db_path", ""),
-                ),
+                # few_shot_examples 仅含 legacy bot_id，不能证明 RuntimeScope；暂不注册。
+                # BookLore raw 缺少可验证 CatalogScope binding，暂不注册注入通道。
             ]
             logger.info(f"[WaveMemory] Injection orchestrator shadow ready: {len(self.injection_shadow_channels)} channels")
         except Exception as e:
@@ -649,20 +893,40 @@ class WaveMemoryPlugin(Star):
             self.injection_trace_store = None
             self.injection_shadow_channels = []
 
-    def _build_shadow_persona_realtime_ctx(self, *, group_id: str, sender_id: str, sender_name: str) -> dict:
-        """复用旧 soul 通道的实时画像上下文。"""
+    def _build_shadow_persona_realtime_ctx(
+        self,
+        *,
+        scope: RuntimeScope | None,
+        sender_id: str,
+        sender_name: str,
+    ) -> dict:
+        """复用当前已解析群 Scope 内的实时画像上下文。"""
         realtime_ctx = {}
         if hasattr(self, '_hourly_reply_count') and sender_id in self._hourly_reply_count:
             realtime_ctx["hourly_at_count"] = self._hourly_reply_count[sender_id].get("count", 0)
+        if (
+            not isinstance(scope, RuntimeScope)
+            or scope.visibility != "group"
+            or scope.session is None
+        ):
+            return realtime_ctx
         try:
+            params = (scope.bot_id, scope.session.id, scope.visibility)
             last_reply_row = self.db.conn.execute(
-                "SELECT content FROM memories WHERE sender_id='bot' AND group_id=? AND content LIKE ? ORDER BY timestamp DESC LIMIT 1",
-                (group_id, f"%{sender_name or sender_id}%"),
+                """SELECT content FROM memories
+                   WHERE sender_id='bot' AND bot_id=? AND session_id=? AND visibility=?
+                     AND resolution_state='resolved' AND quarantine=0
+                     AND content LIKE ?
+                   ORDER BY timestamp DESC LIMIT 1""",
+                (*params, f"%{sender_name or sender_id}%"),
             ).fetchone()
             if not last_reply_row:
                 last_reply_row = self.db.conn.execute(
-                    "SELECT content FROM memories WHERE sender_id='bot' AND group_id=? ORDER BY timestamp DESC LIMIT 1",
-                    (group_id,),
+                    """SELECT content FROM memories
+                       WHERE sender_id='bot' AND bot_id=? AND session_id=? AND visibility=?
+                         AND resolution_state='resolved' AND quarantine=0
+                       ORDER BY timestamp DESC LIMIT 1""",
+                    params,
                 ).fetchone()
             if last_reply_row:
                 realtime_ctx["last_bot_reply"] = str(last_reply_row[0] or "")[:80]
@@ -693,6 +957,7 @@ class WaveMemoryPlugin(Star):
         sender_name: str,
         bot_id: str,
         bot_profile: Optional[BotProfile],
+        runtime_scope: RuntimeScope | None,
         exclude_sources,
         old_text: str,
     ) -> None:
@@ -705,9 +970,9 @@ class WaveMemoryPlugin(Star):
             from .services.injection.context import InjectionContext
             from .services.injection.shadow import run_injection_shadow
 
-            recent_context = self._get_recent_messages(event, max_messages=8)
+            recent_context = self._get_recent_messages(event, scope=runtime_scope, max_messages=8)
             realtime_ctx = self._build_shadow_persona_realtime_ctx(
-                group_id=group_id,
+                scope=runtime_scope,
                 sender_id=sender_id,
                 sender_name=sender_name,
             )
@@ -722,6 +987,7 @@ class WaveMemoryPlugin(Star):
                 sender_name=sender_name,
                 bot_id=bot_id,
                 bot_profile_id=bot_profile_id,
+                scope=runtime_scope,
                 recent_context=recent_context,
                 mode=getattr(self, "runtime_mode_name", "full"),
                 config=self._build_shadow_context_config(
@@ -759,6 +1025,7 @@ class WaveMemoryPlugin(Star):
         sender_name: str,
         bot_id: str,
         bot_profile: Optional[BotProfile],
+        runtime_scope: RuntimeScope | None,
         exclude_sources,
     ) -> bool:
         """主动模式：新 Orchestrator 直接写真实 ProviderRequest；失败返回 False 走旧逻辑。"""
@@ -771,9 +1038,9 @@ class WaveMemoryPlugin(Star):
             from .services.injection.active import run_injection_active
             from .utils.perf import get_perf_tracker
 
-            recent_context = self._get_recent_messages(event, max_messages=8)
+            recent_context = self._get_recent_messages(event, scope=runtime_scope, max_messages=8)
             realtime_ctx = self._build_shadow_persona_realtime_ctx(
-                group_id=group_id,
+                scope=runtime_scope,
                 sender_id=sender_id,
                 sender_name=sender_name,
             )
@@ -788,6 +1055,7 @@ class WaveMemoryPlugin(Star):
                 sender_name=sender_name,
                 bot_id=bot_id,
                 bot_profile_id=bot_profile_id,
+                scope=runtime_scope,
                 recent_context=recent_context,
                 mode=getattr(self, "runtime_mode_name", "full"),
                 config=self._build_shadow_context_config(
@@ -835,11 +1103,27 @@ class WaveMemoryPlugin(Star):
                         memory_ids.append(mid)
             for mid in memory_ids[:10]:
                 try:
-                    row = self.db.conn.execute("SELECT importance FROM memories WHERE id=?", (mid,)).fetchone()
+                    if (
+                        not isinstance(runtime_scope, RuntimeScope)
+                        or runtime_scope.visibility != "group"
+                        or runtime_scope.session is None
+                    ):
+                        continue
+                    row = self.db.conn.execute(
+                        """SELECT importance FROM memories
+                           WHERE id=? AND bot_id=? AND session_id=? AND visibility=?
+                             AND resolution_state='resolved' AND quarantine=0""",
+                        (mid, runtime_scope.bot_id, runtime_scope.session.id, runtime_scope.visibility),
+                    ).fetchone()
                     if row:
                         cur_imp = float(row[0] if row[0] is not None else 1.0)
                         if cur_imp < 3.0:
-                            self.db.update_memory(mid, importance=min(3.0, cur_imp + 0.02))
+                            await self.write_gateway.set_memory_importance(
+                                scope=runtime_scope,
+                                memory_ids=[mid],
+                                importance=min(3.0, cur_imp + 0.02),
+                                idempotency_hint=f"orchestrator-hit:{trace_id}:{mid}",
+                            )
                 except Exception:
                     pass
 
@@ -888,26 +1172,56 @@ class WaveMemoryPlugin(Star):
             except Exception as e:
                 logger.warning(f"[WaveMemory] v2.1 migration failed (non-fatal): {e}")
 
+        # 从现有 Bot Registry 构造唯一 ScopeResolver；领域切片未落地时显式保持 fail closed。
+        try:
+            from .services.scopes import BotIdentityBinding, ScopeResolver
+
+            bindings = [
+                BotIdentityBinding(
+                    self_id=profile.qq_id,
+                    db_id=profile.db_id,
+                    display_name=profile.name,
+                )
+                for profile in self._bot_registry.values()
+                if profile.qq_id and profile.db_id
+            ]
+            self.scope_resolver = ScopeResolver(bindings)
+            logger.info(f"[WaveMemory] ScopeResolver initialized: {len(bindings)} bot bindings")
+        except Exception as exc:
+            self.scope_resolver = None
+            logger.warning(f"[WaveMemory] ScopeResolver unavailable; message ingress fail closed: {exc}")
+            _record_err("ScopeResolution", "scope_resolver_unavailable")
+
         # 启动写入器
-        self.writer.start()
+        self.writer.start(self.task_supervisor)
 
         # 启动 TagWorker
         if self.tag_worker:
-            self.tag_worker.start()
+            self.tag_worker.start(self.task_supervisor)
 
-        # 重建索引（如果需要）
-        if self.memory_index.count == 0 and self.db.get_memory_count() > 0:
-            self._spawn(self._rebuild_memory_index())
+        # 长修复只通过 durable Maintenance jobs 执行；启动时仅排队，不直接重建。
+        self.maintenance_job_runner.start(self.task_supervisor)
+        if (
+            self.memory_index.manifest_error
+            or (self.memory_index.count == 0 and self.db.get_memory_count() > 0)
+        ):
+            await self._queue_maintenance_repair("memory_index", reason="startup_drift")
 
-        if self.tag_index.count == 0 and self.db.get_tag_count() > 0:
-            self._spawn(self._rebuild_tag_index())
+        if (
+            self.tag_index.manifest_error
+            or (self.tag_index.count == 0 and self.db.get_tag_count() > 0)
+        ):
+            await self._queue_maintenance_repair("tag_index", reason="startup_drift")
 
-        # PairSimilarity：延迟到首次查询时再 refresh（避免 __init__ 阻塞 16s）
-        # self.pair_sim_service.refresh_if_needed() — 移除启动时同步调用
+        # PairSimilarity：通过 durable job 分批计算；请求路径只做懒加载读取。
+        pair_count_row = self.db.conn.execute(
+            "SELECT COUNT(*) FROM tag_pair_similarity"
+        ).fetchone()
+        if self.db.get_tag_count() > 1 and int(pair_count_row[0] if pair_count_row else 0) == 0:
+            await self._queue_maintenance_repair("pair_similarity", reason="startup_empty")
 
-        # 构建共现矩阵（仅在内存中为空时才 rebuild）
         if self.enable_spike and self.db.get_tag_count() > 10 and not self.cooccurrence.forward:
-            self._spawn(self._rebuild_cooccurrence())
+            await self._queue_maintenance_repair("cooccurrence", reason="startup_empty")
 
         # 初始化 EPA
         if self.epa:
@@ -927,7 +1241,6 @@ class WaveMemoryPlugin(Star):
                 WaveMemoryRememberTool(writer=self.writer),
                 WaveMemoryDeepSearchTool(db=self.db),
                 WaveMemoryFactsTool(db=self.db),
-                WaveMemoryTagGraphTool(db=self.db),
             ])
         if runtime_capability_enabled(self.runtime_mode, "agent_feedback_tools", True):
             llm_tools.extend([
@@ -936,21 +1249,14 @@ class WaveMemoryPlugin(Star):
                 WaveMemorySuggestConfigTool(db=self.db),
                 WaveMemorySubmitReviewCandidateTool(db=self.db),
             ])
+        # legacy social/tag read-model 与 BookLore catalog 尚无可验证的
+        # canonical Scope/CatalogScope binding，不能注册为 LLM 工具。
         if runtime_capability_enabled(self.runtime_mode, "persona_tools", True):
-            llm_tools.append(WaveMemoryPersonSearchTool(db=self.db))
+            logger.info("[WaveMemory] person_search tool withheld: scope_migration_required")
         if runtime_capability_enabled(self.runtime_mode, "affinity_tools", True):
-            llm_tools.append(WaveMemoryAffinityTool(db=self.db))
+            logger.info("[WaveMemory] affinity tool withheld: scope_migration_required")
         if runtime_capability_enabled(self.runtime_mode, "book_lore_tools", True):
-            llm_tools.append(BookLoreSearchTool(
-                book_lore_index=self.book_lore_index,
-                embedding_service=self.embedding_service,
-                db=self.db,
-                lore_db_path=self.lore_db_path,
-            ))
-            llm_tools.append(BookLoreGraphTool(
-                db=self.db,
-                lore_db_path=self.lore_db_path,
-            ))
+            logger.info("[WaveMemory] book_lore tools withheld: catalog_scope_required")
 
         if llm_tools:
             self.context.add_llm_tools(*llm_tools)
@@ -972,6 +1278,9 @@ class WaveMemoryPlugin(Star):
                     geodesic=self.geodesic,
                     tag_extractor=self.tag_extractor,
                     writer=self.writer,
+                    write_gateway=self.write_gateway,
+                    durable_jobs=self.write_gateway.jobs,
+                    task_supervisor=self.task_supervisor,
                     host=self.webui_host,
                     port=self.webui_port,
                     password=self.webui_password,
@@ -991,20 +1300,9 @@ class WaveMemoryPlugin(Star):
         else:
             self.webui = None
 
-        # 启动后台 Tag 补全
-        self.tag_job = TagBackfillJob(
-            db=self.db,
-            tag_extractor=self.tag_extractor,
-            embedding_service=self.embedding_service,
-            tag_index=self.tag_index,
-            config=self.tag_cfg,
-        )
-        tag_coverage = self.tag_job.get_coverage()
-        if tag_coverage < 0.50:
-            logger.info(f"[WaveMemory] Tag coverage {tag_coverage:.1%} < 90%, starting backfill job")
-            self.tag_job.start()
-        else:
-            logger.info(f"[WaveMemory] Tag coverage {tag_coverage:.1%}, backfill not needed")
+        # legacy TagBackfillJob 写入 tags/memory_tags，已退出正式数据面。
+        # scoped TagWorker 会持续扫描所有未完成的 resolved v2 memory，并通过统一写入口提交。
+        self.tag_job = None
 
         # v2.0: Tag 质量检测——垃圾率 > 50% 时降级关闭脉冲传播
         try:
@@ -1018,18 +1316,24 @@ class WaveMemoryPlugin(Star):
 
         # 启动生命周期服务
         if self.enable_affinity:
-            # 取第一个 bot 的 QQ ID 和 db_id 用于好感度系统
+            # 旧 API 仍保留首个 Bot 作为默认读取值；新消息按 RuntimeScope.bot_id 分发到独立 affinity engine。
             _first_bot = list(self._bot_registry.values())[0] if self._bot_registry else None
+            _affinity_bot_identities = {
+                profile.db_id: profile.qq_id
+                for profile in self._bot_registry.values()
+                if profile.db_id
+            }
             self.lifecycle = LifecycleService(
                 db=self.db,
                 bot_qq_id=_first_bot.qq_id if _first_bot else "",
                 bot_db_id=_first_bot.db_id if _first_bot else "yushu",
+                bot_identities=_affinity_bot_identities,
                 mood_duration_hours=self.mood_duration_hours,
                 mood_msg_threshold=self.mood_msg_threshold,
                 positive_emotion_threshold=self.positive_emotion_threshold,
                 negative_emotion_threshold=self.negative_emotion_threshold,
             )
-            self.lifecycle.start()
+            self.lifecycle.start(self.task_supervisor)
             # LLM 摘要整合
             if self.enable_consolidation and self.tag_llm_provider_id:
                 # 构建 bot 标识集合，用于排除 bot 自己作为 fact subject
@@ -1052,7 +1356,7 @@ class WaveMemoryPlugin(Star):
                     skip_topics=self.consolidation_skip_topics,
                     bot_identifiers=_bot_ids_set,
                 )
-                self.consolidation.start()
+                self.consolidation.start(self.task_supervisor)
             else:
                 self.consolidation = None
         else:
@@ -1067,8 +1371,9 @@ class WaveMemoryPlugin(Star):
                 noise_ttl_days=int(eviction_cfg.get("noise_ttl_days", 7)),
                 chat_stale_days=int(eviction_cfg.get("chat_stale_days", 30)),
                 eviction_interval_hours=float(eviction_cfg.get("interval_hours", 6.0)),
+                write_gateway=self.write_gateway,
             )
-            self.eviction_service.start()
+            self.eviction_service.start(self.task_supervisor)
         else:
             self.eviction_service = None
 
@@ -1169,7 +1474,7 @@ class WaveMemoryPlugin(Star):
                 mid_seeds=self.dream_mid_seeds,
                 mid_k=self.dream_mid_k,
             )
-            self.dream_service.start()
+            self.dream_service.start(self.task_supervisor)
         else:
             self.dream_service = None
 
@@ -1180,8 +1485,12 @@ class WaveMemoryPlugin(Star):
             (p for p in _registry.values() if not p.exclude_sources),
             None
         )
-        study_cfg = self.config.get("Study_Settings", {})
-        if runtime_capability_enabled(self.runtime_mode, "study", study_cfg.get("enabled", True)) and self.book_lore_index and self.tag_llm_provider_id and experience_bot:
+        study_cfg = self.config.get("Study_Settings", {}) or {}
+        study_policy = self.learning_config.for_bot(experience_bot.db_id if experience_bot else "")
+        study_task_enabled = self.learning_config.enabled and study_policy.task_enabled(
+            "worldview_internalization_enabled"
+        )
+        if runtime_capability_enabled(self.runtime_mode, "study", study_cfg.get("enabled", True)) and study_task_enabled and self.book_lore_index and self.tag_llm_provider_id and experience_bot:
             try:
                 study_llm = LLMFallbackClient(
                     context=self.context,
@@ -1196,11 +1505,14 @@ class WaveMemoryPlugin(Star):
                     lore_db_path=self.lore_db_path,
                     bot_name=experience_bot.name,
                     bot_qq_id=experience_bot.qq_id,
+                    # 学习作用域必须使用 BotProfile.db_id，不能使用 QQ 号。
+                    bot_id=experience_bot.db_id,
+                    source_library_id=str(study_cfg.get("source_library_id", "book_lore")),
                     study_interval_hours=float(study_cfg.get("interval_hours", 6.0)),
                     max_new_per_cycle=int(study_cfg.get("max_new_per_cycle", 2)),
                     dedup_threshold=float(study_cfg.get("dedup_threshold", 0.85)),
                 )
-                self.study_service.start()
+                self.study_service.start(self.task_supervisor)
             except Exception as e:
                 logger.warning(f"[WaveMemory] StudyService init failed: {e}"); _record_err("StudyService", e)
                 try:
@@ -1214,7 +1526,9 @@ class WaveMemoryPlugin(Star):
 
         # 自省系统（检测纠正 → 学习，所有 bot 共用）：纯记忆模式关闭自省学习后台能力。
         reflect_bot = experience_bot or (list(_registry.values())[0] if _registry else None)
-        if runtime_capability_enabled(self.runtime_mode, "self_reflect", study_cfg.get("self_reflect_enabled", True)) and self.tag_llm_provider_id and reflect_bot:
+        reflect_policy = self.learning_config.for_bot(reflect_bot.db_id if reflect_bot else "")
+        reflect_task_enabled = self.learning_config.enabled and reflect_policy.task_enabled("self_reflect_enabled")
+        if runtime_capability_enabled(self.runtime_mode, "self_reflect", study_cfg.get("self_reflect_enabled", True)) and reflect_task_enabled and self.tag_llm_provider_id and reflect_bot:
             try:
                 reflect_llm = LLMFallbackClient(
                     context=self.context,
@@ -1231,6 +1545,8 @@ class WaveMemoryPlugin(Star):
                     bot_name=reflect_bot.name,
                     bot_qq_id=reflect_bot.qq_id,
                     bot_aliases=reflect_bot.aliases,
+                    bot_id=reflect_bot.db_id,
+                    repositories=self.db.learning,
                 )
             except Exception as e:
                 logger.warning(f"[WaveMemory] SelfReflectService init failed: {e}")
@@ -1303,6 +1619,13 @@ class WaveMemoryPlugin(Star):
             f"time_anchor={bool(self.subjective_time)} desire={bool(self.desire_engine)}"
         )
 
+        # 学习中心必须在所有领域服务完成初始化后组装，复用主插件实例。
+        try:
+            self._configure_learning_center_services()
+        except Exception as exc:
+            logger.warning(f"[LearningCenter] production wiring failed: {exc}")
+            _record_err("LearningCenter", exc)
+
         # 新编排器影子链路：只写 trace，不改真实 ProviderRequest。
         self._setup_injection_shadow_pipeline()
 
@@ -1316,21 +1639,63 @@ class WaveMemoryPlugin(Star):
         _reg("测地线重排", "ok" if self.geodesic else "off", "" if self.geodesic else "依赖共现矩阵", dependency="共现矩阵节点 > 1000")
         _reg("Embedding", "ok" if self.embedding_service else "off", "" if self.embedding_service else "embedding_provider_id 未配置", dependency="AstrBot Provider 配置")
         _reg("Tag 提取", "ok" if self.tag_extractor else "off", "" if self.tag_extractor else "tag_llm_provider_id 未配置", dependency="Tag LLM Provider 配置")
+        _reg("统一写协调器", "ok" if getattr(self, "write_gateway", None) else "degraded", "" if getattr(self, "write_gateway", None) else "WriteCoordinator 未接线", dependency="SQLite writer lease")
         _reg("EPA 基底", "ok" if (self.epa and self.epa.initialized) else "degraded", "" if (self.epa and self.epa.initialized) else f"需 ≥{self.epa.min_tags if self.epa else 20} 个 tag 向量", dependency="Tag 覆盖率 > 20%")
         _reg("MetaThinking", "ok" if getattr(self, 'meta_thinking', None) else "off", "" if getattr(self, 'meta_thinking', None) else "MetaThinking 配置缺失或初始化失败", dependency="MetaThinking_Settings.enabled + LLM Provider")
         _reg("做梦系统", "ok" if getattr(self, 'dream_service', None) else "off", "" if getattr(self, 'dream_service', None) else "enable_dream=false 或初始化失败", dependency="enable_dream=true")
-        _reg("自主学习", "ok" if getattr(self, 'study_service', None) else "off", "" if getattr(self, 'study_service', None) else "StudyService 未启用或 BookLore 不可用", dependency="LLM Provider + 记忆 > 100 条")
-        _reg("自省系统", "ok" if getattr(self, 'self_reflect', None) else "off", "" if getattr(self, 'self_reflect', None) else "SelfReflect 未启用", dependency="LLM Provider")
+
+        missing_bot_profile_reason = "未配置 Bot Profile（MetaThinking_Bot1/2 缺 qq_id/db_id）"
+        study_off_reason = (
+            "StudyService 未启用" if not runtime_capability_enabled(self.runtime_mode, "study", study_cfg.get("enabled", True)) or not study_task_enabled
+            else "BookLore 不可用" if not self.book_lore_index
+            else "tag_llm_provider_id 未配置" if not self.tag_llm_provider_id
+            else "未配置经历 Bot Profile（需要一个未排除 source 的 MetaThinking_Bot）" if not experience_bot
+            else "StudyService 初始化失败或未启用"
+        )
+        self_reflect_off_reason = (
+            "SelfReflect 未启用" if not runtime_capability_enabled(self.runtime_mode, "self_reflect", study_cfg.get("self_reflect_enabled", True)) or not reflect_task_enabled
+            else "tag_llm_provider_id 未配置" if not self.tag_llm_provider_id
+            else missing_bot_profile_reason if not reflect_bot
+            else "SelfReflect 初始化失败或未启用"
+        )
+        soul_off_reason = (
+            "tag_llm_provider_id 未配置" if not self.tag_llm_provider_id
+            else missing_bot_profile_reason if not soul_bot_id
+            else "belief_engine 初始化失败或未启用"
+        )
+        soul_state_off_reason = missing_bot_profile_reason if not soul_bot_id else "初始化失败或未启用"
+
+        _reg("自主学习", "ok" if getattr(self, 'study_service', None) else "off", "" if getattr(self, 'study_service', None) else study_off_reason, dependency="LLM Provider + 记忆 > 100 条")
+        learning_wired = bool(
+            getattr(self, "learning_job_runner", None)
+            and getattr(self, "learning_review_service", None)
+            and getattr(self, "learning_promotion_orchestrator", None)
+        )
+        learning_targets = len(getattr(self, "learning_promotion_targets", None) or ())
+        _reg(
+            "学习中心生产接线",
+            "ok" if learning_wired and learning_targets > 0 else "degraded",
+            "" if learning_wired and learning_targets > 0 else "Runner/审核/晋升目标未完整注入",
+            dependency="主插件领域服务 + 学习仓储",
+        )
+        _reg("自省系统", "ok" if getattr(self, 'self_reflect', None) else "off", "" if getattr(self, 'self_reflect', None) else self_reflect_off_reason, dependency="LLM Provider + Bot Profile")
         _reg("记忆整合", "ok" if getattr(self, 'consolidation', None) else "off", "" if getattr(self, 'consolidation', None) else "enable_consolidation=false 或 LLM 不可用", dependency="LLM Provider")
         _reg("记忆淘汰", "ok" if getattr(self, 'eviction_service', None) else "off", "" if getattr(self, 'eviction_service', None) else "Eviction 未启用", dependency="自动启用")
-        _reg("信念引擎", "ok" if self.belief_engine else "off", "" if self.belief_engine else "belief_engine 未初始化(需 LLM)", dependency="LLM Provider + 记忆整合")
-        _reg("关切追踪", "ok" if self.concern_tracker else "off", "" if self.concern_tracker else "concern_tracker 未初始化", dependency="自动启用")
-        _reg("情绪轨迹", "ok" if self.mood_trajectory else "off", "" if self.mood_trajectory else "mood_trajectory 未初始化", dependency="自动启用")
+        _reg("信念引擎", "ok" if self.belief_engine else "off", "" if self.belief_engine else soul_off_reason, dependency="LLM Provider + Bot Profile + 记忆整合")
+        _reg("关切追踪", "ok" if self.concern_tracker else "off", "" if self.concern_tracker else f"concern_tracker {soul_state_off_reason}", dependency="Bot Profile")
+        _reg("情绪轨迹", "ok" if self.mood_trajectory else "off", "" if self.mood_trajectory else f"mood_trajectory {soul_state_off_reason}", dependency="Bot Profile")
         _reg("黑话系统", "ok" if getattr(self, 'jargon_service', None) else "off", "" if getattr(self, 'jargon_service', None) else "Jargon 未启用", dependency="LLM Provider + 聊天记录积累")
         _reg("风格学习", "ok" if getattr(self, 'few_shot_service', None) else "off", "" if getattr(self, 'few_shot_service', None) else "FewShot 未启用", dependency="LLM Provider + bot 回复积累")
 
+        # 启动 committed-outbox 派生泵；启动后会自动 replay 未完成 delivery。
+        self._spawn(
+            self.write_gateway.run_outbox_loop(),
+            name="wave-memory:outbox-dispatcher",
+            owner="outbox",
+        )
+
         # 高频互动者缓存预热 (US-2.3) — 异步执行，不阻塞启动
-        self._spawn(self._async_cache_warmup())
+        self._spawn(self._async_cache_warmup(), owner="cache")
 
         logger.info("[WaveMemory] Fully initialized")
 
@@ -1339,6 +1704,18 @@ class WaveMemoryPlugin(Star):
         if self._terminated:
             return
         self._terminated = True
+
+        try:
+            if hasattr(self, "task_supervisor") and self.task_supervisor:
+                await self.task_supervisor.close_accepting()
+        except Exception as e:
+            logger.debug(f"[WaveMemory] task supervisor ingress close error: {e}")
+
+        try:
+            if hasattr(self, "maintenance_job_runner") and self.maintenance_job_runner:
+                self.maintenance_job_runner.stop()
+        except Exception as e:
+            logger.debug(f"[WaveMemory] maintenance job runner stop error: {e}")
 
         try:
             if hasattr(self, 'tag_worker') and self.tag_worker:
@@ -1389,29 +1766,45 @@ class WaveMemoryPlugin(Star):
             logger.debug(f"[WaveMemory] webui stop error: {e}")
 
         try:
-            self.writer.stop()
+            if hasattr(self, "writer") and self.writer:
+                await self.writer.shutdown()
         except Exception as e:
-            logger.debug(f"[WaveMemory] writer stop error: {e}")
+            logger.debug(f"[WaveMemory] writer settle error: {e}")
 
         try:
-            self.memory_index.save()
+            if hasattr(self, "task_supervisor") and self.task_supervisor:
+                # Durable jobs may still be inside LLM/import handlers that use the
+                # coordinator. Settle their cancellation before closing the gateway.
+                await self.task_supervisor.settle(owner="durable-jobs", timeout=5.0)
         except Exception as e:
-            logger.debug(f"[WaveMemory] memory_index save error: {e}")
+            logger.debug(f"[WaveMemory] durable job runner settle error: {e}")
+            try:
+                await self.task_supervisor.cancel(owner="durable-jobs", timeout=5.0)
+            except Exception as cancel_error:
+                logger.debug(f"[WaveMemory] durable job runner cancel error: {cancel_error}")
 
         try:
-            self.tag_index.save()
+            if hasattr(self, "write_gateway") and self.write_gateway:
+                # close_accepting → writer settle → committed watermark drain →
+                # verified index generation barrier → writer lease release.
+                await self.write_gateway.shutdown()
         except Exception as e:
-            logger.debug(f"[WaveMemory] tag_index save error: {e}")
+            logger.debug(f"[WaveMemory] write_gateway shutdown error: {e}")
+
+        try:
+            if hasattr(self, "task_supervisor") and self.task_supervisor:
+                await self.task_supervisor.settle(timeout=10.0)
+        except Exception as e:
+            logger.debug(f"[WaveMemory] task supervisor settle error: {e}")
+            try:
+                await self.task_supervisor.cancel(timeout=5.0)
+            except Exception as cancel_error:
+                logger.debug(f"[WaveMemory] task supervisor cancel error: {cancel_error}")
 
         try:
             self.db.close()
         except Exception as e:
             logger.debug(f"[WaveMemory] db close error: {e}")
-
-        # 取消后台任务
-        for task in self._bg_tasks:
-            if not task.done():
-                task.cancel()
 
         logger.info("[WaveMemory] Shutdown complete")
 
@@ -1578,12 +1971,14 @@ class WaveMemoryPlugin(Star):
             logger.debug(f"[WaveMemory] Belief emergence error: {e}")
             _record_err("BeliefEmergence", e)
 
-    async def _jargon_mine_task(self, group_id: str) -> None:
-        """后台黑话挖掘任务。"""
+    async def _jargon_mine_task(self, runtime_scope: RuntimeScope) -> None:
+        """后台黑话挖掘任务；只接受入口已解析的群 RuntimeScope。"""
+        if runtime_scope.visibility != "group" or runtime_scope.session is None:
+            return
         try:
-            results = await self.jargon_service.mine(group_id)
+            results = await self.jargon_service.mine(runtime_scope)
             if results:
-                logger.info(f"[WaveMemory] Jargon mined {len(results)} new in {group_id}")
+                logger.info(f"[WaveMemory] Jargon mined {len(results)} new in {runtime_scope.session.id}")
         except Exception as e:
             logger.debug(f"[WaveMemory] Jargon mine error: {e}")
             _record_err("JargonMine", e)
@@ -1613,6 +2008,10 @@ class WaveMemoryPlugin(Star):
         if event.message_obj and event.message_obj.sender:
             sender_name = event.message_obj.sender.nickname or ""
 
+        runtime_scope = getattr(event, "_wave_memory_runtime_scope", None)
+        if not isinstance(runtime_scope, RuntimeScope):
+            runtime_scope = None
+
         bot_profile = self._get_bot(bot_id)
         exclude_sources = bot_profile.exclude_sources if bot_profile and bot_profile.exclude_sources else None
         if await self._run_injection_active_trace(
@@ -1624,6 +2023,7 @@ class WaveMemoryPlugin(Star):
             sender_name=sender_name,
             bot_id=bot_id,
             bot_profile=bot_profile,
+            runtime_scope=runtime_scope,
             exclude_sources=exclude_sources,
         ):
             return
@@ -1632,6 +2032,17 @@ class WaveMemoryPlugin(Star):
         if safety_injection:
             from astrbot.core.agent.message import TextPart
             req.extra_user_content_parts.append(TextPart(text=safety_injection))
+
+        # 旧注入链路同样不得把 event 的裸 group_id 当成授权边界。
+        # Scope 缺失时保留上方安全提示，但不读取/注入任何 memories 数据。
+        if (
+            not isinstance(runtime_scope, RuntimeScope)
+            or runtime_scope.visibility != "group"
+            or runtime_scope.session is None
+        ):
+            logger.debug("[WaveMemory] legacy injection skipped: resolved group RuntimeScope required")
+            return
+        group_id = runtime_scope.session.conversation_id
 
         has_experience_channel = (bot_profile and not bot_profile.exclude_sources) or (not bot_profile)
 
@@ -1709,21 +2120,23 @@ class WaveMemoryPlugin(Star):
             t0 = _time.perf_counter()
             try:
                 if self.enable_shotgun:
-                    context_messages = self._get_recent_messages(event, max_messages=8)
+                    context_messages = self._get_recent_messages(event, scope=runtime_scope, max_messages=8)
                     memories = await asyncio.wait_for(
                         self.query_engine.shotgun_query(
                             text=message, context_messages=context_messages,
                             group_id=group_id, top_k=self.inject_top_k,
+                            scope=runtime_scope,
                         ), timeout=_CHANNEL_TIMEOUT)
                 else:
                     # 只搜高价值记忆（不搜 chat/noise，避免复读群友的话）
-                    default_sources = ["core", "evolution", "experience", "lore", "bzz_experience", "bzz_evolution", "book_lore"]
+                    default_sources = ["core", "evolution", "experience", "lore", "bzz_experience", "bzz_evolution", "book_lore", "oni_lore"]
                     memories = await asyncio.wait_for(
                         self.query_engine.query(
                             text=message, group_id=group_id,
                             top_k=self.inject_top_k,
                             exclude_sources=exclude_sources,
                             source_filter=default_sources if not exclude_sources else None,
+                            scope=runtime_scope,
                         ), timeout=_CHANNEL_TIMEOUT)
                 if memories:
                     memories = filter_identity_contamination_memories(memories)
@@ -1747,8 +2160,9 @@ class WaveMemoryPlugin(Star):
             try:
                 exp_memories = await asyncio.wait_for(
                     self.query_engine.query(
-                        text=message, group_id=None, top_k=2,
+                        text=message, group_id=group_id, top_k=2,
                         source_filter=["bzz_experience", "bzz_evolution"],
+                        scope=runtime_scope,
                     ), timeout=_CHANNEL_TIMEOUT)
             except asyncio.TimeoutError:
                 logger.warning("[WaveMemory] experience timed out")
@@ -1785,6 +2199,7 @@ class WaveMemoryPlugin(Star):
                     self.query_engine.query(
                         text=relation_query, group_id=group_id,
                         top_k=3, exclude_sources=exclude_sources,
+                        scope=runtime_scope,
                     ), timeout=_CHANNEL_TIMEOUT)
                 if relation_memories:
                     cache.set("relation", cache_key, relation_memories)
@@ -1798,84 +2213,35 @@ class WaveMemoryPlugin(Star):
 
         # ─── 通道 4: BookLore ───
         async def _ch_book_lore():
-            nonlocal lore_text
-            if not has_experience_channel or not self.book_lore_index:
-                return
-            t0 = _time.perf_counter()
-            try:
-                lore_vec = await asyncio.wait_for(
-                    self.query_engine.embedding.get_embedding(message),
-                    timeout=_CHANNEL_TIMEOUT)
-                if lore_vec is not None:
-                    community_hits = self.book_lore_index.search_communities(lore_vec, k=1)
-                    if community_hits:
-                        import sqlite3
-                        conn_lore = sqlite3.connect(self.lore_db_path)
-                        for cid, score in community_hits:
-                            if score >= 0.35:
-                                row = conn_lore.execute(
-                                    "SELECT title, summary FROM book_communities WHERE id = ?", (cid,)
-                                ).fetchone()
-                                if row:
-                                    lore_text = f"<world_knowledge>\n{row[0]}：{row[1][:300]}\n</world_knowledge>"
-                                    consumption["lore_tokens"] = estimate_tokens(lore_text)
-                                    consumption["lore_chars"] = len(lore_text)
-                        conn_lore.close()
-            except asyncio.TimeoutError:
-                logger.warning("[WaveMemory] book_lore timed out")
-            except Exception:
-                pass
-            timing["book_lore_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
+            # Raw BookLore 尚未绑定可验证 CatalogScope；不得由旧注入链直接读取。
+            timing["book_lore_ms"] = 0.0
 
         # ─── 通道 5: Persona + 信念 + 关切 + 情绪（轻量级，共享通道） ───
         async def _ch_soul():
             nonlocal persona_text, belief_text, concern_summary, mood_text, mood_traj_text, jargon_text, fewshot_text
             t0 = _time.perf_counter()
             try:
-                # Persona 注入（v2.0: 不缓存，含实时状态）
-                if self.persona_evolution:
-                    pe_bot_id = bot_profile.db_id if bot_profile else "bot"
-                    # 构建实时上下文
-                    _rt_ctx = {}
-                    # 本小时 @ 次数
-                    if hasattr(self, '_hourly_reply_count') and sender_id in self._hourly_reply_count:
-                        _rt_ctx["hourly_at_count"] = self._hourly_reply_count[sender_id].get("count", 0)
-                    # bot 上次对此人说了什么
-                    try:
-                        last_reply_row = self.db.conn.execute(
-                            "SELECT content FROM memories WHERE sender_id='bot' AND group_id=? AND content LIKE ? ORDER BY timestamp DESC LIMIT 1",
-                            (group_id, f"%{sender_name or sender_id}%"),
-                        ).fetchone()
-                        if not last_reply_row:
-                            # fallback: 该群最近 bot 回复
-                            last_reply_row = self.db.conn.execute(
-                                "SELECT content FROM memories WHERE sender_id='bot' AND group_id=? ORDER BY timestamp DESC LIMIT 1",
-                                (group_id,),
-                            ).fetchone()
-                        if last_reply_row:
-                            _rt_ctx["last_bot_reply"] = last_reply_row[0][:80]
-                    except Exception:
-                        pass
-                    persona_text = self.persona_evolution.get_persona_injection(
-                        sender_id, group_id, bot_id=pe_bot_id, realtime_ctx=_rt_ctx
-                    ) or ""
-                    if persona_text:
-                        consumption["persona_tokens"] = estimate_tokens(persona_text)
-                        consumption["persona_chars"] = len(persona_text)
+                # PersonaEvolution 仍读取 legacy cross-group profiles/facts；正式注入只保留
+                # 已接受 RuntimeScope 的 PersonaComposer 通道，旧用户画像在 scoped social
+                # read-model 落地前 fail-closed。
 
                 # 信念注入 (带缓存 US-2.2)
                 if hasattr(self, 'belief_engine') and self.belief_engine:
                     from .utils.cache import get_cache_manager
                     cache = get_cache_manager()
                     active_bot_db_id = bot_profile.db_id if bot_profile else "bot"
-                    belief_key = f"{active_bot_db_id}:{sender_id}:{message[:30]}"
+                    belief_key = f"{runtime_scope.bot_id}:{runtime_scope.session.id}:{runtime_scope.visibility}:{sender_id}:{message[:30]}"
                     cached_belief = cache.get("belief", belief_key)
                     if cached_belief is not None:
                         belief_text = cached_belief
                     else:
                         belief_keywords = [w for w in message.split()[:5] if len(w) > 1]
                         self.belief_engine.bot_id = active_bot_db_id
-                        belief_text = self.belief_engine.get_injection(sender_id=sender_id, keywords=belief_keywords) or ""
+                        belief_text = self.belief_engine.get_injection(
+                            scope=runtime_scope,
+                            sender_id=sender_id,
+                            keywords=belief_keywords,
+                        ) or ""
                         if belief_text:
                             cache.set("belief", belief_key, belief_text)
                     if belief_text:
@@ -1904,9 +2270,9 @@ class WaveMemoryPlugin(Star):
                         consumption["mood_traj_tokens"] = estimate_tokens(mood_traj_text)
                         consumption["mood_traj_chars"] = len(mood_traj_text)
 
-                # 黑话注入 (US-4.3)
-                if self.jargon_service and group_id:
-                    jargon_text = self.jargon_service.get_injection(message, group_id)
+                # 黑话注入 (US-4.3)：只读取入口解析出的 RuntimeScope。
+                if self.jargon_service and isinstance(runtime_scope, RuntimeScope):
+                    jargon_text = self.jargon_service.get_injection(message, runtime_scope)
                     if jargon_text:
                         consumption["jargon_tokens"] = estimate_tokens(jargon_text)
                         consumption["jargon_chars"] = len(jargon_text)
@@ -1937,62 +2303,51 @@ class WaveMemoryPlugin(Star):
                 keywords = [w for w in jieba.cut(message) if len(w) >= 2][:8]
                 if not keywords:
                     return
-                # 搜索 facts 表：subject 或 object 包含关键词
-                conditions = " OR ".join(
-                    ["subject LIKE ? OR object LIKE ?"] * len(keywords)
-                )
-                params = []
-                for kw in keywords:
-                    params.extend([f"%{kw}%", f"%{kw}%"])
-                # 多取一些，衰减排序后再截断
-                fetch_limit = self.facts_max * 3
-                rows = self.db.conn.execute(
-                    f"SELECT rowid, subject, predicate, object, confidence, last_reinforced, created_at FROM facts WHERE {conditions} ORDER BY confidence DESC LIMIT ?",
-                    params + [fetch_limit],
-                ).fetchall()
+                # 正式 Facts 注入只读取同一 RuntimeScope 的 scoped_facts；绝不从
+                # legacy facts 表按关键词回查或补默认 Scope。
+                scoped_repo = getattr(self.db, "scoped_knowledge", None)
+                if scoped_repo is None:
+                    _record_err("facts", "scoped_repository_unavailable")
+                    return
+                fetch_limit = max(self.facts_max * 3, self.facts_max)
+                rows = scoped_repo.list_scoped_facts(runtime_scope, limit=fetch_limit)
+                lowered_keywords = tuple(keyword.casefold() for keyword in keywords)
+                rows = [
+                    row for row in rows
+                    if any(
+                        keyword in str(row.get("subject") or "").casefold()
+                        or keyword in str(row.get("object") or "").casefold()
+                        for keyword in lowered_keywords
+                    )
+                ]
                 if rows:
-                    # 应用时间衰减排序
+                    # 保留已有的时间衰减排序，但字段只能来自 scoped repository DTO。
                     _now = _time.time()
                     _rate = self._facts_decay_rate
 
-                    def _eff_conf(r):
-                        lr = r[5] or r[6] or _now
-                        age = (_now - lr) / 86400
+                    def _eff_conf(row):
+                        lr = row.get("updated_at") or row.get("created_at") or _now
+                        try:
+                            age = (_now - float(lr)) / 86400
+                        except (TypeError, ValueError):
+                            age = 0.0
                         decay = max(0.1, 1.0 - age * _rate) if _rate > 0 else 1.0
-                        return (r[4] or 1.0) * decay
+                        return float(row.get("confidence") or 0.0) * decay
 
                     sorted_rows = [
-                        r for r in sorted(rows, key=_eff_conf, reverse=True)
-                        if not is_identity_contamination(f"{r[1]} {r[2]} {r[3]}")
+                        row for row in sorted(rows, key=_eff_conf, reverse=True)
+                        if not is_identity_contamination(
+                            f"{row.get('subject', '')} {row.get('predicate', '')} {row.get('object', '')}"
+                        )
                     ][:self.facts_max]
-                    lines = [f"{r[1]} {r[2]} {r[3]}" for r in sorted_rows]
-                    hit_rowids = {r[0] for r in sorted_rows}
-
-                    # v1.3.0: 1-跳关联扩展 (D-5)
-                    hit_entities = set()
-                    for r in sorted_rows:
-                        if r[1]:
-                            hit_entities.add(r[1])
-                        if r[3]:
-                            hit_entities.add(r[3])
-                    # 对前 3 个实体做 1 跳扩展
-                    for entity in list(hit_entities)[:3]:
-                        extra_rows = self.db.conn.execute(
-                            "SELECT rowid, subject, predicate, object FROM facts WHERE (subject=? OR object=?) AND rowid NOT IN ({}) ORDER BY confidence DESC LIMIT 3".format(
-                                ",".join("?" * len(hit_rowids))
-                            ),
-                            [entity, entity] + list(hit_rowids),
-                        ).fetchall()
-                        for er in extra_rows:
-                            extra_line = f"{er[1]} {er[2]} {er[3]}"
-                            if er[0] not in hit_rowids and not is_identity_contamination(extra_line):
-                                lines.append(extra_line)
-                                hit_rowids.add(er[0])
-
+                    lines = [
+                        f"{row['subject']} {row['predicate']} {row['object']}"
+                        for row in sorted_rows
+                    ]
                     if lines:
                         facts_text = "<known_facts>\n" + "\n".join(lines) + "\n</known_facts>"
-            except Exception:
-                pass
+            except Exception as exc:
+                _record_err("facts", exc)
             timing["facts_ms"] = round((_time.perf_counter() - t0) * 1000, 1)
 
         # ─── 通道 7: FTS5 精确召回（人名/专有名词关键词匹配） ───
@@ -2009,16 +2364,26 @@ class WaveMemoryPlugin(Star):
                 # 构建 FTS5 MATCH 表达式（OR 连接）
                 match_expr = " OR ".join(words)
                 rows = self.db.conn.execute(
-                    """SELECT rowid, content, sender_name, group_id FROM fts_memories
-                       WHERE fts_memories MATCH ? LIMIT 20""",
-                    (match_expr,),
+                    """SELECT fts_memories.rowid
+                         FROM fts_memories
+                         JOIN memories AS m ON m.id = fts_memories.rowid
+                        WHERE fts_memories MATCH ?
+                          AND m.bot_id = ? AND m.session_id = ? AND m.visibility = ?
+                          AND m.resolution_state = 'resolved' AND m.quarantine = 0
+                          AND m.memory_type = 'message'
+                        LIMIT 20""",
+                    (match_expr, runtime_scope.bot_id, runtime_scope.session.id, runtime_scope.visibility),
                 ).fetchall()
                 if rows:
                     fts5_memories = []
                     for row in rows:
                         mem = self.db.conn.execute(
-                            "SELECT id, content, sender_id, sender_name, timestamp, importance, source, group_id, memory_type FROM memories WHERE id=? AND memory_type='message'",
-                            (row[0],),
+                            """SELECT id, content, sender_id, sender_name, timestamp, importance, source, group_id, memory_type
+                                 FROM memories
+                                WHERE id=? AND memory_type='message'
+                                  AND bot_id=? AND session_id=? AND visibility=?
+                                  AND resolution_state='resolved' AND quarantine=0""",
+                            (row[0], runtime_scope.bot_id, runtime_scope.session.id, runtime_scope.visibility),
                         ).fetchone()
                         if mem:
                             mem_content = mem[1] or ""
@@ -2052,12 +2417,14 @@ class WaveMemoryPlugin(Star):
                     """SELECT DISTINCT summary, DATE(timestamp, 'unixepoch', 'localtime') as day
                        FROM memories
                        WHERE summary IS NOT NULL AND summary != '' AND summary != '日常灌水'
-                       AND group_id = ?
+                       AND bot_id = ? AND session_id = ? AND visibility = ?
+                       AND resolution_state = 'resolved' AND quarantine = 0
                        AND (sender_id = ? OR content LIKE ?)
                        AND timestamp > ?
                        ORDER BY timestamp DESC
                        LIMIT ?""",
-                    (group_id, sender_id, f"%{sender_name}%" if sender_name else f"%{sender_id}%",
+                    (runtime_scope.bot_id, runtime_scope.session.id, runtime_scope.visibility,
+                     sender_id, f"%{sender_name}%" if sender_name else f"%{sender_id}%",
                      _time.time() - 7 * 86400, self.timeline_max),
                 ).fetchall()
                 if rows:
@@ -2232,7 +2599,11 @@ class WaveMemoryPlugin(Star):
                         mid = mem.get("id")
                         cur_imp = mem.get("importance", 1.0)
                         if mid and cur_imp < 3.0:
-                            self.db.update_memory(mid, importance=min(3.0, cur_imp + 0.02))
+                            await self.write_gateway.set_memory_importance(
+                                scope=runtime_scope,
+                                memory_ids=[mid],
+                                importance=min(3.0, cur_imp + 0.02),
+                            )
             else:
                 logger.info("[WaveMemory] inject_memory: no memories found to inject")
 
@@ -2245,6 +2616,7 @@ class WaveMemoryPlugin(Star):
                 sender_name=sender_name,
                 bot_id=bot_id,
                 bot_profile=bot_profile,
+                runtime_scope=runtime_scope,
                 exclude_sources=exclude_sources,
                 old_text=injection,
             )
@@ -2262,6 +2634,50 @@ class WaveMemoryPlugin(Star):
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
         """捕获所有消息，异步写入记忆。"""
+        # 消息入口只解析一次 RuntimeScope。任何失败都必须发生在 writer/领域写之前。
+        resolved_event_context = None
+        scope_resolver = getattr(self, "scope_resolver", None)
+        if scope_resolver is None:
+            scope_failure_reason = "scope_resolver_unavailable"
+        else:
+            try:
+                resolved_event_context = scope_resolver.resolve_event(event)
+                scope_failure_reason = "" if getattr(resolved_event_context, "scope", None) is not None else "scope_missing"
+            except Exception as exc:
+                scope_failure_reason = str(getattr(exc, "reason_code", "") or "scope_resolution_error")
+
+        if scope_failure_reason:
+            counters = getattr(self, "_scope_resolution_failed_total", None)
+            if not isinstance(counters, dict):
+                counters = {}
+                self._scope_resolution_failed_total = counters
+            counters[scope_failure_reason] = counters.get(scope_failure_reason, 0) + 1
+
+            now = time.time()
+            last_warnings = getattr(self, "_scope_resolution_last_warning", None)
+            if not isinstance(last_warnings, dict):
+                last_warnings = {}
+                self._scope_resolution_last_warning = last_warnings
+            if now - float(last_warnings.get(scope_failure_reason, 0.0)) >= 60.0:
+                last_warnings[scope_failure_reason] = now
+                logger.warning(
+                    f"[WaveMemory] scope_resolution_failed reason={scope_failure_reason} "
+                    f"count={counters[scope_failure_reason]}"
+                )
+                _record_err("ScopeResolution", scope_failure_reason)
+            return
+
+        runtime_scope = resolved_event_context.scope
+        # on_message 是唯一的事件 Scope 解析点；后续 LLM hook 若接收同一事件，
+        # 只可透传该对象，不得再次从原始字段推断身份或会话。
+        try:
+            setattr(event, "_wave_memory_runtime_scope", runtime_scope)
+        except Exception:
+            # 部分 AstrBot 事件实现可能禁止扩展属性；注入路径保持显式 optional。
+            pass
+        sender_id = resolved_event_context.sender_local_id
+        group_id = resolved_event_context.conversation_local_id
+        bot_id = resolved_event_context.bot_self_id
         message = event.get_message_str() or ""
 
         # 先探测图片，避免纯图片消息被文本长度门槛误杀
@@ -2277,10 +2693,6 @@ class WaveMemoryPlugin(Star):
         if len(message.strip()) < self.min_message_length and not images:
             return
 
-        sender_id = event.get_sender_id() or ""
-        group_id = event.get_group_id() or f"private:{sender_id}"
-        bot_id = event.get_self_id() or ""
-
         # 平台会把 bot 自己发出的文本/图片回推成普通消息事件。
         # ignore_bot_messages=true 时必须在这里也截断；after_message_sent 不是唯一入口。
         if sender_id and (sender_id == bot_id or sender_id in self._bot_qq_ids):
@@ -2289,11 +2701,13 @@ class WaveMemoryPlugin(Star):
                 return
             if images:
                 await self.writer.enqueue({
+                    "scope": runtime_scope,
                     "group_id": group_id,
                     "sender_id": "bot",
                     "sender_name": self._get_bot_name(sender_id if sender_id in self._bot_qq_ids else bot_id),
                     "content": message,
                     "timestamp": time.time(),
+                    "event_id": getattr(event, "message_id", None),
                 })
             return
 
@@ -2443,11 +2857,17 @@ class WaveMemoryPlugin(Star):
                 if sender_id in admin_ids:
                     content = msg_stripped[7:].strip(":： \n")
                     if content and len(content) >= 4:
-                        self.db.add_memory(
-                            group_id=group_id, content=f"[管理员教导] {content}",
-                            sender_id=sender_id, sender_name=sender_name,
-                            importance=2.5, source="teach",
-                        )
+                        await self.writer.enqueue({
+                            "scope": runtime_scope,
+                            "group_id": group_id,
+                            "content": f"[管理员教导] {content}",
+                            "sender_id": sender_id,
+                            "sender_name": sender_name,
+                            "timestamp": time.time(),
+                            "event_id": getattr(event, "message_id", None),
+                            "importance": 2.5,
+                            "source": "teach",
+                        })
                         # 尝试解析为 facts（格式：A是B / A的B是C）
                         import re as _re
                         fact_match = _re.match(r'^(.+?)(是|的|=|→)(.+)$', content)
@@ -2456,7 +2876,22 @@ class WaveMemoryPlugin(Star):
                             predicate = fact_match.group(2).strip() or "是"
                             obj = fact_match.group(3).strip()
                             if subject and obj:
-                                self.db.insert_fact(subject, predicate, obj, group_id=group_id, confidence=0.95)
+                                scoped_repo = getattr(self.db, "scoped_knowledge", None)
+                                if scoped_repo is None:
+                                    _record_err("teach.fact", "scoped_repository_unavailable")
+                                else:
+                                    scoped_repo.upsert_scoped_fact(
+                                        runtime_scope,
+                                        subject=subject,
+                                        predicate=predicate,
+                                        object=obj,
+                                        confidence=0.95,
+                                        status="pending",
+                                        provenance={
+                                            "source": "teach",
+                                            "event_id": str(getattr(event, "message_id", "") or ""),
+                                        },
+                                    )
                         logger.info(f"[WaveMemory] /teach: {content[:50]}")
                     return
 
@@ -2468,25 +2903,46 @@ class WaveMemoryPlugin(Star):
                 if msg_stripped.startswith(prefix):
                     content = msg_stripped[len(prefix):].strip(":： \n")
                     if content and len(content) >= 4:
-                        self.db.add_memory(
-                            group_id=group_id, content=f"[用户要求记住] {content}",
-                            sender_id=sender_id, sender_name=sender_name if sender_name else "",
-                            importance=2.0, source="explicit",
-                        )
-                        logger.info(f"[WaveMemory] 显式记住: {sender_name}: {content[:30]}")
+                        await self.writer.enqueue({
+                            "scope": runtime_scope,
+                            "group_id": group_id,
+                            "content": f"[用户要求记住] {content}",
+                            "sender_id": sender_id,
+                            "sender_name": sender_name if sender_name else "",
+                            "timestamp": time.time(),
+                            "event_id": getattr(event, "message_id", None),
+                            "importance": 2.0,
+                            "source": "explicit",
+                        })
+                        logger.info(f"[WaveMemory] 显式记住 queued: {sender_name}: {content[:30]}")
                     return
             for prefix in _forget_prefixes:
                 if msg_stripped.startswith(prefix):
                     content = msg_stripped[len(prefix):].strip(":： \n")
                     if content and len(content) >= 2:
                         rows = self.db.conn.execute(
-                            "SELECT id FROM memories WHERE content LIKE ? AND sender_id = ? ORDER BY id DESC LIMIT 5",
-                            (f"%{content}%", sender_id),
+                            """SELECT id FROM memories
+                               WHERE content LIKE ? AND sender_id = ?
+                                 AND bot_id = ? AND session_id = ? AND visibility = ?
+                                 AND resolution_state = 'resolved' AND quarantine = 0
+                               ORDER BY id DESC LIMIT 5""",
+                            (
+                                f"%{content}%",
+                                sender_id,
+                                runtime_scope.bot_id,
+                                runtime_scope.session.id if runtime_scope.session else "",
+                                runtime_scope.visibility,
+                            ),
                         ).fetchall()
-                        for row in rows:
-                            self.db.conn.execute("UPDATE memories SET importance = 0.01 WHERE id = ?", (row[0],))
-                        self.db.conn.commit()
                         if rows:
+                            await self.write_gateway.set_memory_importance(
+                                scope=runtime_scope,
+                                memory_ids=[int(row[0]) for row in rows],
+                                importance=0.01,
+                                idempotency_hint=(
+                                    f"explicit-forget:{getattr(event, 'message_id', '') or content}"
+                                ),
+                            )
                             logger.info(f"[WaveMemory] 显式忘记: {sender_name}: {content[:30]} ({len(rows)} 条降权)")
                     return
 
@@ -2495,24 +2951,34 @@ class WaveMemoryPlugin(Star):
 
             message_ts = time.time()
             await self.writer.enqueue({
+                "scope": runtime_scope,
                 "group_id": group_id,
                 "sender_id": sender_id,
                 "sender_name": sender_name,
                 "content": locked_message,
                 "timestamp": message_ts,
+                "event_id": getattr(event, "message_id", None),
                 "is_at_bot": getattr(event, "is_at_or_wake_command", False),
             })
 
-            # 黑话词频统计 + 触发挖掘 (US-4.1)
+            # 黑话词频统计 + 触发挖掘 (US-4.1)：主入口只透传已解析的 Scope。
             if self.jargon_service:
-                self.jargon_service.feed_message(locked_message, group_id, sender_id, timestamp=message_ts)
-                if self.jargon_service.should_mine(group_id):
-                    self._spawn(self._jargon_mine_task(group_id))
+                self.jargon_service.feed_message(locked_message, runtime_scope, sender_id, timestamp=message_ts)
+                if self.jargon_service.should_mine(runtime_scope):
+                    self._spawn(self._jargon_mine_task(runtime_scope))
 
-            # 白真真自省：检测群友对白真真的纠正
+            # 自省：按稳定 BotProfile.db_id 检测群友纠正并创建候选
             if self.self_reflect and group_id:
                 try:
-                    await self.self_reflect.check_correction(locked_message, sender_name, group_id)
+                    correction_message_id = getattr(event, "message_id", None)
+                    await self.self_reflect.check_correction(
+                        locked_message,
+                        sender_name,
+                        group_id,
+                        bot_id=runtime_scope.bot_id,
+                        scope=runtime_scope,
+                        message_id=correction_message_id,
+                    )
                 except Exception:
                     pass
 
@@ -2526,9 +2992,8 @@ class WaveMemoryPlugin(Star):
                     if "[引用消息" in raw and any(bid in raw for bid in bot_ids):
                         is_reply_to_bot = True
                 hour = int(time.strftime('%H', time.localtime()))
-                self.lifecycle.affinity.process_message(
-                    sender_id=sender_id,
-                    group_id=group_id,
+                self.lifecycle.process_scoped_message(
+                    scope=runtime_scope,
                     content=locked_message,
                     is_at_bot=is_at_bot,
                     is_reply_to_bot=is_reply_to_bot,
@@ -2571,7 +3036,7 @@ class WaveMemoryPlugin(Star):
                 and (is_interesting or concern_score > 0.3)):
                 try:
                     bot_id = event.get_self_id() or ""
-                    context_messages = self._get_recent_messages(event, max_messages=10)
+                    context_messages = self._get_recent_messages(event, scope=runtime_scope, max_messages=10)
                     result = await self.meta_thinking.should_proactive(group_id, context_messages)
                     if result.get("action") == "主动插话":
                         inner = result.get("inner_thought", "")
@@ -2616,9 +3081,50 @@ class WaveMemoryPlugin(Star):
         if not has_image and len(bot_text) < 4:
             return
 
-        sender_id = event.get_sender_id() or ""
-        group_id = event.get_group_id() or f"private:{sender_id}"
+        # on_message 已解析过的 Scope 可直接复用；after_message_sent 单独触发时才
+        # 通过同一 resolver 解析。绝不把私聊拼成伪 group，也不回退到默认 Bot。
+        runtime_scope = getattr(event, "_wave_memory_runtime_scope", None)
+        if not isinstance(runtime_scope, RuntimeScope):
+            resolver = getattr(self, "scope_resolver", None)
+            try:
+                resolved_context = resolver.resolve_event(event) if resolver is not None else None
+                runtime_scope = getattr(resolved_context, "scope", None)
+            except Exception as exc:
+                runtime_scope = None
+                scope_failure_reason = str(getattr(exc, "reason_code", "") or "scope_resolution_error")
+            else:
+                scope_failure_reason = "" if isinstance(runtime_scope, RuntimeScope) else "scope_missing"
+        else:
+            scope_failure_reason = ""
+
+        if scope_failure_reason or not isinstance(runtime_scope, RuntimeScope):
+            reason = scope_failure_reason or "scope_missing"
+            counters = getattr(self, "_scope_resolution_failed_total", None)
+            if not isinstance(counters, dict):
+                counters = {}
+                self._scope_resolution_failed_total = counters
+            counters[reason] = counters.get(reason, 0) + 1
+            logger.warning("[WaveMemory] bot_sent_scope_resolution_failed reason=%s count=%s", reason, counters[reason])
+            _record_err("BotSentScopeResolution", reason)
+            return
+
+        try:
+            setattr(event, "_wave_memory_runtime_scope", runtime_scope)
+        except Exception:
+            pass
+
+        if runtime_scope.visibility != "group" or runtime_scope.session is None:
+            reason = "legacy_writer_scope_visibility_unsupported"
+            logger.warning("[WaveMemory] bot_sent_scope_rejected reason=%s", reason)
+            _record_err("BotSentScopeResolution", reason)
+            return
+
+        group_id = runtime_scope.session.conversation_id
+        principal = runtime_scope.subject_principal_id or ""
+        principal_prefix = f"{runtime_scope.session.platform_id}:user:"
+        sender_id = principal[len(principal_prefix):] if principal.startswith(principal_prefix) else ""
         bot_id = event.get_self_id() or ""
+        bot_db_id = runtime_scope.bot_id
 
         # 记录 reply_tracker（供 _should_engage ABA 判断）
         if sender_id and group_id:
@@ -2631,111 +3137,502 @@ class WaveMemoryPlugin(Star):
         # v1.5.0: 互动积累（纯规则，不调 LLM）
         if sender_id and sender_id != "bot":
             try:
-                bot_profile = self._get_bot(bot_id)
-                db_bot_id = bot_profile.db_id if bot_profile else "bot"
                 self.db.conn.execute(
                     """UPDATE user_profiles 
                        SET interaction_count = COALESCE(interaction_count, 0) + 1,
                            last_seen = ?
                        WHERE user_id = ? AND group_id = ? AND bot_id = ?""",
-                    (time.time(), sender_id, group_id, db_bot_id),
+                    (time.time(), sender_id, group_id, bot_db_id),
                 )
                 self.db.conn.commit()
             except Exception:
                 pass
 
         await self.writer.enqueue({
+            "scope": runtime_scope,
             "group_id": group_id,
             "sender_id": "bot",
             "sender_name": self._get_bot_name(bot_id),
             "content": bot_text,
             "timestamp": time.time(),
+            "event_id": getattr(event, "message_id", None),
         })
 
-        # 自省：记录回复供后续检测纠正（只对配置了 self_reflect 的 bot 生效）
-        bot_profile = self._get_bot(bot_id)
-        if bot_profile and self.self_reflect:
-            self.self_reflect.record_reply(bot_text, group_id)
+        # 自省：仅缓存当前已解析群 Scope 中的回复，供同 Bot/同会话的纠正匹配。
+        if self.self_reflect:
+            self.self_reflect.record_reply(
+                bot_text,
+                group_id,
+                bot_id=runtime_scope.bot_id,
+                scope=runtime_scope,
+                message_id=getattr(event, "message_id", None),
+            )
 
     # ─── 后台任务 ───
 
     async def _async_cache_warmup(self):
-        """高频互动者缓存预热 — 后台执行不阻塞启动。"""
+        """保留兼容任务入口，但不预热无 Scope 的 legacy persona。"""
+        logger.debug("[WaveMemory] persona cache warmup withheld: scope_migration_required")
+
+    async def _on_memory_projection_refresh(self, event) -> None:
+        """Invalidate dependent reads and coalesce PairSimilarity rebuild requests."""
+        if event.event_type != "memory.tags_applied":
+            return
+        self.pair_sim_service.clear_cache()
+        bucket = int(time.time() // 300)
+        token = f"pair_similarity:tag-change:{bucket}"
+        request = await self.write_gateway.jobs.create_request(
+            idempotency_key=f"maintenance:{token}",
+            kind="maintenance.pair_similarity.rebuild",
+            scope={"kind": "system_maintenance"},
+            payload={"kind": "pair_similarity", "reason": "tag_change"},
+        )
+        await self.write_gateway.jobs.schedule_run(
+            request_id=request.request_id,
+            schedule_slot=token,
+            cursor_generation=bucket,
+            cursor={"phase": "queued", "source_event": event.event_id},
+        )
+
+    async def _queue_maintenance_repair(self, kind: str, *, reason: str) -> str:
+        """Idempotently queue a recoverable repair instead of mutating derived state inline."""
+        manifest = None
         try:
-            await asyncio.sleep(2)  # 让其他启动步骤先完成
-            from .utils.cache import get_cache_manager
-            cache_mgr = get_cache_manager()
-            top_users = self.db.conn.execute(
-                """SELECT sender_id, sender_name FROM memories
-                   WHERE timestamp > strftime('%s','now') - 604800
-                   GROUP BY sender_id ORDER BY COUNT(*) DESC LIMIT 20"""
+            if kind == "memory_index":
+                manifest = self.memory_index.read_manifest(verify_checksum=False)
+            elif kind == "tag_index":
+                manifest = self.tag_index.read_manifest(verify_checksum=False)
+        except Exception:
+            manifest = None
+        generation = 0 if manifest is None else int(manifest.generation)
+        watermark = await self.write_gateway.coordinator.committed_watermark()
+        token = f"{kind}:{reason}:{watermark}:{generation}"
+        request = await self.write_gateway.jobs.create_request(
+            idempotency_key=f"maintenance:{token}",
+            kind=f"maintenance.{kind}.rebuild",
+            scope={"kind": "system_maintenance"},
+            payload={"kind": kind, "reason": reason, "preflight_token": token},
+        )
+        run = await self.write_gateway.jobs.schedule_run(
+            request_id=request.request_id,
+            schedule_slot=token,
+            cursor_generation=generation + 1,
+            cursor={"phase": "queued", "watermark": watermark},
+        )
+        return run.run_id
+
+    async def _maintenance_rebuild_memory_index(self, run, request, runner):
+        """Build a fresh HNSW generation from one writer-serialized canonical snapshot."""
+        import numpy as np
+
+        await self.write_gateway.jobs.update_progress(
+            run.run_id,
+            lease_owner=runner.lease_owner,
+            progress={"phase": "snapshot"},
+            cursor={"phase": "snapshot"},
+        )
+
+        def _snapshot(connection):
+            rows = connection.execute(
+                """SELECT id, vector FROM memories
+                     WHERE vector IS NOT NULL AND resolution_state='resolved'
+                       AND COALESCE(quarantine, 0)=0
+                       AND COALESCE(memory_type, 'message') NOT IN ('archived','evicted','deleted')"""
             ).fetchall()
-            preloaded = 0
-            for uid, uname in top_users:
-                if uid and self.persona_evolution:
-                    persona_text = self.persona_evolution.get_persona_injection(uid, None, bot_id="bot")
-                    if persona_text:
-                        cache_mgr.set("persona", f"{uid}:None:bot", persona_text)
-                        preloaded += 1
-            if preloaded:
-                logger.info(f"[WaveMemory] 缓存预热: {preloaded} 个高频互动者 persona")
-        except Exception as e:
-            logger.debug(f"[WaveMemory] 缓存预热跳过: {e}")
+            return rows, OutboxRepository.committed_watermark(connection)
 
-    async def _rebuild_memory_index(self):
-        """重建 HNSW 内存索引（在线程池中执行，避免阻塞事件循环）。"""
-        logger.info("[WaveMemory] Rebuilding memory index...")
+        rows, watermark = await self.write_gateway.coordinator.read(_snapshot)
+        fresh = VectorIndex(
+            dimension=self.dimension,
+            max_elements=max(self.max_memories, len(rows) + 1),
+            index_path=None,
+            kind="memory",
+        )
+        if rows:
+            ids = [int(row[0]) for row in rows]
+            vectors = np.asarray(
+                [np.frombuffer(row[1], dtype=np.float32) for row in rows],
+                dtype=np.float32,
+            )
+            fresh.add(ids, vectors)
+        async with self.memory_index_projection._lock:
+            with self.memory_index._lock:
+                self.memory_index.index = fresh.index
+                self.memory_index.max_elements = fresh.max_elements
+            manifest = await asyncio.to_thread(
+                self.memory_index.save,
+                db_watermark=int(watermark),
+            )
+            self.memory_index_projection._dirty = False
+        return {
+            "kind": "memory_index",
+            "count": len(rows),
+            "generation": None if manifest is None else manifest.generation,
+            "db_watermark": int(watermark),
+            "verified": manifest is not None and manifest.count == len(rows),
+        }
+
+    async def _maintenance_rebuild_tag_index(self, run, request, runner):
+        """Rebuild the legacy/reference Tag HNSW as a versioned durable generation."""
         import numpy as np
 
-        def _sync_rebuild():
-            all_vecs = self.db.get_all_memory_vectors()
-            if all_vecs:
-                ids = [v[0] for v in all_vecs]
-                vectors = np.array([v[1] for v in all_vecs], dtype=np.float32)
-                self.memory_index.add(ids, vectors)
-                self.memory_index.save()
-                return len(ids)
-            return 0
+        def _snapshot(connection):
+            rows = connection.execute(
+                "SELECT id, vector FROM tags WHERE vector IS NOT NULL"
+            ).fetchall()
+            return rows, OutboxRepository.committed_watermark(connection)
 
-        count = await asyncio.to_thread(_sync_rebuild)
-        if count:
-            logger.info(f"[WaveMemory] Memory index rebuilt: {count} vectors")
+        rows, watermark = await self.write_gateway.coordinator.read(_snapshot)
+        fresh = VectorIndex(
+            dimension=self.dimension,
+            max_elements=max(50000, len(rows) + 1),
+            index_path=None,
+            kind="tag",
+        )
+        if rows:
+            fresh.add(
+                [int(row[0]) for row in rows],
+                np.asarray(
+                    [np.frombuffer(row[1], dtype=np.float32) for row in rows],
+                    dtype=np.float32,
+                ),
+            )
+        with self.tag_index._lock:
+            self.tag_index.index = fresh.index
+            self.tag_index.max_elements = fresh.max_elements
+        manifest = await asyncio.to_thread(
+            self.tag_index.save,
+            db_watermark=int(watermark),
+        )
+        return {
+            "kind": "tag_index",
+            "count": len(rows),
+            "generation": None if manifest is None else manifest.generation,
+            "db_watermark": int(watermark),
+            "verified": manifest is not None and manifest.count == len(rows),
+        }
 
-    async def _rebuild_tag_index(self):
-        """重建 Tag 向量索引（在线程池中执行）。"""
-        logger.info("[WaveMemory] Rebuilding tag index...")
-        import numpy as np
-
-        def _sync_rebuild():
-            tag_data = self.db.get_all_tag_vectors()
-            if tag_data:
-                ids = [t[0] for t in tag_data]
-                vectors = np.array([t[2] for t in tag_data], dtype=np.float32)
-                self.tag_index.add(ids, vectors)
-                self.tag_index.save()
-                return len(ids)
-            return 0
-
-        count = await asyncio.to_thread(_sync_rebuild)
-        if count:
-            logger.info(f"[WaveMemory] Tag index rebuilt: {count} vectors")
-
-    def _get_recent_messages(self, event, max_messages: int = 8) -> list[str]:
+    def _get_recent_messages(
+        self,
+        event,
+        *,
+        scope: RuntimeScope | None,
+        max_messages: int = 8,
+    ) -> list[str]:
+        """仅返回当前已解析群 Scope 内的正式记忆；无法证明 Scope 时空返回。"""
+        if (
+            not isinstance(scope, RuntimeScope)
+            or scope.visibility != "group"
+            or scope.session is None
+        ):
+            return []
         try:
-            group_id = event.get_group_id()
             rows = self.db.conn.execute(
                 """SELECT content FROM memories
-                   WHERE group_id = ? AND content IS NOT NULL
+                   WHERE bot_id=? AND session_id=? AND visibility=?
+                     AND resolution_state='resolved' AND quarantine=0
+                     AND content IS NOT NULL
                    ORDER BY id DESC LIMIT ?""",
-                (group_id, max_messages),
+                (scope.bot_id, scope.session.id, scope.visibility, max_messages),
             ).fetchall()
             return [r[0] for r in reversed(rows)] if rows else []
         except Exception:
             return []
 
-    async def _rebuild_cooccurrence(self):
-        """重建共现矩阵（在线程池中执行，避免阻塞事件循环）。"""
-        await asyncio.to_thread(self.cooccurrence.rebuild)
+    async def _maintenance_run_import(self, run, request, runner):
+        """Execute serializable Import requests under a durable lease and fail closed on unresolved scope."""
+        mode = str(request.payload.get("mode") or "legacy")
+        await self.write_gateway.jobs.update_progress(
+            run.run_id,
+            lease_owner=runner.lease_owner,
+            lease_seconds=120.0,
+            progress={"phase": "preflight", "mode": mode},
+            cursor={"phase": "preflight"},
+        )
+
+        if mode == "legacy":
+            from .webui.importer import WaveMemoryImporter
+
+            source = str(request.payload.get("source") or "")
+            importer = WaveMemoryImporter(
+                self.db,
+                self.embedding_service,
+                self.tag_extractor,
+                memory_index=None,
+                writer=None,
+            )
+            last = {}
+            async for raw_event in importer.run(
+                source=source,
+                re_embed=bool(request.payload.get("re_embed", True)),
+                extract_tags=bool(request.payload.get("extract_tags", True)),
+                batch_size=max(1, min(int(request.payload.get("batch_size", 20)), 100)),
+            ):
+                try:
+                    last = json.loads(raw_event)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    last = {"message": str(raw_event)}
+                await self.write_gateway.jobs.update_progress(
+                    run.run_id,
+                    lease_owner=runner.lease_owner,
+                    lease_seconds=120.0,
+                    progress=last,
+                    cursor={"phase": last.get("status", "running")},
+                )
+            return last
+
+        if mode == "discovered_source":
+            from .webui.source_discovery import SourceDiscovery
+
+            source_id = str(request.payload.get("source_id") or "")
+            source = next(
+                (item for item in SourceDiscovery().discover_all() if item.get("id") == source_id),
+                None,
+            )
+            if source is None:
+                raise RuntimeError("import_source_not_found")
+            target = str((source.get("adapter") or {}).get("target", "memories"))
+            if target == "memories" or source.get("type") != "known":
+                return {
+                    "status": "blocked",
+                    "reason_code": "unresolved_import_not_supported",
+                    "source_id": source_id,
+                    "message": "Import source has no verified RuntimeScope binding.",
+                }
+            return {
+                "status": "blocked",
+                "reason_code": "domain_import_gateway_required",
+                "source_id": source_id,
+                "target": target,
+                "message": "Non-memory imports require a target-specific coordinator command.",
+            }
+
+        raise RuntimeError("import_mode_invalid")
+
+    async def _maintenance_run_tag_backfill(self, run, request, runner):
+        """Extract one bounded scoped Tag batch under a durable lease."""
+        from .webui.tag_execution import tag_memory_batch
+
+        batch_size = max(1, min(int(request.payload.get("batch_size", 20)), 50))
+        min_length = max(0, int(request.payload.get("skip_short_min_length", 10)))
+
+        def _snapshot(connection):
+            return connection.execute(
+                """SELECT m.id, m.content, m.sender_name, o.payload_json
+                   FROM memories m
+                   JOIN domain_outbox o
+                     ON o.aggregate_kind='memory'
+                    AND o.aggregate_id=CAST(m.id AS TEXT)
+                    AND o.event_type='memory.created'
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM scoped_memory_tags smt WHERE smt.memory_id=m.id
+                   )
+                     AND m.resolution_state='resolved'
+                     AND COALESCE(m.quarantine, 0)=0
+                     AND LENGTH(COALESCE(m.content, '')) >= ?
+                   ORDER BY m.id ASC LIMIT ?""",
+                (min_length, batch_size),
+            ).fetchall()
+
+        rows = await self.write_gateway.coordinator.read(_snapshot)
+        messages = []
+        for memory_id, content, sender_name, payload_json in rows:
+            try:
+                scope = json.loads(payload_json).get("scope")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                scope = None
+            if isinstance(scope, dict):
+                messages.append({
+                    "id": int(memory_id),
+                    "content": str(content or "")[:800],
+                    "sender": str(sender_name or ""),
+                    "scope": scope,
+                })
+
+        await self.write_gateway.jobs.update_progress(
+            run.run_id,
+            lease_owner=runner.lease_owner,
+            lease_seconds=120.0,
+            progress={"phase": "extract", "selected": len(messages)},
+            cursor={"phase": "extract", "after_id": messages[-1]["id"] if messages else 0},
+        )
+        result = await asyncio.wait_for(
+            tag_memory_batch(
+                self.db,
+                self.embedding_service,
+                self.tag_extractor,
+                messages,
+                tag_batch_size=batch_size,
+                tag_write_policy="missing_only",
+                skip_short_min_length=min_length,
+                write_gateway=self.write_gateway,
+            ),
+            timeout=110.0,
+        )
+        return {**result, "bounded": True}
+
+    async def _maintenance_run_tag_audit(self, run, request, runner):
+        """Run LLM Tag audit as a resumable durable job, never in an SSE request."""
+        from .services.tag_auditor import TagAuditor
+
+        provider_id = str(request.payload.get("provider_id") or self.tag_llm_provider_id or "")
+        if not provider_id:
+            raise RuntimeError("tag_audit_provider_not_configured")
+        strategy = str(request.payload.get("strategy", "mixed"))
+        if strategy not in {"mixed", "low_quality", "high_freq"}:
+            raise RuntimeError("tag_audit_strategy_invalid")
+        total_count = max(10, min(int(request.payload.get("total_count", 500)), 2000))
+        batch_size = max(1, min(int(request.payload.get("batch_size", 50)), 100))
+        auditor = TagAuditor(
+            db=self.db,
+            context=self.context,
+            provider_id=provider_id,
+        )
+
+        async def _publish(suggestion):
+            action = suggestion.get("action")
+            if action == "merge":
+                tag_ids = json.dumps(suggestion.get("source_ids", []))
+                target_name = suggestion.get("target_name", "")
+                target_type = suggestion.get("target_type", "")
+            elif action == "retype":
+                tag_ids = json.dumps([suggestion.get("tag_id")])
+                target_name = None
+                target_type = suggestion.get("new_type", "")
+            elif action == "delete":
+                tag_ids = json.dumps([suggestion.get("tag_id")])
+                target_name = None
+                target_type = None
+            else:
+                return
+
+            def _insert(connection):
+                connection.execute(
+                    """
+                    INSERT INTO tag_audit_suggestions(
+                        action, tag_ids, target_name, target_type,
+                        reason, status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, 'pending', ?)
+                    """,
+                    (
+                        action,
+                        tag_ids,
+                        target_name,
+                        target_type,
+                        suggestion.get("reason", ""),
+                        time.time(),
+                    ),
+                )
+
+            await self.write_gateway.coordinator.transaction(
+                _insert,
+                actor="maintenance.tag_audit",
+            )
+
+        last_event = {"progress": 0, "processed": 0, "total_suggestions": 0}
+        await self.write_gateway.jobs.update_progress(
+            run.run_id,
+            lease_owner=runner.lease_owner,
+            lease_seconds=120.0,
+            progress=last_event,
+            cursor={"processed": 0, "strategy": strategy},
+        )
+        iterator = auditor.run_audit(
+            batch_size=batch_size,
+            strategy=strategy,
+            total_count=total_count,
+            save_suggestion=_publish,
+        ).__aiter__()
+        while True:
+            if await self.write_gateway.jobs.cancellation_requested(run.run_id):
+                return {**last_event, "cancelled": True}
+            try:
+                event = await asyncio.wait_for(iterator.__anext__(), timeout=110.0)
+            except StopAsyncIteration:
+                break
+            last_event = dict(event)
+            await self.write_gateway.jobs.update_progress(
+                run.run_id,
+                lease_owner=runner.lease_owner,
+                lease_seconds=120.0,
+                progress=last_event,
+                cursor={
+                    "processed": int(last_event.get("processed", 0)),
+                    "strategy": strategy,
+                },
+            )
+        return last_event
+
+    async def _maintenance_rebuild_pair_similarity(self, run, request, runner):
+        """Compute PairSimilarity off-loop and publish it through one serialized transaction."""
+        max_tags = max(2, min(int(request.payload.get("max_tags", 2000)), 5000))
+
+        def _snapshot(connection):
+            return connection.execute(
+                """
+                SELECT id, vector
+                FROM tags
+                WHERE vector IS NOT NULL
+                ORDER BY frequency DESC, id ASC
+                LIMIT ?
+                """,
+                (max_tags,),
+            ).fetchall()
+
+        rows = await self.write_gateway.coordinator.read(_snapshot)
+        await self.write_gateway.jobs.update_progress(
+            run.run_id,
+            lease_owner=runner.lease_owner,
+            progress={"phase": "compute", "tags": len(rows)},
+            cursor={"phase": "compute", "tags": len(rows)},
+        )
+
+        params, cache = await asyncio.to_thread(
+            self.pair_sim_service.compute_projection,
+            rows,
+        )
+
+        def _publish(connection):
+            connection.execute("DELETE FROM tag_pair_similarity")
+            if params:
+                connection.executemany(
+                    """
+                    INSERT INTO tag_pair_similarity(
+                        tag_id_a, tag_id_b, similarity, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    params,
+                )
+
+        await self.write_gateway.coordinator.transaction(
+            _publish,
+            actor="maintenance.pair_similarity",
+        )
+        self.pair_sim_service.install_projection(cache)
+        return {
+            "tags": len(rows),
+            "pairs": len(params),
+            "max_tags": max_tags,
+        }
+
+    async def _maintenance_rebuild_cooccurrence(self, run, request, runner):
+        """Rebuild the cooccurrence projection under its outbox consumer barrier."""
+        await self.write_gateway.jobs.update_progress(
+            run.run_id,
+            lease_owner=runner.lease_owner,
+            progress={"phase": "rebuild"},
+            cursor={"phase": "rebuild"},
+        )
+        async with self.cooccurrence_projection._lock:
+            await asyncio.to_thread(self.cooccurrence.rebuild)
+            watermark = await self.write_gateway.coordinator.committed_watermark()
+        return {
+            "kind": "cooccurrence",
+            "nodes": self.cooccurrence.node_count,
+            "edges": self.cooccurrence.edge_count,
+            "db_watermark": int(watermark),
+            "verified": True,
+        }
 
     async def _on_cooccurrence_rebuilt(self):
         """共现矩阵重建完成后，重算内生残差（30分钟最小间隔）。"""

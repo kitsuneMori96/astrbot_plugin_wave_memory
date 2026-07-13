@@ -13,11 +13,15 @@ from astrbot.api import logger
 
 from .db.connection import ConnectionManager
 from .db.memory_repo import MemoryRepo
+from .db.migrations.memories_v2 import ensure_memories_v2_schema
+from .db.migrations.scoped_derived_knowledge import ensure_scoped_derived_knowledge_schema
+from .db.scoped_knowledge_repo import ScopedKnowledgeRepo
 from .db.tag_repo import TagRepo
 from .db.social_repo import SocialRepo
 from .db.knowledge_repo import KnowledgeRepo
 from .db.booklore_repo import BookLoreRepo
 from .db.belief_repo import BeliefRepo
+from .db.learning_repository import LearningRepositories
 from .metrics_store import InjectionMetricStore
 
 
@@ -28,29 +32,44 @@ class WaveMemoryDB:
         self.db_path = db_path
         self.dimension = dimension
 
-        # 核心连接管理器
+        # 核心连接管理器；后续任一初始化失败都必须释放自身创建的连接。
         self._cm = ConnectionManager(db_path)
+        try:
+            # 初始化各 Repo
+            self._memory_repo = MemoryRepo(self._cm)
+            # memories 表已经存在；在任何 FTS 建表/填充之前一次性完成纯增量 v2 迁移。
+            ensure_memories_v2_schema(self._cm)
+            self._tag_repo = TagRepo(self._cm)
+            self._social_repo = SocialRepo(self._cm)
+            self._knowledge_repo = KnowledgeRepo(self._cm)
+            self._booklore_repo = BookLoreRepo(self._cm)
+            self._belief_repo = BeliefRepo(self._cm)
+            # 仅创建新的 scoped_* 派生知识数据面；绝不回填或改写 legacy 表。
+            ensure_scoped_derived_knowledge_schema(self._cm)
+            self._scoped_knowledge_repo = ScopedKnowledgeRepo(self._cm)
+            # 学习中心 schema/repository 随数据库 Facade 初始化，迁移纯增量且不做 legacy backfill。
+            self.learning = LearningRepositories.from_connection(self._cm.conn)
+            self._injection_metrics = InjectionMetricStore(self._cm)
 
-        # 初始化各 Repo
-        self._memory_repo = MemoryRepo(self._cm)
-        self._tag_repo = TagRepo(self._cm)
-        self._social_repo = SocialRepo(self._cm)
-        self._knowledge_repo = KnowledgeRepo(self._cm)
-        self._booklore_repo = BookLoreRepo(self._cm)
-        self._belief_repo = BeliefRepo(self._cm)
-        self._injection_metrics = InjectionMetricStore(self._cm)
-
-        # FTS5 + 其他迁移
-        self._injection_metrics.ensure_schema()
-        self._setup_fts5()
-        self._setup_audit_table()
-        self._setup_jargon_knowledge_tables()
-        self._backfill_tag_relations_created_at()
+            # FTS5 + 其他迁移
+            self._injection_metrics.ensure_schema()
+            self._setup_fts5()
+            self._setup_audit_table()
+            self._setup_jargon_knowledge_tables()
+            self._backfill_tag_relations_created_at()
+        except BaseException:
+            self._cm.close()
+            raise
 
     @property
     def conn(self):
         """返回带锁代理，确保所有通过 db.conn.execute() 的调用都序列化。"""
         return self._cm
+
+    @property
+    def scoped_knowledge(self):
+        """正式 scoped 派生知识边界；禁止调用方回退 legacy 表。"""
+        return self._scoped_knowledge_repo
 
     @property
     def memory_index(self):
@@ -86,8 +105,29 @@ class WaveMemoryDB:
     # Memory 委托
     # ═══════════════════════════════════════════════════════
 
-    def add_memory(self, group_id, content, vector=None, sender_id="", sender_name="", timestamp=None, importance=1.0, source="live"):
-        return self._memory_repo.add_memory(group_id, content, vector, sender_id, sender_name, timestamp, importance, source)
+    def add_memory(
+        self,
+        group_id,
+        content,
+        vector=None,
+        sender_id="",
+        sender_name="",
+        timestamp=None,
+        importance=1.0,
+        source="live",
+        *,
+        scope=None,
+        provenance=None,
+        origin_metadata=None,
+        quarantine=False,
+    ):
+        return self._memory_repo.add_memory(
+            group_id, content, vector, sender_id, sender_name, timestamp, importance, source,
+            scope=scope,
+            provenance=provenance,
+            origin_metadata=origin_metadata,
+            quarantine=quarantine,
+        )
 
     def get_memory_by_id(self, memory_id):
         return self._memory_repo.get_memory_by_id(memory_id)
@@ -95,8 +135,15 @@ class WaveMemoryDB:
     def get_all_memory_vectors(self, group_id=None):
         return self._memory_repo.get_all_memory_vectors(group_id)
 
-    def get_memories_by_ids(self, ids):
-        return self._memory_repo.get_memories_by_ids(ids)
+    def get_memories_by_ids(self, ids, *, scope=None):
+        return self._memory_repo.get_memories_by_ids(ids, scope=scope)
+
+    def find_recent_duplicate_memory(self, *, scope, normalized_content, since_ts):
+        return self._memory_repo.find_recent_duplicate_memory(
+            scope=scope,
+            normalized_content=normalized_content,
+            since_ts=since_ts,
+        )
 
     def touch_memories(self, ids, importance_boost: float = 0.01):
         return self._memory_repo.touch_memories(ids, importance_boost=importance_boost)
@@ -252,6 +299,43 @@ class WaveMemoryDB:
 
     def mark_imported(self, content_hash):
         return self._knowledge_repo.mark_imported(content_hash)
+
+    # ═══════════════════════════════════════════════════════
+    # Scoped derived knowledge（正式 API；无 legacy fallback）
+    # ═══════════════════════════════════════════════════════
+
+    def upsert_scoped_jargon(self, scope, **kwargs):
+        return self._scoped_knowledge_repo.upsert_scoped_jargon(scope, **kwargs)
+
+    def list_scoped_jargon(self, scope, **kwargs):
+        return self._scoped_knowledge_repo.list_scoped_jargon(scope, **kwargs)
+
+    def upsert_scoped_fact(self, scope, **kwargs):
+        return self._scoped_knowledge_repo.upsert_scoped_fact(scope, **kwargs)
+
+    def list_scoped_facts(self, scope, **kwargs):
+        return self._scoped_knowledge_repo.list_scoped_facts(scope, **kwargs)
+
+    def upsert_scoped_tag(self, scope, **kwargs):
+        return self._scoped_knowledge_repo.upsert_scoped_tag(scope, **kwargs)
+
+    def link_scoped_memory_tag(self, scope, **kwargs):
+        return self._scoped_knowledge_repo.link_scoped_memory_tag(scope, **kwargs)
+
+    def upsert_scoped_tag_relation(self, scope, **kwargs):
+        return self._scoped_knowledge_repo.upsert_scoped_tag_relation(scope, **kwargs)
+
+    def upsert_scoped_belief(self, scope, **kwargs):
+        return self._scoped_knowledge_repo.upsert_scoped_belief(scope, **kwargs)
+
+    def list_scoped_beliefs(self, scope, **kwargs):
+        return self._scoped_knowledge_repo.list_scoped_beliefs(scope, **kwargs)
+
+    def get_scoped_consolidation_cursor(self, scope, **kwargs):
+        return self._scoped_knowledge_repo.get_scoped_consolidation_cursor(scope, **kwargs)
+
+    def advance_scoped_consolidation_cursor(self, scope, **kwargs):
+        return self._scoped_knowledge_repo.advance_scoped_consolidation_cursor(scope, **kwargs)
 
     # ═══════════════════════════════════════════════════════
     # WebUI + 兼容方法（直接在 facade 层实现）
@@ -604,8 +688,8 @@ class WaveMemoryDB:
     def add_belief(self, content, belief_type, bot_id, strength=0.5, sources=None, status="active", evidence_type="memory", evidence_ids=None):
         return self._belief_repo.add_belief(content, belief_type, bot_id, strength, sources, status, evidence_type, evidence_ids)
 
-    def get_beliefs(self, bot_id=None, belief_type=None, status="active", limit=50):
-        return self._belief_repo.get_beliefs(bot_id, belief_type, status, limit)
+    def get_beliefs(self, bot_id=None, belief_type=None, status="active", limit=50, *, include_unresolved_legacy=False):
+        return self._belief_repo.get_beliefs(bot_id, belief_type, status, limit, include_unresolved_legacy=include_unresolved_legacy)
 
     def get_belief_by_id(self, belief_id):
         return self._belief_repo.get_belief_by_id(belief_id)

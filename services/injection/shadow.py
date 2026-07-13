@@ -13,7 +13,7 @@ from typing import Any, Iterable
 from .channel_base import InjectionChannel
 from .context import InjectionContext
 from .orchestrator import InjectionOrchestrator, OrchestrationResult
-from .trace_store import InjectionTraceStore
+from .trace_store import InjectionTraceStore, runtime_scope_metadata
 from ..config.channel_config import ChannelConfigSet
 
 
@@ -91,6 +91,7 @@ def _record_shadow_trace(
             "total_chars": len(result.final_text),
             "status": _trace_status(comparison, result),
             "metadata": {
+                **runtime_scope_metadata(ctx.scope),
                 "shadow_mode": True,
                 "shadow_comparison": comparison,
             },

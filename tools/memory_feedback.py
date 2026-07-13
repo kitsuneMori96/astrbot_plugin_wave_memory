@@ -30,10 +30,12 @@ try:
     from services.agent.permission_policy import check_agent_action
     from services.injection.feedback_store import MemoryFeedbackStore, VALID_MEMORY_FEEDBACK
     from services.injection.trace_store import InjectionTraceStore
+    from tools.scope_boundary import require_group_runtime_scope, scope_envelope, scope_error_message
 except Exception:  # pragma: no cover - AstrBot 包导入路径
     from ..services.agent.permission_policy import check_agent_action
     from ..services.injection.feedback_store import MemoryFeedbackStore, VALID_MEMORY_FEEDBACK
     from ..services.injection.trace_store import InjectionTraceStore
+    from .scope_boundary import require_group_runtime_scope, scope_envelope, scope_error_message
 
 
 def _details(raw: str | None) -> dict[str, Any]:
@@ -126,18 +128,39 @@ class WaveMemoryFeedbackMemoryTool(FunctionTool[AstrAgentContext]):
         self.feedback_store = store
         return store
 
-    def _apply_useful_boost(self, memory_id: int) -> bool:
+    def _memory_in_scope(self, memory_id: int, scope) -> bool:
+        conn = self._conn()
+        if not conn or scope.session is None:
+            return False
+        try:
+            row = conn.execute(
+                """SELECT 1 FROM memories
+                   WHERE id=? AND bot_id=? AND session_id=? AND visibility=?
+                     AND resolution_state='resolved' AND COALESCE(quarantine, 0)=0""",
+                (int(memory_id), scope.bot_id, scope.session.id, scope.visibility),
+            ).fetchone()
+            return bool(row)
+        except Exception:
+            return False
+
+    def _apply_useful_boost(self, memory_id: int, scope) -> bool:
         if not self.auto_apply_useful:
             return False
         conn = self._conn()
-        if not conn:
+        if not conn or scope.session is None:
             return False
-        cur = conn.execute(
-            "UPDATE memories SET importance = MIN(3.0, COALESCE(importance, 1.0) + ?) WHERE id = ?",
-            (float(self.useful_boost), int(memory_id)),
-        )
-        conn.commit()
-        return bool(getattr(cur, "rowcount", 0))
+        try:
+            cur = conn.execute(
+                """UPDATE memories
+                   SET importance = MIN(3.0, COALESCE(importance, 1.0) + ?)
+                   WHERE id=? AND bot_id=? AND session_id=? AND visibility=?
+                     AND resolution_state='resolved' AND COALESCE(quarantine, 0)=0""",
+                (float(self.useful_boost), int(memory_id), scope.bot_id, scope.session.id, scope.visibility),
+            )
+            conn.commit()
+            return bool(getattr(cur, "rowcount", 0))
+        except Exception:
+            return False
 
     async def call(self, context: ContextWrapper[AstrAgentContext], **kwargs) -> str:
         decision = check_agent_action(self.permission_action)
@@ -156,20 +179,27 @@ class WaveMemoryFeedbackMemoryTool(FunctionTool[AstrAgentContext]):
         if feedback not in VALID_MEMORY_FEEDBACK:
             return "feedback 必须是 useful/useless/misleading/duplicate 之一"
 
+        runtime_scope, error_code = require_group_runtime_scope(context, "feedback.record")
+        if error_code:
+            return scope_error_message("记忆反馈记录", error_code)
+        assert runtime_scope is not None
+
         trace_store = self._trace_store()
         feedback_store = self._feedback_store()
         if not trace_store or not feedback_store:
             return "反馈存储未初始化"
 
-        trace = trace_store.get(trace_id)
+        trace = trace_store.get_for_scope(trace_id, runtime_scope)
         if not trace:
-            return f"没有找到注入 trace：{trace_id}"
+            return scope_error_message("记忆反馈证据校验", "scope_mismatch")
+        if not self._memory_in_scope(memory_id, runtime_scope):
+            return scope_error_message("记忆反馈目标校验", "scope_mismatch")
         if memory_id not in _trace_hit_memory_ids(trace):
             return f"memory_id={memory_id} 不在该 trace 的命中项中，不能作为本次注入反馈证据"
 
         soft_applied = False
         if feedback == "useful":
-            soft_applied = self._apply_useful_boost(memory_id)
+            soft_applied = self._apply_useful_boost(memory_id, runtime_scope)
 
         feedback_id = feedback_store.record(
             trace_id=trace_id,
@@ -180,6 +210,7 @@ class WaveMemoryFeedbackMemoryTool(FunctionTool[AstrAgentContext]):
             metadata={
                 "soft_applied": soft_applied,
                 "policy": "useful_boost_only; no direct delete for misleading/duplicate",
+                "source_runtime_scope": scope_envelope(runtime_scope),
             },
         )
         return json.dumps(

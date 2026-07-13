@@ -44,9 +44,14 @@ class DreamService:
         self._task: Optional[asyncio.Task] = None
         self._running = False
 
-    def start(self):
+    def start(self, supervisor=None):
         self._running = True
-        self._task = asyncio.create_task(self._dream_loop())
+        if supervisor is None:
+            self._task = asyncio.create_task(self._dream_loop())
+        else:
+            self._task = supervisor.start(
+                "wave-memory:dream", self._dream_loop(), owner="dream"
+            )
         logger.info("[WaveMemory] Dream service started")
 
     def stop(self):

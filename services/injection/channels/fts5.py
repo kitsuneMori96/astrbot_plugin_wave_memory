@@ -7,6 +7,11 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
+try:
+    from ....domain.scope import RuntimeScope
+except ImportError:  # 兼容独立测试/插件顶级加载
+    from domain.scope import RuntimeScope
+
 from ...identity_safety import is_identity_contamination
 from ..channel_base import InjectionResult, estimate_injection_tokens
 from .safety import is_channel_allowed_in_mode
@@ -47,6 +52,15 @@ def _as_float(value: Any, default: float) -> float:
 def _channel_cfg(ctx: Any) -> Mapping[str, Any]:
     config = _mapping(getattr(ctx, "config", {}))
     return _mapping(_mapping(config.get("channels", {})).get("fts5", {}))
+
+
+def _group_scope(ctx: Any) -> RuntimeScope | None:
+    scope = getattr(ctx, "scope", None)
+    if not isinstance(scope, RuntimeScope):
+        return None
+    if scope.visibility != "group" or scope.session is None:
+        return None
+    return scope
 
 
 def _keywords(message: str, limit: int = 6) -> list[str]:
@@ -118,6 +132,8 @@ class FTS5Channel:
         min_score = _as_float(cfg.get("min_score"), 0.0)
         if top_k <= 0:
             return InjectionResult.empty(self.name, reason="fts5 top_k is zero")
+        if _group_scope(ctx) is None:
+            return InjectionResult.empty(self.name, reason="fts5 requires resolved group RuntimeScope")
 
         try:
             words = _keywords(getattr(ctx, "message", "") or "")
@@ -146,52 +162,56 @@ class FTS5Channel:
             return result
 
     def _query_memories(self, ctx: Any, *, expr: str, words: list[str], top_k: int) -> list[dict[str, Any]]:
-        rows = self.db.conn.execute(
-            """SELECT rowid, content, sender_name, group_id FROM fts_memories
-               WHERE fts_memories MATCH ? LIMIT ?""",
-            (expr, max(20, top_k * 3)),
-        ).fetchall()
-        if not rows:
-            rows = self._like_fallback(words=words, limit=max(20, top_k * 3))
-
-        memories: list[dict[str, Any]] = []
-        seen_ids: set[Any] = set()
-        for row in rows:
-            mem = self.db.conn.execute(
-                """SELECT id, content, sender_id, sender_name, timestamp, importance, source, group_id, memory_type
-                   FROM memories WHERE id=? AND memory_type='message'""",
-                (row[0],),
-            ).fetchone()
-            if not mem or mem[0] in seen_ids:
-                continue
-            seen_ids.add(mem[0])
-            score = 1.0 if mem[7] == getattr(ctx, "group_id", None) else 0.5
-            memories.append({
-                "id": mem[0],
-                "content": mem[1] or "",
-                "sender_id": mem[2],
-                "sender_name": mem[3],
-                "timestamp": mem[4],
-                "importance": mem[5],
-                "source": mem[6],
-                "group_id": mem[7],
-                "memory_type": mem[8],
-                "score": score,
-            })
-        memories.sort(key=lambda item: item.get("score", 0), reverse=True)
-        return memories
-
-    def _like_fallback(self, *, words: list[str], limit: int) -> list[tuple[Any, ...]]:
-        if not words:
+        scope = _group_scope(ctx)
+        if scope is None:  # build() guards this too; keep direct callers fail-closed.
             return []
-        conditions = " OR ".join(["content LIKE ?"] * len(words))
+        limit = max(20, top_k * 3)
+        base = """
+            m.bot_id = ? AND m.session_id = ? AND m.visibility = ?
+            AND m.resolution_state = 'resolved' AND m.quarantine = 0
+            AND m.memory_type = 'message'
+        """
+        params = (scope.bot_id, scope.session.id, scope.visibility)
+        try:
+            rows = self.db.conn.execute(
+                f"""SELECT m.id, m.content, m.sender_id, m.sender_name, m.timestamp,
+                           m.importance, m.source, m.group_id, m.memory_type
+                      FROM fts_memories
+                      JOIN memories AS m ON m.id = fts_memories.rowid
+                     WHERE fts_memories MATCH ? AND {base}
+                     ORDER BY rank LIMIT ?""",
+                (expr, *params, limit),
+            ).fetchall()
+            if not rows:
+                rows = self._like_fallback(words=words, limit=limit, scope=scope)
+        except Exception:
+            # Missing scoped schema or an invalid FTS expression must never fall
+            # back to an unscoped legacy read.
+            return []
+
+        return [
+            {
+                "id": row[0], "content": row[1] or "", "sender_id": row[2],
+                "sender_name": row[3], "timestamp": row[4], "importance": row[5],
+                "source": row[6], "group_id": row[7], "memory_type": row[8], "score": 1.0,
+            }
+            for row in rows
+        ]
+
+    def _like_fallback(self, *, words: list[str], limit: int, scope: RuntimeScope) -> list[tuple[Any, ...]]:
+        if not words or scope.session is None:
+            return []
+        conditions = " OR ".join(["m.content LIKE ?"] * len(words))
         params = [f"%{word}%" for word in words]
         return self.db.conn.execute(
-            f"""SELECT id AS rowid, content, sender_name, group_id
-                FROM memories
-               WHERE memory_type='message' AND ({conditions})
-               ORDER BY timestamp DESC LIMIT ?""",
-            params + [limit],
+            f"""SELECT m.id, m.content, m.sender_id, m.sender_name, m.timestamp,
+                       m.importance, m.source, m.group_id, m.memory_type
+                  FROM memories AS m
+                 WHERE m.bot_id = ? AND m.session_id = ? AND m.visibility = ?
+                   AND m.resolution_state = 'resolved' AND m.quarantine = 0
+                   AND m.memory_type = 'message' AND ({conditions})
+                 ORDER BY m.timestamp DESC LIMIT ?""",
+            [scope.bot_id, scope.session.id, scope.visibility, *params, limit],
         ).fetchall()
 
     @staticmethod

@@ -21,6 +21,11 @@ except Exception:  # pragma: no cover
     import logging
     logger = logging.getLogger(__name__)  # type: ignore[assignment]
 
+try:  # 兼容插件包导入和仓库测试直接导入
+    from ...domain.scope import RuntimeScope, ScopeValidationError
+except ImportError:  # pragma: no cover - 由仓库测试直接导入 services 使用
+    from domain.scope import RuntimeScope, ScopeValidationError
+
 
 @dataclass(frozen=True)
 class LivingMemoryCompatSurface:
@@ -28,6 +33,32 @@ class LivingMemoryCompatSurface:
 
     memory_engine: "WaveMemoryLivingMemoryFacade"
     initializer: SimpleNamespace
+
+
+def _project_group_scope(scope: RuntimeScope | None) -> tuple[str, str, str]:
+    """Project only a resolved group Scope; never infer it from legacy fields."""
+    if not isinstance(scope, RuntimeScope):
+        raise ScopeValidationError("scope_required", "LivingMemory read/write requires RuntimeScope")
+    if scope.visibility != "group" or scope.session is None:
+        raise ScopeValidationError(
+            "legacy_writer_scope_visibility_unsupported",
+            "LivingMemory currently supports group RuntimeScope only",
+        )
+    return scope.bot_id, scope.session.conversation_id, scope.session.id
+
+
+def _project_group_subject_scope(scope: RuntimeScope | None) -> tuple[str, str, str, str]:
+    """Project a group Scope and its verified user subject for compatibility writes."""
+    bot_id, group_id, canonical_session_id = _project_group_scope(scope)
+    assert scope is not None and scope.session is not None
+    prefix = f"{scope.session.platform_id}:user:"
+    principal = scope.subject_principal_id or ""
+    if not principal.startswith(prefix) or principal == prefix:
+        raise ScopeValidationError(
+            "scope_subject_required",
+            "LivingMemory write requires a scoped platform user",
+        )
+    return bot_id, group_id, canonical_session_id, principal[len(prefix):]
 
 
 class WaveMemoryLivingMemoryFacade:
@@ -38,14 +69,14 @@ class WaveMemoryLivingMemoryFacade:
         *,
         query_engine: Any = None,
         writer: Any = None,
-        default_session_id: str = "global",
+        default_session_id: str | None = None,
         default_sender_name: str = "LivingMemory兼容",
         now: Callable[[], float] | None = None,
         max_k: int = 50,
     ) -> None:
         self.query_engine = query_engine
         self.writer = writer
-        self.default_session_id = default_session_id or "global"
+        self.default_session_id = str(default_session_id or "").strip()
         self.default_sender_name = default_sender_name or "LivingMemory兼容"
         self._now = now or time.time
         self.max_k = max(1, int(max_k or 50))
@@ -57,6 +88,7 @@ class WaveMemoryLivingMemoryFacade:
         k: int = 5,
         session_id: str | None = None,
         persona_id: str | None = None,
+        scope: RuntimeScope | None = None,
     ) -> list[dict[str, Any]]:
         """Search WaveMemory memories through QueryEngine.
 
@@ -72,15 +104,41 @@ class WaveMemoryLivingMemoryFacade:
             self.last_error = "query_engine_unavailable"
             return []
 
+        try:
+            bot_id, group_id, canonical_session_id = _project_group_scope(scope)
+        except ScopeValidationError as exc:
+            self.last_error = exc.reason_code
+            return []
+        declared_session = str(session_id or "").strip()
+        if declared_session and declared_session not in {group_id, canonical_session_id}:
+            self.last_error = "scope_session_mismatch"
+            return []
+        declared_persona = str(persona_id or "").strip()
+        if declared_persona and declared_persona != bot_id:
+            self.last_error = "scope_bot_mismatch"
+            return []
+
         top_k = self._bounded_int(k, default=5, minimum=1, maximum=self.max_k)
         try:
-            memories = await self.query_engine.query(text=text, group_id=session_id, top_k=top_k)
+            memories = await self.query_engine.query(
+                text=text,
+                group_id=group_id,
+                top_k=top_k,
+                scope=scope,
+            )
         except Exception as exc:
             self.last_error = str(exc) or exc.__class__.__name__
             logger.debug(f"[WaveMemory] LivingMemory facade search failed: {self.last_error}")
             return []
 
-        return [self._format_memory_result(memory, session_id=session_id, persona_id=persona_id) for memory in (memories or [])]
+        return [
+            self._format_memory_result(
+                memory,
+                session_id=canonical_session_id,
+                persona_id=bot_id,
+            )
+            for memory in (memories or [])
+        ]
 
     async def add_memory(
         self,
@@ -89,8 +147,13 @@ class WaveMemoryLivingMemoryFacade:
         persona_id: str | None = None,
         importance: float = 0.7,
         metadata: Mapping[str, Any] | None = None,
+        scope: RuntimeScope | None = None,
     ) -> str:
-        """Queue a memory write through MessageWriter and return a stable queued id."""
+        """Queue a Scope-bound memory write and return a stable queued id.
+
+        The legacy ``session_id``/``persona_id`` fields are assertions only; they
+        may match a supplied Scope but can never construct or override one.
+        """
         self.last_error = None
         text = str(content or "").strip()
         if not text:
@@ -98,21 +161,43 @@ class WaveMemoryLivingMemoryFacade:
         if self.writer is None or not hasattr(self.writer, "enqueue"):
             self.last_error = "writer_unavailable"
             return ""
+        try:
+            bot_id, group_id, canonical_session_id, sender_id = _project_group_subject_scope(scope)
+        except ScopeValidationError as exc:
+            self.last_error = exc.reason_code
+            return ""
 
-        group_id = str(session_id or self.default_session_id or "global")
-        persona = str(persona_id or "")
+        declared_session = str(session_id or "").strip()
+        if declared_session and declared_session not in {group_id, canonical_session_id}:
+            self.last_error = "scope_session_mismatch"
+            return ""
+        declared_persona = str(persona_id or "").strip()
+        if declared_persona and declared_persona != bot_id:
+            self.last_error = "scope_bot_mismatch"
+            return ""
+
+        persona = declared_persona or bot_id
         safe_importance = self._bounded_float(importance, default=0.7, minimum=0.0, maximum=3.0)
-        queued_id = self._queued_id(text, session_id=group_id, persona_id=persona, importance=safe_importance)
+        queued_id = self._queued_id(
+            text,
+            session_id=f"{bot_id}:{canonical_session_id}",
+            persona_id=persona,
+            importance=safe_importance,
+        )
         item_metadata = self._metadata_from_mapping(metadata)
         item_metadata.update({
             "source": "wave_memory_livingmemory_compat",
+            "origin_kind": "livingmemory_compat",
             "session_id": group_id,
+            "canonical_session_id": canonical_session_id,
             "persona_id": persona,
+            "bot_id": bot_id,
             "queued_id": queued_id,
         })
         item = {
+            "scope": scope,
             "group_id": group_id,
-            "sender_id": f"compat:{persona}" if persona else "compat_livingmemory",
+            "sender_id": sender_id,
             "sender_name": self.default_sender_name,
             "content": text,
             "timestamp": self._now(),

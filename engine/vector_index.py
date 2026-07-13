@@ -2,11 +2,27 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
+
+from .index_manifest import (
+    IndexManifest,
+    ManifestValidationError,
+    checksum_file,
+    generation_path,
+    latest_generation,
+    manifest_path,
+    read_index_manifest,
+    validate_index_manifest,
+)
 
 try:
     import hnswlib
@@ -17,19 +33,47 @@ except ImportError:
 class VectorIndex:
     """基于 hnswlib 的 HNSW 向量索引，支持增量添加和持久化。"""
 
-    def __init__(self, dimension: int, max_elements: int = 100000, index_path: Optional[str] = None):
+    def __init__(
+        self,
+        dimension: int,
+        max_elements: int = 100000,
+        index_path: Optional[str] = None,
+        kind: Optional[str] = None,
+        strict_manifest: bool = True,
+    ):
         if hnswlib is None:
             raise ImportError("hnswlib is required: pip install hnswlib")
 
         self.dimension = dimension
         self.max_elements = max_elements
         self.index_path = index_path
+        self.kind = kind or self._infer_kind(index_path)
         self._lock = threading.Lock()
+        self._manifest: Optional[IndexManifest] = None
+        self._manifest_error: Optional[str] = None
 
         self.index = hnswlib.Index(space="cosine", dim=dimension)
 
-        if index_path and os.path.exists(index_path):
-            self.index.load_index(index_path, max_elements=max_elements)
+        load_path: Optional[str] = None
+        if index_path:
+            try:
+                self._manifest = read_index_manifest(
+                    index_path,
+                    expected_kind=self.kind,
+                    expected_dimension=dimension,
+                )
+            except ManifestValidationError as exc:
+                self._manifest_error = str(exc)
+                if strict_manifest:
+                    raise
+            if self._manifest is not None:
+                load_path = str(generation_path(index_path, self._manifest.generation))
+            elif self._manifest_error is None and os.path.exists(index_path):
+                # Backward-compatible load for indexes created before manifests.
+                load_path = index_path
+
+        if load_path:
+            self.index.load_index(load_path, max_elements=max_elements)
         else:
             self.index.init_index(max_elements=max_elements, ef_construction=100, M=12) # 优化 M=12, ef_construction=100 减少常驻内存 30%+
 
@@ -71,12 +115,163 @@ class VectorIndex:
                 except Exception:
                     pass
 
-    def save(self):
-        """持久化索引到磁盘。"""
-        if self.index_path:
-            with self._lock:
-                os.makedirs(os.path.dirname(self.index_path), exist_ok=True)
-                self.index.save_index(self.index_path)
+    def save(
+        self,
+        db_watermark: Optional[int] = None,
+        *,
+        replace_attempts: int = 5,
+    ) -> Optional[IndexManifest]:
+        """Atomically persist a new immutable generation and switch its manifest."""
+        if not self.index_path:
+            return None
+        if db_watermark is not None and (
+            not isinstance(db_watermark, int)
+            or isinstance(db_watermark, bool)
+            or db_watermark < 0
+        ):
+            raise ValueError("db_watermark must be a non-negative integer")
+        if not isinstance(replace_attempts, int) or replace_attempts < 1:
+            raise ValueError("replace_attempts must be a positive integer")
+
+        with self._lock:
+            base_path = Path(self.index_path)
+            base_path.parent.mkdir(parents=True, exist_ok=True)
+
+            previous = read_index_manifest(
+                base_path,
+                expected_kind=self.kind,
+                expected_dimension=self.dimension,
+            )
+            generation = max(
+                previous.generation if previous is not None else 0,
+                latest_generation(base_path),
+            ) + 1
+            watermark = (
+                db_watermark
+                if db_watermark is not None
+                else previous.db_watermark if previous is not None else 0
+            )
+            target_path = generation_path(base_path, generation)
+            temp_path = self._temp_path(base_path, "index")
+
+            try:
+                self.index.save_index(str(temp_path))
+                self._fsync_file(temp_path)
+                checksum = checksum_file(temp_path)
+                self._replace_with_retry(
+                    temp_path,
+                    target_path,
+                    attempts=replace_attempts,
+                )
+
+                manifest = IndexManifest(
+                    kind=self.kind,
+                    generation=generation,
+                    dimension=self.dimension,
+                    db_watermark=watermark,
+                    count=self.index.get_current_count(),
+                    checksum=checksum,
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                )
+                self._write_manifest_atomic(manifest, attempts=replace_attempts)
+                self._manifest = manifest
+                return manifest
+            finally:
+                try:
+                    temp_path.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def read_manifest(self, *, verify_checksum: bool = True) -> Optional[IndexManifest]:
+        """Read and validate the committed manifest for this index."""
+        if not self.index_path:
+            return None
+        return read_index_manifest(
+            self.index_path,
+            expected_kind=self.kind,
+            expected_dimension=self.dimension,
+            verify_checksum=verify_checksum,
+        )
+
+    def validate_manifest(
+        self,
+        manifest: Optional[IndexManifest] = None,
+        *,
+        verify_checksum: bool = True,
+    ) -> Optional[Path]:
+        """Validate a supplied or currently committed manifest."""
+        if not self.index_path:
+            return None
+        current = manifest or self.read_manifest(verify_checksum=False)
+        if current is None:
+            return None
+        return validate_index_manifest(
+            current,
+            self.index_path,
+            expected_kind=self.kind,
+            expected_dimension=self.dimension,
+            verify_checksum=verify_checksum,
+        )
+
+    def _write_manifest_atomic(self, manifest: IndexManifest, *, attempts: int) -> None:
+        destination = manifest_path(self.index_path)
+        temp_path = self._temp_path(Path(self.index_path), "manifest")
+        try:
+            with temp_path.open("w", encoding="utf-8", newline="\n") as handle:
+                json.dump(
+                    manifest.to_dict(),
+                    handle,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._replace_with_retry(temp_path, destination, attempts=attempts)
+        finally:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+
+    @staticmethod
+    def _replace_with_retry(
+        source: Path,
+        destination: Path,
+        *,
+        attempts: int,
+        base_delay: float = 0.01,
+    ) -> None:
+        for attempt in range(attempts):
+            try:
+                os.replace(source, destination)
+                return
+            except OSError:
+                if attempt + 1 >= attempts:
+                    raise
+                time.sleep(base_delay * (2**attempt))
+
+    @staticmethod
+    def _fsync_file(path: Path) -> None:
+        # Windows requires a writable descriptor for fsync/FlushFileBuffers.
+        with path.open("r+b") as handle:
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    @staticmethod
+    def _temp_path(base_path: Path, purpose: str) -> Path:
+        return base_path.parent / f".{base_path.name}.{purpose}.{uuid.uuid4().hex}.tmp"
+
+    @staticmethod
+    def _infer_kind(index_path: Optional[str]) -> str:
+        if not index_path:
+            return "vector"
+        return Path(index_path).stem or "vector"
+
+    @property
+    def manifest_error(self) -> Optional[str]:
+        return self._manifest_error
 
     @property
     def count(self) -> int:

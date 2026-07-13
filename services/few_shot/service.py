@@ -131,31 +131,73 @@ class FewShotService:
             if len(candidates) >= 10:
                 break
 
-        # 写入 DB
-        now_ts = int(time.time())
-        for c in candidates:
-            self._db.conn.execute(
-                """INSERT OR IGNORE INTO few_shot_examples (content, score, traits, status, bot_id, created_at)
-                   VALUES (?, ?, ?, 'pending', ?, ?)""",
-                (c["content"], c["score"], json.dumps(c["traits"], ensure_ascii=False), bot_id, now_ts),
-            )
-        self._db.conn.commit()
-
-        logger.info(f"[FewShot] 提取了 {len(candidates)} 条风格候选")
+        # 候选仅返回给学习/审核链；正式表唯一写入口是 add_approved_example。
+        logger.info(f"[FewShot] 提取了 {len(candidates)} 条待审核风格候选")
         return candidates
+
+    def add_approved_example(
+        self,
+        *,
+        content: str,
+        score: float = 0.0,
+        traits: list[str] | None = None,
+        bot_id: str = "",
+        status: str = "approved",
+        approved_at: int | None = None,
+    ) -> int:
+        """写入批准的风格样例并按 bot_id+content 幂等去重。
+
+        学习中心晋升器只调用这个领域入口；不会直接拼接 few_shot_examples SQL。
+        """
+        content = str(content or "").strip()
+        bot_id = str(bot_id or "").strip()
+        status = str(status or "approved").strip().lower()
+        if not content or not bot_id:
+            raise ValueError("content and bot_id are required")
+        if status != "approved":
+            raise ValueError("FewShot promotion requires approved status")
+        if not self._is_healthy_example(content):
+            raise ValueError("few-shot example failed safety validation")
+        existing = self._db.conn.execute(
+            "SELECT id, status FROM few_shot_examples WHERE bot_id=? AND content=? ORDER BY id LIMIT 1",
+            (bot_id, content),
+        ).fetchone()
+        now = int(time.time() if approved_at is None else approved_at)
+        if existing:
+            if str(existing[1] or "").lower() != "approved":
+                self._db.conn.execute(
+                    "UPDATE few_shot_examples SET score=?, traits=?, status='approved', approved_at=? WHERE id=?",
+                    (float(score), json.dumps(list(traits or []), ensure_ascii=False), now, int(existing[0])),
+                )
+                self._db.conn.commit()
+            return int(existing[0])
+        cur = self._db.conn.execute(
+            """INSERT INTO few_shot_examples
+               (content, score, traits, status, bot_id, created_at, approved_at)
+               VALUES (?, ?, ?, 'approved', ?, ?, ?)""",
+            (content, float(score), json.dumps(list(traits or []), ensure_ascii=False), bot_id, now, now),
+        )
+        self._db.conn.commit()
+        return int(getattr(cur, "lastrowid", 0) or 0)
+
+    def refresh(self, **kwargs: Any) -> None:
+        """清理注入游标，确保新晋升样例下一次可参与缓存选择。"""
+        self._last_injected_ids = []
 
     # ─── US-5.2: 注入 few-shot ───
 
     def get_injection(self, bot_id: str = "", max_items: int = None) -> str:
         """获取 2-3 条已批准 few-shot 注入文本。"""
-        if not self._enabled:
+        bot_id = str(bot_id or "").strip()
+        if not self._enabled or not bot_id:
+            self._last_injected_ids = []
             return ""
         if max_items is None:
             max_items = self._max_inject
 
         rows = self._db.conn.execute(
             """SELECT id, content FROM few_shot_examples
-               WHERE status = 'approved' AND (bot_id = ? OR bot_id = '')
+               WHERE status = 'approved' AND bot_id = ?
                ORDER BY score DESC LIMIT 20""",
             (bot_id,),
         ).fetchall()
@@ -186,10 +228,13 @@ class FewShotService:
         if not self._enabled or not self._llm:
             return None
 
-        # 获取已批准范例
+        bot_id = str(bot_id or "").strip()
+        if not bot_id:
+            return None
+        # 获取同一 bot 的已批准范例，不接受 legacy 空 bot 回退。
         rows = self._db.conn.execute(
             """SELECT content FROM few_shot_examples
-               WHERE status = 'approved' AND (bot_id = ? OR bot_id = '')
+               WHERE status = 'approved' AND bot_id = ?
                ORDER BY score DESC LIMIT 5""",
             (bot_id,),
         ).fetchall()

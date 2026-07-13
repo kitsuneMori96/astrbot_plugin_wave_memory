@@ -6,6 +6,11 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
+try:
+    from ....domain.scope import RuntimeScope
+except ImportError:  # 兼容独立测试/插件顶级加载
+    from domain.scope import RuntimeScope
+
 from ..channel_base import InjectionResult
 from .safety import SafetyChannel, is_channel_allowed_in_mode
 
@@ -47,6 +52,15 @@ def _timeline_cfg(ctx: Any) -> Mapping[str, Any]:
     return _mapping(_mapping(getattr(ctx, "config", {})).get("timeline", {}))
 
 
+def _group_scope(ctx: Any) -> RuntimeScope | None:
+    scope = getattr(ctx, "scope", None)
+    if not isinstance(scope, RuntimeScope):
+        return None
+    if scope.visibility != "group" or scope.session is None:
+        return None
+    return scope
+
+
 class TimelineChannel:
     """复用 memories.summary 的近期事件流通道。"""
 
@@ -68,8 +82,10 @@ class TimelineChannel:
         max_items = _as_int(channel_cfg.get("max_items"), 5)
         if max_items <= 0:
             return InjectionResult.empty(self.name, reason="timeline max_items is zero")
-        if not getattr(ctx, "group_id", None) or not getattr(ctx, "sender_id", None):
-            return InjectionResult.empty(self.name, reason="timeline requires group_id and sender_id")
+        if not getattr(ctx, "sender_id", None):
+            return InjectionResult.empty(self.name, reason="timeline requires sender_id")
+        if _group_scope(ctx) is None:
+            return InjectionResult.empty(self.name, reason="timeline requires resolved group RuntimeScope")
 
         try:
             items = self._query(ctx, max_items=max_items)
@@ -91,26 +107,33 @@ class TimelineChannel:
             return result
 
     def _query(self, ctx: Any, *, max_items: int) -> list[dict[str, Any]]:
+        scope = _group_scope(ctx)
+        if scope is None or scope.session is None:
+            return []
         cfg = _timeline_cfg(ctx)
         days = _as_int(cfg.get("days"), 7)
         now = float(getattr(ctx, "now", 0.0) or time.time())
         sender_name = str(getattr(ctx, "sender_name", "") or "")
         sender_id = str(getattr(ctx, "sender_id", "") or "")
         like_value = f"%{sender_name}%" if sender_name else f"%{sender_id}%"
-        rows = self.db.conn.execute(
-            """SELECT summary,
-                      DATE(MAX(timestamp), 'unixepoch', 'localtime') AS day,
-                      MAX(timestamp) AS ts
-                 FROM memories
-                WHERE summary IS NOT NULL AND summary != '' AND summary != '日常灌水'
-                  AND group_id = ?
-                  AND (sender_id = ? OR content LIKE ?)
-                  AND timestamp > ?
-                GROUP BY summary
-                ORDER BY MAX(timestamp) DESC
-                LIMIT ?""",
-            (getattr(ctx, "group_id", None), sender_id, like_value, now - days * 86400, max_items),
-        ).fetchall()
+        try:
+            rows = self.db.conn.execute(
+                """SELECT summary,
+                          DATE(MAX(timestamp), 'unixepoch', 'localtime') AS day,
+                          MAX(timestamp) AS ts
+                     FROM memories
+                    WHERE summary IS NOT NULL AND summary != '' AND summary != '日常灌水'
+                      AND bot_id = ? AND session_id = ? AND visibility = ?
+                      AND resolution_state = 'resolved' AND quarantine = 0
+                      AND (sender_id = ? OR content LIKE ?)
+                      AND timestamp > ?
+                    GROUP BY summary
+                    ORDER BY MAX(timestamp) DESC
+                    LIMIT ?""",
+                (scope.bot_id, scope.session.id, scope.visibility, sender_id, like_value, now - days * 86400, max_items),
+            ).fetchall()
+        except Exception:
+            return []
         return [
             {"summary": row[0], "day": row[1], "timestamp": row[2], "source": "timeline"}
             for row in rows

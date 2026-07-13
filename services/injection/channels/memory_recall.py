@@ -141,6 +141,7 @@ class MemoryRecallChannel:
                 context_messages=list(context_messages),
                 group_id=getattr(ctx, "group_id", None),
                 top_k=top_k,
+                scope=getattr(ctx, "scope", None),
             )
 
         exclude_sources = recall_cfg.get("exclude_sources")
@@ -153,6 +154,7 @@ class MemoryRecallChannel:
             top_k=top_k,
             exclude_sources=exclude_sources,
             source_filter=source_filter,
+            scope=getattr(ctx, "scope", None),
         )
 
     @staticmethod

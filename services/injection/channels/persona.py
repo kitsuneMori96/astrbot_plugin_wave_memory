@@ -10,6 +10,10 @@ from collections.abc import Mapping
 from typing import Any
 
 from ...identity_safety import is_identity_contamination
+try:
+    from ....domain.scope import validate_formal_command_scope
+except ImportError:  # pragma: no cover - standalone repository tests
+    from domain.scope import validate_formal_command_scope
 from ..channel_base import InjectionResult, estimate_injection_tokens
 from .safety import is_channel_allowed_in_mode
 
@@ -74,6 +78,14 @@ class PersonaChannel:
         cfg = _channel_cfg(ctx)
         if not _as_bool(cfg.get("enabled"), True):
             return InjectionResult.disabled(self.name, reason="persona channel disabled by config")
+        runtime_scope = getattr(ctx, "scope", None)
+        scope_decision = validate_formal_command_scope("persona.inject", runtime_scope)
+        if not scope_decision.allowed:
+            return InjectionResult.empty(
+                self.name,
+                latency_ms=self._latency_ms(started),
+                reason=scope_decision.reason_code or "scope_rejected",
+            )
         max_items = _as_int(cfg.get("max_items"), 3)
         token_budget = _as_int(cfg.get("token_budget"), 350)
         if max_items <= 0:
@@ -107,14 +119,16 @@ class PersonaChannel:
         candidates: list[dict[str, Any]] = []
         debug: Mapping[str, Any] = {}
 
-        if self.composer:
+        runtime_scope = getattr(ctx, "scope", None)
+        if self.composer and runtime_scope is not None and runtime_scope.session is not None:
             payload = await self.composer.build_self_persona(
-                bot_id=getattr(ctx, "bot_id", "") or getattr(ctx, "bot_profile_id", "") or "bot",
-                group_id=getattr(ctx, "group_id", "") or "",
+                bot_id=runtime_scope.bot_id,
+                group_id=runtime_scope.session.conversation_id,
                 sender_id=getattr(ctx, "sender_id", "") or "",
                 sender_name=getattr(ctx, "sender_name", "") or "",
                 message=getattr(ctx, "message", "") or "",
                 recent_context=list(getattr(ctx, "recent_context", []) or []),
+                scope=runtime_scope,
             )
             payload = _mapping(payload)
             debug = _mapping(payload.get("debug", {}))
@@ -141,24 +155,13 @@ class PersonaChannel:
         return candidates
 
     def _build_user_persona(self, ctx: Any) -> dict[str, Any] | None:
-        if not self.persona_evolution:
-            return None
-        realtime_ctx = dict(_persona_cfg(ctx).get("realtime_ctx", {}) or {})
-        text = self.persona_evolution.get_persona_injection(
-            getattr(ctx, "sender_id", "") or "",
-            getattr(ctx, "group_id", "") or "",
-            bot_id=getattr(ctx, "bot_profile_id", "") or getattr(ctx, "bot_id", "") or "bot",
-            realtime_ctx=realtime_ctx,
-        ) or ""
-        text = str(text).strip()
-        if not text:
-            return None
-        return {
-            "block": "user_persona",
-            "text": text,
-            "source": "PersonaEvolution.get_persona_injection",
-            "source_ids": [],
-        }
+        """Do not inject the unmigrated legacy PersonaEvolution read-model.
+
+        It aggregates global profiles and legacy facts by bare IDs.  A future
+        scoped social read-model may replace this branch, but current formal
+        injection must fail closed rather than re-derive a person scope.
+        """
+        return None
 
     @staticmethod
     def _filter_and_budget(

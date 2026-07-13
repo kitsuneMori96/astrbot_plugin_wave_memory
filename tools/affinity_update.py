@@ -11,6 +11,13 @@ from astrbot.core.agent.tool import FunctionTool
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.astr_agent_context import AstrAgentContext
 
+try:  # 兼容插件包导入和仓库测试直接导入
+    from ..domain.scope import RuntimeScope
+    from .scope_boundary import require_group_runtime_scope, scope_error_message
+except ImportError:  # pragma: no cover - 由仓库测试直接导入 tools 使用
+    from domain.scope import RuntimeScope
+    from tools.scope_boundary import require_group_runtime_scope, scope_error_message
+
 
 @dataclass
 class WaveMemoryAffinityUpdateTool(FunctionTool[AstrAgentContext]):
@@ -57,13 +64,11 @@ class WaveMemoryAffinityUpdateTool(FunctionTool[AstrAgentContext]):
             except Exception:
                 return "数据库连接已断开"
 
-        inner_ctx = getattr(ctx, "context", None)
-        event = getattr(inner_ctx, "event", None)
-        group_id = event.get_group_id() if event else ""
-        self_id = event.get_self_id() if event else ""
-        bot_id = self.bot_db_ids.get(self_id)
-        if not bot_id:
-            return "无法识别当前 bot，已拒绝关系更新以避免串人格"
+        runtime_scope, error_code = require_group_runtime_scope(ctx, "affinity.update")
+        if error_code:
+            return scope_error_message("关系更新", error_code)
+        assert runtime_scope is not None
+
         target = (kwargs.get("target_user") or "").strip()
         dimension = kwargs.get("dimension") or ""
         event_type = kwargs.get("event_type") or ""
@@ -73,17 +78,14 @@ class WaveMemoryAffinityUpdateTool(FunctionTool[AstrAgentContext]):
         except Exception:
             return "delta 必须是数字"
 
-        if not group_id:
-            return "当前不是群聊上下文，无法安全更新群内关系"
-        user_id = self._resolve_user(target, group_id)
+        user_id = self._resolve_user(target, runtime_scope)
         if not user_id:
-            return f"没有找到目标用户「{target}」，无法更新好感度"
+            return f"没有在当前 Bot/群作用域找到目标用户「{target}」，无法更新好感度"
+        target_scope = self._target_scope(runtime_scope, user_id)
 
         try:
             result = self.relationship_events.record_event(
-                bot_id=bot_id,
-                group_id=group_id,
-                user_id=user_id,
+                scope=target_scope,
                 event_type=event_type,
                 dimension=dimension,
                 delta=delta,
@@ -92,33 +94,64 @@ class WaveMemoryAffinityUpdateTool(FunctionTool[AstrAgentContext]):
         except Exception as e:
             return f"关系事件记录失败：{e}"
 
-        display = self._display_name(user_id) or target or user_id
+        display = self._display_name(user_id, runtime_scope) or target or user_id
         return (
             f"已记录关系事件：{display} / {dimension} {result.applied_delta:+g}\n"
             f"当前好感度：{result.before_affection} → {result.after_affection}\n"
             f"原因：{reason}"
         )
 
-    def _resolve_user(self, target: str, group_id: str) -> str:
-        if not target:
+    @staticmethod
+    def _scope_subject_user_id(scope: RuntimeScope) -> str:
+        if scope.session is None:
             return ""
-        row = self.db.conn.execute("SELECT qq_id FROM person_registry WHERE qq_id=?", (target,)).fetchone()
-        if row:
-            return row[0]
-        row = self.db.conn.execute(
-            "SELECT qq_id FROM person_registry WHERE display_name LIKE ? OR aliases LIKE ? ORDER BY message_count DESC LIMIT 1",
-            (f"%{target}%", f"%{target}%"),
-        ).fetchone()
-        if row:
-            return row[0]
-        row = self.db.conn.execute(
-            """SELECT sender_id FROM memories
-               WHERE group_id=? AND sender_name LIKE ? AND sender_id IS NOT NULL AND sender_id != ''
-               ORDER BY timestamp DESC LIMIT 1""",
-            (group_id, f"%{target}%"),
-        ).fetchone()
-        return row[0] if row else ""
+        prefix = f"{scope.session.platform_id}:user:"
+        principal = scope.subject_principal_id or ""
+        return principal[len(prefix):] if principal.startswith(prefix) else ""
 
-    def _display_name(self, user_id: str) -> str:
-        row = self.db.conn.execute("SELECT display_name FROM person_registry WHERE qq_id=?", (user_id,)).fetchone()
-        return row[0] if row and row[0] else user_id
+    @classmethod
+    def _target_scope(cls, scope: RuntimeScope, user_id: str) -> RuntimeScope:
+        if scope.visibility != "group" or scope.session is None:
+            raise ValueError("relationship target requires a group RuntimeScope")
+        user_id = str(user_id or "").strip()
+        if not user_id:
+            raise ValueError("relationship target user_id is required")
+        return RuntimeScope(
+            bot_id=scope.bot_id,
+            visibility="group",
+            session=scope.session,
+            subject_principal_id=f"{scope.session.platform_id}:user:{user_id}",
+        )
+
+    def _resolve_user(self, target: str, scope: RuntimeScope) -> str:
+        """Resolve only within the active Bot + canonical group session."""
+        if not target or scope.session is None:
+            return ""
+        current_user_id = self._scope_subject_user_id(scope)
+        if target == current_user_id:
+            return current_user_id
+        params = (scope.session.conversation_id, scope.bot_id)
+        row = self.db.conn.execute(
+            """SELECT user_id FROM user_profiles
+               WHERE user_id=? AND group_id=? AND bot_id=? LIMIT 1""",
+            (target, *params),
+        ).fetchone()
+        if row:
+            return str(row[0] or "")
+        row = self.db.conn.execute(
+            """SELECT user_id FROM user_profiles
+               WHERE group_id=? AND bot_id=? AND nickname LIKE ?
+               ORDER BY last_seen DESC LIMIT 1""",
+            (*params, f"%{target}%"),
+        ).fetchone()
+        return str(row[0] or "") if row else ""
+
+    def _display_name(self, user_id: str, scope: RuntimeScope) -> str:
+        if scope.session is None:
+            return user_id
+        row = self.db.conn.execute(
+            """SELECT nickname FROM user_profiles
+               WHERE user_id=? AND group_id=? AND bot_id=?""",
+            (user_id, scope.session.conversation_id, scope.bot_id),
+        ).fetchone()
+        return str(row[0] or user_id) if row else user_id

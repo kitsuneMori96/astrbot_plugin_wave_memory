@@ -29,9 +29,11 @@ except Exception:  # pragma: no cover - 本地单测未安装 AstrBot SDK 时的
 try:  # 兼容测试以 plugin root 为 sys.path 的导入方式
     from services.agent.permission_policy import check_agent_action
     from services.injection.trace_store import InjectionTraceStore
+    from tools.scope_boundary import require_group_runtime_scope, scope_error_message
 except Exception:  # pragma: no cover - AstrBot 包导入路径
     from ..services.agent.permission_policy import check_agent_action
     from ..services.injection.trace_store import InjectionTraceStore
+    from .scope_boundary import require_group_runtime_scope, scope_error_message
 
 
 def _parse_details(raw: str | None) -> dict[str, Any]:
@@ -155,13 +157,18 @@ class WaveMemoryExplainInjectionTool(FunctionTool[AstrAgentContext]):
         if not trace_id:
             return "请提供 trace_id"
 
+        scope, error_code = require_group_runtime_scope(context, "injection.trace.read")
+        if error_code:
+            return scope_error_message("注入 trace 查询", error_code)
+        assert scope is not None
+
         store = self._get_trace_store()
         if not store:
             return "注入 trace 存储未初始化"
 
-        trace = store.get(trace_id)
+        trace = store.get_for_scope(trace_id, scope)
         if not trace:
-            return f"没有找到注入 trace：{trace_id}"
+            return f"没有找到当前作用域内可验证的注入 trace：{trace_id}"
 
         return json.dumps(build_injection_explanation(trace), ensure_ascii=False, indent=2)
 

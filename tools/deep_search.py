@@ -12,7 +12,28 @@ from astrbot.core.agent.tool import FunctionTool
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.astr_agent_context import AstrAgentContext
 
-from ..engine.database import WaveMemoryDB
+try:
+    from ..engine.database import WaveMemoryDB
+except ImportError:  # 兼容插件顶级加载
+    from engine.database import WaveMemoryDB
+
+try:
+    from .scope_boundary import (
+        extract_group_runtime_scope,
+        require_group_runtime_scope,
+        scope_error_message,
+    )
+except ImportError:  # 兼容插件顶级加载
+    from tools.scope_boundary import (
+        extract_group_runtime_scope,
+        require_group_runtime_scope,
+        scope_error_message,
+    )
+
+
+def _extract_group_scope(ctx: ContextWrapper):
+    """兼容旧私有导入；实际边界统一由 scope_boundary 实现。"""
+    return extract_group_runtime_scope(ctx)
 
 
 @dataclass
@@ -60,6 +81,10 @@ class WaveMemoryDeepSearchTool(FunctionTool[AstrAgentContext]):
 
         if not self.db:
             return "记忆数据库未初始化。"
+        scope, error_code = require_group_runtime_scope(ctx, "memory.message.read")
+        if error_code:
+            return scope_error_message("深度搜索", error_code)
+        assert scope is not None
 
         # db 存活检测
         if self.db.closed:
@@ -69,28 +94,34 @@ class WaveMemoryDeepSearchTool(FunctionTool[AstrAgentContext]):
                 return "记忆数据库连接异常。"
 
         try:
-            # FTS5 搜索
+            # Hitting IDs and all later window rows must satisfy the exact same
+            # Bot/session visibility boundary; FTS itself has no Scope columns.
+            base = """
+                m.bot_id = ? AND m.session_id = ? AND m.visibility = ?
+                AND m.resolution_state = 'resolved' AND m.quarantine = 0
+            """
+            scope_params = (scope.bot_id, scope.session.id, scope.visibility)
             fts_query = " AND ".join(keywords.split())
-            hits = self.db.conn.execute("""
-                SELECT rowid, snippet(fts_memories, 0, '【', '】', '...', 32) as snippet,
-                       rank
+            hits = self.db.conn.execute(f"""
+                SELECT m.id, rank
                 FROM fts_memories
-                WHERE fts_memories MATCH ?
+                JOIN memories AS m ON m.id = fts_memories.rowid
+                WHERE fts_memories MATCH ? AND {base}
                 ORDER BY rank
                 LIMIT ?
-            """, (fts_query, max_results * 2)).fetchall()
+            """, (fts_query, *scope_params, max_results * 2)).fetchall()
 
             if not hits:
-                # 尝试 OR 搜索
+                # 尝试 OR 搜索，仍只在同一 Scope 内。
                 fts_query_or = " OR ".join(keywords.split())
-                hits = self.db.conn.execute("""
-                    SELECT rowid, snippet(fts_memories, 0, '【', '】', '...', 32) as snippet,
-                           rank
+                hits = self.db.conn.execute(f"""
+                    SELECT m.id, rank
                     FROM fts_memories
-                    WHERE fts_memories MATCH ?
+                    JOIN memories AS m ON m.id = fts_memories.rowid
+                    WHERE fts_memories MATCH ? AND {base}
                     ORDER BY rank
                     LIMIT ?
-                """, (fts_query_or, max_results * 2)).fetchall()
+                """, (fts_query_or, *scope_params, max_results * 2)).fetchall()
 
             if not hits:
                 return f"未找到包含「{keywords}」的记忆。"
@@ -104,22 +135,23 @@ class WaveMemoryDeepSearchTool(FunctionTool[AstrAgentContext]):
                 if memory_id in seen_ids:
                     continue
 
-                # 获取命中记忆的 group_id
-                mem_row = self.db.conn.execute(
-                    "SELECT group_id FROM memories WHERE id = ?", (memory_id,)
-                ).fetchone()
-                if not mem_row:
-                    continue
-
-                group_id = mem_row[0]
-
-                # 获取上下文窗口
+                # The hit query has already scoped memory_id.  The context
+                # window repeats every Scope predicate so adjacent IDs from a
+                # different Bot/session can never bleed into the fragment.
                 window = self.db.conn.execute("""
                     SELECT id, sender_name, content, timestamp
                     FROM memories
-                    WHERE group_id = ? AND id BETWEEN ? AND ?
+                    WHERE bot_id = ? AND session_id = ? AND visibility = ?
+                      AND resolution_state = 'resolved' AND quarantine = 0
+                      AND id BETWEEN ? AND ?
                     ORDER BY id ASC
-                """, (group_id, memory_id - window_size, memory_id + window_size)).fetchall()
+                """, (
+                    scope.bot_id,
+                    scope.session.id,
+                    scope.visibility,
+                    memory_id - window_size,
+                    memory_id + window_size,
+                )).fetchall()
 
                 if not window:
                     continue

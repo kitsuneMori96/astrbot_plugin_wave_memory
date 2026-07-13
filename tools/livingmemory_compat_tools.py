@@ -31,22 +31,21 @@ try:
 except Exception:  # pragma: no cover - AstrBot 包导入路径
     from ..services.agent.permission_policy import check_agent_action
 
+try:  # 兼容插件包导入和仓库测试直接导入
+    from ..domain.scope import RuntimeScope
+    from .scope_boundary import extract_event_runtime_scope, require_group_runtime_scope, scope_error_message
+except ImportError:  # pragma: no cover - 由仓库测试直接导入 tools 使用
+    from domain.scope import RuntimeScope
+    from tools.scope_boundary import extract_event_runtime_scope, require_group_runtime_scope, scope_error_message
+
 
 def _json_payload(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
-def _extract_session_id(ctx: ContextWrapper[AstrAgentContext] | None, explicit: Any = None) -> str | None:
-    if explicit:
-        return str(explicit)
-    try:
-        event = getattr(getattr(ctx, "context", None), "event", None)
-        if event:
-            group_id = event.get_group_id()
-            return str(group_id) if group_id else None
-    except Exception:
-        return None
-    return None
+def _extract_runtime_scope(ctx: ContextWrapper[AstrAgentContext] | None) -> RuntimeScope | None:
+    """兼容旧私有导入；不从 legacy session/group 字段重新推断 Scope。"""
+    return extract_event_runtime_scope(ctx)
 
 
 def _parse_metadata(value: Any) -> dict[str, Any]:
@@ -95,9 +94,28 @@ class RecallLongTermMemoryTool(FunctionTool[AstrAgentContext]):
             k = int(kwargs.get("k", 5) or 5)
         except (TypeError, ValueError):
             k = 5
-        session_id = _extract_session_id(ctx, kwargs.get("session_id"))
+        runtime_scope, error_code = require_group_runtime_scope(ctx, "memory.message.read")
+        if error_code:
+            return _json_payload({"status": "error", "message": scope_error_message("兼容记忆搜索", error_code)})
+        assert runtime_scope is not None
+        session_id = kwargs.get("session_id") or None
+        if session_id and str(session_id) not in {
+            runtime_scope.session.conversation_id,
+            runtime_scope.session.id,
+        }:
+            return _json_payload({"status": "error", "message": "session_id 与当前作用域不一致，已拒绝搜索"})
         persona_id = kwargs.get("persona_id") or None
-        results = await self.memory_engine.search_memories(query, k=k, session_id=session_id, persona_id=persona_id)
+        if persona_id and str(persona_id) != runtime_scope.bot_id:
+            return _json_payload({"status": "error", "message": "persona_id 与当前 Bot 作用域不一致，已拒绝搜索"})
+        results = await self.memory_engine.search_memories(
+            query,
+            k=k,
+            session_id=session_id,
+            persona_id=persona_id,
+            scope=runtime_scope,
+        )
+        if getattr(self.memory_engine, "last_error", None):
+            return _json_payload({"status": "error", "message": self.memory_engine.last_error})
         return _json_payload({"status": "ok", "results": results})
 
 
@@ -134,15 +152,32 @@ class MemorizeLongTermMemoryTool(FunctionTool[AstrAgentContext]):
             importance = float(kwargs.get("importance", 0.7) or 0.7)
         except (TypeError, ValueError):
             importance = 0.7
-        session_id = _extract_session_id(ctx, kwargs.get("session_id"))
+        runtime_scope, error_code = require_group_runtime_scope(ctx, "memory.message.write")
+        if error_code:
+            return _json_payload({"status": "error", "message": scope_error_message("兼容记忆写入", error_code)})
+        assert runtime_scope is not None
+        session_id = kwargs.get("session_id") or None
+        if session_id and str(session_id) not in {
+            runtime_scope.session.conversation_id,
+            runtime_scope.session.id,
+        }:
+            return _json_payload({"status": "error", "message": "session_id 与当前作用域不一致，已拒绝写入"})
         persona_id = kwargs.get("persona_id") or None
+        if persona_id and str(persona_id) != runtime_scope.bot_id:
+            return _json_payload({"status": "error", "message": "persona_id 与当前 Bot 作用域不一致，已拒绝写入"})
         metadata = _parse_metadata(kwargs.get("metadata"))
+        event = getattr(getattr(ctx, "context", None), "event", None)
+        event_id = getattr(event, "message_id", None) if event else None
+        if event_id not in {None, ""}:
+            metadata.setdefault("event_id", str(event_id))
+        metadata.setdefault("origin_kind", "livingmemory_compat_tool")
         memory_id = await self.memory_engine.add_memory(
             content,
             session_id=session_id,
             persona_id=persona_id,
             importance=importance,
             metadata=metadata,
+            scope=runtime_scope,
         )
         if not memory_id:
             return _json_payload({"status": "error", "message": getattr(self.memory_engine, "last_error", "写入失败") or "写入失败"})

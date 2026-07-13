@@ -8,11 +8,16 @@ import math
 import re
 import time
 from collections import defaultdict
-from typing import Optional
+from typing import Mapping, Optional
 
 from astrbot.api import logger
 
-from ..engine.database import WaveMemoryDB
+try:  # 兼容插件包导入和仓库测试直接导入
+    from ..domain.scope import RuntimeScope, ScopeValidationError
+    from ..engine.database import WaveMemoryDB
+except ImportError:  # pragma: no cover - 由仓库测试直接导入 services 使用
+    from domain.scope import RuntimeScope, ScopeValidationError
+    from engine.database import WaveMemoryDB
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -87,6 +92,25 @@ def _get_attitude_level(affection: int) -> str:
         return "hostile"
 
 
+def _project_group_subject_scope(scope: RuntimeScope) -> tuple[str, str, str]:
+    """Project an ingress-resolved group Scope into legacy affinity keys."""
+    if not isinstance(scope, RuntimeScope):
+        raise ScopeValidationError("scope_required", "affinity requires RuntimeScope")
+    if scope.visibility != "group" or scope.session is None:
+        raise ScopeValidationError(
+            "scope_visibility_not_allowed",
+            "affinity currently accepts group RuntimeScope only",
+        )
+    prefix = f"{scope.session.platform_id}:user:"
+    principal = scope.subject_principal_id or ""
+    if not principal.startswith(prefix) or principal == prefix:
+        raise ScopeValidationError(
+            "scope_subject_required",
+            "affinity requires a scoped platform user",
+        )
+    return scope.bot_id, scope.session.conversation_id, principal[len(prefix):]
+
+
 # ═══════════════════════════════════════════════════════════════
 # AffinityEngine — 好感度计算核心
 # ═══════════════════════════════════════════════════════════════
@@ -113,36 +137,52 @@ class AffinityEngine:
         self._emotion_cache: Optional[dict] = None
 
     def _get_emotion_classification(self) -> dict:
-        if self._emotion_cache is not None:
-            return self._emotion_cache
-        rows = self.db.conn.execute(
-            "SELECT id, name FROM tags WHERE tag_type = 'emotion'"
-        ).fetchall()
-        classification = {}
-        for tid, name in rows:
-            if any(kw in name for kw in FUN_EMOTION_KW):
-                classification[tid] = 'fun'
-            elif any(kw in name for kw in POSITIVE_EMOTION_KW):
-                classification[tid] = 'positive'
-            elif any(kw in name for kw in NEGATIVE_EMOTION_KW):
-                classification[tid] = 'negative'
-        self._emotion_cache = classification
-        return classification
+        """Legacy global tags cannot be projected into a RuntimeScope safely.
+
+        The caller retains keyword-based emotion handling; scoped emotion tags
+        can be reintroduced only after a dedicated scoped read-model exists.
+        """
+        if self._emotion_cache is None:
+            self._emotion_cache = {}
+        return self._emotion_cache
 
     def process_message(
         self,
-        sender_id: str,
-        group_id: str,
-        content: str,
+        sender_id: str = "",
+        group_id: str = "",
+        content: str = "",
         emotion_tag_ids: list[int] = None,
         is_reply_to_bot: bool = False,
         is_at_bot: bool = False,
         conversation_depth: int = 0,
         hour: int = -1,
-    ):
-        """处理一条消息，累加好感度增量到缓冲。"""
-        if not sender_id or sender_id == self.bot_qq_id:
-            return
+        *,
+        scope: RuntimeScope | None = None,
+    ) -> bool:
+        """处理一条消息，累加好感度增量到缓冲。
+
+        新事件路径必须携带 ingress 解析出的 Scope；旧调用暂保留裸键兼容，
+        但不会由本方法从原始事件字段重新推断 Scope。
+        """
+        supplied_sender_id = str(sender_id or "").strip()
+        supplied_group_id = str(group_id or "").strip()
+        if scope is not None:
+            try:
+                scoped_bot_id, scoped_group_id, scoped_user_id = _project_group_subject_scope(scope)
+            except ScopeValidationError:
+                return False
+            if scoped_bot_id != self.bot_db_id:
+                return False
+            if (
+                (supplied_sender_id and supplied_sender_id != scoped_user_id)
+                or (supplied_group_id and supplied_group_id != scoped_group_id)
+            ):
+                return False
+            sender_id, group_id = scoped_user_id, scoped_group_id
+        else:
+            sender_id, group_id = supplied_sender_id, supplied_group_id
+        if not sender_id or not group_id or sender_id == self.bot_qq_id:
+            return False
 
         key = (sender_id, group_id)
         buf = self._buffer[key]
@@ -227,12 +267,42 @@ class AffinityEngine:
             event_reasons["familiarity"].append("深夜陪聊")
             event_reasons["depth"].append("深夜陪聊")
 
-        self._record_relationship_events(sender_id, group_id, before, buf, event_reasons)
+        self._record_relationship_events(
+            user_id=sender_id,
+            group_id=group_id,
+            before=before,
+            after=buf,
+            reasons=event_reasons,
+            scope=scope,
+        )
+        return True
 
-    def _record_relationship_events(self, user_id: str, group_id: str, before: dict, after: dict, reasons: dict):
-        """记录关系事件日志；当前状态仍由 flush 聚合写入，避免重复计算。"""
+    def _record_relationship_events(
+        self,
+        *,
+        user_id: str,
+        group_id: str,
+        before: dict,
+        after: dict,
+        reasons: dict,
+        scope: RuntimeScope | None = None,
+    ):
+        """记录关系事件日志；Scope 路径只使用已验证的 legacy 投影。"""
         if not self.record_relationship_events:
             return
+        event_bot_id = self.bot_db_id
+        if scope is not None:
+            try:
+                scoped_bot_id, scoped_group_id, scoped_user_id = _project_group_subject_scope(scope)
+            except ScopeValidationError:
+                return
+            if (
+                scoped_bot_id != self.bot_db_id
+                or scoped_group_id != group_id
+                or scoped_user_id != user_id
+            ):
+                return
+            event_bot_id = scoped_bot_id
         now = time.time()
         try:
             for dim_name, after_value in after.items():
@@ -245,7 +315,7 @@ class AffinityEngine:
                     """INSERT INTO relationship_events
                        (bot_id, group_id, user_id, event_type, dimension, delta, reason, created_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (self.bot_db_id, group_id, user_id, event_type, dim_name, round(delta, 2), reason, now),
+                    (event_bot_id, group_id, user_id, event_type, dim_name, round(delta, 2), reason, now),
                 )
             self.db.conn.commit()
         except Exception as e:
@@ -362,18 +432,9 @@ class AffinityEngine:
                 if not names:
                     continue
                 all_names = [n[0] for n in names]
-                # 从 facts 中补充绰号/别名（群友互相起的名字）
-                alias_facts = self.db.conn.execute(
-                    """SELECT object FROM facts WHERE subject LIKE ? 
-                       AND (predicate LIKE '%称%' OR predicate LIKE '%叫%' OR predicate LIKE '%绰号%' OR predicate LIKE '%代称%' OR predicate LIKE '%别名%')
-                       LIMIT 5""",
-                    (f"%{user_id}%",),
-                ).fetchall()
-                for af in alias_facts:
-                    # 提取括号前的名字部分
-                    alias_name = af[0].split('（')[0].split('(')[0].strip()
-                    if alias_name and alias_name not in all_names and len(alias_name) <= 20:
-                        all_names.append(alias_name)
+                # flush 缓冲只保留 legacy (user_id, group_id) 键，无法证明
+                # Fact 的 Bot/canonical session 归属；不得从 legacy facts 猜测别名。
+                # 正式 alias assertion/People 投影将在 Facts v2 阶段提供带 Scope 的来源。
                 # 取最近使用的名字作为 display_name
                 recent_name = self.db.conn.execute(
                     "SELECT sender_name FROM memories WHERE sender_id=? AND sender_name != '' ORDER BY timestamp DESC LIMIT 1",
@@ -559,9 +620,27 @@ class LifecycleService:
         negative_emotion_threshold: float = 0.4,
         run_global_jobs: bool = True,
         target_profiles: dict[str, dict[str, str]] | None = None,
+        bot_identities: Mapping[str, str] | None = None,
     ):
         self.db = db
-        self.affinity = AffinityEngine(db, bot_qq_id=bot_qq_id, bot_db_id=bot_db_id, target_profiles=target_profiles)
+        identities = {
+            str(identity).strip(): str(qq_id or "").strip()
+            for identity, qq_id in dict(bot_identities or {}).items()
+            if str(identity or "").strip()
+        }
+        if bot_db_id and bot_db_id not in identities:
+            identities[str(bot_db_id)] = str(bot_qq_id or "")
+        self._affinities: dict[str, AffinityEngine] = {
+            identity: AffinityEngine(
+                db,
+                bot_qq_id=qq_id,
+                bot_db_id=identity,
+                target_profiles=target_profiles,
+            )
+            for identity, qq_id in identities.items()
+        }
+        # 兼容属性只允许精确命中配置的 Bot；禁止退回注册表中的第一个 Bot。
+        self.affinity = self._affinities.get(str(bot_db_id))
         self.patterns = PatternAggregator(db)
         self._task: Optional[asyncio.Task] = None
         self._running = False
@@ -574,22 +653,59 @@ class LifecycleService:
         self.negative_emotion_threshold = negative_emotion_threshold
         self.run_global_jobs = run_global_jobs
 
-    def start(self):
+    def process_scoped_message(
+        self,
+        *,
+        scope: RuntimeScope,
+        content: str,
+        emotion_tag_ids: list[int] | None = None,
+        is_reply_to_bot: bool = False,
+        is_at_bot: bool = False,
+        conversation_depth: int = 0,
+        hour: int = -1,
+    ) -> bool:
+        """Route an ingress-resolved message to its exact Bot affinity engine."""
+        if not isinstance(scope, RuntimeScope):
+            return False
+        affinity = self._affinities.get(scope.bot_id)
+        if affinity is None:
+            return False
+        return affinity.process_message(
+            content=content,
+            emotion_tag_ids=emotion_tag_ids,
+            is_reply_to_bot=is_reply_to_bot,
+            is_at_bot=is_at_bot,
+            conversation_depth=conversation_depth,
+            hour=hour,
+            scope=scope,
+        )
+
+    def start(self, supervisor=None):
         if self._running:
             return
         self._running = True
-        self._task = asyncio.create_task(self._loop())
-        logger.info(f"[WaveMemory] LifecycleService started bot={self.affinity.bot_db_id} global_jobs={self.run_global_jobs}")
+        if supervisor is None:
+            self._task = asyncio.create_task(self._loop())
+        else:
+            self._task = supervisor.start(
+                "wave-memory:lifecycle", self._loop(), owner="lifecycle"
+            )
+        logger.info(
+            "[WaveMemory] LifecycleService started bots=%s global_jobs=%s",
+            sorted(self._affinities),
+            self.run_global_jobs,
+        )
 
     def stop(self):
         self._running = False
         if self._task:
             self._task.cancel()
-        # 停止前持久化残余缓冲
-        try:
-            self.affinity.flush()
-        except Exception:
-            pass
+        # 停止前持久化每个 Bot 的残余缓冲。
+        for affinity in self._affinities.values():
+            try:
+                affinity.flush()
+            except Exception:
+                pass
 
     async def _loop(self):
         """主循环：每 30 分钟执行一次。"""
@@ -607,11 +723,12 @@ class LifecycleService:
         """一次 tick：好感度持久化 + 模式更新 + 衰减 + 情绪。"""
         now = time.time()
 
-        # 1. 好感度 flush（将消息缓冲的维度增量持久化到 DB）
+        # 1. 好感度 flush（将每个 Bot 的消息缓冲维度增量持久化到 DB）
         #    MetaThinking 只在@bot 时更新好感度，日常聊天的 familiarity/depth 靠这里
-        flushed = self.affinity.flush()
-        if flushed > 0:
-            logger.info(f"[WaveMemory] Affinity flushed bot={self.affinity.bot_db_id}: {flushed} users")
+        for bot_id, affinity in self._affinities.items():
+            flushed = affinity.flush()
+            if flushed > 0:
+                logger.info(f"[WaveMemory] Affinity flushed bot={bot_id}: {flushed} users")
 
         if not self.run_global_jobs:
             return
@@ -644,18 +761,10 @@ class LifecycleService:
     def _run_decay(self) -> int:
         """标记过期记忆为 archived 并且对 user_profiles 执行多维情感衰减。"""
         now = time.time()
-        threshold_time = now - 180 * 86400  # 180 天前
 
-        result = self.db.conn.execute(
-            """UPDATE memories SET memory_type = 'archived'
-               WHERE memory_type = 'message'
-                 AND importance < 0.15
-                 AND timestamp < ?
-                 AND access_count = 0
-                 AND (last_accessed IS NULL OR last_accessed < ?)""",
-            (threshold_time, threshold_time),
-        )
-        archived_count = result.rowcount
+        # 旧实现按全库条件直接归档，无法证明 Bot/session Scope，已退出正式写面。
+        # scoped EvictionService 负责按 RuntimeScope 分组提交 archive/delete/evict 命令。
+        archived_count = 0
 
         try:
             rows = self.db.conn.execute(
@@ -730,24 +839,29 @@ class LifecycleService:
             
         return archived_count
 
-    def get_user_affinity(self, user_id: str, group_id: str, bot_id: str = None) -> dict:
-        """获取用户好感度信息（含缓冲中的未持久化增量）。"""
-        db_bot_id = bot_id or self.affinity.bot_db_id
+    def get_user_affinity(self, user_id: str, group_id: str, bot_id: str | None = None) -> dict | None:
+        """读取精确 Bot affinity；未知 Bot 或未记录关系返回 ``None``。"""
+        db_bot_id = str(bot_id or "").strip()
+        if not db_bot_id:
+            return None
+        affinity = self._affinities.get(db_bot_id)
+        if affinity is None:
+            return None
         row = self.db.conn.execute(
             "SELECT affection, metadata FROM user_profiles WHERE user_id = ? AND group_id = ? AND bot_id = ?",
             (user_id, group_id, db_bot_id),
         ).fetchone()
 
         if not row:
-            return {"affection": 0, "attitude": "neutral", "dimensions": {}}
+            return None
 
         meta = json.loads(row[1]) if row[1] else {}
         dims = meta.get("dimensions", {})
 
-        # 加上缓冲中的增量
+        # 加上同 Bot 缓冲中的增量。
         key = (user_id, group_id)
-        if key in self.affinity._buffer:
-            for dim, delta in self.affinity._buffer[key].items():
+        if affinity is not None and key in affinity._buffer:
+            for dim, delta in affinity._buffer[key].items():
                 dims[dim] = dims.get(dim, 0) + delta
 
         return {
@@ -768,7 +882,10 @@ class LifecycleService:
             (window,),
         ).fetchall()
 
-        emotion_cache = self.affinity._get_emotion_classification()
+        affinity = self.affinity
+        if affinity is None:
+            return
+        emotion_cache = affinity._get_emotion_classification()
         if not emotion_cache:
             return
 

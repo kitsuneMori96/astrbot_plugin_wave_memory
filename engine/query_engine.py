@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
+
+try:
+    from ..domain.scope import RuntimeScope
+except ImportError:  # 兼容插件作为顶级模块加载
+    from domain.scope import RuntimeScope
 
 from astrbot.api import logger
 
@@ -35,6 +40,7 @@ class QueryEngine:
         residual_pyramid: Optional[ResidualPyramid] = None,
         epa: Optional[EPAModule] = None,
         geodesic: Optional[GeodesicReranker] = None,
+        write_gateway: Any | None = None,
     ):
         self.db = db
         self.memory_index = memory_index
@@ -46,6 +52,7 @@ class QueryEngine:
         self.residual_pyramid = residual_pyramid
         self.epa = epa
         self.geodesic = geodesic
+        self.write_gateway = write_gateway
 
         # 配置参数（对齐默认值）
         self.min_similarity = float(config.get("min_similarity", "0.35"))
@@ -54,6 +61,37 @@ class QueryEngine:
         self.enable_epa = config.get("enable_epa", True)
         self.enable_geodesic = config.get("enable_geodesic_rerank", True)
 
+    @staticmethod
+    def _group_scope(scope: Any) -> RuntimeScope | None:
+        """Return only a resolved group RuntimeScope; all other reads fail closed."""
+        if not isinstance(scope, RuntimeScope):
+            return None
+        if scope.visibility != "group" or scope.session is None:
+            return None
+        return scope
+
+    def _get_scoped_memories_by_ids(self, ids: list[Any], scope: RuntimeScope) -> list[dict]:
+        """Post-filter HNSW candidates through the repository's exact Scope helper.
+
+        The vector index has no Scope dimension, so it may return IDs belonging to
+        any Bot/session.  Never compensate with a legacy group_id predicate: until
+        the repository can prove the complete RuntimeScope, return no candidates.
+        """
+        if not ids:
+            return []
+        getter = getattr(self.db, "get_memories_by_ids", None)
+        if not callable(getter):
+            return []
+        try:
+            memories = getter(ids, scope=scope)
+        except TypeError:
+            # Legacy repository signatures cannot establish bot/session ownership.
+            return []
+        except Exception:
+            logger.warning("[WaveMemory] Scoped memory candidate filter failed", exc_info=True)
+            return []
+        return [dict(memory) for memory in memories or [] if isinstance(memory, dict)]
+
     async def query(
         self,
         text: str,
@@ -61,6 +99,8 @@ class QueryEngine:
         top_k: int = 5,
         exclude_sources: Optional[list[str]] = None,
         source_filter: Optional[str | list[str]] = None,
+        *,
+        scope: RuntimeScope | None = None,
     ) -> list[dict]:
         """执行完整的浪潮查询管线。
         
@@ -68,6 +108,11 @@ class QueryEngine:
             exclude_sources: 排除特定 source 类型的记忆（如 ["bzz_experience"]）
             source_filter: 只保留特定 source 类型的记忆，支持单个或列表
         """
+        resolved_scope = self._group_scope(scope)
+        if resolved_scope is None:
+            logger.warning("[WaveMemory] Query rejected: resolved group RuntimeScope required")
+            return []
+
         start = time.time()
 
         query_vec = await self.embedding.get_embedding(text)
@@ -86,7 +131,7 @@ class QueryEngine:
 
         memory_ids = [r[0] for r in results]
         distances = {r[0]: r[1] for r in results}
-        memories = self.db.get_memories_by_ids(memory_ids)
+        memories = self._get_scoped_memories_by_ids(memory_ids, resolved_scope)
 
         # 只保留特定 source（优先于 exclude_sources）
         if source_filter:
@@ -97,11 +142,10 @@ class QueryEngine:
         elif exclude_sources:
             memories = [m for m in memories if m.get("source", "live") not in exclude_sources]
 
-        cross_group_enabled = self.config.get("cross_group_enabled", True)
-        if not cross_group_enabled and group_id:
-            memories = [m for m in memories if m.get("group_id", "") == group_id]
+        # Scope post-filtering is authoritative.  group_id remains display-only
+        # compatibility data and must never widen or narrow the DB query.
         for mem in memories:
-            mem["_is_cross_group"] = (mem.get("group_id", "") != group_id) if group_id else False
+            mem["_is_cross_group"] = False
 
         for mem in memories:
             dist = distances.get(mem["id"], 1.0)
@@ -139,7 +183,13 @@ class QueryEngine:
         memories = memories[:top_k]
 
         if memories:
-            self.db.touch_memories([m["id"] for m in memories])
+            if self.write_gateway is not None:
+                await self.write_gateway.touch_memories(
+                    scope=resolved_scope,
+                    memory_ids=[m["id"] for m in memories],
+                )
+            else:
+                self.db.touch_memories([m["id"] for m in memories])
 
         total_ms = (time.time() - start) * 1000
         logger.debug(
@@ -237,8 +287,15 @@ class QueryEngine:
         context_messages: list[str] = None,
         group_id: Optional[str] = None,
         top_k: int = 5,
+        *,
+        scope: RuntimeScope | None = None,
     ) -> list[dict]:
         """多路霰弹枪检索。"""
+        resolved_scope = self._group_scope(scope)
+        if resolved_scope is None:
+            logger.warning("[WaveMemory] Shotgun query rejected: resolved group RuntimeScope required")
+            return []
+
         start = time.time()
 
         query_vec = await self.embedding.get_embedding(text)
@@ -271,10 +328,10 @@ class QueryEngine:
             return []
 
         memory_ids = list(all_candidates.keys())
-        memories = self.db.get_memories_by_ids(memory_ids)
+        memories = self._get_scoped_memories_by_ids(memory_ids, resolved_scope)
 
         for mem in memories:
-            mem["_is_cross_group"] = (mem.get("group_id", "") != group_id) if group_id else False
+            mem["_is_cross_group"] = False
 
         for mem in memories:
             dist = all_candidates.get(mem["id"], 1.0)
@@ -297,7 +354,13 @@ class QueryEngine:
             memories = memories[:top_k]
 
         if memories:
-            self.db.touch_memories([m["id"] for m in memories])
+            if self.write_gateway is not None:
+                await self.write_gateway.touch_memories(
+                    scope=resolved_scope,
+                    memory_ids=[m["id"] for m in memories],
+                )
+            else:
+                self.db.touch_memories([m["id"] for m in memories])
 
         total_ms = (time.time() - start) * 1000
         logger.debug(

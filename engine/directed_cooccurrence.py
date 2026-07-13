@@ -45,10 +45,24 @@ class DirectedCooccurrence:
         new_forward: dict[int, dict[int, float]] = defaultdict(lambda: defaultdict(float))
         new_backward: dict[int, dict[int, float]] = defaultdict(lambda: defaultdict(float))
 
-        rows = self.db.conn.execute("""
-            SELECT memory_id, tag_id, position FROM memory_tags
-            ORDER BY memory_id, position
-        """).fetchall()
+        has_scoped = self.db.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='scoped_memory_tags'"
+        ).fetchone()
+        if has_scoped:
+            rows = self.db.conn.execute(
+                """SELECT smt.memory_id, smt.tag_id, smt.position
+                     FROM scoped_memory_tags smt
+                     JOIN memories m
+                       ON m.id=smt.memory_id AND m.bot_id=smt.bot_id
+                      AND m.session_id=smt.session_id AND m.visibility=smt.visibility
+                    WHERE m.resolution_state='resolved' AND COALESCE(m.quarantine, 0)=0
+                      AND COALESCE(m.memory_type, 'message') NOT IN ('archived','evicted','deleted')
+                    ORDER BY smt.memory_id, smt.position"""
+            ).fetchall()
+        else:
+            rows = self.db.conn.execute(
+                "SELECT memory_id, tag_id, position FROM memory_tags ORDER BY memory_id, position"
+            ).fetchall()
 
         if not rows:
             self.forward = new_forward
@@ -115,7 +129,11 @@ class DirectedCooccurrence:
         # 原子切换
         self.forward = new_forward
         self.backward = new_backward
-        self._tag_count = self.db.get_tag_count()
+        if has_scoped:
+            count_row = self.db.conn.execute("SELECT COUNT(*) FROM scoped_tags").fetchone()
+            self._tag_count = int(count_row[0]) if count_row else 0
+        else:
+            self._tag_count = self.db.get_tag_count()
 
         logger.info(
             f"[WaveMemory] DirectedCooccurrence rebuilt: "
@@ -220,8 +238,12 @@ class DirectedCooccurrence:
         node_info: dict[int, dict] = {}
         if selected_nodes:
             placeholders = ",".join("?" * len(selected_nodes))
+            has_scoped = self.db.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='scoped_tags'"
+            ).fetchone()
+            tag_table = "scoped_tags" if has_scoped else "tags"
             rows = self.db.conn.execute(
-                f"SELECT id, name, tag_type FROM tags WHERE id IN ({placeholders})",
+                f"SELECT id, name, tag_type FROM {tag_table} WHERE id IN ({placeholders})",
                 list(selected_nodes),
             ).fetchall()
             for r in rows:
@@ -252,7 +274,14 @@ class DirectedCooccurrence:
 
     def needs_rebuild(self, threshold_pct: float = 0.05) -> bool:
         """判断是否需要重建（阈值改为 0.05）。"""
-        current_count = self.db.get_tag_count()
+        has_scoped = self.db.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='scoped_tags'"
+        ).fetchone()
+        if has_scoped:
+            row = self.db.conn.execute("SELECT COUNT(*) FROM scoped_tags").fetchone()
+            current_count = int(row[0]) if row else 0
+        else:
+            current_count = self.db.get_tag_count()
         if self._tag_count == 0:
             return current_count > 10
         change = abs(current_count - self._tag_count) / self._tag_count

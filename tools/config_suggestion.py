@@ -31,11 +31,13 @@ try:
     from services.config.channel_config import KNOWN_CHANNELS
     from services.injection.config_suggestion_store import ConfigSuggestionStore, VALID_CONFIG_PROBLEMS, VALID_SUGGESTION_SCOPES
     from services.injection.trace_store import InjectionTraceStore
+    from tools.scope_boundary import require_group_runtime_scope, scope_envelope, scope_error_message
 except Exception:  # pragma: no cover
     from ..services.agent.permission_policy import check_agent_action
     from ..services.config.channel_config import KNOWN_CHANNELS
     from ..services.injection.config_suggestion_store import ConfigSuggestionStore, VALID_CONFIG_PROBLEMS, VALID_SUGGESTION_SCOPES
     from ..services.injection.trace_store import InjectionTraceStore
+    from .scope_boundary import require_group_runtime_scope, scope_envelope, scope_error_message
 
 
 def _as_trace_ids(value: Any) -> list[str]:
@@ -130,6 +132,11 @@ class WaveMemorySuggestConfigTool(FunctionTool[AstrAgentContext]):
         decision = check_agent_action(self.permission_action)
         if not decision.allowed:
             return decision.reason
+        runtime_scope, error_code = require_group_runtime_scope(context, "config.suggest")
+        if error_code:
+            return scope_error_message("配置建议提交", error_code)
+        assert runtime_scope is not None
+
         scope = str(kwargs.get("scope", "") or "").strip().lower()
         channel = str(kwargs.get("channel", "") or "").strip()
         problem = str(kwargs.get("problem", "") or "").strip().lower()
@@ -155,9 +162,12 @@ class WaveMemorySuggestConfigTool(FunctionTool[AstrAgentContext]):
         if not trace_store or not suggestion_store:
             return "配置建议存储未初始化"
 
-        missing = [trace_id for trace_id in evidence_trace_ids if not trace_store.get(trace_id)]
+        missing = [
+            trace_id for trace_id in evidence_trace_ids
+            if not trace_store.get_for_scope(trace_id, runtime_scope)
+        ]
         if missing:
-            return f"找不到证据 trace：{missing[0]}"
+            return scope_error_message("配置建议证据校验", "scope_mismatch")
 
         suggestion_id = suggestion_store.create(
             scope=scope,
@@ -166,7 +176,11 @@ class WaveMemorySuggestConfigTool(FunctionTool[AstrAgentContext]):
             suggestion=suggestion,
             evidence_trace_ids=evidence_trace_ids,
             actor="agent",
-            metadata={"applied": False, "policy": "review_required"},
+            metadata={
+                "applied": False,
+                "policy": "review_required",
+                "source_runtime_scope": scope_envelope(runtime_scope),
+            },
         )
         return json.dumps(
             {

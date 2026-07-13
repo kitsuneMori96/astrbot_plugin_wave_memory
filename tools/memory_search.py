@@ -11,6 +11,24 @@ from astrbot.core.agent.tool import FunctionTool
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.astr_agent_context import AstrAgentContext
 
+try:
+    from .scope_boundary import (
+        extract_group_runtime_scope,
+        require_group_runtime_scope,
+        scope_error_message,
+    )
+except ImportError:  # 兼容插件顶级加载
+    from tools.scope_boundary import (
+        extract_group_runtime_scope,
+        require_group_runtime_scope,
+        scope_error_message,
+    )
+
+
+def _extract_group_scope(context: ContextWrapper[AstrAgentContext]):
+    """兼容旧私有导入；实际边界统一由 scope_boundary 实现。"""
+    return extract_group_runtime_scope(context)
+
 
 @dataclass
 class WaveMemorySearchTool(FunctionTool[AstrAgentContext]):
@@ -56,10 +74,17 @@ class WaveMemorySearchTool(FunctionTool[AstrAgentContext]):
             except Exception:
                 return "记忆数据库连接异常"
 
-        event = context.context.event
-        group_id = event.get_group_id() if event else None
+        scope, error_code = require_group_runtime_scope(context, "memory.message.read")
+        if error_code:
+            return scope_error_message("记忆搜索", error_code)
+        assert scope is not None
 
-        memories = await self.query_engine.query(text=query, group_id=group_id, top_k=top_k)
+        memories = await self.query_engine.query(
+            text=query,
+            group_id=scope.session.conversation_id,
+            top_k=top_k,
+            scope=scope,
+        )
 
         if not memories:
             return "没有找到相关记忆"
@@ -102,17 +127,23 @@ class WaveMemoryRememberTool(FunctionTool[AstrAgentContext]):
         if not self.writer:
             return "记忆系统未初始化"
 
-        event = context.context.event
-        group_id = event.get_group_id() if event else "global"
+        scope, error_code = require_group_runtime_scope(context, "memory.message.write")
+        if error_code:
+            return scope_error_message("记忆写入", error_code)
+        assert scope is not None
 
         import time
+        event = getattr(getattr(context, "context", None), "event", None)
         await self.writer.enqueue({
-            "group_id": group_id,
+            "scope": scope,
+            "group_id": scope.session.conversation_id,
             "sender_id": "bot_remember",
             "sender_name": "主动记忆",
             "content": content,
             "timestamp": time.time(),
+            "event_id": getattr(event, "message_id", None) if event else None,
             "importance": importance,
+            "metadata": {"origin_kind": "agent_remember"},
         })
 
         return f"已记住：{content[:50]}..."

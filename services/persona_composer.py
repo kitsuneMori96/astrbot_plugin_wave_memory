@@ -17,6 +17,11 @@ from typing import Any
 
 from astrbot.api import logger
 
+try:
+    from ..domain.scope import RuntimeScope
+except ImportError:  # pragma: no cover - standalone repository tests
+    from domain.scope import RuntimeScope
+
 from .identity_safety import is_identity_contamination
 
 _EXPERIENCE_STYLE_CONTAMINATION_RE = re.compile(r"(猫耳|猫耳朵|兽耳|尾巴|小爪子|飞机耳|本真君|小鱼干|灵鱼干|喵)")
@@ -95,12 +100,23 @@ class PersonaComposer:
         sender_name: str,
         message: str,
         recent_context: list[str] | None,
+        scope: RuntimeScope | None = None,
     ) -> dict[str, Any]:
-        """Return persona/belief/experience/style blocks plus compact debug data."""
+        """Return persona/belief/experience/style blocks plus compact debug data.
 
+        The composer is also a direct service entry, so it must not use caller
+        supplied bot/group values to recover a scope.  It accepts only the
+        RuntimeScope parsed at ingress.
+        """
+        if not isinstance(scope, RuntimeScope) or scope.visibility != "group" or scope.session is None:
+            return self._empty_payload(source="scope_required")
+        bot_id = scope.bot_id
+        group_id = scope.session.conversation_id
         profile = self._get_profile(bot_id)
+        if profile is None:
+            return self._empty_payload(source="bot_profile_scope_unresolved")
         bot_name = self._profile_value(profile, "name", None) or "当前 bot"
-        bot_db_id = self._profile_value(profile, "db_id", None) or self.default_bot_db_id
+        bot_db_id = self._profile_value(profile, "db_id", None) or scope.bot_id
         aliases = self._profile_value(profile, "aliases", []) or []
 
         persona_block = self._build_persona_block(bot_name=bot_name, bot_db_id=bot_db_id, aliases=aliases)
@@ -108,13 +124,17 @@ class PersonaComposer:
             bot_db_id=bot_db_id,
             sender_id=sender_id,
             message=message,
+            scope=scope,
         )
         experience_block, experience_ids = await self._build_experience_block(
             message=message,
             group_id=group_id,
             bot_db_id=bot_db_id,
+            scope=scope,
         )
-        style_block, style_ids = self._build_style_block(bot_id=bot_id)
+        # few_shot_examples only carry legacy bot_id and cannot prove the current
+        # RuntimeScope.  Do not re-inject them through the persona path.
+        style_block, style_ids = "", []
 
         return {
             "persona_block": persona_block,
@@ -130,11 +150,31 @@ class PersonaComposer:
             },
         }
 
+    @staticmethod
+    def _empty_payload(*, source: str) -> dict[str, Any]:
+        return {
+            "persona_block": "",
+            "belief_block": "",
+            "experience_block": "",
+            "style_block": "",
+            "debug": {
+                "persona_sources": [],
+                "belief_ids": [],
+                "belief_source": source,
+                "experience_ids": [],
+                "style_ids": [],
+            },
+        }
+
     def _get_profile(self, bot_id: str) -> Any:
         if bot_id and bot_id in self.bot_profiles:
             return self.bot_profiles[bot_id]
-        if self.bot_profiles:
-            return next(iter(self.bot_profiles.values()))
+        # Canonical RuntimeScope uses BotProfile.db_id while older registries may
+        # still be keyed by QQ id.  Match the stable profile field, never infer a
+        # bot from a display name or a default/first profile.
+        for profile in self.bot_profiles.values():
+            if self._profile_value(profile, "db_id", None) == bot_id:
+                return profile
         return None
 
     @staticmethod
@@ -156,14 +196,23 @@ class PersonaComposer:
             "</self_persona>"
         )
 
-    def _build_belief_block(self, *, bot_db_id: str, sender_id: str, message: str) -> tuple[str, dict[str, Any]]:
+    def _build_belief_block(
+        self,
+        *,
+        bot_db_id: str,
+        sender_id: str,
+        message: str,
+        scope: RuntimeScope | None,
+    ) -> tuple[str, dict[str, Any]]:
         if not self.belief_engine:
             return "", {"source": "none", "belief_ids": []}
+        if not isinstance(scope, RuntimeScope) or scope.visibility != "group" or scope.session is None:
+            return "", {"source": "scope_rejected", "belief_ids": []}
         try:
             if hasattr(self.belief_engine, "bot_id"):
                 self.belief_engine.bot_id = bot_db_id
             keywords = self._keywords(message)
-            text = self.belief_engine.get_injection(sender_id=sender_id, keywords=keywords) or ""
+            text = self.belief_engine.get_injection(scope=scope, sender_id=sender_id, keywords=keywords) or ""
             text = text.strip()
             if not text or is_identity_contamination(text):
                 return "", {"source": "belief_engine", "belief_ids": []}
@@ -172,22 +221,34 @@ class PersonaComposer:
             logger.debug(f"[PersonaComposer] belief block failed: {e}")
             return "", {"source": "belief_engine_error", "belief_ids": []}
 
-    async def _build_experience_block(self, *, message: str, group_id: str, bot_db_id: str) -> tuple[str, list[int]]:
+    async def _build_experience_block(
+        self,
+        *,
+        message: str,
+        group_id: str,
+        bot_db_id: str,
+        scope: RuntimeScope | None,
+    ) -> tuple[str, list[int]]:
+        # 旧经历记录没有可证明的 Scope；不能从 bot/group 参数反推后回退。
+        if not isinstance(scope, RuntimeScope) or scope.visibility != "group" or scope.session is None:
+            return "", []
         memories = []
         if self.query_engine:
             try:
                 memories = await self.query_engine.query(
                     text=message,
-                    group_id=None,
+                    group_id=scope.session.conversation_id,
                     top_k=max(self.max_experiences * 2, 4),
                     source_filter=["bzz_experience", "bzz_evolution", "experience"],
+                    scope=scope,
                 )
             except Exception as e:
                 logger.debug(f"[PersonaComposer] query experience failed: {e}")
                 memories = []
 
+        # 不再用全局/裸 group_id SQL fallback；无 v2 resolved 命中即为空。
         if not memories:
-            memories = self._recent_experience_memories(bot_db_id=bot_db_id, group_id=group_id)
+            return "", []
 
         selected = []
         seen_content = set()

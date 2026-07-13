@@ -98,7 +98,13 @@ class TagAuditor:
 
         return self._parse_suggestions(response.completion_text)
 
-    async def run_audit(self, batch_size: int = 50, strategy: str = "mixed", total_count: int = 500) -> AsyncIterator[dict]:
+    async def run_audit(
+        self,
+        batch_size: int = 50,
+        strategy: str = "mixed",
+        total_count: int = 500,
+        save_suggestion=None,
+    ) -> AsyncIterator[dict]:
         """运行完整审计流程，yield 进度事件。
 
         strategy:
@@ -128,9 +134,15 @@ class TagAuditor:
                 logger.warning(f"[WaveMemory] Audit batch error: {e}")
                 suggestions = []
 
-            # 存入数据库
+            # Production supplies an async coordinator-backed publisher. The legacy
+            # fallback remains only for isolated compatibility callers.
             for s in suggestions:
-                self._save_suggestion(s)
+                if save_suggestion is None:
+                    self._save_suggestion(s)
+                else:
+                    result = save_suggestion(s)
+                    if hasattr(result, "__await__"):
+                        await result
                 suggestions_total += 1
 
             processed += len(batch)

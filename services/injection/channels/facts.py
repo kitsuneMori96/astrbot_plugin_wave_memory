@@ -8,6 +8,10 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from ...identity_safety import is_identity_contamination
+try:
+    from ....domain.scope import validate_formal_command_scope
+except ImportError:  # pragma: no cover - direct package imports in isolated tests
+    from domain.scope import validate_formal_command_scope
 from ..channel_base import InjectionResult, estimate_injection_tokens
 from .safety import is_channel_allowed_in_mode
 
@@ -65,19 +69,23 @@ def _keywords(message: str, limit: int = 8) -> list[str]:
     return words
 
 
-def _row_to_fact(row: tuple[Any, ...], *, now: float, decay_rate: float) -> dict[str, Any]:
-    confidence = float(row[4] if row[4] is not None else 1.0)
-    anchor = row[5] or row[6] or now
-    age_days = max(0.0, (now - float(anchor)) / 86400.0)
+def _row_to_fact(row: Mapping[str, Any], *, now: float, decay_rate: float) -> dict[str, Any]:
+    """Normalize the scoped repository DTO without exposing a legacy table row."""
+    confidence = float(row.get("confidence") if row.get("confidence") is not None else 1.0)
+    anchor = row.get("updated_at") or row.get("created_at") or now
+    try:
+        age_days = max(0.0, (now - float(anchor)) / 86400.0)
+    except (TypeError, ValueError):
+        age_days = 0.0
     decay = max(0.1, 1.0 - age_days * decay_rate) if decay_rate > 0 else 1.0
     return {
-        "rowid": row[0],
-        "subject": row[1] or "",
-        "predicate": row[2] or "",
-        "object": row[3] or "",
+        "rowid": row.get("id"),
+        "subject": str(row.get("subject") or ""),
+        "predicate": str(row.get("predicate") or ""),
+        "object": str(row.get("object") or ""),
         "confidence": confidence,
-        "last_reinforced": row[5],
-        "created_at": row[6],
+        "last_reinforced": row.get("updated_at"),
+        "created_at": row.get("created_at"),
         "effective_confidence": confidence * decay,
     }
 
@@ -95,7 +103,7 @@ def _audit_fact(fact: Mapping[str, Any]) -> dict[str, Any]:
 
 
 class FactsChannel:
-    """复用 facts 表的轻量关键词召回通道。"""
+    """基于当前 RuntimeScope 的 scoped facts 进行关键词召回。"""
 
     name = "facts"
 
@@ -117,15 +125,35 @@ class FactsChannel:
         if max_items <= 0:
             return InjectionResult.empty(self.name, reason="facts max_items is zero")
 
+        scope = getattr(ctx, "scope", None)
+        scope_decision = validate_formal_command_scope("fact.read", scope)
+        if not scope_decision.allowed:
+            return InjectionResult.empty(
+                self.name,
+                latency_ms=self._latency_ms(started),
+                reason=scope_decision.reason_code or "scope_rejected",
+            )
+        repo = getattr(self.db, "scoped_knowledge", None)
+        if repo is None:
+            return InjectionResult.empty(
+                self.name,
+                latency_ms=self._latency_ms(started),
+                reason="scoped_repository_unavailable",
+            )
+
         try:
             keywords = _keywords(str(getattr(ctx, "message", "") or ""))
             if not keywords:
                 return InjectionResult.empty(self.name, latency_ms=self._latency_ms(started), reason="no fact keywords")
-            facts, filtered = self._query_primary(ctx, keywords=keywords, max_items=max_items)
+            # The repository performs the Scope predicate.  Filtering and one-hop
+            # expansion below operate only on that already isolated DTO set.
+            rows = repo.list_scoped_facts(scope, limit=max(max_items * 12, 100))
+            now = float(getattr(ctx, "now", 0.0) or time.time())
+            facts, filtered = self._query_primary(rows, keywords=keywords, now=now)
             facts, budget_filtered = self._select_with_budget(facts, max_items=max_items, token_budget=token_budget)
             filtered.extend(budget_filtered)
             if facts:
-                extra = self._query_one_hop(facts, max_items=max_items - len(facts))
+                extra = self._query_one_hop(rows, facts, now=now, max_items=max_items - len(facts))
                 extra, extra_budget_filtered = self._select_with_budget(
                     extra,
                     max_items=max_items - len(facts),
@@ -149,48 +177,56 @@ class FactsChannel:
             result.latency_ms = self._latency_ms(started)
             return result
 
-    def _query_primary(self, ctx: Any, *, keywords: list[str], max_items: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        conditions = " OR ".join(["subject LIKE ? OR object LIKE ?"] * len(keywords))
-        params: list[Any] = []
-        for keyword in keywords:
-            params.extend([f"%{keyword}%", f"%{keyword}%"])
-        rows = self.db.conn.execute(
-            f"SELECT rowid, subject, predicate, object, confidence, last_reinforced, created_at FROM facts WHERE {conditions} ORDER BY confidence DESC LIMIT ?",
-            params + [max_items * 3],
-        ).fetchall()
-        now = float(getattr(ctx, "now", 0.0) or time.time())
-        facts = [_row_to_fact(row, now=now, decay_rate=self.facts_decay_rate) for row in rows]
+    def _query_primary(
+        self,
+        rows: Iterable[Mapping[str, Any]],
+        *,
+        keywords: list[str],
+        now: float,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        lowered_keywords = tuple(keyword.casefold() for keyword in keywords)
+        facts = [
+            _row_to_fact(row, now=now, decay_rate=self.facts_decay_rate)
+            for row in rows
+            if any(
+                keyword in str(row.get("subject") or "").casefold()
+                or keyword in str(row.get("object") or "").casefold()
+                for keyword in lowered_keywords
+            )
+        ]
         facts.sort(key=lambda fact: fact.get("effective_confidence", 0.0), reverse=True)
         return self._filter_identity(facts)
 
-    def _query_one_hop(self, facts: list[dict[str, Any]], *, max_items: int) -> list[dict[str, Any]]:
+    def _query_one_hop(
+        self,
+        rows: Iterable[Mapping[str, Any]],
+        facts: list[dict[str, Any]],
+        *,
+        now: float,
+        max_items: int,
+    ) -> list[dict[str, Any]]:
         if max_items <= 0 or not facts:
             return []
         hit_rowids = {fact["rowid"] for fact in facts if fact.get("rowid") is not None}
-        if not hit_rowids:
+        entities = {
+            str(value)
+            for fact in facts
+            for value in (fact.get("subject"), fact.get("object"))
+            if value
+        }
+        if not hit_rowids or not entities:
             return []
-        entities: list[str] = []
-        for fact in facts:
-            for value in (fact.get("subject"), fact.get("object")):
-                if value and value not in entities:
-                    entities.append(str(value))
-        extras: list[dict[str, Any]] = []
-        now = time.time()
-        for entity in entities[:3]:
-            excluded_rowids = list(hit_rowids)
-            placeholders = ",".join("?" for _ in excluded_rowids)
-            rows = self.db.conn.execute(
-                f"SELECT rowid, subject, predicate, object, confidence, last_reinforced, created_at FROM facts WHERE (subject=? OR object=?) AND rowid NOT IN ({placeholders}) ORDER BY confidence DESC LIMIT 3",
-                [entity, entity] + excluded_rowids,
-            ).fetchall()
-            for row in rows:
-                fact = _row_to_fact(row, now=now, decay_rate=self.facts_decay_rate)
-                if fact["rowid"] not in hit_rowids and not is_identity_contamination(_fact_line(fact)):
-                    extras.append(fact)
-                    hit_rowids.add(fact["rowid"])
-                    if len(extras) >= max_items:
-                        return extras
-        return extras
+        extras = [
+            _row_to_fact(row, now=now, decay_rate=self.facts_decay_rate)
+            for row in rows
+            if row.get("id") not in hit_rowids
+            and (str(row.get("subject") or "") in entities or str(row.get("object") or "") in entities)
+        ]
+        extras.sort(key=lambda fact: fact.get("effective_confidence", 0.0), reverse=True)
+        return [
+            fact for fact in extras
+            if not is_identity_contamination(_fact_line(fact))
+        ][:max_items]
 
     @staticmethod
     def _filter_identity(facts: Iterable[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:

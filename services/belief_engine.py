@@ -6,13 +6,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from typing import Optional
 
 from astrbot.api import logger
 
-from ..engine.database import WaveMemoryDB
+try:
+    from ..domain.scope import RuntimeScope
+    from ..engine.database import WaveMemoryDB
+except ImportError:  # pragma: no cover - direct service imports in focused tests
+    from domain.scope import RuntimeScope
+    from engine.database import WaveMemoryDB
 from .llm_fallback import LLMFallbackClient
 from .identity_safety import is_identity_contamination
 
@@ -68,130 +74,169 @@ class BeliefEngine:
         self.bot_id = bot_id
         self.max_beliefs = max_beliefs
 
-    async def extract_from_summary(self, summary: str, source_memory_ids: list[int] = None) -> list[dict]:
-        """从 consolidation 摘要中提取信念。返回新增的信念列表。"""
-        if not summary or len(summary) < 20:
+    async def extract_from_summary(
+        self,
+        summary: str,
+        scope: RuntimeScope,
+        source_memory_ids: list[int] | None = None,
+    ) -> list[dict]:
+        """从同一 RuntimeScope 的 consolidation 摘要中提取 scoped pending 信念。
+
+        ``scope`` 是必填的正式运行边界。source ids 必须全部是该 scope 下已解析、
+        非隔离的 memories v2 记录；任何缺失或跨 Scope id 都会 fail closed。
+        """
+        if not isinstance(scope, RuntimeScope) or scope.visibility != "group" or scope.session is None:
+            logger.warning("[BeliefEngine] Scoped extraction rejected: RuntimeScope required")
             return []
-        if is_identity_contamination(summary):
-            logger.info("[BeliefEngine] Skip identity roleplay contaminated summary")
+        if not summary or len(summary) < 20 or is_identity_contamination(summary):
+            return []
+        if (not isinstance(source_memory_ids, list)
+                or not source_memory_ids
+                or any(isinstance(memory_id, bool) or not isinstance(memory_id, int) for memory_id in source_memory_ids)):
+            logger.warning("[BeliefEngine] Scoped extraction rejected: verified source ids required")
+            return []
+        requested_ids = list(dict.fromkeys(source_memory_ids))
+        scoped_memories = self.db.get_memories_by_ids(requested_ids, scope=scope)
+        if len(scoped_memories) != len(requested_ids):
+            logger.warning("[BeliefEngine] Scoped extraction rejected: source ids are absent or cross-scope")
             return []
 
-        # 获取已有信念作为去重参考
-        existing = self.db.get_beliefs(bot_id=self.bot_id, limit=30)
+        existing = self.db.list_scoped_beliefs(scope, limit=30)
         existing_text = "\n".join(
-            f"[ID:{b['id']}] {b['content']} (type={b['type']}, strength={b['strength']:.0%})"
-            for b in existing
+            f"[ID:{belief['id']}] {belief['content']} (type={belief['belief_type']}, strength={belief['strength']:.0%})"
+            for belief in existing
         ) or "（暂无）"
-
         prompt = EXTRACT_PROMPT.format(summary=summary[:1000], existing_beliefs=existing_text)
 
         try:
-            resp = await self.llm.text_chat(prompt=prompt)
-            text = resp.completion_text.strip()
-
-            # 解析 JSON
+            response = await self.llm.text_chat(prompt=prompt)
+            text = response.completion_text.strip()
             if text.startswith("```"):
                 text = text.split("```")[1]
                 if text.startswith("json"):
                     text = text[4:]
             beliefs_data = json.loads(text)
-
             if not isinstance(beliefs_data, list):
                 return []
 
             new_beliefs = []
-            for item in beliefs_data[:2]:  # 最多 2 条
+            for item in beliefs_data[:2]:
+                if not isinstance(item, dict):
+                    continue
                 content = item.get("content", "").strip()
                 belief_type = item.get("type", "world_view")
-                challenges = item.get("challenges", [])
-
-                if not content or len(content) < 5:
-                    continue
-                if is_identity_contamination(content):
+                if (not content or len(content) < 5 or is_identity_contamination(content)):
                     continue
                 if belief_type not in ("person_judgment", "world_view", "self_identity", "preference"):
                     belief_type = "world_view"
 
-                # 去重：检查是否已有非常相似的信念
-                if self._is_duplicate(content, existing):
-                    # 如果内容相似，强化已有信念而非新建
-                    similar = self._find_similar(content, existing)
-                    if similar:
-                        self.db.reinforce_belief(similar["id"])
-                        if source_memory_ids:
-                            for mid in source_memory_ids[:5]:
-                                self.db.add_belief_source(similar["id"], mid)
+                similar = self._find_similar(content, existing)
+                if similar:
+                    # There is no legacy reinforce/source write in the formal path.  Re-upsert
+                    # the same scoped key with a modest strength increase and verified evidence.
+                    self.db.upsert_scoped_belief(
+                        scope,
+                        belief_key=similar["belief_key"],
+                        content=similar["content"],
+                        belief_type=similar["belief_type"],
+                        strength=min(float(similar["strength"]) + 0.1, 1.0),
+                        status=similar["status"],
+                        source_memory_id=requested_ids[0] if requested_ids else None,
+                        provenance={"producer": "consolidation", "source_memory_ids": requested_ids[:10]},
+                    )
                     continue
 
-                # consolidation 摘要只能产生 legacy 待审信念；active 信念必须来自经历/关系事件涌现
-                belief_id = self.db.add_belief(
+                belief_key = hashlib.sha256(content.casefold().encode("utf-8")).hexdigest()[:32]
+                belief_id = self.db.upsert_scoped_belief(
+                    scope,
+                    belief_key=belief_key,
                     content=content,
                     belief_type=belief_type,
-                    bot_id=self.bot_id,
-                    strength=0.4,  # 初始强度较低，需要多次强化
-                    sources=source_memory_ids[:10] if source_memory_ids else [],
-                    status="pending_legacy",
+                    strength=0.4,
+                    status="pending",
+                    source_memory_id=requested_ids[0] if requested_ids else None,
+                    provenance={"producer": "consolidation", "source_memory_ids": requested_ids[:10]},
                 )
                 new_beliefs.append({"id": belief_id, "content": content, "type": belief_type})
-
-                # 处理冲突
-                for conflict_id in challenges:
-                    if isinstance(conflict_id, int):
-                        self.db.weaken_belief(conflict_id, amount=0.15)
-
-                logger.info(f"[BeliefEngine] New belief: {content[:50]}... (type={belief_type})")
-
+                existing.append({
+                    "id": belief_id,
+                    "belief_key": belief_key,
+                    "content": content,
+                    "belief_type": belief_type,
+                    "strength": 0.4,
+                    "status": "pending",
+                })
+                logger.info(f"[BeliefEngine] New scoped belief: {content[:50]}... (type={belief_type})")
             return new_beliefs
-
         except json.JSONDecodeError:
             logger.debug("[BeliefEngine] Failed to parse LLM output as JSON")
             return []
-        except Exception as e:
-            logger.debug(f"[BeliefEngine] Extract failed: {e}")
+        except Exception as exc:
+            logger.debug(f"[BeliefEngine] Scoped extract failed: {exc}")
             return []
 
-    def get_injection(self, sender_id: str = None, keywords: list[str] = None) -> str:
-        """获取与当前对话相关的信念注入文本。
+    def get_injection(
+        self,
+        scope: RuntimeScope,
+        sender_id: str | None = None,
+        keywords: list[str] | None = None,
+    ) -> str:
+        """获取当前 group RuntimeScope 内的 active 信念注入文本。
 
-        只注入 status='active' 的信念，排除 pending_legacy（LLM 摘要提取的待审信念）。
+        Scope 是正式读取边界：缺失、非 group 或没有 session 时 fail closed，
+        且只通过 ``list_scoped_beliefs`` 读取已解析的 scoped beliefs。
         """
-        beliefs = []
+        if not isinstance(scope, RuntimeScope) or scope.visibility != "group" or scope.session is None:
+            logger.warning("[BeliefEngine] Scoped injection rejected: group RuntimeScope required")
+            return ""
 
-        # 1. 自我认知（始终注入）— get_beliefs 默认 status='active'，排除 pending_legacy
-        beliefs += self.db.get_beliefs(bot_id=self.bot_id, belief_type="self_identity", limit=3)
+        # 唯一的正式信念读取：repo 依 RuntimeScope 的 bot/session/visibility 隔离。
+        active_beliefs = self.db.list_scoped_beliefs(scope, status="active")
+        beliefs: list[dict] = [
+            belief for belief in active_beliefs
+            if isinstance(belief, dict) and belief.get("status") == "active"
+        ]
 
-        # 2. 对特定人的判断
+        selected: list[dict] = []
+        # 1. 自我认知（始终注入）。
+        selected.extend(belief for belief in beliefs if belief.get("belief_type") == "self_identity")
+
+        # 2. 对特定人的判断：仅在已 scoped 的 active 集合内做本地匹配。
         if sender_id:
-            person_beliefs = self.db.search_beliefs([sender_id], bot_id=self.bot_id, limit=2)
-            beliefs += person_beliefs
+            selected.extend(
+                belief for belief in beliefs
+                if sender_id in str(belief.get("content") or "")
+            )
 
-        # 3. 与话题相关的世界观/偏好
-        if keywords:
-            topic_beliefs = self.db.search_beliefs(keywords[:3], bot_id=self.bot_id, limit=3)
-            beliefs += topic_beliefs
+        # 3. 与话题相关的世界观/偏好：同样不触发任何 legacy 查询。
+        normalized_keywords = [str(keyword).casefold() for keyword in (keywords or [])[:3] if keyword]
+        if normalized_keywords:
+            selected.extend(
+                belief for belief in beliefs
+                if any(keyword in str(belief.get("content") or "").casefold() for keyword in normalized_keywords)
+            )
 
-        # 去重 + 排除 pending_legacy（防御层：DB 层已过滤 status='active'）
+        # 去重，并保留 active 状态的防御性检查。
         seen_ids = set()
         unique_beliefs = []
-        for b in beliefs:
-            if b["id"] not in seen_ids:
-                seen_ids.add(b["id"])
-                # 只注入 active 信念，pending_legacy 不注入
-                if b.get("status") == "pending_legacy":
-                    continue
-                unique_beliefs.append(b)
+        for belief in selected:
+            belief_id = belief.get("id")
+            if belief_id in seen_ids or belief.get("status") != "active":
+                continue
+            seen_ids.add(belief_id)
+            unique_beliefs.append(belief)
 
-        # 按 strength 阈值过滤：挡掉被动摇到很低的低质信念（已批准 active 默认 0.4 仍通过）
+        # 按 strength 阈值过滤：挡掉被动摇到很低的低质信念（已批准 active 默认 0.4 仍通过）。
         _MIN_INJECT_STRENGTH = 0.35
-        unique_beliefs = [b for b in unique_beliefs if (b.get("strength") or 0) >= _MIN_INJECT_STRENGTH]
+        unique_beliefs = [belief for belief in unique_beliefs if (belief.get("strength") or 0) >= _MIN_INJECT_STRENGTH]
 
         if not unique_beliefs:
             return ""
 
         lines = ["<beliefs>"]
-        for b in unique_beliefs[:5]:
-            strength_label = "确信" if b["strength"] > 0.7 else "觉得" if b["strength"] > 0.4 else "隐约觉得"
-            lines.append(f"- {strength_label}：{b['content']}")
+        for belief in unique_beliefs[:5]:
+            strength_label = "确信" if belief["strength"] > 0.7 else "觉得" if belief["strength"] > 0.4 else "隐约觉得"
+            lines.append(f"- {strength_label}：{belief['content']}")
         lines.append("</beliefs>")
         return "\n".join(lines)
 

@@ -8,6 +8,10 @@ from collections.abc import Mapping
 from typing import Any
 
 from ...identity_safety import is_identity_contamination
+try:
+    from ....domain.scope import validate_formal_command_scope
+except ImportError:  # pragma: no cover - standalone repository tests
+    from domain.scope import validate_formal_command_scope
 from ..channel_base import InjectionResult
 from .safety import is_channel_allowed_in_mode
 
@@ -73,12 +77,21 @@ class BeliefChannel:
         if not self.belief_engine:
             return InjectionResult.empty(self.name, reason="belief engine is unavailable")
 
+        runtime_scope = getattr(ctx, "scope", None)
+        scope_decision = validate_formal_command_scope("belief.inject", runtime_scope)
+        if not scope_decision.allowed:
+            return InjectionResult.empty(
+                self.name,
+                reason=scope_decision.reason_code or "scope_rejected",
+            )
+
         try:
             bot_profile_id = getattr(ctx, "bot_profile_id", "") or getattr(ctx, "bot_id", "") or "bot"
             if hasattr(self.belief_engine, "bot_id"):
                 self.belief_engine.bot_id = bot_profile_id
             keywords = _keywords(getattr(ctx, "message", "") or "")
             text = self.belief_engine.get_injection(
+                scope=runtime_scope,
                 sender_id=getattr(ctx, "sender_id", "") or "",
                 keywords=keywords,
             ) or ""

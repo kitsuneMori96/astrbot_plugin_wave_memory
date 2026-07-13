@@ -13,6 +13,11 @@ from typing import Any, Callable, Iterable
 
 from .channel_base import InjectionResult
 
+try:
+    from ...domain.scope import RuntimeScope, ScopeCodec
+except ImportError:  # pragma: no cover - direct services imports in isolated tests
+    from domain.scope import RuntimeScope, ScopeCodec
+
 _SECRET_KEY_RE = re.compile(r"(api[_-]?key|token|secret|credential|provider)", re.I)
 _SECRET_VALUE_RE = re.compile(r"sk-[A-Za-z0-9_\-]{4,}")
 
@@ -26,6 +31,13 @@ def _num(value: Any) -> float:
 
 def _hash_text(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8", errors="ignore")).hexdigest()
+
+
+def runtime_scope_metadata(scope: Any) -> dict[str, Any]:
+    """Encode only a complete RuntimeScope for trace persistence."""
+    if not isinstance(scope, RuntimeScope):
+        return {}
+    return {"runtime_scope": ScopeCodec.to_dict(scope)}
 
 
 def _redact(value: Any) -> Any:
@@ -241,6 +253,26 @@ class InjectionTraceStore:
             "metadata_json": row[16] or "{}",
             "channels": channels,
         }
+
+    def get_for_scope(self, trace_id: str, scope: RuntimeScope) -> dict[str, Any] | None:
+        """Return a trace only when its persisted canonical RuntimeScope matches exactly.
+
+        Legacy traces did not persist a self-describing scope envelope.  They are
+        intentionally unreadable through formal tool paths instead of rebuilding
+        a scope from their old ``group_id``/``bot_id`` columns.
+        """
+        if not isinstance(scope, RuntimeScope):
+            return None
+        trace = self.get(trace_id)
+        if trace is None:
+            return None
+        try:
+            metadata = json.loads(trace.get("metadata_json") or "{}")
+            encoded_scope = metadata.get("runtime_scope") if isinstance(metadata, dict) else None
+            stored_scope = ScopeCodec.from_dict(encoded_scope)
+        except Exception:
+            return None
+        return trace if isinstance(stored_scope, RuntimeScope) and stored_scope == scope else None
 
     def _load_channels(self, trace_id: str) -> list[dict[str, Any]]:
         rows = self.conn.execute(

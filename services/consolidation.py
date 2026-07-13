@@ -1,4 +1,8 @@
-"""Wave Memory 记忆整合服务 — 定时 LLM 摘要，碎片消息 → 结构化知识"""
+"""Wave Memory scoped consolidation service.
+
+Only resolved, non-quarantined memories v2 records may enter this pipeline.  All
+outputs are written through WaveMemoryDB's scoped derived-knowledge facade.
+"""
 
 from __future__ import annotations
 
@@ -10,8 +14,14 @@ from typing import Optional
 
 from astrbot.api import logger
 
-from ..engine.database import WaveMemoryDB
-from ..engine.fact_classifier import classify_fact
+try:
+    from ..domain.scope import RuntimeScope, SessionRef
+    from ..engine.database import WaveMemoryDB
+    from ..engine.fact_classifier import classify_fact
+except ImportError:  # pragma: no cover - direct service imports in focused tests
+    from domain.scope import RuntimeScope, SessionRef
+    from engine.database import WaveMemoryDB
+    from engine.fact_classifier import classify_fact
 from .identity_safety import is_identity_contamination
 
 
@@ -27,39 +37,26 @@ CONSOLIDATION_PROMPT = """从以下群聊消息中提取结构化知识。
 {{
   "summary": "一句话概括这段对话的核心内容",
   "topics": ["话题1", "话题2"],
-  "facts": [
-    {{"subject": "人名或事物", "predicate": "动作或关系", "object": "对象或属性"}},
-    {{"subject": "人名", "predicate": "是/喜欢/说了/使用/计划/纠正/反对", "object": "具体内容"}}
-  ],
-  "relations": [
-    {{"source": "人物或话题", "target": "人物/话题/事物", "type": "关系类型"}}
-  ],
-  "social": [
-    {{"person_a": "人名A", "person_b": "人名B", "relation": "朋友/互怼/师徒/情侣/对立/合作/认识"}}
-  ],
-  "nicknames": [
-    {{"person": "QQ号或当前昵称", "called": "群友给的绰号或别称"}}
-  ]
+  "facts": [{{"subject": "人名或事物", "predicate": "动作或关系", "object": "对象或属性"}}],
+  "relations": [{{"source": "人物或话题", "target": "人物/话题/事物", "type": "关系类型"}}],
+  "social": [{{"person_a": "人名A", "person_b": "人名B", "relation": "朋友/互怼/师徒/情侣/对立/合作/认识"}}],
+  "nicknames": [{{"person": "QQ号或当前昵称", "called": "群友给的绰号或别称"}}]
 }}
 
 规则：
 - topics 最多 3 个，用简短名词短语
 - facts 最多 5 个，必须是三元组格式，subject 必须包含具体人名
-- predicate 尽量用动词短语（说了/认为/使用/计划/纠正/反对/创作/持有/发现/决定）
-- relations 描述 topics/人物 之间的关联，最多 4 条
-- type 从以下选择：discusses（讨论）、mentions（提及）、decides（决策）、supports（支持/认同）、opposes（反对/不认同）、reacts_to（情绪反应）、creates（创作/制作）、uses（使用/采用）、knows（了解/知道）、relates_to（关联-兜底）
-- social 描述对话中体现的人际关系（最多 2 条，没有则留空数组）
-- nicknames 提取对话中出现的绰号/别称（如"以后叫他北老师"、"xxx就是yyy"），最多 3 条，没有则留空数组
+- relations 最多 4 条；type 从 discusses、mentions、decides、supports、opposes、reacts_to、creates、uses、knows、relates_to 中选择
+- social 最多 2 条，nicknames 最多 3 条；没有则留空数组
 - 如果对话是无意义灌水，summary 写"日常灌水"，其他字段留空数组
 - 直接输出 JSON，不要 markdown 代码块"""
 
+_CURSOR_NAME = "messages_v2_id"
+_EXCLUDED_SENDERS = ("bot_self", "angel_memory_import", "livingmemory_import", "legacy_import")
+
 
 class ConsolidationService:
-    """记忆整合服务：定时把碎片消息压缩成结构化知识。
-
-    调度：每 4 小时执行一次。
-    输出：tag_relations 表 + memories.summary 字段。
-    """
+    """按完整 RuntimeScope 独立整合 memories v2 消息。"""
 
     def __init__(
         self,
@@ -84,20 +81,16 @@ class ConsolidationService:
         self._bot_identifiers: set = bot_identifiers or set()
         self._task: Optional[asyncio.Task] = None
         self._running = False
-        self._last_consolidated_ts: float = 0
 
-    def start(self):
+    def start(self, supervisor=None):
         self._running = True
-        row = self.db.conn.execute(
-            "SELECT value FROM kv_store WHERE key = 'last_consolidation_ts'"
-        ).fetchone()
-        if row:
-            try:
-                self._last_consolidated_ts = float(row[0])
-            except (ValueError, TypeError):
-                pass
-        self._task = asyncio.create_task(self._loop())
-        logger.info("[WaveMemory] ConsolidationService started")
+        if supervisor is None:
+            self._task = asyncio.create_task(self._loop())
+        else:
+            self._task = supervisor.start(
+                "wave-memory:consolidation", self._loop(), owner="consolidation"
+            )
+        logger.info("[WaveMemory] ConsolidationService started (scoped v2)")
 
     def stop(self):
         self._running = False
@@ -105,7 +98,6 @@ class ConsolidationService:
             self._task.cancel()
 
     async def _loop(self):
-        # 首次启动等 5 分钟（让其他服务先初始化）
         await asyncio.sleep(300)
         while self._running:
             try:
@@ -113,481 +105,259 @@ class ConsolidationService:
                 await asyncio.sleep(self.interval)
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                logger.warning(f"[WaveMemory] Consolidation error: {e}")
+            except Exception as exc:
+                logger.warning(f"[WaveMemory] Consolidation error: {exc}")
                 await asyncio.sleep(300)
 
     async def consolidate_once(self) -> dict:
-        """执行一次整合。"""
+        """Enumerate only complete resolved v2 group scopes and process each cursor."""
         if not self.provider_id or not self.context:
             logger.debug("[WaveMemory] Consolidation skipped: no LLM provider")
             return {"status": "skipped"}
 
-        now = time.time()
-        since = self._last_consolidated_ts or (now - self.interval)
-
-        # 按 group_id 分组
-        def _fetch_groups():
-            return self.db.conn.execute(
-                """SELECT DISTINCT group_id FROM memories
-                   WHERE timestamp > ? AND memory_type = 'message'
-                     AND sender_id NOT IN ('bot_self', 'angel_memory_import', 'livingmemory_import', 'legacy_import')""",
-                (since,),
-            ).fetchall()
-
-        groups = await asyncio.to_thread(_fetch_groups)
-
-        total_consolidated = 0
-        total_relations = 0
-
-        for (group_id,) in groups:
+        scopes = await asyncio.to_thread(self._list_memory_scopes)
+        total_messages = total_relations = 0
+        for scope in scopes:
             try:
-                result = await self._consolidate_group(group_id, since, now)
-                total_consolidated += result.get("messages", 0)
+                result = await self._consolidate_scope(scope)
+                total_messages += result.get("messages", 0)
                 total_relations += result.get("relations", 0)
-            except Exception as e:
-                logger.warning(f"[WaveMemory] Consolidation failed for group {group_id}: {e}")
+            except Exception as exc:
+                logger.warning(
+                    "[WaveMemory] Consolidation failed for scope %s/%s: %s",
+                    scope.bot_id,
+                    scope.session.id if scope.session else "missing-session",
+                    exc,
+                )
 
-        # 记录时间
-        self._last_consolidated_ts = now
-        def _save_ts():
-            self.db.conn.execute(
-                "INSERT OR REPLACE INTO kv_store (key, value) VALUES ('last_consolidation_ts', ?)",
-                (str(now),),
-            )
-            self.db.conn.commit()
-        await asyncio.to_thread(_save_ts)
-
-        if total_consolidated > 0:
+        if total_messages:
             logger.info(
-                f"[WaveMemory] Consolidation done: {total_consolidated} messages, "
-                f"{total_relations} relations, {len(groups)} groups"
+                "[WaveMemory] Scoped consolidation done: %s messages, %s relations, %s scopes",
+                total_messages,
+                total_relations,
+                len(scopes),
             )
+        return {"messages": total_messages, "relations": total_relations, "groups": len(scopes)}
 
-        return {
-            "messages": total_consolidated,
-            "relations": total_relations,
-            "groups": len(groups),
-        }
+    def _list_memory_scopes(self) -> list[RuntimeScope]:
+        """Build RuntimeScope values from complete v2 tuples; malformed rows fail closed."""
+        rows = self.db.conn.execute(
+            """SELECT DISTINCT bot_id, session_id, visibility, group_id
+                 FROM memories
+                WHERE memory_type='message' AND content IS NOT NULL
+                  AND bot_id IS NOT NULL AND session_id IS NOT NULL AND visibility='group'
+                  AND resolution_state='resolved' AND quarantine=0"""
+        ).fetchall()
+        scopes: list[RuntimeScope] = []
+        for bot_id, session_id, visibility, group_id in rows:
+            try:
+                platform_id, kind, conversation_id = session_id.split(":", 2)
+                if group_id != conversation_id:
+                    raise ValueError("group_id does not match canonical session")
+                scopes.append(RuntimeScope(
+                    bot_id=bot_id,
+                    visibility=visibility,
+                    session=SessionRef(
+                        id=session_id,
+                        platform_id=platform_id,
+                        kind=kind,
+                        conversation_id=conversation_id,
+                    ),
+                ))
+            except Exception as exc:
+                logger.warning("[WaveMemory] Skip unresolved/invalid consolidation scope: %s", exc)
+        return scopes
 
-    async def _consolidate_group(self, group_id: str, since: float, until: float) -> dict:
-        """整合一个群的消息。"""
-        def _fetch_messages():
-            return self.db.conn.execute(
-                """SELECT id, sender_name, sender_id, content, timestamp
-                   FROM memories
-                   WHERE group_id = ? AND timestamp BETWEEN ? AND ?
-                     AND memory_type = 'message' AND content IS NOT NULL
-                   ORDER BY timestamp ASC
-                   LIMIT ?""",
-                (group_id, since, until, self.batch_size),
-            ).fetchall()
+    async def _consolidate_scope(self, scope: RuntimeScope) -> dict:
+        """Consolidate one exact Scope tuple, advancing only its own cursor on success."""
+        if not isinstance(scope, RuntimeScope) or scope.visibility != "group" or scope.session is None:
+            return {"messages": 0, "relations": 0}
+        raw_cursor = self.db.get_scoped_consolidation_cursor(scope, cursor_name=_CURSOR_NAME)
+        try:
+            cursor = int(raw_cursor) if raw_cursor is not None else 0
+        except (TypeError, ValueError):
+            logger.warning("[WaveMemory] Invalid scoped consolidation cursor; refusing scope")
+            return {"messages": 0, "relations": 0}
 
-        messages = await asyncio.to_thread(_fetch_messages)
-
+        messages = await asyncio.to_thread(self._fetch_messages, scope, cursor)
         if len(messages) < 5:
             return {"messages": 0, "relations": 0}
 
-        # 格式化对话文本
-        conversation_lines = []
-        msg_ids = []
-        for mid, sender_name, sender_id, content, ts in messages:
-            time_str = time.strftime("%H:%M", time.localtime(ts))
-            name = sender_name or sender_id or "unknown"
-            conversation_lines.append(f"[{name}({sender_id}) {time_str}] {content[:200]}")
-            msg_ids.append(mid)
+        conversation_lines, message_ids = [], []
+        for memory_id, sender_name, sender_id, content, timestamp in messages:
+            time_text = time.strftime("%H:%M", time.localtime(timestamp))
+            conversation_lines.append(f"[{sender_name or sender_id or 'unknown'}({sender_id}) {time_text}] {content[:200]}")
+            message_ids.append(memory_id)
 
-        conversation_text = "\n".join(conversation_lines)
-
-        # 调用 LLM
         provider = self.context.get_provider_by_id(self.provider_id)
         if not provider:
             return {"messages": 0, "relations": 0}
-
-        prompt = CONSOLIDATION_PROMPT.replace("{conversation}", conversation_text)
-
         response = await provider.text_chat(
-            prompt=prompt,
+            prompt=CONSOLIDATION_PROMPT.replace("{conversation}", "\n".join(conversation_lines)),
             system_prompt="你是记忆整合系统，只输出 JSON。",
         )
-
         if not response or not response.completion_text:
             return {"messages": 0, "relations": 0}
-
-        # 解析 JSON
         structured = self._parse_response(response.completion_text)
         if not structured:
             return {"messages": 0, "relations": 0}
 
         summary = structured.get("summary", "")
-        topics = structured.get("topics", [])
         facts = structured.get("facts", [])
+        topics = structured.get("topics", [])
         relations = structured.get("relations", [])
-        social = structured.get("social", [])
-
-        # 跳过灌水
-        if summary == "日常灌水" and not facts:
-            await asyncio.to_thread(self._write_summary, msg_ids, summary)
-            return {"messages": len(msg_ids), "relations": 0}
-
-        # 写入 tag_relations（在线程中执行，不阻塞事件循环）
-        relations_written = await asyncio.to_thread(self._write_relations, topics, facts, relations)
-
-        # 写入人际关系到 facts（关系自动发现）
-        def _write_social():
-            written = 0
-            for sr in (social or [])[:3]:
-                a = sr.get("person_a", "").strip()
-                b = sr.get("person_b", "").strip()
-                rel = sr.get("relation", "").strip()
-                if a and b and rel:
-                    if is_identity_contamination(f"{a} {rel} {b}"):
-                        continue
-                    try:
-                        self.db.insert_fact(a, rel, b, group_id=group_id, confidence=0.7)
-                        written += 1
-                    except Exception:
-                        pass
-            return written
-
-        social_written = await asyncio.to_thread(_write_social)
-        if social:
-            logger.info(f"[Consolidation] social 提取: raw={len(social)} written={social_written} | {social}")
-        elif facts:
-            # 有 facts 但没 social → prompt 可能需要调整
-            logger.debug(f"[Consolidation] social 为空（有 {len(facts)} 个 facts），prompt 可能未触发 social 提取")
-
-        # v1.3.0: 绰号/别称提取 (D-7)
-        nicknames = structured.get("nicknames", [])
-        def _write_nicknames():
-            written = 0
-            for nn in (nicknames or [])[:3]:
-                person = nn.get("person", "").strip()
-                called = nn.get("called", "").strip()
-                if person and called and len(called) >= 2:
-                    if is_identity_contamination(f"{person} 被称为 {called}"):
-                        continue
-                    try:
-                        self.db.insert_fact(person, "被称为", called, group_id=group_id, confidence=0.8)
-                        self._add_alias(person, called)
-                        written += 1
-                    except Exception:
-                        pass
-            return written
-
-        nicknames_written = await asyncio.to_thread(_write_nicknames)
-        if nicknames_written:
-            logger.info(f"[Consolidation] 绰号提取: {nicknames_written} 条 | {nicknames}")
-
-        # 写入 facts 三元组
-        facts_written = await asyncio.to_thread(self._write_facts, facts, group_id, msg_ids[0] if msg_ids else None)
-
-        # 写入 summary
-        await asyncio.to_thread(self._write_summary, msg_ids, summary)
-
-        # 回写 topics 到 memory_tags（让每条消息获得段落级话题标签）
+        relations_written = await asyncio.to_thread(
+            self._write_relations, scope, topics, facts, relations,
+        )
+        facts_written = await asyncio.to_thread(
+            self._write_facts, scope, facts, message_ids[0],
+        )
+        social = [
+            {"subject": item.get("person_a", ""), "predicate": item.get("relation", ""), "object": item.get("person_b", "")}
+            for item in (structured.get("social") or [])[:3]
+            if isinstance(item, dict)
+        ]
+        nickname_facts = [
+            {"subject": item.get("person", ""), "predicate": "被称为", "object": item.get("called", "")}
+            for item in (structured.get("nicknames") or [])[:3]
+            if isinstance(item, dict)
+        ]
+        facts_written += await asyncio.to_thread(self._write_facts, scope, social + nickname_facts, message_ids[0])
         if self.topic_backfill:
-            await asyncio.to_thread(self._backfill_topic_tags, msg_ids, topics)
+            await asyncio.to_thread(self._backfill_topic_tags, scope, message_ids, topics)
 
-        # 信念提取：从摘要中提取稳定判断
         if self.belief_engine and summary and summary != "日常灌水":
             try:
                 full_text = f"{summary}\n事实: {json.dumps(facts, ensure_ascii=False)}" if facts else summary
-                new_b = await self.belief_engine.extract_from_summary(full_text, source_memory_ids=msg_ids[:5])
-                logger.info(f"[Consolidation] 信念提取: summary={summary[:30]!r} → {len(new_b or [])} 条新信念")
-            except Exception as e:
-                logger.warning(f"[Consolidation] Belief extraction failed: {e}")
-        else:
-            logger.info(f"[Consolidation] 跳过信念提取: belief_engine={bool(self.belief_engine)} summary={summary[:20]!r}")
+                beliefs = await self.belief_engine.extract_from_summary(
+                    full_text, scope, source_memory_ids=message_ids[:5],
+                )
+                logger.info("[Consolidation] Scoped belief extraction: %s new beliefs", len(beliefs or []))
+            except Exception as exc:
+                logger.warning(f"[Consolidation] Scoped belief extraction failed: {exc}")
 
-        return {"messages": len(msg_ids), "relations": relations_written, "facts": facts_written}
+        # This is deliberately the final operation: failed LLM/output work is retried.
+        self.db.advance_scoped_consolidation_cursor(
+            scope, cursor_name=_CURSOR_NAME, cursor_value=str(message_ids[-1]),
+        )
+        return {"messages": len(message_ids), "relations": relations_written, "facts": facts_written}
+
+    def _fetch_messages(self, scope: RuntimeScope, cursor: int) -> list:
+        """Read only records exactly matching the resolved Scope tuple."""
+        return self.db.conn.execute(
+            """SELECT id, sender_name, sender_id, content, timestamp
+                 FROM memories
+                WHERE id > ? AND group_id=? AND bot_id=? AND session_id=? AND visibility=?
+                  AND resolution_state='resolved' AND quarantine=0
+                  AND memory_type='message' AND content IS NOT NULL
+                  AND sender_id NOT IN (?, ?, ?, ?)
+                ORDER BY id ASC LIMIT ?""",
+            (cursor, scope.session.conversation_id, scope.bot_id, scope.session.id, scope.visibility,
+             *_EXCLUDED_SENDERS, self.batch_size),
+        ).fetchall()
+
+    # Kept as a fail-closed compatibility hook for callers that have not been moved to RuntimeScope.
+    async def _consolidate_group(self, group_id: str, *args, **kwargs) -> dict:
+        logger.warning("[WaveMemory] Legacy group-only consolidation rejected: %r", group_id)
+        return {"messages": 0, "relations": 0}
 
     def _parse_response(self, text: str) -> Optional[dict]:
-        """解析 LLM 返回的 JSON。"""
-        # 去掉 markdown 代码块
         text = text.strip()
         if text.startswith("```"):
             text = re.sub(r"^```(?:json)?\s*", "", text)
             text = re.sub(r"\s*```$", "", text)
-
         try:
-            return json.loads(text)
+            value = json.loads(text)
         except json.JSONDecodeError:
-            # 尝试提取 JSON 部分
             match = re.search(r"\{[\s\S]*\}", text)
-            if match:
-                try:
-                    return json.loads(match.group())
-                except json.JSONDecodeError:
-                    pass
-            logger.debug(f"[WaveMemory] Consolidation JSON parse failed: {text[:200]}")
-            return None
-
-    def _write_relations(self, topics: list, facts: list, relations: list) -> int:
-        """将结构化关系写入 tag_relations 表。"""
-        now = time.time()
-        written = 0
-
-        # 确保 topics 和 facts 作为 tag 存在
-        tag_cache = {}  # name -> tag_id
-
-        for topic in topics:
-            if not topic:
-                continue
-            tag_id = self._ensure_tag(topic, "topic")
-            if tag_id:
-                tag_cache[topic] = tag_id
-
-        for fact in facts:
-            if not fact:
-                continue
-            # 兼容新格式（dict）和旧格式（str）
-            if isinstance(fact, dict):
-                fact_text = fact.get("subject", "") + fact.get("predicate", "") + fact.get("object", "")
-            else:
-                fact_text = str(fact)
-            if not fact_text:
-                continue
-            tag_id = self._ensure_tag(fact_text[:100], "fact")
-            if tag_id:
-                tag_cache[fact_text[:100]] = tag_id
-
-        # 写入 relations
-        for rel in relations:
-            source_name = rel.get("source", "")
-            target_name = rel.get("target", "")
-            rel_type = rel.get("type", "discusses")
-
-            if not source_name or not target_name:
-                continue
-
-            source_id = tag_cache.get(source_name) or self._find_tag(source_name)
-            target_id = tag_cache.get(target_name) or self._find_tag(target_name)
-
-            if not source_id or not target_id:
-                continue
-
-            # 写入或更新 tag_relations
-            existing = self.db.conn.execute(
-                """SELECT id, weight FROM tag_relations
-                   WHERE source_tag_id = ? AND target_tag_id = ? AND relation_type = ?""",
-                (source_id, target_id, rel_type),
-            ).fetchone()
-
-            if existing:
-                # 增加权重
-                self.db.conn.execute(
-                    "UPDATE tag_relations SET weight = weight + 1.0, confidence = MIN(confidence + 0.05, 1.0) WHERE id = ?",
-                    (existing[0],),
-                )
-            else:
-                self.db.conn.execute(
-                    """INSERT INTO tag_relations (source_tag_id, target_tag_id, relation_type, weight, confidence, metadata, created_at)
-                       VALUES (?, ?, ?, 1.0, 0.7, '{}', ?)""",
-                    (source_id, target_id, rel_type, now),
-                )
-            written += 1
-
-        self.db.conn.commit()
-        return written
-
-    def _ensure_tag(self, name: str, tag_type: str) -> Optional[int]:
-        """确保 tag 存在，返回 tag_id。"""
-        name = name.strip()[:100]
-        if not name:
-            return None
-
-        # tags.name 有 UNIQUE 约束，先按 name 查（不限 tag_type）
-        row = self.db.conn.execute(
-            "SELECT id FROM tags WHERE name = ?",
-            (name,),
-        ).fetchone()
-
-        if row:
-            return row[0]
-
-        # 创建新 tag（INSERT OR IGNORE 防止并发冲突）
-        self.db.conn.execute(
-            "INSERT OR IGNORE INTO tags (name, tag_type, frequency, created_at) VALUES (?, ?, 1, ?)",
-            (name, tag_type, time.time()),
-        )
-        row = self.db.conn.execute(
-            "SELECT id FROM tags WHERE name = ?", (name,)
-        ).fetchone()
-        return row[0] if row else None
-
-    def _find_tag(self, name: str) -> Optional[int]:
-        """查找 tag（先精确匹配，再前缀匹配）。"""
-        name = name.strip()
-        if not name:
-            return None
-
-        row = self.db.conn.execute(
-            "SELECT id FROM tags WHERE name = ?", (name,)
-        ).fetchone()
-        if row:
-            return row[0]
-
-        # 前缀匹配（避免全表 LIKE 扫描）
-        row = self.db.conn.execute(
-            "SELECT id FROM tags WHERE name LIKE ? LIMIT 1", (f"{name}%",)
-        ).fetchone()
-        return row[0] if row else None
-
-    def _add_alias(self, person: str, alias: str):
-        """将绰号添加到 person_registry 的 aliases 字段。
-        
-        person 可以是 QQ 号或昵称。如果是昵称则尝试在 person_registry 中匹配。
-        """
-        try:
-            # 先尝试用 QQ 号精确匹配
-            row = self.db.conn.execute(
-                "SELECT qq_id, aliases FROM person_registry WHERE qq_id = ?",
-                (person,),
-            ).fetchone()
-
-            # 如果没匹配到，尝试用昵称匹配（aliases 或 display_name 包含 person）
-            if not row:
-                row = self.db.conn.execute(
-                    "SELECT qq_id, aliases FROM person_registry WHERE display_name = ? OR aliases LIKE ?",
-                    (person, f'%"{person}"%'),
-                ).fetchone()
-
-            if not row:
-                # 没找到对应的人，跳过
-                return
-
-            qq_id = row[0]
-            existing_aliases = json.loads(row[1]) if row[1] else []
-            if alias not in existing_aliases:
-                existing_aliases.append(alias)
-                self.db.conn.execute(
-                    "UPDATE person_registry SET aliases = ? WHERE qq_id = ?",
-                    (json.dumps(existing_aliases, ensure_ascii=False), qq_id),
-                )
-                self.db.conn.commit()
-                logger.debug(f"[Consolidation] 绰号写入 person_registry: {qq_id} += '{alias}'")
-        except Exception as e:
-            logger.debug(f"[Consolidation] _add_alias error: {e}")
-
-    def _resolve_to_qq(self, name: str) -> str:
-        """将昵称/别名解析为 QQ 号。解析不到则返回原值。"""
-        import re as _re
-        # 已经是纯 QQ 号
-        if _re.match(r'^\d{5,12}$', name.strip()):
-            return name.strip()
-        # 格式 "昵称(QQ号)"
-        m = _re.search(r'\((\d{5,12})\)', name)
-        if m:
-            return m.group(1)
-        # 从 person_registry 匹配
-        try:
-            row = self.db.conn.execute(
-                "SELECT qq_id FROM person_registry WHERE display_name = ? OR aliases LIKE ?",
-                (name.strip(), f'%"{name.strip()}"%'),
-            ).fetchone()
-            if row:
-                return row[0]
-        except Exception:
-            pass
-        return name
-
-    def _write_facts(self, facts: list, group_id: str, source_memory_id: int = None) -> int:
-        """将 facts 写入 facts 三元组表。
-
-        兼容两种格式：
-        - 新格式: [{"subject": "...", "predicate": "...", "object": "..."}]
-        - 旧格式: ["陈述句字符串"] — 尝试简单解析
-        """
-        written = 0
-        for fact in facts:
-            if not fact:
-                continue
-
-            if isinstance(fact, dict):
-                subject = fact.get("subject", "").strip()
-                predicate = fact.get("predicate", "").strip()
-                obj = fact.get("object", "").strip()
-            elif isinstance(fact, str):
-                # 旧格式兼容：尝试拆分 "A是B" / "A喜欢B"
-                parts = re.split(r"(是|喜欢|认为|说了|决定|提到|觉得|想要|正在|已经)", fact, maxsplit=1)
-                if len(parts) == 3:
-                    subject, predicate, obj = parts[0].strip(), parts[1].strip(), parts[2].strip()
-                else:
-                    # 无法解析，跳过
-                    continue
-            else:
-                continue
-
-            if not subject or not predicate or not obj:
-                continue
-            if len(subject) > 50 or len(obj) > 200:
-                continue
-            if is_identity_contamination(f"{subject} {predicate} {obj}"):
-                continue
-
-            # v2.0: subject 映射为 QQ 号（统一身份）
-            subject = self._resolve_to_qq(subject)
-
-            # 排除 bot 自己作为 subject — bot 说的话不是"关于 bot 的事实"
-            if self._bot_identifiers and subject in self._bot_identifiers:
-                logger.debug(f"[Consolidation] Skip bot self-fact: {subject}")
-                continue
-
-            # 分类 fact 类型（决定衰减速率）
-            fact_type = classify_fact(subject, predicate, obj)
-
+            if not match:
+                return None
             try:
-                self.db.insert_fact(
-                    subject=subject,
-                    predicate=predicate,
-                    obj=obj,
-                    group_id=group_id,
-                    source_memory_id=source_memory_id,
-                    fact_type=fact_type,
+                value = json.loads(match.group())
+            except json.JSONDecodeError:
+                return None
+        return value if isinstance(value, dict) else None
+
+    def _write_relations(self, scope: RuntimeScope, topics: list, facts: list, relations: list) -> int:
+        """Write scoped tags and tag relations; no legacy tag table is touched."""
+        tags: dict[str, int] = {}
+
+        def ensure(name: str, tag_type: str) -> int | None:
+            name = name.strip()[:100] if isinstance(name, str) else ""
+            if not name:
+                return None
+            tag_id = self.db.upsert_scoped_tag(
+                scope, name=name, tag_type=tag_type, confidence=0.7,
+                metadata={"producer": "consolidation"},
+            )
+            tags[name] = tag_id
+            return tag_id
+
+        for topic in topics or []:
+            ensure(topic, "topic")
+        for fact in facts or []:
+            text = (
+                f"{fact.get('subject', '')}{fact.get('predicate', '')}{fact.get('object', '')}"
+                if isinstance(fact, dict) else str(fact)
+            )
+            ensure(text, "fact")
+
+        written = 0
+        for relation in (relations or [])[:4]:
+            if not isinstance(relation, dict):
+                continue
+            source, target = relation.get("source", ""), relation.get("target", "")
+            relation_type = relation.get("type", "discusses")
+            if not isinstance(source, str) or not isinstance(target, str) or not isinstance(relation_type, str):
+                continue
+            source_id = tags.get(source) or ensure(source, "entity")
+            target_id = tags.get(target) or ensure(target, "entity")
+            if source_id and target_id:
+                self.db.upsert_scoped_tag_relation(
+                    scope, source_tag_id=source_id, target_tag_id=target_id,
+                    relation_type=relation_type, weight=1.0, confidence=0.7,
+                    metadata={"producer": "consolidation"},
                 )
                 written += 1
-            except Exception:
-                pass
-
         return written
 
-    def _write_summary(self, msg_ids: list[int], summary: str):
-        """批量写入 summary 到 memories 表。"""
-        if not msg_ids or not summary:
-            return
-
-        placeholders = ",".join("?" * len(msg_ids))
-        self.db.conn.execute(
-            f"UPDATE memories SET summary = ? WHERE id IN ({placeholders})",
-            [summary] + msg_ids,
-        )
-        self.db.conn.commit()
-
-    def _backfill_topic_tags(self, msg_ids: list[int], topics: list[str]):
-        """将 consolidation 提取的 topics 回写到 memory_tags，让每条消息获得段落级话题标签。"""
-        if not msg_ids or not topics:
-            return
-
-        topic_tag_ids = []
-        for topic in topics:
-            if not topic or len(topic.strip()) < 2:
+    def _write_facts(self, scope: RuntimeScope, facts: list, source_memory_id: int) -> int:
+        """Write fact triples through the scoped facade only."""
+        written = 0
+        for fact in facts or []:
+            if isinstance(fact, dict):
+                subject = str(fact.get("subject", "")).strip()
+                predicate = str(fact.get("predicate", "")).strip()
+                obj = str(fact.get("object", "")).strip()
+            elif isinstance(fact, str):
+                parts = re.split(r"(是|喜欢|认为|说了|决定|提到|觉得|想要|正在|已经)", fact, maxsplit=1)
+                if len(parts) != 3:
+                    continue
+                subject, predicate, obj = (part.strip() for part in parts)
+            else:
                 continue
-            if topic.strip() in self.skip_topics:
+            if (not subject or not predicate or not obj or len(subject) > 50 or len(obj) > 200
+                    or is_identity_contamination(f"{subject} {predicate} {obj}")
+                    or (self._bot_identifiers and subject in self._bot_identifiers)):
                 continue
-            tag_id = self._ensure_tag(topic.strip(), "topic")
-            if tag_id:
-                topic_tag_ids.append(tag_id)
+            self.db.upsert_scoped_fact(
+                scope, subject=subject, predicate=predicate, object=obj,
+                confidence=0.7, status="pending", source_memory_id=source_memory_id,
+                provenance={"producer": "consolidation", "fact_type": classify_fact(subject, predicate, obj)},
+            )
+            written += 1
+        return written
 
-        if not topic_tag_ids:
-            return
-
-        # 为每条消息关联这些 topic tag（INSERT OR IGNORE 避免重复）
-        for mem_id in msg_ids:
-            for pos, tag_id in enumerate(topic_tag_ids, 1):
-                self.db.conn.execute(
-                    "INSERT OR IGNORE INTO memory_tags (memory_id, tag_id, position, relevance) VALUES (?, ?, ?, ?)",
-                    (mem_id, tag_id, 100 + pos, 0.6),  # position 100+ 表示来自 consolidation，relevance 0.6 低于实时提取
+    def _backfill_topic_tags(self, scope: RuntimeScope, memory_ids: list[int], topics: list[str]) -> None:
+        """Link v2 messages to same-scope tags via the scoped facade."""
+        for topic in topics or []:
+            if not isinstance(topic, str) or len(topic.strip()) < 2 or topic.strip() in self.skip_topics:
+                continue
+            tag_id = self.db.upsert_scoped_tag(
+                scope, name=topic.strip(), tag_type="topic", confidence=0.7,
+                metadata={"producer": "consolidation"},
+            )
+            for position, memory_id in enumerate(memory_ids, 1):
+                self.db.link_scoped_memory_tag(
+                    scope, memory_id=memory_id, tag_id=tag_id, position=100 + position, relevance=0.6,
                 )
-
-        self.db.conn.commit()

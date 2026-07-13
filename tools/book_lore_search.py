@@ -17,6 +17,13 @@ from astrbot.core.agent.tool import FunctionTool
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.astr_agent_context import AstrAgentContext
 
+try:
+    from ..domain.scope import CatalogScope
+    from .scope_boundary import require_catalog_scope, scope_error_message
+except ImportError:  # pragma: no cover - direct tools imports in isolated tests
+    from domain.scope import CatalogScope
+    from tools.scope_boundary import require_catalog_scope, scope_error_message
+
 
 @dataclass
 class BookLoreSearchTool(FunctionTool[AstrAgentContext]):
@@ -53,8 +60,12 @@ class BookLoreSearchTool(FunctionTool[AstrAgentContext]):
     embedding_service: Any = field(default=None, repr=False)
     db: Any = field(default=None, repr=False)
     lore_db_path: str = field(default="", repr=False)
+    catalog_scope: CatalogScope | None = field(default=None, repr=False)
 
     async def call(self, ctx: ContextWrapper[AstrAgentContext], **kwargs) -> str:
+        _, error_code = require_catalog_scope(self.catalog_scope, "catalog.read")
+        if error_code:
+            return scope_error_message("书设检索", error_code)
         query = kwargs.get("query", "").strip()
         type_filter = kwargs.get("type_filter", "")
         limit = int(kwargs.get("limit", 5))
@@ -164,8 +175,12 @@ class BookLoreGraphTool(FunctionTool[AstrAgentContext]):
 
     db: Any = field(default=None, repr=False)
     lore_db_path: str = field(default="", repr=False)
+    catalog_scope: CatalogScope | None = field(default=None, repr=False)
 
     async def call(self, ctx: ContextWrapper[AstrAgentContext], **kwargs) -> str:
+        _, error_code = require_catalog_scope(self.catalog_scope, "catalog.read")
+        if error_code:
+            return scope_error_message("书设图谱查询", error_code)
         entity_name = kwargs.get("entity_name", "").strip()
         depth = int(kwargs.get("depth", 2))
 

@@ -1,50 +1,28 @@
-"""BookLoreRepo — book_entities / book_relations / book_communities"""
+"""WaveMemory 主库中的 legacy BookLore 边界。
+
+真实 BookLore 位于独立 SQLite，由 ``ExternalBookLoreStore`` 只读访问。主库 Facade
+初始化此兼容对象时不得创建同名表，也不得把 catalog 内容写回主库。
+"""
 
 from __future__ import annotations
-
-import time
-from typing import Optional
 
 from .connection import ConnectionManager
 
 
+class BookLoreWriteForbidden(RuntimeError):
+    """禁止通过旧主库 repository 写入 raw BookLore。"""
+
+
 class BookLoreRepo:
-    """书籍知识图谱仓库（预留）。"""
+    """已冻结的 legacy 兼容壳；不会隐式建表或写入。"""
 
     def __init__(self, cm: ConnectionManager):
         self.cm = cm
-        self._create_tables()
 
-    def _create_tables(self):
-        self.cm.executescript("""
-            CREATE TABLE IF NOT EXISTS book_entities (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                entity_type TEXT DEFAULT 'concept',
-                description TEXT,
-                source_book TEXT,
-                vector BLOB,
-                created_at REAL
-            );
+    def upsert_community(self, **kwargs) -> int:
+        raise BookLoreWriteForbidden(
+            "external_book_lore_is_readonly; use reviewed catalog projection/promotion boundary"
+        )
 
-            CREATE TABLE IF NOT EXISTS book_relations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source_id INTEGER NOT NULL,
-                target_id INTEGER NOT NULL,
-                relation_type TEXT NOT NULL,
-                weight REAL DEFAULT 1.0,
-                context TEXT,
-                created_at REAL,
-                FOREIGN KEY (source_id) REFERENCES book_entities(id) ON DELETE CASCADE,
-                FOREIGN KEY (target_id) REFERENCES book_entities(id) ON DELETE CASCADE
-            );
 
-            CREATE TABLE IF NOT EXISTS book_communities (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT,
-                entity_ids TEXT,
-                summary TEXT,
-                created_at REAL
-            );
-        """)
-        self.cm.commit()
+__all__ = ["BookLoreRepo", "BookLoreWriteForbidden"]

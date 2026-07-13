@@ -138,27 +138,54 @@ class SocialRepo:
         ).fetchone()
         if not row:
             return None
+        aliases = json.loads(row[2]) if row[2] else []
         return {
             "qq_id": row[0], "display_name": row[1],
-            "aliases": json.loads(row[2]) if row[2] else [],
+            # 兼容旧 DTO，但明确标记为只读、未解析 legacy 数据。
+            "aliases": aliases,
+            "legacy_aliases": aliases,
+            "aliases_readonly": True,
+            "alias_scope": None,
             "tag_ids": json.loads(row[3]) if row[3] else [],
             "first_seen": row[4], "last_seen": row[5],
             "message_count": row[6],
             "groups": json.loads(row[7]) if row[7] else [],
         }
 
-    def find_person_by_name(self, name: str) -> list:
+    def find_person_by_name(self, name: str, *, include_legacy_aliases: bool = False) -> list:
+        """按权威显示名查找；legacy aliases 仅供显式审计读取。"""
         rows = self.cm.execute_read(
             "SELECT qq_id, display_name, aliases, message_count FROM person_registry"
         ).fetchall()
         results = []
-        name_lower = name.lower()
+        name_lower = str(name or "").strip().casefold()
+        if not name_lower:
+            return results
         for qq_id, display, aliases_json, cnt in rows:
-            aliases = json.loads(aliases_json) if aliases_json else []
-            if any(a.lower() == name_lower for a in aliases):
+            display_name = str(display or "")
+            display_lower = display_name.casefold()
+            if display_lower == name_lower:
                 results.append({"qq_id": qq_id, "display_name": display, "message_count": cnt, "match": "exact"})
-            elif any(name_lower in a.lower() or a.lower() in name_lower for a in aliases if len(a) >= 2):
+                continue
+            if name_lower in display_lower or (len(display_lower) >= 2 and display_lower in name_lower):
                 results.append({"qq_id": qq_id, "display_name": display, "message_count": cnt, "match": "fuzzy"})
+                continue
+            if not include_legacy_aliases:
+                continue
+            aliases = json.loads(aliases_json) if aliases_json else []
+            if any(str(alias).casefold() == name_lower for alias in aliases):
+                results.append({
+                    "qq_id": qq_id, "display_name": display, "message_count": cnt,
+                    "match": "legacy_alias_exact", "legacy": True, "readonly": True, "scope": None,
+                })
+            elif any(
+                name_lower in str(alias).casefold() or str(alias).casefold() in name_lower
+                for alias in aliases if len(str(alias)) >= 2
+            ):
+                results.append({
+                    "qq_id": qq_id, "display_name": display, "message_count": cnt,
+                    "match": "legacy_alias_fuzzy", "legacy": True, "readonly": True, "scope": None,
+                })
         results.sort(key=lambda x: (0 if x["match"] == "exact" else 1, -x["message_count"]))
         return results[:5]
 
