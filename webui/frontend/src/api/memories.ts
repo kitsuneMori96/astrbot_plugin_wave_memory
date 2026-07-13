@@ -59,9 +59,16 @@ export interface StreamProgress {
   progress: number
   processed?: number
   total: number
+  selected?: number
+  tagged?: number
+  imported?: number
+  skipped?: number
   errors?: number
+  remaining?: number
+  partial?: boolean
   done?: boolean
   error?: string
+  message?: string
 }
 
 export interface NebulaPoint {
@@ -133,26 +140,30 @@ export function batchDeleteMemories(ids: number[]): Promise<{ ok: boolean; delet
   })
 }
 
-export function getMemoryClusters(): Promise<MemoriesNebulaResponse> {
-  return fetchJson<MemoriesNebulaResponse>('/api/memories/clusters')
-}
-
 /**
  * 专为 POST + text/event-stream 持续流解包而封装的高性能 XHR/Fetch Chunk Reader。
  */
+export interface StreamOptions {
+  signal?: AbortSignal
+  payload?: Record<string, unknown>
+}
+
 export async function runPostStream(
   path: string,
   ids: number[],
-  onProgress: (state: StreamProgress) => void
-): Promise<void> {
+  onProgress: (state: StreamProgress) => void,
+  options: StreamOptions = {}
+): Promise<StreamProgress | null> {
   const token = getStoredToken()
+  const payload = options.payload ?? {}
   const response = await fetch(toApiPath(path), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ ids }),
+    body: JSON.stringify({ ids, ...payload }),
+    signal: options.signal,
   })
 
   if (!response.ok) {
@@ -166,9 +177,37 @@ export async function runPostStream(
 
   const decoder = new TextDecoder('utf-8')
   let buffer = ''
+  let lastPayload: StreamProgress | null = null
+
+  const handleLine = (line: string) => {
+    const cleanLine = line.trim()
+    if (!cleanLine || !cleanLine.startsWith('data:')) return
+
+    const jsonStr = cleanLine.substring(5).trim()
+    let payload: StreamProgress
+    try {
+      payload = JSON.parse(jsonStr) as StreamProgress
+    } catch {
+      return
+    }
+
+    lastPayload = payload
+    onProgress(payload)
+    if (payload.error) {
+      throw new Error(payload.error)
+    }
+  }
 
   while (true) {
-    const { value, done } = await reader.read()
+    let chunk: ReadableStreamReadResult<Uint8Array>
+    try {
+      chunk = await reader.read()
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err)
+      throw new Error(`流式连接中断：${detail || '网络连接被提前关闭'}`)
+    }
+
+    const { value, done } = chunk
     if (done) break
 
     buffer += decoder.decode(value, { stream: true })
@@ -176,17 +215,37 @@ export async function runPostStream(
     buffer = lines.pop() || ''
 
     for (const line of lines) {
-      const cleanLine = line.trim()
-      if (!cleanLine) continue
-      if (cleanLine.startsWith('data:')) {
-        try {
-          const jsonStr = cleanLine.substring(5).trim()
-          const payload = JSON.parse(jsonStr) as StreamProgress
-          onProgress(payload)
-        } catch {
-          // Ignore
-        }
-      }
+      handleLine(line)
     }
   }
+
+  if (buffer.trim()) {
+    handleLine(buffer)
+  }
+
+  return lastPayload
+}
+
+export interface SimilarMemoryItem {
+  id: number
+  content: string
+  source: string
+  similarity: number
+}
+
+export function getSimilarMemories(id: number): Promise<{ items: SimilarMemoryItem[]; reason?: string }> {
+  return fetchJson<{ items: SimilarMemoryItem[]; reason?: string }>(`/api/memories/${id}/similar`)
+}
+
+export function addMemoryTag(id: number, tagName: string): Promise<{ ok: boolean }> {
+  return fetchJson<{ ok: boolean }>(`/api/memories/${id}/tags`, {
+    method: 'POST',
+    body: JSON.stringify({ tag_name: tagName }),
+  })
+}
+
+export function deleteMemoryTag(id: number, tagName: string): Promise<{ ok: boolean }> {
+  return fetchJson<{ ok: boolean }>(`/api/memories/${id}/tags/${encodeURIComponent(tagName)}`, {
+    method: 'DELETE',
+  })
 }

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { AlertTriangleIcon, RefreshCwIcon, SearchIcon } from 'lucide-react'
 
 import { getInjectionTrace, listInjectionTraces, type InjectionTraceSummary, type TraceDetailPayload, type TraceFilters } from '@/api/injection'
+import { getAgentFeedback, type AgentFeedbackPayload } from '@/api/review'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -145,6 +146,7 @@ function tracePrimaryTokenChannel(trace: InjectionTraceSummary): string {
 export function InjectionPage() {
   const [filters, setFilters] = useState<FilterState>(defaultFilters)
   const [traces, setTraces] = useState<InjectionTraceSummary[]>([])
+  const [feedbackRecords, setFeedbackRecords] = useState<Array<Record<string, unknown>>>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [detailOpen, setDetailOpen] = useState(false)
@@ -156,11 +158,16 @@ export function InjectionPage() {
     setLoading(true)
     setError('')
     try {
-      const payload = await listInjectionTraces(toFilters(nextFilters))
+      const [payload, feedbackPayload] = await Promise.all([
+        listInjectionTraces(toFilters(nextFilters)),
+        // 反馈记录属于注入观测域；独立页移除后仍在此只读保留。
+        getAgentFeedback().catch((): AgentFeedbackPayload => ({ feedback_records: [] })),
+      ])
       if (payload.error) {
         throw new Error(payload.error)
       }
       setTraces(payload.traces ?? [])
+      setFeedbackRecords(feedbackPayload.feedback_records ?? [])
     } catch (err) {
       setError(err instanceof Error ? err.message : 'trace 列表加载失败')
       setTraces([])
@@ -354,6 +361,23 @@ export function InjectionPage() {
                     )
                   })}
                 </TableBody>
+              </Table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>反馈记录</CardTitle>
+          <CardDescription>最近 trace/memory 反馈只读展示；需要形成学习候选时请进入学习中心。</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {feedbackRecords.length === 0 ? <p className="text-sm text-muted-foreground">暂无反馈记录。</p> : (
+            <div className="overflow-auto rounded-lg border">
+              <Table>
+                <TableHeader><TableRow><TableHead>ID</TableHead><TableHead>反馈</TableHead><TableHead>追踪</TableHead><TableHead>记忆</TableHead><TableHead>原因</TableHead></TableRow></TableHeader>
+                <TableBody>{feedbackRecords.slice(0, 50).map((item, index) => <TableRow key={`feedback-${String(item.id ?? index)}-${index}`}><TableCell className="font-mono text-xs">{String(item.id ?? '-')}</TableCell><TableCell><Badge variant="secondary">{String(item.feedback ?? '-')}</Badge></TableCell><TableCell className="font-mono text-xs">{String(item.trace_id ?? '-')}</TableCell><TableCell className="font-mono text-xs">{String(item.memory_id ?? '-')}</TableCell><TableCell className="max-w-lg truncate">{String(item.reason ?? item.content ?? '-')}</TableCell></TableRow>)}</TableBody>
               </Table>
             </div>
           )}

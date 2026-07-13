@@ -66,8 +66,12 @@ function createApiError(response: Response, payload: unknown): ApiError {
     typeof payload === 'object' && payload !== null && 'detail' in payload
       ? String((payload as { detail?: unknown }).detail)
       : typeof payload === 'object' && payload !== null && 'error' in payload
-        ? String((payload as { error?: unknown }).error)
-        : response.statusText
+        ? typeof (payload as { error?: unknown }).error === 'object' && (payload as { error?: unknown }).error !== null && 'message' in ((payload as { error?: unknown }).error as object)
+          ? String(((payload as { error: { message?: unknown } }).error).message)
+          : String((payload as { error?: unknown }).error)
+        : typeof payload === 'object' && payload !== null && 'message' in payload
+          ? String((payload as { message?: unknown }).message)
+          : response.statusText
   const error = new Error(detail || `HTTP ${response.status}`) as ApiError
   error.status = response.status
   error.detail = detail

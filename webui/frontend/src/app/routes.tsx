@@ -10,7 +10,6 @@ import {
   GitBranchIcon,
   GitCompareArrowsIcon,
   HeartIcon,
-  MessageSquareWarningIcon,
   SearchCheckIcon,
   Settings2Icon,
   SlidersIcon,
@@ -18,12 +17,10 @@ import {
   UsersIcon,
 } from 'lucide-react'
 
-import { AgentFeedbackPage } from '@/pages/review/AgentFeedbackPage'
 import { ChannelConfigPage } from '@/pages/channels/ChannelConfigPage'
 import { CompatibilityPage } from '@/pages/review/CompatibilityPage'
 import { DashboardPage } from '@/pages/dashboard/DashboardPage'
 import { InjectionPage } from '@/pages/injection/InjectionPage'
-import { LearningObjectsPage } from '@/pages/review/LearningObjectsPage'
 import { SettingsPage } from '@/pages/settings/SettingsPage'
 import { MemoriesPage } from '@/pages/memories/MemoriesPage'
 import { ImportPage } from '@/pages/import/ImportPage'
@@ -36,6 +33,8 @@ import { BlackboxFewShotPage } from '@/pages/blackbox/BlackboxFewShotPage'
 import { BlackboxFactsPage } from '@/pages/blackbox/BlackboxFactsPage'
 import { BlackboxPeoplePage } from '@/pages/blackbox/BlackboxPeoplePage'
 import { BlackboxIndexesPage } from '@/pages/blackbox/BlackboxIndexesPage'
+import { MaintainPage } from '@/pages/maintain/MaintainPage'
+import { LearningCenterPage } from '@/pages/learning/LearningCenterPage'
 
 export interface AppRoute {
   path: string
@@ -68,6 +67,13 @@ export const appRoutes: AppRoute[] = [
     element: ImportPage,
   },
   {
+    path: '/maintain',
+    title: '标签与维护中心',
+    description: '历史记忆批量标签分析分类、合并治理与系统算法自检',
+    icon: SlidersIcon,
+    element: MaintainPage,
+  },
+  {
     path: '/injection',
     title: '注入观测台',
     description: 'trace 筛选、通道瀑布和最终注入预览',
@@ -82,18 +88,11 @@ export const appRoutes: AppRoute[] = [
     element: ChannelConfigPage,
   },
   {
-    path: '/learning-objects',
-    title: '学习对象',
-    description: '学习对象登记、候选与风险摘要',
+    path: '/learning-center',
+    title: '通用学习中心',
+    description: '来源、候选、经历内化与晋升历史的统一审核入口',
     icon: BrainCircuitIcon,
-    element: LearningObjectsPage,
-  },
-  {
-    path: '/agent-feedback',
-    title: 'Agent 反馈审查',
-    description: '反馈记录、配置建议与人工审查',
-    icon: MessageSquareWarningIcon,
-    element: AgentFeedbackPage,
+    element: LearningCenterPage,
   },
   {
     path: '/beliefs',
@@ -119,35 +118,35 @@ export const appRoutes: AppRoute[] = [
   {
     path: '/blackbox',
     title: '黑盒管理',
-    description: 'BookLore、FewShot、Facts、人物与索引能力的统一管理入口',
+    description: 'BookLore、FewShot、Facts、人物与索引能力的只读诊断与联动入口',
     icon: DatabaseIcon,
     element: BlackboxHubPage,
   },
   {
     path: '/blackbox/book-lore',
     title: 'BookLore 管理',
-    description: '世界观/书设知识库、索引健康与 BookLore-only 查询入口',
+    description: '世界观/书设知识库、索引健康、搜索分页与未开放写操作标识',
     icon: BookOpenIcon,
     element: BlackboxBookLorePage,
   },
   {
     path: '/blackbox/fewshot',
     title: 'FewShot 管理',
-    description: '风格范例库、候选治理、漂移检测与测试匹配入口',
+    description: '风格范例库只读搜索、状态筛选与未开放写操作标识',
     icon: BrainCircuitIcon,
     element: BlackboxFewShotPage,
   },
   {
     path: '/blackbox/facts',
     title: 'Facts / 关系管理',
-    description: '稳定事实关系、PERSON_ALIAS 和 facts channel 测试入口',
+    description: '稳定事实关系、PERSON_ALIAS、详情查看与证据记忆跳转',
     icon: GitBranchIcon,
     element: BlackboxFactsPage,
   },
   {
     path: '/blackbox/people',
     title: '人物与好感管理',
-    description: '人物画像、UserProfile、Affinity、关系事件与别名入口',
+    description: '人物画像、UserProfile、Affinity、搜索分页与详情展开',
     icon: UsersIcon,
     element: BlackboxPeoplePage,
   },

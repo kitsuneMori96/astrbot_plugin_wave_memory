@@ -4,6 +4,26 @@ export interface ServiceHealth {
   name: string
   status: string
   reason?: string
+  dependency?: string
+  role?: 'core' | 'derived' | 'optional' | string
+  severity?: 'ok' | 'degraded' | 'disabled' | 'critical' | string
+}
+
+export interface SystemHealthSummary {
+  overall?: 'healthy' | 'degraded' | 'critical' | string
+  label?: string
+  total?: number
+  ok_count?: number
+  critical_count?: number
+  degraded_count?: number
+  optional_off_count?: number
+}
+
+export interface RegistryBotItem {
+  qq_id: string
+  name: string
+  db_id: string
+  aliases: string[]
 }
 
 export interface SystemPayload {
@@ -14,6 +34,7 @@ export interface SystemPayload {
   db_size_mb?: number
   epa?: { initialized?: boolean; reason?: string }
   services_health?: ServiceHealth[]
+  services_summary?: SystemHealthSummary
   lifecycle?: {
     facts?: number
     persons?: number
@@ -23,6 +44,12 @@ export interface SystemPayload {
     active_moods?: Array<{ group_id?: string; type?: string; intensity?: number; desc?: string }>
     unspoken_desire?: { topic?: string; motive?: string }
   }
+  todos?: {
+    untagged_count: number
+    pending_fewshot: number
+    has_errors: boolean
+  }
+  registry_bots?: RegistryBotItem[]
 }
 
 export interface ErrorPayload {
@@ -47,6 +74,17 @@ export interface InjectionMetricRankingItem {
   [key: string]: unknown
 }
 
+export interface InjectionMetricWindow {
+  sample_count?: number
+  duration_seconds?: number
+  duration_days?: number
+  total_tokens_sum?: number
+  avg_tokens_per_sample?: number
+  avg_tokens_per_day?: number
+  p95_tokens_per_sample?: number
+  max_tokens_per_sample?: number
+}
+
 export interface InjectionMetricsPayload {
   range?: string
   from?: number
@@ -54,6 +92,7 @@ export interface InjectionMetricsPayload {
   bucket_seconds?: number
   count?: number
   summary?: Record<string, unknown>
+  window?: InjectionMetricWindow
   series?: InjectionMetricSeriesPoint[]
   ranking?: InjectionMetricRankingItem[]
   error?: string

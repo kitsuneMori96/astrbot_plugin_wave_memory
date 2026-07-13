@@ -203,3 +203,42 @@ export function getBlackboxIndexesSummary(): Promise<BlackboxIndexesSummary> {
 export function getBlackboxIndexesCheck(): Promise<BlackboxIndexesSummary> {
   return fetchJson<BlackboxIndexesSummary>('/api/blackbox/indexes/check')
 }
+
+export function updateBlackboxFewShot(id: number | string, payload: { status?: string; content?: string }): Promise<{ ok: boolean }> {
+  return fetchJson<{ ok: boolean }>(`/api/blackbox/fewshot/examples/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function deleteBlackboxFewShot(id: number | string): Promise<{ ok: boolean }> {
+  return fetchJson<{ ok: boolean }>(`/api/blackbox/fewshot/examples/${id}`, {
+    method: 'DELETE',
+  })
+}
+
+export function updateBlackboxFact(id: number | string, payload: { confidence?: number; predicate?: string; object?: string }): Promise<{ ok: boolean }> {
+  return fetchJson<{ ok: boolean }>(`/api/blackbox/facts/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function deleteBlackboxFact(id: number | string): Promise<{ ok: boolean }> {
+  return fetchJson<{ ok: boolean }>(`/api/blackbox/facts/${id}`, {
+    method: 'DELETE',
+  })
+}
+
+export function deleteBookLoreItem(tableType: 'entities' | 'communities' | 'relations' | 'notes', id: number | string): Promise<{ ok: boolean }> {
+  return fetchJson<{ ok: boolean }>(`/api/blackbox/book-lore/${tableType}/${id}`, {
+    method: 'DELETE',
+  })
+}
+
+export function rebuildIndexes(): Promise<{ ok: boolean; message: string }> {
+  return fetchJson<{ ok: boolean; message: string }>('/api/blackbox/indexes/rebuild', {
+    method: 'POST',
+  })
+}
+

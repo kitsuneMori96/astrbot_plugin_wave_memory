@@ -14,6 +14,7 @@ import {
   type ChannelSettings,
   type ChannelValidationPayload,
 } from '@/api/channels'
+import { getAgentFeedback, reviewConfigSuggestion, type AgentFeedbackPayload } from '@/api/review'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -73,6 +74,8 @@ export function ChannelConfigPage() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [configSuggestions, setConfigSuggestions] = useState<Array<Record<string, unknown>>>([])
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false)
 
   // 检测配置是否修改过
   const isDirty = draft && original && JSON.stringify(serializePatch(draft)) !== JSON.stringify(serializePatch(original))
@@ -81,12 +84,17 @@ export function ChannelConfigPage() {
     setLoading(true)
     setError('')
     try {
-      const payload = await getChannelConfig()
+      const [payload, feedbackPayload] = await Promise.all([
+        getChannelConfig(),
+        // 配置建议属于配置域；读取失败不能阻断通道配置本身。
+        getAgentFeedback().catch((): AgentFeedbackPayload => ({ config_suggestions: [] })),
+      ])
       const currentData = payload.current ?? { channels: {}, recent_dedup_minutes: 30, trace_enabled: true }
       setDraft(currentData)
       setOriginal(JSON.parse(JSON.stringify(currentData)))
       setRuntime(payload.runtime ?? {})
       setValidation(null)
+      setConfigSuggestions(feedbackPayload.config_suggestions ?? [])
     } catch (err) {
       setError(err instanceof Error ? err.message : '通道配置加载失败')
     } finally {
@@ -158,6 +166,21 @@ export function ChannelConfigPage() {
       toast.error(message)
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function handleSuggestionReview(id: number, action: 'approve' | 'reject' | 'ignore') {
+    setSuggestionsLoading(true)
+    try {
+      const result = await reviewConfigSuggestion(id, action)
+      if (!result.ok) throw new Error(result.error ?? '配置建议处理失败')
+      toast.success(result.message ?? '配置建议状态已记录；配置不会自动应用')
+      const next = await getAgentFeedback()
+      setConfigSuggestions(next.config_suggestions ?? [])
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '配置建议处理失败')
+    } finally {
+      setSuggestionsLoading(false)
     }
   }
 
@@ -264,6 +287,33 @@ export function ChannelConfigPage() {
               </Link>
             </Button>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>配置建议</CardTitle>
+          <CardDescription>配置建议保留在配置域；人工批准只记录状态，不会绕过校验自动应用。</CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          {configSuggestions.length === 0 ? <p className="text-sm text-muted-foreground">暂无待处理配置建议。</p> : configSuggestions.map((suggestion, index) => {
+            const id = Number(suggestion.id)
+            const title = String(suggestion.suggestion ?? suggestion.problem ?? suggestion.title ?? `配置建议 ${index + 1}`)
+            return (
+              <div key={`config-suggestion-${String(suggestion.id ?? index)}`} className="flex flex-col gap-3 rounded-lg border p-3">
+                <div className="flex items-start justify-between gap-3"><span className="font-medium">{title}</span><Badge variant="secondary">待处理</Badge></div>
+                <p className="text-xs text-muted-foreground">范围：{String(suggestion.scope ?? '未指定')} · 通道：{String(suggestion.channel ?? '未指定')}</p>
+                <pre className="overflow-auto rounded-md bg-muted p-2 text-xs font-mono">{JSON.stringify(suggestion, null, 2)}</pre>
+                <div className="flex flex-wrap gap-2">
+                  {(['approve', 'reject', 'ignore'] as const).map((action) => (
+                    <Button key={action} size="sm" variant={action === 'approve' ? 'default' : action === 'reject' ? 'destructive' : 'secondary'} disabled={suggestionsLoading || !Number.isFinite(id)} onClick={() => void handleSuggestionReview(id, action)}>
+                      {action === 'approve' ? '记录批准' : action === 'reject' ? '拒绝' : '忽略'}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            )
+          })}
         </CardContent>
       </Card>
 

@@ -286,11 +286,11 @@ export function TraceDetailSheet({
                 <Section title="错误/警告">
                   <JsonBlock value={warningsAndErrors(detail)} />
                 </Section>
-                <Section title="反馈与修正入口" description="先在对象管理页修正，再回到注入观测台验证下一次 trace">
+                <Section title="反馈与修正入口" description="反馈记录保留在注入观测台；候选提交、审核和晋升历史统一进入学习中心">
                   <div className="flex flex-wrap gap-2">
                     <Button asChild variant="outline" size="sm">
-                      <Link to="/agent-feedback">
-                        查看 Agent 反馈
+                      <Link to="/learning-center">
+                        查看学习中心候选
                         <ArrowRightIcon data-icon="inline-end" />
                       </Link>
                     </Button>

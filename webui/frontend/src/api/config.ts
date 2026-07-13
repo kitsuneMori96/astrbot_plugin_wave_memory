@@ -48,6 +48,21 @@ export interface HotConfigPayload {
   config: Record<string, unknown>
 }
 
+export interface WaveConfigPayload {
+  runtime?: Record<string, unknown>
+  embedding_provider_id?: string
+  embedding_dimension?: number
+  tag_llm_provider_id?: string
+  query?: Record<string, unknown>
+  tags?: Record<string, unknown>
+  storage?: Record<string, unknown>
+  filter?: Record<string, unknown>
+  lifecycle?: Record<string, unknown>
+  performance?: Record<string, unknown>
+  webui?: Record<string, unknown>
+  [key: string]: unknown
+}
+
 export interface FullConfigSavePayload {
   [key: string]: unknown
 }
@@ -67,6 +82,10 @@ export interface HotConfigSaveResponse {
 
 export function getConfigSchema(): Promise<ConfigSchemaPayload> {
   return fetchJson<ConfigSchemaPayload>('/api/config/schema')
+}
+
+export function getFullConfig(): Promise<WaveConfigPayload> {
+  return fetchJson<WaveConfigPayload>('/api/config')
 }
 
 export function getHotConfig(): Promise<HotConfigPayload> {

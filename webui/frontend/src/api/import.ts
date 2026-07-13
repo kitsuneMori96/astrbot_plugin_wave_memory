@@ -15,5 +15,5 @@ export interface ImportSourcesPayload {
 }
 
 export function getImportSources(): Promise<ImportSourcesPayload> {
-  return fetchJson<ImportSourcesPayload>('/api/memories/import/sources')
+  return fetchJson<ImportSourcesPayload>('/api/import/sources')
 }

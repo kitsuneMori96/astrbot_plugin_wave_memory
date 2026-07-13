@@ -1,7 +1,6 @@
 import { Link } from 'react-router-dom'
-import { ArrowRightIcon, BookOpenIcon, BrainCircuitIcon, DatabaseIcon, GitBranchIcon, SearchCheckIcon, UsersIcon } from 'lucide-react'
+import { ArrowRightIcon, BookOpenIcon, BrainCircuitIcon, GitBranchIcon, SearchCheckIcon, UsersIcon } from 'lucide-react'
 
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
@@ -11,109 +10,76 @@ interface CapabilityCard {
   title: string
   route: string
   description: string
-  status: string
   badges: string[]
-  nextStep: string
-  implemented: boolean
   icon: typeof BookOpenIcon
 }
 
 const capabilities: CapabilityCard[] = [
   {
-    title: 'BookLore',
+    title: 'BookLore 书设知识',
     route: '/blackbox/book-lore',
-    description: '世界观/书设知识库，不是群聊记忆，不是人格指令',
-    status: '只读入口 · 等待独立管理页',
-    badges: ['只读诊断', '治理配置'],
-    nextStep: '已补只读页面：实体、关系、社区、索引健康与 BookLore-only 查询契约。',
-    implemented: true,
+    description: '查看世界观与书设知识库，提供实体、关系、社区的只读诊断。',
+    badges: ['只读诊断', '世界观'],
     icon: BookOpenIcon,
   },
   {
-    title: 'FewShot',
+    title: 'FewShot 风格范例',
     route: '/blackbox/fewshot',
-    description: '风格范例库，不是事实记忆，不代表真实发生过',
-    status: '只读入口 · 候选/审核页待补',
-    badges: ['治理配置', '通道配置'],
-    nextStep: '已补只读页面：pending/approved/rejected、漂移检测与测试匹配契约。',
-    implemented: true,
+    description: '查看风格范例候选库，提供范例列表、状态筛选、批准或拒绝。',
+    badges: ['治理配置', '风格特征'],
     icon: BrainCircuitIcon,
   },
   {
-    title: 'Facts',
+    title: 'Facts 事实关系',
     route: '/blackbox/facts',
-    description: '事实关系管理入口：稳定关系、证据、来源与注入影响。',
-    status: '只读入口 · 关系 CRUD 待设计',
-    badges: ['只读诊断', '中风险'],
-    nextStep: '已补只读页面：事实列表字段、PERSON_ALIAS、facts channel 测试契约。',
-    implemented: true,
+    description: '管理稳定事实关系网络，支持三元组编辑、物理删除和证据深度溯源。',
+    badges: ['事实网络', '中风险'],
     icon: GitBranchIcon,
   },
   {
-    title: '人物与好感',
+    title: '人物与好感度',
     route: '/blackbox/people',
-    description: '人物画像、UserProfile、Affinity 的统一入口。',
-    status: '只读入口 · 画像/好感管理待补',
-    badges: ['只读诊断', '治理配置'],
-    nextStep: '已补只读页面：人物画像、别名、好感信号、群/机器人维度契约。',
-    implemented: true,
+    description: '查看用户画像登记表、UserProfile 好感评分和互动事件时间线。',
+    badges: ['只读诊断', '用户画像'],
     icon: UsersIcon,
   },
   {
-    title: '索引与 FTS5',
+    title: '索引与 FTS5 健康',
     route: '/blackbox/indexes',
-    description: '向量索引、FTS5、EPA basis 健康入口。',
-    status: '只读入口 · 重建属于危险操作',
-    badges: ['只读诊断', '危险操作需二次确认'],
-    nextStep: '已补只读页面：HNSW/id map/FTS5/EPA basis 健康检查与重建确认契约。',
-    implemented: true,
+    description: '检查向量索引、FTS5、EPA basis 健康状态，支持一键物理重建。',
+    badges: ['索引检查', '危险操作'],
     icon: SearchCheckIcon,
-  },
-  {
-    title: '学习对象',
-    route: '/learning-objects',
-    description: '学习对象登记、候选、重复项与风险摘要入口。',
-    status: '已有页面 · 纳入黑盒管理矩阵',
-    badges: ['治理配置', '只读诊断'],
-    nextStep: '保留现有学习对象页，并作为黑盒矩阵的已接入能力。',
-    implemented: true,
-    icon: DatabaseIcon,
   },
 ]
 
 function CapabilityCardView({ capability }: { capability: CapabilityCard }) {
   const Icon = capability.icon
   return (
-    <Card className="flex h-full flex-col">
-      <CardHeader className="flex flex-row items-start justify-between gap-4">
-        <div className="flex flex-col gap-2">
-          <CardTitle>{capability.title}</CardTitle>
-          <CardDescription>{capability.description}</CardDescription>
+    <Card className="flex h-full flex-col hover:border-primary/30 hover:shadow-md transition-all duration-300">
+      <CardHeader className="flex flex-row items-start justify-between gap-4 pb-2">
+        <div className="flex flex-col gap-1">
+          <CardTitle className="text-base font-semibold">{capability.title}</CardTitle>
+          <CardDescription className="text-xs leading-relaxed text-muted-foreground">
+            {capability.description}
+          </CardDescription>
         </div>
-        <Icon className="size-5 text-muted-foreground" />
+        <Icon className="size-5 text-muted-foreground shrink-0 mt-0.5" />
       </CardHeader>
-      <CardContent className="flex flex-1 flex-col gap-4">
-        <div className="flex flex-wrap gap-2">
+      <CardContent className="flex flex-1 flex-col justify-end pt-2">
+        <div className="flex flex-wrap gap-1.5">
           {capability.badges.map((badge) => (
-            <Badge key={badge} variant={badge.includes('危险') ? 'destructive' : 'secondary'}>
+            <Badge key={badge} variant={badge.includes('危险') || badge.includes('风险') ? 'destructive' : 'secondary'} className="text-[10px] font-normal px-2 py-0.5">
               {badge}
             </Badge>
           ))}
         </div>
-        <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">{capability.status}</div>
-        <p className="text-sm text-muted-foreground">{capability.nextStep}</p>
       </CardContent>
-      <CardFooter className="flex items-center justify-between gap-3">
-        <span className="font-mono text-xs text-muted-foreground">{capability.route}</span>
-        <Button asChild={capability.implemented} disabled={!capability.implemented} variant="outline" size="sm">
-          {capability.implemented ? (
-            <Link to={capability.route}>
-              进入管理页
-              <ArrowRightIcon data-icon="inline-end" />
-            </Link>
-          ) : (
-            <span>后续补齐</span>
-          )}
+      <CardFooter className="pt-3 border-t bg-muted/10">
+        <Button asChild variant="ghost" size="sm" className="w-full justify-between h-8 text-xs font-medium hover:bg-primary/5 hover:text-primary px-3">
+          <Link to={capability.route} className="flex items-center justify-between w-full">
+            <span>进入管理</span>
+            <ArrowRightIcon className="size-3.5" data-icon="inline-end" />
+          </Link>
         </Button>
       </CardFooter>
     </Card>
@@ -123,26 +89,21 @@ function CapabilityCardView({ capability }: { capability: CapabilityCard }) {
 export function BlackboxHubPage() {
   return (
     <div className="flex flex-col gap-6">
-      <Card>
-        <CardHeader>
+      <Card className="border-border/60">
+        <CardHeader className="pb-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="flex flex-col gap-2">
-              <CardTitle>黑盒管理前端矩阵</CardTitle>
-              <CardDescription>v4.5.0 先建立能力总入口，再按能力逐个补管理页。</CardDescription>
+            <div className="flex flex-col gap-1.5">
+              <CardTitle className="text-lg font-semibold">黑盒管理矩阵</CardTitle>
+              <CardDescription className="text-sm">
+                集中诊断、审计与管理 WaveMemory 底层异构知识图谱、特征索引和心智范例。
+              </CardDescription>
             </div>
-            <Badge variant="outline">BookLore | FewShot | Facts | 人物 | 索引 | 学习对象</Badge>
+            <Badge variant="outline" className="text-xs">v4.5.4 Rework</Badge>
           </div>
         </CardHeader>
-        <CardContent className="flex flex-col gap-4">
-          <Alert>
-            <BrainCircuitIcon />
-            <AlertTitle>{'发现 -> 管理 -> 验证 -> 调参'}</AlertTitle>
-            <AlertDescription>
-              这是 v4.5.0 的黑盒能力总入口。当前卡片以只读入口为主；删除、合并、重建、禁用等危险操作需二次确认并在后续子页面单独实现。
-            </AlertDescription>
-          </Alert>
-          <Separator />
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <CardContent>
+          <Separator className="mb-6" />
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {capabilities.map((capability) => (
               <CapabilityCardView key={capability.title} capability={capability} />
             ))}

@@ -19,16 +19,15 @@ import {
 
 const routeGroups = [
   { label: '总览', paths: ['/dashboard'] },
-  { label: '记忆与导入', paths: ['/memories', '/import'] },
+  { label: '记忆与导入', paths: ['/memories', '/import', '/maintain'] },
   { label: '注入与通道', paths: ['/injection', '/channels'] },
-  { label: '认知与审查', paths: ['/beliefs', '/jargon', '/soul', '/learning-objects', '/agent-feedback'] },
+  { label: '认知与审查', paths: ['/beliefs', '/jargon', '/soul', '/learning-center'] },
   { label: '黑盒管理', paths: ['/blackbox'] },
   { label: '系统与维护', paths: ['/compatibility', '/settings'] },
 ]
 
 const toolLinks = [
   { href: '/explore', label: '3D 星图' },
-  { href: '/maintain', label: '维护工具' },
 ]
 
 export function WaveSidebar() {

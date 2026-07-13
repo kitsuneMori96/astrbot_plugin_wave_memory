@@ -52,7 +52,7 @@ export function SoulPage() {
   const [moods, setMoods] = useState<MoodItem[]>([])
   
   // 筛选器
-  const [botFilter, setBotFilter] = useState('bot')
+  const [botFilter, setBotFilter] = useState('yushu')
   const [moodGroupFilter, setMoodGroupFilter] = useState('')
 
   const [loading, setLoading] = useState(true)
@@ -65,7 +65,7 @@ export function SoulPage() {
   const [concernForm, setConcernForm] = useState<Partial<ConcernItem>>({
     topic: '',
     intensity: 0.5,
-    bot_id: 'bot',
+    bot_id: 'yushu',
   })
 
   // 新建/编辑时间锚点弹窗
@@ -74,7 +74,7 @@ export function SoulPage() {
   const [anchorForm, setAnchorForm] = useState<Partial<TimeAnchorItem>>({
     event_summary: '',
     emotional_weight: 0.5,
-    bot_id: 'bot',
+    bot_id: 'yushu',
   })
 
   // 编辑情绪颗粒弹窗
@@ -506,12 +506,22 @@ export function SoulPage() {
         <div className="flex items-center gap-2 text-xs">
           <span className="text-muted-foreground">切换 Bot 灵魂：</span>
           <Select value={botFilter} onValueChange={setBotFilter}>
-            <SelectTrigger className="w-36 h-8">
+            <SelectTrigger className="w-40 h-8">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="bot">主 AI 人格 (bot)</SelectItem>
-              <SelectItem value="assistant">备用 AI 人格 (assistant)</SelectItem>
+              {sys?.registry_bots && sys.registry_bots.length > 0 ? (
+                sys.registry_bots.map((bot) => (
+                  <SelectItem key={bot.db_id} value={bot.db_id}>
+                    {bot.name} ({bot.db_id})
+                  </SelectItem>
+                ))
+              ) : (
+                <>
+                  <SelectItem value="yushu">羽书 (yushu)</SelectItem>
+                  <SelectItem value="baizz">白真真 (baizz)</SelectItem>
+                </>
+              )}
             </SelectContent>
           </Select>
           <Input
@@ -658,13 +668,23 @@ export function SoulPage() {
               {isConcernNew ? (
                 <Field>
                   <FieldLabel>归属 Bot ID</FieldLabel>
-                  <Select value={concernForm.bot_id || 'bot'} onValueChange={(val) => setConcernForm({ ...concernForm, bot_id: val })}>
+                  <Select value={concernForm.bot_id || 'yushu'} onValueChange={(val) => setConcernForm({ ...concernForm, bot_id: val })}>
                     <SelectTrigger>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="bot">bot（主AI人格）</SelectItem>
-                      <SelectItem value="assistant">assistant（辅助AI）</SelectItem>
+                      {sys?.registry_bots && sys.registry_bots.length > 0 ? (
+                        sys.registry_bots.map((bot) => (
+                          <SelectItem key={bot.db_id} value={bot.db_id}>
+                            {bot.name} ({bot.db_id})
+                          </SelectItem>
+                        ))
+                      ) : (
+                        <>
+                          <SelectItem value="yushu">羽书 (yushu)</SelectItem>
+                          <SelectItem value="baizz">白真真 (baizz)</SelectItem>
+                        </>
+                      )}
                     </SelectContent>
                   </Select>
                 </Field>
@@ -713,13 +733,23 @@ export function SoulPage() {
               {isAnchorNew ? (
                 <Field>
                   <FieldLabel>归属 Bot ID</FieldLabel>
-                  <Select value={anchorForm.bot_id || 'bot'} onValueChange={(val) => setAnchorForm({ ...anchorForm, bot_id: val })}>
+                  <Select value={anchorForm.bot_id || 'yushu'} onValueChange={(val) => setAnchorForm({ ...anchorForm, bot_id: val })}>
                     <SelectTrigger>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="bot">bot（主AI）</SelectItem>
-                      <SelectItem value="assistant">assistant（辅助AI）</SelectItem>
+                      {sys?.registry_bots && sys.registry_bots.length > 0 ? (
+                        sys.registry_bots.map((bot) => (
+                          <SelectItem key={bot.db_id} value={bot.db_id}>
+                            {bot.name} ({bot.db_id})
+                          </SelectItem>
+                        ))
+                      ) : (
+                        <>
+                          <SelectItem value="yushu">羽书 (yushu)</SelectItem>
+                          <SelectItem value="baizz">白真真 (baizz)</SelectItem>
+                        </>
+                      )}
                     </SelectContent>
                   </Select>
                 </Field>

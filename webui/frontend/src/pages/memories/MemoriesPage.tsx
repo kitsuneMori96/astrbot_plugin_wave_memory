@@ -1,8 +1,7 @@
-import { type ReactNode, useEffect, useState, useTransition, useRef } from 'react'
-import { Link } from 'react-router-dom'
+import { useCallback, useEffect, useState, useTransition, useRef } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   AlertCircleIcon,
-  ArrowRightIcon,
   CheckCircle2Icon,
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -14,8 +13,6 @@ import {
   TagIcon,
   Trash2Icon,
   Undo2Icon,
-  LayoutGridIcon,
-  OrbitIcon,
 } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -28,14 +25,16 @@ import {
   runPostStream,
   updateMemory,
   batchDeleteMemories,
-  getMemoryClusters,
+  getSimilarMemories,
+  addMemoryTag,
+  deleteMemoryTag,
   type MemoryItem,
   type MemoryDetail,
   type SenderItem,
   type StreamProgress,
-  type NebulaPoint,
-  type NebulaCluster,
 } from '@/api/memories'
+import { type TagExecutionOptions, type TagWritePolicy } from '@/api/tags'
+import { TagExtractionConfigPanel } from '@/components/tag/TagExtractionConfigPanel'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -50,42 +49,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
 
-const sourceAssetMetadata: Record<string, { label: string; handling: string; route?: string }> = {
-  live: { label: '群聊长期记忆', handling: '保持在记忆管理器' },
-  chat: { label: '群聊长期记忆', handling: '保持在记忆管理器' },
-  bzz_experience: { label: '第一人称经历', handling: '链接到灵魂/经历视图', route: '/soul' },
-  experience: { label: '第一人称经历', handling: '链接到灵魂/经历视图', route: '/soul' },
-  book_lore: { label: '书设知识', handling: '提示去 BookLore 管理', route: '/blackbox/book-lore' },
-  lore: { label: '书设知识', handling: '提示去 BookLore 管理', route: '/blackbox/book-lore' },
-  bot_reply: { label: 'Bot 回复素材', handling: '可送入 FewShot 候选', route: '/blackbox/fewshot' },
-  fewshot: { label: '风格范例', handling: '提示去 FewShot 管理', route: '/blackbox/fewshot' },
-}
-
-const associationPlaceholders = ['Tags', 'Facts', 'Beliefs', 'Person links', 'Injection traces', 'Similar memories']
-
-const managementConversions = [
-  { label: 'Bot 回复 -> FewShot 候选', route: '/blackbox/fewshot' },
-  { label: '世界观内容 -> BookLore 条目候选', route: '/blackbox/book-lore' },
-  { label: '稳定关系句子 -> Fact 候选', route: '/blackbox/facts' },
-]
-
-function sourceAssetMeta(source: string | undefined) {
-  return sourceAssetMetadata[source || ''] ?? { label: source || '未知来源', handling: '保持在记忆管理器' }
-}
-
-function ManagementLink({ route, children }: { route: string; children: ReactNode }) {
-  return (
-    <Button asChild variant="outline" size="sm">
-      <Link to={route}>
-        {children}
-        <ArrowRightIcon data-icon="inline-end" />
-      </Link>
-    </Button>
-  )
-}
-
-// 辅助方法：不同标签类型的颜色分级
-function tagBadgeClass(type: string): string {
+const tagBadgeClass = (type: string): string => {
   const base = 'badge border font-normal text-[10px]'
   switch (type) {
     case 'person':
@@ -113,21 +77,16 @@ function formatTime(seconds: unknown): string {
 
 export function MemoriesPage() {
   const [isPendingQuery, startQueryTransition] = useTransition()
+  const [searchParams] = useSearchParams()
+  const initialOpenHandledRef = useRef(false)
   
-  // 5. 记忆星云聚类视图状态
-  const [viewMode, setViewMode] = useState<'list' | 'nebula'>('list')
-  const [nebulaPoints, setNebulaPoints] = useState<NebulaPoint[]>([])
-  const [nebulaClusters, setNebulaClusters] = useState<NebulaCluster[]>([])
-  const [nebulaLoading, setNebulaLoading] = useState(false)
-  const canvasRef = useRef<HTMLCanvasElement | null>(null)
-  const [hoveredNebulaPoint, setHoveredNebulaPoint] = useState<NebulaPoint | null>(null)
-
   // 1. 过滤检索状态
-  const [search, setSearch] = useState('')
+  const [search, setSearch] = useState(() => searchParams.get('search') ?? '')
   const [source, setSource] = useState('')
   const [sender, setSender] = useState('')
   const [hasTags, setHasTags] = useState('')
-  const [hasVector, setHasVector] = useState('')
+  const [hasVector, setHasVector] = useState(() => searchParams.get('has_vector') ?? '')
+  const [configDialogOpen, setConfigDialogOpen] = useState(false)
   
   const [senders, setSenders] = useState<SenderItem[]>([])
   const [memories, setMemories] = useState<MemoryItem[]>([])
@@ -149,12 +108,24 @@ export function MemoriesPage() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailSaving, setDetailSaving] = useState(false)
   const [detailError, setDetailError] = useState('')
+  const [historyStack, setHistoryStack] = useState<number[]>([])
+  const [similarLoading, setSimilarLoading] = useState(false)
+  const [similarItems, setSimilarItems] = useState<any[]>([])
+  const [newTagName, setNewTagName] = useState('')
 
   // 4. SSE 异步流进度模态弹窗状态
   const [streamOpen, setStreamOpen] = useState(false)
   const [streamTitle, setStreamOpenTitle] = useState('')
   const [streamProgress, setStreamProgress] = useState<StreamProgress | null>(null)
   const [streamLog, setStreamLog] = useState<string[]>([])
+  const [streamRunning, setStreamRunning] = useState(false)
+  const [tagBatchSize, setTagBatchSize] = useState(20)
+  const [tagWritePolicy, setTagWritePolicy] = useState<TagWritePolicy>('missing_only')
+
+  const handleTagOptionsChange = useCallback((options: Required<TagExecutionOptions>) => {
+    setTagBatchSize(options.tag_batch_size)
+    setTagWritePolicy(options.tag_write_policy)
+  }, [])
 
   // 加载数据列表
   async function loadData(nextPage = page) {
@@ -205,212 +176,6 @@ export function MemoriesPage() {
     // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [source, sender, hasTags, hasVector])
 
-  // 加载星云聚类数据并由 Canvas 绘制
-  async function loadNebulaClusters() {
-    setNebulaLoading(true)
-    try {
-      const res = await getMemoryClusters()
-      setNebulaPoints(res.points ?? [])
-      setNebulaClusters(res.clusters ?? [])
-    } catch {
-      toast.error('记忆星云聚类加载失败')
-    } finally {
-      setNebulaLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    if (viewMode === 'nebula') {
-      void loadNebulaClusters()
-    }
-  }, [viewMode])
-
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas || viewMode !== 'nebula') return
-
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-
-    let animationFrameId: number
-    const dpr = window.devicePixelRatio || 1
-    const width = canvas.parentElement?.clientWidth || 700
-    const height = 460
-    
-    canvas.width = width * dpr
-    canvas.height = height * dpr
-    canvas.style.width = `${width}px`
-    canvas.style.height = `${height}px`
-    ctx.scale(dpr, dpr)
-
-    // 社区星云色彩主题映射
-    const clusterColors: Record<string, string> = {
-      '灵魂羁绊': '#ec4899', // 玫瑰粉
-      '黑话口癖': '#fb7185', // 珊瑚红
-      '世界设定': '#a78bfa', // 薰衣草紫
-      '日常见闻': '#60a5fa', // 海洋蓝
-    }
-
-    let scaleFactor = 2.4
-    let dragOffsetX = width / 2
-    let dragOffsetY = height / 2
-    let isDragging = false
-    let startX = 0
-    let startY = 0
-
-    // 交互辅助位置坐标
-    const getCanvasMousePos = (e: MouseEvent) => {
-      const rect = canvas.getBoundingClientRect()
-      return {
-        x: e.clientX - rect.left,
-        y: e.clientY - rect.top,
-      }
-    }
-
-    const handleMouseDown = (e: MouseEvent) => {
-      isDragging = true
-      const pos = getCanvasMousePos(e)
-      startX = pos.x - dragOffsetX
-      startY = pos.y - dragOffsetY
-    }
-
-    const handleMouseMove = (e: MouseEvent) => {
-      const pos = getCanvasMousePos(e)
-      if (isDragging) {
-        dragOffsetX = pos.x - startX
-        dragOffsetY = pos.y - startY
-      } else {
-        // Hover 拾取检测
-        let found: NebulaPoint | null = null
-        for (const p of nebulaPoints) {
-          const cx = p.x * scaleFactor + dragOffsetX
-          const cy = p.y * scaleFactor + dragOffsetY
-          const dist = Math.hypot(pos.x - cx, pos.y - cy)
-          if (dist < 6) {
-            found = p
-            break
-          }
-        }
-        setHoveredNebulaPoint(found)
-        canvas.style.cursor = found ? 'pointer' : (isDragging ? 'grabbing' : 'grab')
-      }
-    }
-
-    const handleMouseUp = () => {
-      isDragging = false
-    }
-
-    const handleMouseLeave = () => {
-      isDragging = false
-      setHoveredNebulaPoint(null)
-    }
-
-    const handleWheel = (e: WheelEvent) => {
-      e.preventDefault()
-      const zoom = e.deltaY < 0 ? 1.1 : 0.9
-      scaleFactor = Math.max(0.5, Math.min(10, scaleFactor * zoom))
-    }
-
-    const handleClick = () => {
-      if (hoveredNebulaPoint) {
-        void handleOpenDetail(hoveredNebulaPoint.id)
-      }
-    }
-
-    canvas.addEventListener('mousedown', handleMouseDown)
-    canvas.addEventListener('mousemove', handleMouseMove)
-    canvas.addEventListener('mouseup', handleMouseUp)
-    canvas.addEventListener('mouseleave', handleMouseLeave)
-    canvas.addEventListener('wheel', handleWheel)
-    canvas.addEventListener('click', handleClick)
-
-    let angleOffset = 0
-    const render = () => {
-      ctx.fillStyle = '#060814' // 太空背景色
-      ctx.fillRect(0, 0, width, height)
-
-      // 绘制网格背景
-      ctx.strokeStyle = 'rgba(139, 92, 246, 0.03)'
-      ctx.lineWidth = 1
-      const gridSpacing = 40
-      for (let x = (dragOffsetX % gridSpacing); x < width; x += gridSpacing) {
-        ctx.beginPath()
-        ctx.moveTo(x, 0)
-        ctx.lineTo(x, height)
-        ctx.stroke()
-      }
-      for (let y = (dragOffsetY % gridSpacing); y < height; y += gridSpacing) {
-        ctx.beginPath()
-        ctx.moveTo(0, y)
-        ctx.lineTo(width, y)
-        ctx.stroke()
-      }
-
-      // 绘制微弱星系引力光圈
-      nebulaClusters.forEach((c) => {
-        const cx = c.cx * scaleFactor + dragOffsetX
-        const cy = c.cy * scaleFactor + dragOffsetY
-        const color = clusterColors[c.name] || '#94a3b8'
-
-        // 绘制引力晕圈
-        const grad = ctx.createRadialGradient(cx, cy, 2, cx, cy, Math.max(10, c.count * 1.5 * scaleFactor))
-        grad.addColorStop(0, `${color}15`)
-        grad.addColorStop(0.5, `${color}05`)
-        grad.addColorStop(1, 'transparent')
-        ctx.fillStyle = grad
-        ctx.beginPath()
-        ctx.arc(cx, cy, Math.max(10, c.count * 1.5 * scaleFactor), 0, Math.PI * 2)
-        ctx.fill()
-      })
-
-      // 绘制星空暗物质粒子
-      angleOffset += 0.005
-      nebulaPoints.forEach((p) => {
-        const cx = p.x * scaleFactor + dragOffsetX
-        const cy = p.y * scaleFactor + dragOffsetY
-        const color = clusterColors[p.cluster] || '#94a3b8'
-        const isHovered = hoveredNebulaPoint?.id === p.id
-
-        // 引入轻微自转视差
-        const rotX = cx
-        const rotY = cy
-
-        ctx.beginPath()
-        ctx.arc(rotX, rotY, isHovered ? 6 : 3, 0, Math.PI * 2)
-        ctx.fillStyle = color
-        ctx.shadowColor = color
-        ctx.shadowBlur = isHovered ? 12 : 3
-        ctx.fill()
-        ctx.shadowBlur = 0 // 重置阴影避免卡顿
-      })
-
-      // 绘制社区气泡标签说明
-      nebulaClusters.forEach((c) => {
-        const cx = c.cx * scaleFactor + dragOffsetX
-        const cy = c.cy * scaleFactor + dragOffsetY
-        const color = clusterColors[c.name] || '#94a3b8'
-
-        ctx.font = '10px monospace'
-        ctx.fillStyle = color
-        ctx.fillText(`🌌 ${c.name} (${c.count} 星体)`, cx - 35, cy - 8)
-      })
-
-      animationFrameId = requestAnimationFrame(render)
-    }
-
-    render()
-
-    return () => {
-      cancelAnimationFrame(animationFrameId)
-      canvas.removeEventListener('mousedown', handleMouseDown)
-      canvas.removeEventListener('mousemove', handleMouseMove)
-      canvas.removeEventListener('mouseup', handleMouseUp)
-      canvas.removeEventListener('mouseleave', handleMouseLeave)
-      canvas.removeEventListener('wheel', handleWheel)
-      canvas.removeEventListener('click', handleClick)
-    }
-  }, [nebulaPoints, nebulaClusters, viewMode, hoveredNebulaPoint])
-
   // 执行搜索
   function handleSearchSubmit(e?: React.FormEvent) {
     if (e) e.preventDefault()
@@ -448,22 +213,94 @@ export function MemoriesPage() {
     }
   }
 
-  // 查看详情
-  async function handleOpenDetail(id: number) {
+  // 查看详情（支持无限级向量穿透和历史返回）
+  async function handleOpenDetail(id: number, pushHistory = true) {
+    if (pushHistory && detailId && detailId !== id) {
+      setHistoryStack((prev) => [...prev, detailId])
+    }
     setDetailOpen(true)
     setDetailId(id)
     setDetail(null)
     setDetailLoading(true)
     setDetailError('')
+    setSimilarItems([])
+    setSimilarLoading(true)
+    
     try {
       const res = await getMemoryDetail(id)
       setDetail(res)
+      
+      // 异步懒加载相似向量推荐 (C-HNSW ≤15ms)
+      try {
+        const simRes = await getSimilarMemories(id)
+        setSimilarItems(simRes.items ?? [])
+      } catch {
+        // 允许相似列表加载失败而不卡死核心详情
+      }
     } catch (err) {
       setDetailError(err instanceof Error ? err.message : '加载详情失败')
     } finally {
       setDetailLoading(false)
+      setSimilarLoading(false)
     }
   }
+
+  // 返回详情的上一级
+  function handleBackDetail() {
+    if (historyStack.length === 0) return
+    const prevId = historyStack[historyStack.length - 1]
+    setHistoryStack((prev) => prev.slice(0, -1))
+    void handleOpenDetail(prevId, false)
+  }
+
+  // 物理删除单个标签关联
+  async function handleRemoveTag(tagName: string) {
+    if (!detailId || !detail) return
+    try {
+      await deleteMemoryTag(detailId, tagName)
+      toast.success(`成功移除了标签 "${tagName}"`)
+      setDetail({
+        ...detail,
+        tags: (detail.tags ?? []).filter((t) => t.name !== tagName)
+      })
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '标签移除失败')
+    }
+  }
+
+  // 回车极速新增标签
+  async function handleAddTag(e: React.FormEvent) {
+    e.preventDefault()
+    if (!detailId || !detail) return
+    const name = newTagName.trim()
+    if (!name) return
+
+    if ((detail.tags ?? []).some((t) => t.name.toLowerCase() === name.toLowerCase())) {
+      toast.warning('标签已关联，无需重复添加')
+      return
+    }
+
+    try {
+      await addMemoryTag(detailId, name)
+      toast.success(`成功关联了标签 "${name}"`)
+      setDetail({
+        ...detail,
+        tags: [...(detail.tags ?? []), { name, type: 'custom' }]
+      })
+      setNewTagName('')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '添加标签失败')
+    }
+  }
+
+  useEffect(() => {
+    const openId = Number(searchParams.get('open'))
+    if (!initialOpenHandledRef.current && Number.isFinite(openId) && openId > 0) {
+      initialOpenHandledRef.current = true
+      void handleOpenDetail(openId)
+    }
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams])
 
   // 保存单条详情编辑
   async function handleSaveDetail() {
@@ -551,7 +388,12 @@ export function MemoriesPage() {
   // 批量重新向量化计算 (SSE 流)
   function handleBatchReEmbed() {
     const count = selectedIds.length
-    if (!count) return
+    if (!count) {
+      toast.warning('请先勾选要重新向量化的记忆')
+      return
+    }
+    if (streamRunning) return
+    setStreamRunning(true)
     
     setStreamLog([])
     setStreamProgress(null)
@@ -584,25 +426,32 @@ export function MemoriesPage() {
       const msg = err instanceof Error ? err.message : '连接错误'
       setStreamLog((prev) => [...prev, `[CRITICAL_FAIL] 传输通道不可用: ${msg}`])
       toast.error(`传输失败: ${msg}`)
+    }).finally(() => {
+      setStreamRunning(false)
     })
   }
 
   // 批量提取标签 (SSE 流)
   function handleBatchExtractTags() {
     const count = selectedIds.length
-    if (!count) return
+    if (!count) {
+      toast.warning('请先勾选要提取 Tag 的记忆')
+      return
+    }
+    if (streamRunning) return
+    setStreamRunning(true)
     
     setStreamLog([])
     setStreamProgress(null)
     setStreamOpenTitle('批量 LLM 标签提取（Tag Extraction）')
     setStreamOpen(true)
     
-    setStreamLog((prev) => [...prev, `[INIT] 开始对选中的 ${count} 条记忆异步触发 LLM Tag 提取分析...`])
+    setStreamLog((prev) => [...prev, `[INIT] 开始对选中的 ${count} 条记忆异步触发 LLM Tag 提取分析；tag_batch_size=${tagBatchSize}，tag_write_policy=${tagWritePolicy}...`])
     
     void runPostStream('/api/memories/batch/extract-tags', selectedIds, (state) => {
       setStreamProgress(state)
       if (state.processed !== undefined) {
-        const logLine = `[PROGRESS] 分析中: ${Math.round(state.progress * 100)}% | 已分析: ${state.processed}/${state.total} | 失败: ${state.errors ?? 0}`
+        const logLine = `[PROGRESS] 分析中: ${Math.round(state.progress * 100)}% | 已分析: ${state.processed}/${state.total} | 写入: ${state.tagged ?? 0} | 失败: ${state.errors ?? 0}`
         setStreamLog((prev) => {
           const next = [...prev, logLine]
           return next.slice(-50)
@@ -618,10 +467,18 @@ export function MemoriesPage() {
         setStreamLog((prev) => [...prev, `[ERROR] 标签分析中断: ${state.error}`])
         toast.error(`分析中断: ${state.error}`)
       }
+    }, {
+      payload: {
+        extract_tags: true,
+        tag_batch_size: tagBatchSize,
+        tag_write_policy: tagWritePolicy,
+      },
     }).catch((err) => {
       const msg = err instanceof Error ? err.message : '连接错误'
       setStreamLog((prev) => [...prev, `[CRITICAL_FAIL] 无法分析: ${msg}`])
       toast.error(`分析失败: ${msg}`)
+    }).finally(() => {
+      setStreamRunning(false)
     })
   }
 
@@ -667,6 +524,7 @@ export function MemoriesPage() {
                     <SelectItem value="experience">experience（经历）</SelectItem>
                     <SelectItem value="lore">lore（背景知识）</SelectItem>
                     <SelectItem value="book_lore">book_lore（小说世界观）</SelectItem>
+                    <SelectItem value="oni_lore">oni_lore（缺氧策略知识）</SelectItem>
                     <SelectItem value="bot_reply">bot_reply（Bot 回复素材）</SelectItem>
                     <SelectItem value="fewshot">fewshot（风格范例）</SelectItem>
                   </SelectContent>
@@ -738,29 +596,6 @@ export function MemoriesPage() {
         </Alert>
       ) : null}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>资产类型语义</CardTitle>
-          <CardDescription>source-aware 资产浏览器：把普通记忆、书设、风格范例和经历分流到正确管理入口。</CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-          {Object.entries(sourceAssetMetadata).filter(([sourceKey]) => ['live', 'bzz_experience', 'book_lore', 'bot_reply', 'fewshot'].includes(sourceKey)).map(([sourceKey, metadata]) => (
-            <div key={sourceKey} className="flex flex-col gap-2 rounded-lg border p-3">
-              <Badge variant="secondary" className="w-fit font-mono text-xs">{sourceKey}</Badge>
-              <div className="text-sm font-medium">{metadata.label}</div>
-              <p className="text-xs text-muted-foreground">{metadata.handling}</p>
-              {metadata.route ? <ManagementLink route={metadata.route}>管理入口</ManagementLink> : <Badge variant="outline" className="w-fit">保持在记忆管理器</Badge>}
-            </div>
-          ))}
-        </CardContent>
-      </Card>
-
-      <Alert>
-        <AlertCircleIcon />
-        <AlertTitle>危险等级</AlertTitle>
-        <AlertDescription>re-embed：中风险；改 source：中风险；删除：高风险，必须二次确认。星云视图为只读可视化，不和神经云图职责冲突。</AlertDescription>
-      </Alert>
-
       {/* ─── 批量控制条（有选中时出现） ─── */}
       {selectedIds.length > 0 ? (
         <div className="flex flex-wrap items-center gap-3 rounded-lg border border-primary bg-primary/5 p-3.5 animate-in slide-in-from-top duration-200">
@@ -771,19 +606,51 @@ export function MemoriesPage() {
             <Trash2Icon data-icon="inline-start" />
             一键物理删除
           </Button>
-          <Button variant="outline" size="sm" className="border-primary/20 hover:bg-primary/5" onClick={handleBatchReEmbed}>
+          <Button disabled={streamRunning || selectedIds.length === 0} variant="outline" size="sm" className="border-primary/20 hover:bg-primary/5" onClick={handleBatchReEmbed}>
             <RefreshCwIcon data-icon="inline-start" />
-            批量重新向量特征计算
+            {streamRunning ? '处理中' : '批量重新向量特征计算'}
           </Button>
-          <Button variant="outline" size="sm" className="border-primary/20 hover:bg-primary/5" onClick={handleBatchExtractTags}>
+          <Button disabled={streamRunning || selectedIds.length === 0} variant="outline" size="sm" className="border-primary/20 hover:bg-primary/5" onClick={handleBatchExtractTags}>
             <TagIcon data-icon="inline-start" />
-            批量提取 Tag
+            {streamRunning ? '处理中' : '批量提取 Tag'}
           </Button>
+
+          {/* 齿轮配置选项 */}
+          <Button variant="outline" size="sm" className="border-primary/20" onClick={() => setConfigDialogOpen(true)} title="批量提取 Tag 参数配置">
+            <RefreshCwIcon className="size-3.5" />
+            提取配置 ⚙️
+          </Button>
+
           <Button variant="ghost" size="sm" className="ml-auto" onClick={() => setSelectedIds([])}>
             取消选择
           </Button>
         </div>
       ) : null}
+
+      {/* 批量提取 Tag 参数配置 Dialog */}
+      <Dialog open={configDialogOpen} onOpenChange={setConfigDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Tag 提取参数配置 ⚙️</DialogTitle>
+            <DialogDescription>配置对手动选中的记忆进行批量 Tag 提取分析时的 LLM 提供商、维度及合并更新策略。</DialogDescription>
+          </DialogHeader>
+          <div className="py-4">
+            <TagExtractionConfigPanel
+              title="LLM 运行配置"
+              description="默认 missing_only 只处理无 Tag 记忆，append/replace 仅作用于本次勾选范围。"
+              onOptionsChange={(opts) => {
+                handleTagOptionsChange(opts)
+              }}
+              disabled={streamRunning}
+            />
+          </div>
+          <div className="flex justify-end border-t pt-3">
+            <Button size="sm" onClick={() => setConfigDialogOpen(false)}>
+              确定并保存
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* ─── 记忆数据主表 ─── */}
       <Card>
@@ -794,63 +661,9 @@ export function MemoriesPage() {
               {total !== null ? `无筛选累计记录数：${total.toLocaleString()} 条` : `${memories.length} 条过滤匹配结果`}
             </CardDescription>
           </div>
-          <div className="flex items-center gap-1.5 rounded-lg border bg-muted/30 p-1">
-            <Button
-              size="xs"
-              variant={viewMode === 'list' ? 'secondary' : 'ghost'}
-              className="h-7 text-xs px-2.5"
-              onClick={() => setViewMode('list')}
-            >
-              <LayoutGridIcon className="size-3 mr-1" />
-              列表
-            </Button>
-            <Button
-              size="xs"
-              variant={viewMode === 'nebula' ? 'secondary' : 'ghost'}
-              className="h-7 text-xs px-2.5"
-              onClick={() => setViewMode('nebula')}
-            >
-              <OrbitIcon className="size-3 mr-1" />
-              星云
-            </Button>
-          </div>
         </CardHeader>
         <CardContent className="pt-0">
-          {viewMode === 'nebula' ? (
-            <div className="relative rounded-xl border bg-[#060814] overflow-hidden flex flex-col items-center">
-              {nebulaLoading ? (
-                <div className="h-[460px] flex flex-col items-center justify-center gap-2 text-xs text-muted-foreground">
-                  <Loader2Icon className="animate-spin text-primary size-5" />
-                  正在解算记忆特征向量，投射星云社区聚类...
-                </div>
-              ) : (
-                <>
-                  <canvas ref={canvasRef} className="block w-full h-[460px] cursor-grab" />
-                  <div className="absolute top-3 left-3 flex flex-col gap-1 pointer-events-none">
-                    <span className="text-[10px] text-purple-400 font-mono">NEBULA CLUSTERING MAP</span>
-                    <span className="text-xs text-slate-400">使用鼠标拖拽平移，滚轮缩放，悬停拾取恒星细节</span>
-                  </div>
-                  {hoveredNebulaPoint ? (
-                    <div className="absolute bottom-3 left-3 right-3 p-3 rounded-lg border border-purple-500/20 bg-slate-950/90 text-xs text-slate-300 max-w-lg shadow-xl animate-in fade-in slide-in-from-bottom-2 duration-150">
-                      <div className="flex items-center gap-2 mb-1.5 justify-between">
-                        <span className="text-purple-300 font-semibold font-mono text-[10px] uppercase">🌠 {hoveredNebulaPoint.cluster} · 记忆星体 #{hoveredNebulaPoint.id}</span>
-                        <span className="text-[10px] text-slate-500 font-mono">{hoveredNebulaPoint.sender} · {formatTime(hoveredNebulaPoint.ts)}</span>
-                      </div>
-                      <p className="font-normal leading-relaxed text-slate-200 line-clamp-2">{hoveredNebulaPoint.content}</p>
-                      <span className="text-[9px] text-purple-400 block mt-1">💡 双击或点击该星体可直接弹出在线编辑和修正面板</span>
-                    </div>
-                  ) : (
-                    <div className="absolute bottom-3 left-3 flex flex-wrap gap-2.5 text-[9px] text-slate-500 font-mono">
-                      <div className="flex items-center gap-1"><span className="size-2 rounded-full bg-[#ec4899]" />灵魂羁绊</div>
-                      <div className="flex items-center gap-1"><span className="size-2 rounded-full bg-[#fb7185]" />黑话口癖</div>
-                      <div className="flex items-center gap-1"><span className="size-2 rounded-full bg-[#a78bfa]" />世界设定</div>
-                      <div className="flex items-center gap-1"><span className="size-2 rounded-full bg-[#60a5fa]" />日常见闻</div>
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          ) : loading ? (
+          {loading ? (
             <div className="flex flex-col gap-3">
               <Skeleton className="h-10 w-full" />
               <Skeleton className="h-10 w-full" />
@@ -884,7 +697,6 @@ export function MemoriesPage() {
                   {memories.map((m) => {
                     const hasV = m.has_vector
                     const isRowChecked = selectedIds.includes(m.id)
-                    const asset = sourceAssetMeta(m.source)
                     return (
                       <TableRow key={m.id} className={isRowChecked ? 'bg-primary/5 hover:bg-primary/5' : ''}>
                         <TableCell>
@@ -900,19 +712,9 @@ export function MemoriesPage() {
                         </TableCell>
                         <TableCell className="max-w-28 truncate text-muted-foreground">{m.sender_name || '-'}</TableCell>
                         <TableCell>
-                          <div className="flex flex-col gap-1">
-                            <Badge variant="secondary" className="w-fit font-mono text-[10px] uppercase">
-                              {m.source || '—'}
-                            </Badge>
-                            <span className="text-xs text-muted-foreground">{asset.label}</span>
-                            {asset.route ? (
-                              <Link to={asset.route} className="text-xs text-primary hover:underline">
-                                {asset.handling}
-                              </Link>
-                            ) : (
-                              <span className="text-xs text-muted-foreground">{asset.handling}</span>
-                            )}
-                          </div>
+                          <Badge variant="secondary" className="w-fit font-mono text-[10px] uppercase">
+                            {m.source || '—'}
+                          </Badge>
                         </TableCell>
                         <TableCell>
                           <div className="flex flex-wrap gap-1">
@@ -974,7 +776,12 @@ export function MemoriesPage() {
       </Card>
 
       {/* ─── 详情 Sheet 弹窗 ─── */}
-      <Sheet open={detailOpen} onOpenChange={setDetailOpen}>
+      <Sheet open={detailOpen} onOpenChange={(open) => {
+        setDetailOpen(open)
+        if (!open) {
+          setHistoryStack([])
+        }
+      }}>
         <SheetContent className="w-full gap-0 sm:max-w-2xl flex flex-col pr-0 sm:pr-2">
           <SheetHeader className="pb-4 border-b shrink-0 pr-6">
             <SheetTitle>记忆明细</SheetTitle>
@@ -998,19 +805,6 @@ export function MemoriesPage() {
                 </Alert>
               ) : detail ? (
                 <>
-                  {(() => {
-                    const asset = sourceAssetMeta(detail.source)
-                    return (
-                      <Alert>
-                        <AlertCircleIcon />
-                        <AlertTitle>source-aware 管理建议</AlertTitle>
-                        <AlertDescription>
-                          当前来源：{detail.source || '未知'} · {asset.label} · {asset.handling}
-                        </AlertDescription>
-                      </Alert>
-                    )
-                  })()}
-
                   <Field>
                     <FieldLabel>内容编辑 (content)</FieldLabel>
                     <Textarea
@@ -1044,44 +838,98 @@ export function MemoriesPage() {
                     <div><span className="text-muted-foreground font-medium">被调次数：</span>{detail.access_count ?? 0}</div>
                   </div>
 
+                  {/* 回退上一级按钮（当有穿透历史时显现） */}
+                  {historyStack.length > 0 ? (
+                    <Button variant="outline" size="sm" className="w-fit" onClick={handleBackDetail}>
+                      <Undo2Icon className="size-3.5" />
+                      返回上一层记忆 (#{historyStack[historyStack.length - 1]})
+                    </Button>
+                  ) : null}
+
+                  {/* 100% 双向标签交互 */}
                   <Field>
                     <FieldLabel>关联标签 (Tags)</FieldLabel>
-                    <div className="flex min-h-12 flex-wrap gap-1.5 rounded-lg border bg-muted/10 p-3">
-                      {(detail.tags ?? []).length === 0 ? (
-                        <span className="text-xs text-muted-foreground">暂无关联标签。</span>
-                      ) : (
-                        (detail.tags ?? []).map((t, idx) => (
-                          <Badge key={`${t.name}-${idx}`} className={tagBadgeClass(t.type || 'keyword')}>
-                            {t.name} ({String(t.type || '—')})
-                          </Badge>
-                        ))
-                      )}
+                    <div className="flex flex-col gap-3 rounded-lg border bg-muted/10 p-3">
+                      <div className="flex flex-wrap gap-1.5 min-h-8 items-center">
+                        {(detail.tags ?? []).length === 0 ? (
+                          <span className="text-xs text-muted-foreground">暂无关联标签。</span>
+                        ) : (
+                          (detail.tags ?? []).map((t, idx) => (
+                            <Badge key={`${t.name}-${idx}`} className={`${tagBadgeClass(t.type || 'keyword')} pr-1 flex items-center gap-1`}>
+                              <span>{t.name}</span>
+                              <button
+                                type="button"
+                                className="hover:bg-foreground/20 rounded-full size-3 flex items-center justify-center font-bold text-[8px] transition-colors"
+                                onClick={() => void handleRemoveTag(t.name)}
+                                title="从当前记忆物理移除该标签关联"
+                              >
+                                ✕
+                              </button>
+                            </Badge>
+                          ))
+                        )}
+                      </div>
+                      
+                      {/* 轻量回车新增标签框 */}
+                      <form onSubmit={handleAddTag} className="flex gap-2">
+                        <Input
+                          placeholder="+ 回车新增自定义标签..."
+                          className="h-8 text-xs max-w-xs"
+                          value={newTagName}
+                          onChange={(e) => setNewTagName(e.target.value)}
+                        />
+                        <Button type="submit" size="sm" className="h-8 text-xs">
+                          关联
+                        </Button>
+                      </form>
                     </div>
                   </Field>
 
-                  <Card>
-                    <CardHeader>
-                      <CardTitle>详情关联区</CardTitle>
-                      <CardDescription>只读占位：后续接入关联对象 API，不在记忆详情里直接改黑盒对象。</CardDescription>
+                  {/* 100% 真实 C-HNSW 向量相似记忆诊断推荐 */}
+                  <Card className="border border-primary/20 bg-primary/5">
+                    <CardHeader className="py-3 shrink-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-primary font-bold">✨</span>
+                        <CardTitle className="text-sm">HNSW 相似记忆碰撞 (Similar Memories)</CardTitle>
+                      </div>
+                      <CardDescription className="text-xs">
+                        基于底层 C-HNSW 向量空间在 15ms 内匹配出的前 3 条最相似记录，点击行可无缝折叠穿透查看。
+                      </CardDescription>
                     </CardHeader>
-                    <CardContent className="grid gap-2 sm:grid-cols-2">
-                      {associationPlaceholders.map((item) => (
-                        <div key={item} className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
-                          {item}
+                    <CardContent className="pt-0 flex flex-col gap-2">
+                      {similarLoading ? (
+                        <div className="flex items-center gap-2 py-4 justify-center">
+                          <Loader2Icon className="animate-spin text-primary size-4" />
+                          <span className="text-xs text-muted-foreground font-mono">HNSW 极速计算中...</span>
                         </div>
-                      ))}
-                    </CardContent>
-                  </Card>
-
-                  <Card>
-                    <CardHeader>
-                      <CardTitle>转为管理对象</CardTitle>
-                      <CardDescription>这些入口只跳转到管理页；候选转正、写入和回滚由对应黑盒管理页负责。</CardDescription>
-                    </CardHeader>
-                    <CardContent className="flex flex-wrap gap-2">
-                      {managementConversions.map((item) => (
-                        <ManagementLink key={item.label} route={item.route}>{item.label}</ManagementLink>
-                      ))}
+                      ) : similarItems.length === 0 ? (
+                        <p className="text-xs text-muted-foreground text-center py-4">未找到该条记忆的高相似碰撞记录（可能未进行特征计算）。</p>
+                      ) : (
+                        <div className="flex flex-col gap-2">
+                          {similarItems.map((item) => (
+                            <div
+                              key={item.id}
+                              onClick={() => void handleOpenDetail(item.id)}
+                              className="group flex flex-col gap-1 rounded-lg border border-border/40 p-2.5 bg-muted/20 hover:bg-muted/40 cursor-pointer transition-all hover:border-primary/20"
+                            >
+                              <div className="flex items-center justify-between text-[10px] font-mono">
+                                <span className="text-muted-foreground">#{item.id}</span>
+                                <div className="flex items-center gap-1.5">
+                                  <Badge variant="secondary" className="text-[8px] px-1 uppercase py-0 leading-none h-4">
+                                    {item.source || 'chat'}
+                                  </Badge>
+                                  <span className="text-primary font-bold">
+                                    相似度 {item.similarity}%
+                                  </span>
+                                </div>
+                              </div>
+                              <p className="text-xs leading-relaxed text-foreground/80 group-hover:text-primary transition-colors line-clamp-2">
+                                {item.content}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </CardContent>
                   </Card>
 
