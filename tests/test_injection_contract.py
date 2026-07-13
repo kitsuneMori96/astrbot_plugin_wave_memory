@@ -3,9 +3,21 @@ import unittest
 
 
 class InjectionContractTest(unittest.TestCase):
-    def test_injection_context_carries_request_identity_and_trace(self):
+    def test_injection_context_carries_request_identity_trace_and_optional_scope(self):
+        from domain.scope import RuntimeScope, SessionRef
         from services.injection.context import InjectionContext
 
+        scope = RuntimeScope(
+            bot_id="yushu",
+            visibility="group",
+            session=SessionRef(
+                id="qq:group:10001",
+                platform_id="qq",
+                kind="group",
+                conversation_id="10001",
+            ),
+            subject_principal_id="qq:user:20002",
+        )
         ctx = InjectionContext(
             event="event",
             req="req",
@@ -15,6 +27,7 @@ class InjectionContractTest(unittest.TestCase):
             sender_name="测试用户",
             bot_id="30003",
             bot_profile_id="yushu",
+            scope=scope,
             recent_context=["上一句"],
             mode="memory_only",
             config={"channels": {}},
@@ -26,6 +39,7 @@ class InjectionContractTest(unittest.TestCase):
         self.assertEqual(ctx.group_id, "10001")
         self.assertEqual(ctx.sender_id, "20002")
         self.assertEqual(ctx.bot_profile_id, "yushu")
+        self.assertEqual(ctx.scope, scope)
         self.assertEqual(ctx.mode, "memory_only")
         self.assertEqual(ctx.trace_id, "trace-1")
 

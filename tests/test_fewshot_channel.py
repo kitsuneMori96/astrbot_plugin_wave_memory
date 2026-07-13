@@ -36,9 +36,15 @@ class FakeFewShotService:
 
 
 class FewShotChannelTest(unittest.TestCase):
-    def _ctx(self, *, mode="full", config=None):
+    def _ctx(self, *, mode="full", config=None, scope="default"):
+        from domain.scope import RuntimeScope, SessionRef
         from services.injection.context import InjectionContext
 
+        runtime_scope = RuntimeScope(
+            bot_id="baizhenzhen",
+            visibility="group",
+            session=SessionRef("qq:group:g1", "qq", "group", "g1"),
+        ) if scope == "default" else scope
         return InjectionContext(
             event="event",
             req=object(),
@@ -48,6 +54,7 @@ class FewShotChannelTest(unittest.TestCase):
             sender_name="用户",
             bot_id="1336495069",
             bot_profile_id="baizhenzhen",
+            scope=runtime_scope,
             recent_context=[],
             mode=mode,
             config=config or {"channels": {"fewshot": {"max_items": 2, "token_budget": 200}}},
@@ -65,7 +72,7 @@ class FewShotChannelTest(unittest.TestCase):
         self.assertEqual(result.channel, "fewshot")
         self.assertEqual(result.status, "hit")
         self.assertIn("先看事实", result.text)
-        self.assertEqual(service.calls[0], {"bot_id": "1336495069", "max_items": 2})
+        self.assertEqual(service.calls[0], {"bot_id": "baizhenzhen", "max_items": 2})
         self.assertEqual([item["example_id"] for item in result.items], [11, 12])
         self.assertIn("简短设边界", result.items[1]["preview"])
 
@@ -106,9 +113,9 @@ class FewShotChannelTest(unittest.TestCase):
             """INSERT INTO few_shot_examples (content, score, traits, status, bot_id, created_at, approved_at)
                VALUES (?, ?, '[]', ?, ?, ?, ?)""",
             [
-                ("先看事实，再冷淡回应。", 0.95, "approved", "1336495069", now, now),
-                ("狠狠怼回去，别客气。", 0.99, "approved", "1336495069", now, now),
-                ("未审核样例不应注入。", 0.98, "pending", "1336495069", now, None),
+                ("先看事实，再冷淡回应。", 0.95, "approved", "baizhenzhen", now, now),
+                ("狠狠怼回去，别客气。", 0.99, "approved", "baizhenzhen", now, now),
+                ("未审核样例不应注入。", 0.98, "pending", "baizhenzhen", now, None),
             ],
         )
         conn.commit()
@@ -121,6 +128,62 @@ class FewShotChannelTest(unittest.TestCase):
         self.assertNotIn("怼回去", result.text)
         self.assertNotIn("未审核", result.text)
         self.assertEqual(len(result.items), 1)
+
+    def test_missing_or_mismatched_runtime_scope_fails_closed(self):
+        from domain.scope import RuntimeScope, SessionRef
+        from services.injection.channels.fewshot import FewShotChannel
+
+        service = FakeFewShotService("不应调用")
+        channel = FewShotChannel(few_shot_service=service)
+        missing = asyncio.run(channel.build(self._ctx(scope=None)))
+        mismatch_scope = RuntimeScope(
+            bot_id="yushu",
+            visibility="group",
+            session=SessionRef("qq:group:g1", "qq", "group", "g1"),
+        )
+        mismatch = asyncio.run(channel.build(self._ctx(scope=mismatch_scope)))
+
+        self.assertEqual(missing.status, "empty")
+        self.assertEqual(mismatch.status, "empty")
+        self.assertEqual(service.calls, [])
+
+    def test_service_has_no_empty_bot_fallback(self):
+        from services.few_shot.service import FewShotService
+
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        service = FewShotService(db=SimpleNamespace(conn=conn), enabled=True)
+        now = int(time.time())
+        conn.executemany(
+            """INSERT INTO few_shot_examples (content, score, traits, status, bot_id, created_at, approved_at)
+               VALUES (?, 1.0, '[]', 'approved', ?, ?, ?)""",
+            [("legacy 全局样例", "", now, now), ("其他 bot 样例", "yushu", now, now)],
+        )
+        conn.commit()
+
+        self.assertEqual(service.get_injection(bot_id="baizhenzhen"), "")
+        self.assertEqual(service.get_injection(bot_id=""), "")
+
+    def test_extract_candidates_does_not_write_formal_table(self):
+        from services.few_shot.service import FewShotService
+
+        class _LLM:
+            async def text_chat(self, **kwargs):
+                return SimpleNamespace(completion_text='{"score": 0.9, "traits": ["克制"]}')
+
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        conn.execute("CREATE TABLE memories (id INTEGER PRIMARY KEY, content TEXT, source TEXT, timestamp INTEGER)")
+        conn.execute(
+            "INSERT INTO memories (content, source, timestamp) VALUES (?, 'bot_reply', ?)",
+            ("先核实事实，再用简短而克制的方式回应对方。", int(time.time())),
+        )
+        service = FewShotService(db=SimpleNamespace(conn=conn), llm_client=_LLM(), enabled=True)
+
+        candidates = asyncio.run(service.extract_candidates(bot_id="baizhenzhen"))
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM few_shot_examples").fetchone()[0], 0)
 
     def test_disabled_config_or_missing_service_returns_without_query(self):
         from services.injection.channels.fewshot import FewShotChannel

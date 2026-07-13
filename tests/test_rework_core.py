@@ -193,16 +193,32 @@ class ReworkCoreTest(unittest.TestCase):
 
         self.addCleanup(conn.close)
 
+        from domain.scope import RuntimeScope, SessionRef, ScopeValidationError
+
         svc = RelationshipEventService(conn, single_delta_cap=5, daily_delta_cap=15)
-        result = svc.record_event(
+        scope = RuntimeScope(
             bot_id="yushu",
-            group_id="g1",
-            user_id="u1",
+            visibility="group",
+            session=SessionRef("test:group:g1", "test", "group", "g1"),
+            subject_principal_id="test:user:u1",
+        )
+        result = svc.record_event(
+            scope=scope,
             event_type="gift_or_feed",
             dimension="fun",
             delta=10,
             reason="用户投喂小蛋糕",
         )
+        with self.assertRaises(ScopeValidationError) as mismatch:
+            svc.record_event(
+                scope=scope,
+                bot_id="baizz",
+                event_type="gift_or_feed",
+                dimension="fun",
+                delta=1,
+                reason="错误 Bot",
+            )
+        self.assertEqual(mismatch.exception.reason_code, "scope_legacy_mismatch")
 
         self.assertEqual(result["applied_delta"], 5)
         yushu = conn.execute("SELECT affection, metadata FROM user_profiles WHERE user_id='u1' AND group_id='g1' AND bot_id='yushu'").fetchone()
@@ -213,6 +229,225 @@ class ReworkCoreTest(unittest.TestCase):
         self.assertGreaterEqual(yushu[0], 1)
         event = conn.execute("SELECT bot_id, dimension, delta, reason FROM relationship_events").fetchone()
         self.assertEqual((event[0], event[1], event[2], event[3]), ("yushu", "fun", 5, "用户投喂小蛋糕"))
+
+    def test_affinity_update_tool_requires_resolved_scope_and_target_locality(self):
+        from domain.scope import RuntimeScope, SessionRef
+        from services.relationship_events import RelationshipEventService
+        from tools.affinity_update import WaveMemoryAffinityUpdateTool
+
+        conn, _ = self._connect()
+        self.addCleanup(conn.close)
+        conn.executescript("""
+            CREATE TABLE user_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                nickname TEXT,
+                affection INTEGER DEFAULT 0,
+                interaction_count INTEGER DEFAULT 0,
+                first_seen REAL,
+                last_seen REAL,
+                personality_tags TEXT,
+                notes TEXT,
+                metadata TEXT,
+                bot_id TEXT NOT NULL,
+                UNIQUE(user_id, group_id, bot_id)
+            );
+            CREATE TABLE relationship_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bot_id TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                dimension TEXT NOT NULL,
+                delta REAL NOT NULL,
+                reason TEXT NOT NULL,
+                source_episode_id INTEGER,
+                source_memory_id INTEGER,
+                created_at REAL NOT NULL
+            );
+        """)
+        conn.execute(
+            "INSERT INTO user_profiles (user_id, group_id, nickname, bot_id) VALUES (?, ?, ?, ?)",
+            ("u-local", "g1", "当前群用户", "yushu"),
+        )
+        conn.execute(
+            "INSERT INTO user_profiles (user_id, group_id, nickname, bot_id) VALUES (?, ?, ?, ?)",
+            ("u-other", "g2", "其他群用户", "yushu"),
+        )
+        conn.commit()
+
+        class _DB:
+            closed = False
+
+            def __init__(self, connection):
+                self.conn = connection
+
+        class _Event:
+            def __init__(self, scope=None):
+                self._wave_memory_runtime_scope = scope
+
+        runtime_scope = RuntimeScope(
+            bot_id="yushu",
+            visibility="group",
+            session=SessionRef("test:group:g1", "test", "group", "g1"),
+            subject_principal_id="test:user:caller",
+        )
+        service = RelationshipEventService(conn)
+        tool = WaveMemoryAffinityUpdateTool(db=_DB(conn), relationship_events=service)
+        missing_ctx = _ContextWrapper(context=type("C", (), {"event": _Event()})())
+        missing = asyncio.run(tool.call(
+            missing_ctx,
+            target_user="当前群用户",
+            dimension="trust",
+            delta=1,
+            event_type="direct_reply",
+            reason="没有 scope",
+        ))
+        self.assertIn("scope_required", missing)
+
+        scoped_ctx = _ContextWrapper(context=type("C", (), {"event": _Event(runtime_scope)})())
+        recorded = asyncio.run(tool.call(
+            scoped_ctx,
+            target_user="当前群用户",
+            dimension="trust",
+            delta=2,
+            event_type="direct_reply",
+            reason="当前群互动",
+        ))
+        self.assertIn("已记录关系事件", recorded)
+        event = conn.execute(
+            "SELECT bot_id, group_id, user_id FROM relationship_events"
+        ).fetchone()
+        self.assertEqual(tuple(event), ("yushu", "g1", "u-local"))
+
+        rejected = asyncio.run(tool.call(
+            scoped_ctx,
+            target_user="其他群用户",
+            dimension="trust",
+            delta=2,
+            event_type="direct_reply",
+            reason="不应跨群",
+        ))
+        self.assertIn("当前 Bot/群作用域", rejected)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM relationship_events").fetchone()[0], 1)
+
+    def test_lifecycle_routes_scope_by_bot_without_cross_contamination(self):
+        from domain.scope import RuntimeScope, SessionRef
+        from services.lifecycle import LifecycleService
+
+        conn, _ = self._connect()
+        self.addCleanup(conn.close)
+        conn.executescript("""
+            CREATE TABLE user_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                nickname TEXT,
+                affection INTEGER DEFAULT 0,
+                interaction_count INTEGER DEFAULT 0,
+                first_seen REAL,
+                last_seen REAL,
+                personality_tags TEXT,
+                notes TEXT,
+                metadata TEXT,
+                bot_id TEXT NOT NULL,
+                UNIQUE(user_id, group_id, bot_id)
+            );
+            CREATE TABLE relationship_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bot_id TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                dimension TEXT NOT NULL,
+                delta REAL NOT NULL,
+                reason TEXT NOT NULL,
+                source_episode_id INTEGER,
+                source_memory_id INTEGER,
+                created_at REAL NOT NULL
+            );
+            CREATE TABLE memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sender_id TEXT,
+                sender_name TEXT,
+                timestamp REAL
+            );
+            CREATE TABLE person_registry (
+                qq_id TEXT PRIMARY KEY,
+                display_name TEXT,
+                aliases TEXT,
+                message_count INTEGER,
+                first_seen REAL,
+                last_seen REAL
+            );
+            CREATE TABLE facts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject TEXT,
+                predicate TEXT,
+                object TEXT
+            );
+        """)
+        conn.execute(
+            "INSERT INTO memories (sender_id, sender_name, timestamp) VALUES (?, ?, ?)",
+            ("user-1", "本地名字", 1.0),
+        )
+        conn.execute(
+            "INSERT INTO facts (subject, predicate, object) VALUES (?, ?, ?)",
+            ("user-1", "昵称", "泄漏别名"),
+        )
+
+        class _DB:
+            def __init__(self, connection):
+                self.conn = connection
+
+        lifecycle = LifecycleService(
+            _DB(conn),
+            bot_qq_id="qq-a",
+            bot_db_id="bot-a",
+            bot_identities={"bot-a": "qq-a", "bot-b": "qq-b"},
+            run_global_jobs=False,
+        )
+        scope_a = RuntimeScope(
+            bot_id="bot-a",
+            visibility="group",
+            session=SessionRef("test:group:g1", "test", "group", "g1"),
+            subject_principal_id="test:user:user-1",
+        )
+        scope_b = RuntimeScope(
+            bot_id="bot-b",
+            visibility="group",
+            session=SessionRef("test:group:g1", "test", "group", "g1"),
+            subject_principal_id="test:user:user-1",
+        )
+        unknown_scope = RuntimeScope(
+            bot_id="bot-c",
+            visibility="group",
+            session=SessionRef("test:group:g1", "test", "group", "g1"),
+            subject_principal_id="test:user:user-1",
+        )
+
+        self.assertTrue(lifecycle.process_scoped_message(scope=scope_a, content="普通消息"))
+        self.assertTrue(lifecycle.process_scoped_message(scope=scope_b, content="普通消息"))
+        self.assertFalse(lifecycle.process_scoped_message(scope=unknown_scope, content="不应写入"))
+        lifecycle._tick()
+
+        profiles = conn.execute(
+            "SELECT bot_id, group_id, user_id FROM user_profiles ORDER BY bot_id"
+        ).fetchall()
+        self.assertEqual([tuple(row) for row in profiles], [
+            ("bot-a", "g1", "user-1"),
+            ("bot-b", "g1", "user-1"),
+        ])
+        event_bots = {
+            row[0] for row in conn.execute("SELECT bot_id FROM relationship_events").fetchall()
+        }
+        self.assertEqual(event_bots, {"bot-a", "bot-b"})
+        aliases = json.loads(
+            conn.execute("SELECT aliases FROM person_registry WHERE qq_id='user-1'").fetchone()[0]
+        )
+        self.assertEqual(aliases, ["本地名字"])
+        self.assertNotIn("泄漏别名", aliases)
 
     def test_relationship_event_marks_known_bot_target_without_dropping_relation(self):
         from services.relationship_events import RelationshipEventService
@@ -275,16 +510,30 @@ class ReworkCoreTest(unittest.TestCase):
 
     def test_memory_repo_excludes_archived_memories_from_recall_candidates(self):
         import numpy as np
+        from domain.scope import RuntimeScope, SessionRef
         from engine.db.connection import ConnectionManager
         from engine.db.memory_repo import MemoryRepo
+        from engine.db.migrations.memories_v2 import ensure_memories_v2_schema
 
+        scope = RuntimeScope(
+            bot_id="bot-test",
+            visibility="group",
+            session=SessionRef(
+                id="qq:group:g1",
+                platform_id="qq",
+                kind="group",
+                conversation_id="g1",
+            ),
+            subject_principal_id="qq:user:tester",
+        )
         tmp = tempfile.TemporaryDirectory()
         cm = None
         try:
             cm = ConnectionManager(str(Path(tmp.name) / "memory.db"))
             repo = MemoryRepo(cm)
-            active_id = repo.add_memory("g1", "正常记忆", vector=np.array([1, 0], dtype=np.float32), source="core")
-            archived_id = repo.add_memory("g1", "应该被隔离的爸爸主人记忆", vector=np.array([0, 1], dtype=np.float32), source="core")
+            ensure_memories_v2_schema(cm)
+            active_id = repo.add_memory("g1", "正常记忆", vector=np.array([1, 0], dtype=np.float32), source="core", scope=scope)
+            archived_id = repo.add_memory("g1", "应该被隔离的爸爸主人记忆", vector=np.array([0, 1], dtype=np.float32), source="core", scope=scope)
             cm.execute_write("UPDATE memories SET memory_type='archived' WHERE id=?", (archived_id,))
             cm.commit()
 
@@ -292,7 +541,7 @@ class ReworkCoreTest(unittest.TestCase):
             self.assertIn(active_id, vector_ids)
             self.assertNotIn(archived_id, vector_ids)
 
-            rows = repo.get_memories_by_ids([active_id, archived_id])
+            rows = repo.get_memories_by_ids([active_id, archived_id], scope=scope)
             self.assertEqual([r["id"] for r in rows], [active_id])
             self.assertEqual(rows[0]["source"], "core")
         finally:
@@ -305,21 +554,28 @@ class ReworkCoreTest(unittest.TestCase):
 
         import time
 
+        from domain.scope import RuntimeScope, SessionRef
+
+        scope = RuntimeScope(
+            "yushu",
+            "group",
+            SessionRef("qq:group:g1", "qq", "group", "g1"),
+        )
         filt = JargonStatisticalFilter(context_keep=10, jieba_threshold=999999)
         now = time.time()
         for i in range(8):
-            filt.feed("邪修 邪修 嗷嗷嗷嗷嗷", "g1", sender_id="2500447291", timestamp=now + i)
+            filt.feed("邪修 邪修 嗷嗷嗷嗷嗷", scope, sender_id="2500447291", timestamp=now + i)
         for i in range(5):
-            filt.feed("邪修 今天又在修仙", "g1", sender_id="user_a", timestamp=now + 100 + i)
+            filt.feed("邪修 今天又在修仙", scope, sender_id="user_a", timestamp=now + 100 + i)
 
-        candidates = filt.get_candidates("g1", min_freq=5, top_k=20)
+        candidates = filt.get_candidates(scope, min_freq=5, top_k=20)
         words = {c["word"] for c in candidates}
 
         self.assertIn("邪修", words)
         self.assertNotIn("嗷嗷", words)
         self.assertTrue(all(ctx["sender_id"] != "2500447291" for c in candidates for ctx in c.get("source_contexts", [])))
 
-    def test_belief_emergence_records_relationship_event_evidence_metadata(self):
+    def test_belief_emergence_without_canonical_scope_is_quarantined(self):
         from services.belief_emergence import BeliefEmergenceService
 
         conn, _ = self._connect()
@@ -378,39 +634,50 @@ class ReworkCoreTest(unittest.TestCase):
             def get_beliefs(self, bot_id=None, status='active', limit=50):
                 return []
 
-        created = asyncio.run(BeliefEmergenceService(DB(conn), bot_id='yushu').emerge_recent(days=1, limit=1))
+        service = BeliefEmergenceService(DB(conn), bot_id='yushu')
+        created = asyncio.run(service.emerge_recent(days=1, limit=1))
 
-        self.assertEqual(len(created), 1)
-        row = conn.execute("SELECT sources, evidence_type, evidence_ids, strength FROM beliefs").fetchone()
-        self.assertEqual(row[1], "relationship_event")
-        self.assertEqual(json.loads(row[0]), json.loads(row[2]))
-        self.assertGreater(row[3], 0.4)
+        self.assertEqual(created, [])
+        self.assertEqual(service.legacy_scope_skip_total, 1)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM beliefs").fetchone()[0], 0)
 
-    def test_jargon_injection_only_uses_confirmed_nonempty_entries(self):
+    def test_jargon_injection_only_uses_scoped_confirmed_nonempty_entries(self):
+        from domain.scope import RuntimeScope, SessionRef
         from services.jargon.inference import JargonInjector
 
         conn, _ = self._connect()
         self.addCleanup(conn.close)
+        # Unresolved legacy rows remain physically present but cannot become an
+        # injection source just because their old group_id happens to match.
         conn.execute("""
             CREATE TABLE jargon (
                 id INTEGER PRIMARY KEY,
                 word TEXT,
                 meaning TEXT,
                 is_jargon INTEGER,
-                frequency INTEGER DEFAULT 0,
-                confidence REAL DEFAULT 0,
-                is_global INTEGER DEFAULT 0,
                 group_id TEXT NOT NULL,
-                status TEXT DEFAULT 'pending',
-                scope TEXT DEFAULT 'local',
-                source TEXT DEFAULT 'wave_memory'
+                status TEXT DEFAULT 'pending'
             )
         """)
-        conn.execute("INSERT INTO jargon (word, meaning, is_jargon, confidence, group_id, status) VALUES ('大声暗道','公开说出本该私下说的话',1,0.9,'g1','confirmed')")
-        conn.execute("INSERT INTO jargon (word, meaning, is_jargon, confidence, group_id, status) VALUES ('肚腩','',1,0.9,'g1','confirmed')")
-        conn.execute("INSERT INTO jargon (word, meaning, is_jargon, confidence, group_id, status) VALUES ('朋友圈','普通词',1,0.9,'g1','pending')")
-        injector = JargonInjector(type('DB', (), {'conn': conn})())
-        text = injector.get_injection('这也太大声暗道了，肚腩朋友圈', 'g1')
+        conn.execute("INSERT INTO jargon (word, meaning, is_jargon, group_id, status) VALUES ('朋友圈','旧表词条',1,'g1','confirmed')")
+
+        class _ScopedRepo:
+            def __init__(self):
+                self.calls = []
+
+            def list_scoped_jargon(self, scope, *, status=None, limit=50):
+                self.calls.append((scope, status, limit))
+                return [
+                    {"word": "大声暗道", "meaning": "公开说出本该私下说的话", "is_jargon": True, "frequency": 3},
+                    {"word": "肚腩", "meaning": "", "is_jargon": True, "frequency": 2},
+                ]
+
+        repo = _ScopedRepo()
+        injector = JargonInjector(types.SimpleNamespace(conn=conn, scoped_knowledge=repo))
+        scope = RuntimeScope("yushu", "group", SessionRef("qq:group:g1", "qq", "group", "g1"))
+        text = injector.get_injection('这也太大声暗道了，肚腩朋友圈', scope)
+
+        self.assertEqual(repo.calls, [(scope, "confirmed", 100)])
         self.assertIn('大声暗道', text)
         self.assertNotIn('肚腩', text)
         self.assertNotIn('朋友圈', text)
@@ -929,102 +1196,21 @@ git clone https://github.com/ykdeso/holyman-skills.git
         self.assertEqual(tuple(row), ("quarantined_roleplay", 0.0))
         self.assertEqual(svc.last_bot_reply(bot_id="yushu", group_id="g1", user_id="u1"), "")
 
-    def test_affinity_tool_supports_group_and_global_scopes(self):
+    def test_affinity_tool_is_fail_closed_until_scoped_social_read_model_exists(self):
         import asyncio
         from tools.extra_tools import WaveMemoryAffinityTool
 
-        conn, _ = self._connect()
-        self.addCleanup(conn.close)
-        conn.executescript("""
-            CREATE TABLE user_profiles (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT NOT NULL,
-                group_id TEXT NOT NULL,
-                nickname TEXT,
-                affection INTEGER DEFAULT 0,
-                interaction_count INTEGER DEFAULT 0,
-                first_seen REAL,
-                last_seen REAL,
-                personality_tags TEXT,
-                notes TEXT,
-                metadata TEXT,
-                bot_id TEXT DEFAULT 'yushu',
-                UNIQUE(user_id, group_id, bot_id)
-            );
-            CREATE TABLE memories (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                group_id TEXT NOT NULL,
-                sender_id TEXT,
-                sender_name TEXT,
-                content TEXT NOT NULL,
-                timestamp REAL NOT NULL
-            );
-            CREATE TABLE person_registry (
-                qq_id TEXT PRIMARY KEY,
-                display_name TEXT,
-                aliases TEXT,
-                message_count INTEGER DEFAULT 0
-            );
-        """)
-        now = time.time()
-        conn.execute("INSERT INTO person_registry (qq_id, display_name, aliases) VALUES ('u1','当前群用户','[]')")
-        conn.execute("INSERT INTO person_registry (qq_id, display_name, aliases) VALUES ('u2','其他群用户','[]')")
-        conn.execute("INSERT INTO person_registry (qq_id, display_name, aliases) VALUES ('2500447291','羽书','[]')")
-        conn.execute("INSERT INTO user_profiles (user_id, group_id, bot_id, affection, interaction_count, metadata, last_seen) VALUES ('u1','g1','yushu',10,3,'{}',?)", (now,))
-        conn.execute("INSERT INTO user_profiles (user_id, group_id, bot_id, affection, interaction_count, metadata, last_seen) VALUES ('u2','g2','yushu',90,99,'{}',?)", (now,))
-        conn.execute("INSERT INTO user_profiles (user_id, group_id, bot_id, affection, interaction_count, metadata, last_seen) VALUES ('u2','g2','baizz',70,77,'{}',?)", (now,))
-        conn.execute("INSERT INTO user_profiles (user_id, group_id, bot_id, affection, interaction_count, metadata, last_seen) VALUES ('2500447291','g2','baizz',20,88,?,?)", (json.dumps({"target_type":"bot","target_bot_id":"yushu","target_name":"羽书"}), now))
-        conn.execute("INSERT INTO memories (group_id, sender_id, sender_name, content, timestamp) VALUES ('g1','u1','当前群用户','hi',?)", (now,))
-        conn.execute("INSERT INTO memories (group_id, sender_id, sender_name, content, timestamp) VALUES ('g2','u2','其他群用户','hi',?)", (now,))
-        conn.commit()
+        result = asyncio.run(
+            WaveMemoryAffinityTool().call(
+                None,
+                mode="ranking",
+                scope="global",
+                group_id="other-group",
+                bot_scope="all_bots",
+            )
+        )
 
-        class DB:
-            closed = False
-            def __init__(self, conn):
-                self.conn = conn
-
-        class Event:
-            def get_group_id(self): return "g1"
-            def get_self_id(self): return "2500447291"
-
-        ctx = _ContextWrapper(context=type("C", (), {"event": Event()})())
-        tool = WaveMemoryAffinityTool(db=DB(conn), bot_db_ids={"2500447291": "yushu"})
-
-        ranking_current = asyncio.run(tool.call(ctx, mode="ranking", scope="current_group"))
-        self.assertIn("当前群用户", ranking_current)
-        self.assertNotIn("其他群用户", ranking_current)
-
-        ranking_global = asyncio.run(tool.call(ctx, mode="ranking", scope="global"))
-        self.assertIn("当前群用户", ranking_global)
-        self.assertIn("其他群用户", ranking_global)
-
-        active_current = asyncio.run(tool.call(ctx, mode="active", scope="current_group"))
-        self.assertIn("当前群用户", active_current)
-        self.assertNotIn("其他群用户", active_current)
-
-        active_global = asyncio.run(tool.call(ctx, mode="active", scope="global"))
-        self.assertIn("当前群用户", active_global)
-        self.assertIn("其他群用户", active_global)
-
-        single_current = asyncio.run(tool.call(ctx, mode="single", user_id="其他群用户", scope="current_group"))
-        self.assertIn("没有找到", single_current)
-
-        single_global = asyncio.run(tool.call(ctx, mode="single", user_id="其他群用户", scope="global"))
-        self.assertIn("其他群", single_global)
-
-        ranking_specific_group = asyncio.run(tool.call(ctx, mode="ranking", scope="current_group", group_id="g2"))
-        self.assertIn("其他群用户", ranking_specific_group)
-        self.assertNotIn("当前群用户", ranking_specific_group)
-
-        ranking_all_bots = asyncio.run(tool.call(ctx, mode="ranking", scope="global", bot_scope="all_bots"))
-        self.assertIn("yushu", ranking_all_bots)
-        self.assertIn("baizz", ranking_all_bots)
-
-        ranking_specific_bot = asyncio.run(tool.call(ctx, mode="ranking", scope="global", bot_id="baizz"))
-        self.assertIn("其他群用户", ranking_specific_bot)
-        self.assertIn("羽书(bot)", ranking_specific_bot)
-        self.assertIn("baizz", ranking_specific_bot)
-        self.assertNotIn("当前群用户", ranking_specific_bot)
+        self.assertIn("scope_migration_required", result)
 
 
 if __name__ == "__main__":

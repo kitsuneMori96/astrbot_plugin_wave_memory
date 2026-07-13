@@ -5,6 +5,22 @@ import unittest
 from pathlib import Path
 
 
+def _group_scope():
+    from domain.scope import RuntimeScope, SessionRef
+
+    return RuntimeScope(
+        bot_id="yushu",
+        visibility="group",
+        session=SessionRef(
+            id="qq:group:group-1",
+            platform_id="qq",
+            kind="group",
+            conversation_id="group-1",
+        ),
+        subject_principal_id="qq:user:user-1",
+    )
+
+
 class FakeTextPart:
     def __init__(self, text):
         self.text = text
@@ -32,8 +48,8 @@ class FakeQueryEngine:
     def __init__(self):
         self.calls = []
 
-    async def query(self, *, text, group_id=None, top_k=5):
-        self.calls.append({"text": text, "group_id": group_id, "top_k": top_k})
+    async def query(self, *, text, group_id=None, top_k=5, scope=None):
+        self.calls.append({"text": text, "group_id": group_id, "top_k": top_k, "scope": scope})
         return [{"id": 7, "content": "兼容记忆", "score": 0.8, "importance": 1.2, "source": "core"}]
 
 
@@ -144,12 +160,21 @@ class InjectionIntegrationTest(unittest.TestCase):
         facade = WaveMemoryLivingMemoryFacade(query_engine=query_engine, writer=writer, now=lambda: 123.0)
 
         self.assertFalse(effective_native_injection_enabled({"enable_auto_inject": True}, mode, compat_cfg={}))
-        results = asyncio.run(facade.search_memories("兼容", k=2, session_id="group-1", persona_id="yushu"))
-        queued_id = asyncio.run(facade.add_memory("兼容写入", session_id="group-1", persona_id="yushu"))
+        scope = _group_scope()
+        results = asyncio.run(facade.search_memories(
+            "兼容", k=2, session_id="group-1", persona_id="yushu", scope=scope
+        ))
+        queued_id = asyncio.run(facade.add_memory(
+            "兼容写入", session_id="group-1", persona_id="yushu", scope=scope
+        ))
 
-        self.assertEqual(query_engine.calls, [{"text": "兼容", "group_id": "group-1", "top_k": 2}])
+        self.assertEqual(len(query_engine.calls), 1)
+        self.assertEqual(query_engine.calls[0]["text"], "兼容")
+        self.assertEqual(query_engine.calls[0]["group_id"], "group-1")
+        self.assertEqual(query_engine.calls[0]["top_k"], 2)
+        self.assertIs(query_engine.calls[0]["scope"], scope)
         self.assertEqual(results[0]["id"], "7")
-        self.assertEqual(results[0]["metadata"]["session_id"], "group-1")
+        self.assertEqual(results[0]["metadata"]["session_id"], "qq:group:group-1")
         self.assertTrue(queued_id.startswith("queued:"))
         self.assertEqual(writer.items[0]["source"], "compat_livingmemory")
         self.assertEqual(writer.items[0]["content"], "兼容写入")
@@ -180,6 +205,10 @@ class InjectionIntegrationTest(unittest.TestCase):
         self.assertEqual(payload["range"], "custom")
         self.assertEqual(payload["count"], 2)
         self.assertEqual(payload["summary"]["total_tokens"]["sum"], 150)
+        self.assertEqual(payload["window"]["sample_count"], 2)
+        self.assertEqual(payload["window"]["total_tokens_sum"], 150)
+        self.assertEqual(payload["window"]["avg_tokens_per_sample"], 75)
+        self.assertEqual(payload["window"]["avg_tokens_per_day"], 3600)
         self.assertTrue(payload["series"])
         self.assertTrue(payload["ranking"])
         self.assertEqual(payload["legacy"], "kept")

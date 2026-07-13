@@ -121,6 +121,44 @@ class InjectionShadowTest(unittest.TestCase):
         self.assertEqual(detail["status"], "shadow_match")
         self.assertTrue(metadata["shadow_comparison"]["exact_match"])
 
+    def test_shadow_runner_persists_exact_runtime_scope_for_trace_reads(self):
+        from domain.scope import RuntimeScope, SessionRef
+        from services.config.channel_config import build_default_channel_config
+        from services.injection.context import InjectionContext
+        from services.injection.shadow import run_injection_shadow
+
+        scope = RuntimeScope(
+            bot_id="bot-alpha",
+            visibility="group",
+            session=SessionRef("test:group:g1", "test", "group", "g1"),
+            subject_principal_id="test:user:u1",
+        )
+        trace_store = self._trace_store()
+        ctx = InjectionContext(
+            event="event",
+            req=FakeReq(),
+            message="scope metadata",
+            group_id="g1",
+            sender_id="u1",
+            sender_name="用户",
+            bot_id="bot-alpha",
+            bot_profile_id="bot-alpha",
+            scope=scope,
+            mode="full",
+            trace_id="trace-shadow-scope",
+        )
+
+        asyncio.run(run_injection_shadow(
+            ctx=ctx,
+            channels=[RecordingChannel("scope text", [])],
+            config=build_default_channel_config(runtime_mode="full"),
+            trace_store=trace_store,
+            old_text="",
+            text_part_factory=FakeTextPart,
+        ))
+
+        self.assertIsNotNone(trace_store.get_for_scope("trace-shadow-scope", scope))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -23,6 +23,22 @@ class FakeQueryEngine:
 
 
 class MemoryRecallChannelTest(unittest.TestCase):
+    @staticmethod
+    def _scope():
+        from domain.scope import RuntimeScope, SessionRef
+
+        return RuntimeScope(
+            bot_id="bot-a",
+            visibility="group",
+            session=SessionRef(
+                id="qq:group:g1",
+                platform_id="qq",
+                kind="group",
+                conversation_id="g1",
+            ),
+            subject_principal_id="qq:user:u1",
+        )
+
     def _ctx(self, *, message="聊聊咖啡", recent_context=None, mode="full", config=None):
         from services.injection.context import InjectionContext
 
@@ -35,6 +51,7 @@ class MemoryRecallChannelTest(unittest.TestCase):
             sender_name="用户",
             bot_id="bot",
             bot_profile_id="yushu",
+            scope=self._scope(),
             recent_context=recent_context or [],
             mode=mode,
             config=config or {},
@@ -59,6 +76,7 @@ class MemoryRecallChannelTest(unittest.TestCase):
         self.assertIn("用户喜欢手冲咖啡", result.text)
         self.assertEqual(query_engine.query_calls[0]["text"], "聊聊咖啡")
         self.assertEqual(query_engine.query_calls[0]["group_id"], "g1")
+        self.assertEqual(query_engine.query_calls[0]["scope"], self._scope())
         self.assertEqual(query_engine.query_calls[0]["top_k"], 2)
         self.assertEqual([item["id"] for item in result.items], [101, 102])
         self.assertEqual(result.items[0]["score"], 0.91)

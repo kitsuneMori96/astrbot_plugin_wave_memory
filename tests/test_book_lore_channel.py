@@ -26,6 +26,12 @@ class FakeBookLoreIndex:
 
 
 class BookLoreChannelTest(unittest.TestCase):
+    @staticmethod
+    def _catalog_scope():
+        from domain.scope import CatalogScope
+
+        return CatalogScope(catalog_id="book-lore", corpus_id="unit-test", version="v1")
+
     def _lore_db(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -53,20 +59,41 @@ class BookLoreChannelTest(unittest.TestCase):
             group_id="g1",
             sender_id="u1",
             sender_name="用户",
-            bot_id="bot",
-            bot_profile_id="yushu",
+            bot_id="bot-alpha",
+            bot_profile_id="bot-alpha",
             recent_context=[],
             mode=mode,
             config=config or {"channels": {"book_lore": {"top_k": 2, "min_score": 0.35, "token_budget": 260}}},
             trace_id="trace-book-lore",
         )
 
-    def test_searches_communities_and_formats_world_knowledge(self):
+    def test_missing_catalog_scope_disables_without_accessing_dependencies(self):
         from services.injection.channels.book_lore import BookLoreChannel
 
         embedding = FakeEmbedding()
         index = FakeBookLoreIndex([(1, 0.91)])
-        channel = BookLoreChannel(book_lore_index=index, embedding_service=embedding, lore_db_path=self._lore_db())
+        result = asyncio.run(BookLoreChannel(
+            book_lore_index=index,
+            embedding_service=embedding,
+            lore_db_path=self._lore_db(),
+        ).build(self._ctx()))
+
+        self.assertEqual(result.status, "disabled")
+        self.assertEqual(result.warnings, ["catalog_scope_required"])
+        self.assertEqual(embedding.calls, [])
+        self.assertEqual(index.calls, [])
+
+    def test_searches_communities_with_explicit_catalog_scope(self):
+        from services.injection.channels.book_lore import BookLoreChannel
+
+        embedding = FakeEmbedding()
+        index = FakeBookLoreIndex([(1, 0.91)])
+        channel = BookLoreChannel(
+            book_lore_index=index,
+            embedding_service=embedding,
+            lore_db_path=self._lore_db(),
+            catalog_scope=self._catalog_scope(),
+        )
 
         result = asyncio.run(channel.build(self._ctx()))
 
@@ -85,7 +112,12 @@ class BookLoreChannelTest(unittest.TestCase):
 
         embedding = FakeEmbedding()
         index = FakeBookLoreIndex([(1, 0.91)])
-        channel = BookLoreChannel(book_lore_index=index, embedding_service=embedding, lore_db_path=self._lore_db())
+        channel = BookLoreChannel(
+            book_lore_index=index,
+            embedding_service=embedding,
+            lore_db_path=self._lore_db(),
+            catalog_scope=self._catalog_scope(),
+        )
 
         memory_only = asyncio.run(channel.build(self._ctx(mode="memory_only")))
         compat_only = asyncio.run(channel.build(self._ctx(mode="compat_only")))
@@ -95,15 +127,22 @@ class BookLoreChannelTest(unittest.TestCase):
         self.assertEqual(embedding.calls, [])
         self.assertEqual(index.calls, [])
 
-    def test_low_score_or_missing_dependencies_return_empty(self):
+    def test_low_score_or_missing_dependencies_return_empty_after_catalog_validation(self):
         from services.injection.channels.book_lore import BookLoreChannel
 
+        scope = self._catalog_scope()
         low = asyncio.run(BookLoreChannel(
             book_lore_index=FakeBookLoreIndex([(1, 0.2)]),
             embedding_service=FakeEmbedding(),
             lore_db_path=self._lore_db(),
+            catalog_scope=scope,
         ).build(self._ctx()))
-        missing = asyncio.run(BookLoreChannel(book_lore_index=None, embedding_service=None, lore_db_path="").build(self._ctx()))
+        missing = asyncio.run(BookLoreChannel(
+            book_lore_index=None,
+            embedding_service=None,
+            lore_db_path="",
+            catalog_scope=scope,
+        ).build(self._ctx()))
 
         self.assertEqual(low.status, "empty")
         self.assertEqual(missing.status, "empty")
@@ -115,6 +154,7 @@ class BookLoreChannelTest(unittest.TestCase):
             book_lore_index=FakeBookLoreIndex([(2, 0.99), (1, 0.88)]),
             embedding_service=FakeEmbedding(),
             lore_db_path=self._lore_db(),
+            catalog_scope=self._catalog_scope(),
         )
 
         result = asyncio.run(channel.build(self._ctx()))

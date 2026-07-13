@@ -128,18 +128,16 @@ class LearningObjectRegistryTest(unittest.TestCase):
         self.assertEqual(payload["pending_candidates"][0]["content"], "候选信念")
         self.assertTrue(payload["risky_candidates"])
 
-    def test_frontend_exposes_learning_object_review_page(self):
+    def test_frontend_routes_learning_object_review_to_learning_center(self):
         page = Path("webui/frontend/src/pages/review/LearningObjectsPage.tsx").read_text(encoding="utf-8")
         api = Path("webui/frontend/src/api/review.ts").read_text(encoding="utf-8")
         routes = Path("webui/frontend/src/app/routes.tsx").read_text(encoding="utf-8")
 
-        self.assertIn("学习对象登记表", page)
-        self.assertIn("getLearningObjectsReview", page)
-        self.assertIn("pending_candidates", page)
-        self.assertIn("risky_candidates", page)
-        self.assertIn("duplicate_entries", page)
-        self.assertIn("/api/learning-objects/review", api)
-        self.assertIn("/learning-objects", routes)
+        self.assertIn("/learning-center", page)
+        self.assertNotIn("getLearningObjectsReview", page)
+        self.assertNotIn("reviewCandidate", page)
+        self.assertNotIn("/api/learning-objects/review", api)
+        self.assertNotIn("/learning-objects", routes)
 
 
 if __name__ == "__main__":

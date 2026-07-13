@@ -350,13 +350,13 @@ class KGCacheWarmupContractTest(unittest.TestCase):
         import asyncio
         rel_result, rel, tag_result, tag, preview_result, rename_result, renamed = asyncio.run(run())
 
-        self.assertEqual(rel_result, {"ok": True, "relation_id": 7})
-        self.assertEqual(tuple(rel), ("讨厌", 0.33, 0.44))
-        self.assertEqual(tag_result, {"ok": True, "tag_id": 2})
-        self.assertEqual(tuple(tag), ("记忆体", "entity", "可编辑标签"))
+        self.assertEqual(rel_result, ({"error": {"code": "scope_required"}}, 400))
+        self.assertEqual(tuple(rel), ("喜欢", 0.8, 0.77))
+        self.assertEqual(tag_result, ({"error": {"code": "legacy_mutation_disabled"}}, 410))
+        self.assertEqual(tuple(tag), ("记忆", "topic", None))
         self.assertEqual(preview_result["affected_facts"], 1)
-        self.assertEqual(rename_result["updated_facts"], 1)
-        self.assertEqual(renamed, "羽書")
+        self.assertEqual(rename_result, ({"error": {"code": "legacy_mutation_disabled"}}, 410))
+        self.assertEqual(renamed, "羽书")
 
     def test_kg_edit_apis_report_missing_rows_and_rename_preview_counts_tags(self):
         from webui.container import ServiceContainer, get_container
@@ -381,7 +381,8 @@ class KGCacheWarmupContractTest(unittest.TestCase):
                 missing_rel = await kg.update_tag_relation(999)
             with patch.object(kg, "request", FakeRequest({"name": "不存在"})):
                 missing_tag = await kg.update_tag(999)
-            missing_delete = await kg.delete_tag_relation(999)
+            with patch.object(kg, "request", FakeRequest({})):
+                missing_delete = await kg.delete_tag_relation(999)
             with patch.object(kg, "request", FakeRequest({"from": "记忆", "to": "记忆体"})):
                 preview = await kg.rename_entity_preview()
             with patch.object(kg, "request", FakeRequest({"from": "记忆", "to": "记忆体", "sync_tags": True})):
@@ -392,17 +393,14 @@ class KGCacheWarmupContractTest(unittest.TestCase):
         import asyncio
         missing_rel, missing_tag, missing_delete, preview, renamed, tag_name = asyncio.run(run())
 
-        self.assertEqual(missing_rel[1], 404)
-        self.assertFalse(missing_rel[0]["ok"])
-        self.assertEqual(missing_tag[1], 404)
-        self.assertFalse(missing_tag[0]["ok"])
-        self.assertEqual(missing_delete[1], 404)
-        self.assertFalse(missing_delete[0]["ok"])
+        self.assertEqual(missing_rel, ({"error": {"code": "scope_required"}}, 400))
+        self.assertEqual(missing_tag, ({"error": {"code": "legacy_mutation_disabled"}}, 410))
+        self.assertEqual(missing_delete, ({"error": {"code": "scope_required"}}, 400))
         self.assertEqual(preview["tag_matches"], 1)
-        self.assertEqual(renamed["updated_tags"], 1)
-        self.assertEqual(tag_name, "记忆体")
+        self.assertEqual(renamed, ({"error": {"code": "legacy_mutation_disabled"}}, 410))
+        self.assertEqual(tag_name, "记忆")
 
-    def test_add_fact_uses_requested_confidence_and_clears_cache(self):
+    def test_add_fact_requires_scope_and_never_writes_legacy_fact_table(self):
         from webui.container import ServiceContainer, get_container
         from webui.blueprints import kg
 
@@ -428,9 +426,9 @@ class KGCacheWarmupContractTest(unittest.TestCase):
         import asyncio
         result = asyncio.run(run())
 
-        self.assertEqual(result, {"ok": True})
-        self.assertEqual(inserted, [("羽书", "关心", "记忆", 0.42)])
-        self.assertNotIn("full:facts", kg._overview_cache)
+        self.assertEqual(result, ({"error": {"code": "scope_required"}}, 400))
+        self.assertEqual(inserted, [])
+        self.assertIn("full:facts", kg._overview_cache)
 
     def test_webui_start_triggers_background_kg_warmup_without_waiting(self):
         from webui import WaveMemoryWebUI

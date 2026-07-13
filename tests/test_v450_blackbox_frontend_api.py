@@ -43,24 +43,17 @@ class TestV450BlackboxFrontendApi:
             "getBlackboxBookLoreCommunities",
             "getBlackboxBookLoreRelations",
             "getBlackboxBookLoreNotes",
-            "BookLore 数据列表",
-            "BookLore communities",
-            "BookLore relations",
-            "BookLore notes",
-            "source_book",
-            "summary?.counts?.entities",
+            "BookLore 世界观书设知识库",
             "entitiesPayload?.items",
             "communitiesPayload?.items",
             "relationsPayload?.items",
             "notesPayload?.items",
-            "BookLore 只读数据加载中",
             "BookLore 数据读取失败",
-            "暂无 BookLore entities",
+            "没有过滤匹配到对应 BookLore 世界观书设数据",
         ):
             assert marker in page
 
         assert "value: '待接入'" not in page
-        assert "后续 communities / relations / notes 分页继续接入" not in page
 
     def test_blackbox_frontend_api_client_declares_fewshot_readonly_calls(self):
         source = Path("webui/frontend/src/api/blackbox.ts").read_text(encoding="utf-8")
@@ -87,13 +80,12 @@ class TestV450BlackboxFrontendApi:
             "useState",
             "getBlackboxFewShotSummary",
             "getBlackboxFewShotExamples",
-            "FewShot 范例列表",
+            "FewShot 风格范例候选库",
             "examplesPayload?.items",
             "summary?.counts?.pending",
             "summary?.average_score",
-            "FewShot 只读数据加载中",
             "FewShot 数据读取失败",
-            "暂无 FewShot examples",
+            "没有过滤匹配到对应状态的 FewShot 风格范例",
         ):
             assert marker in page
 
@@ -131,15 +123,14 @@ class TestV450BlackboxFrontendApi:
             "useEffect",
             "useState",
             "getBlackboxFacts",
-            "Facts 关系列表",
+            "Facts 事实关系网络",
             "factsPayload?.items",
             "factsPayload?.total",
             "subject",
             "predicate",
             "object",
-            "Facts 只读数据加载中",
             "Facts 数据读取失败",
-            "暂无 facts 关系",
+            "没有过滤匹配到对应 Facts 事实三元组",
         ):
             assert marker in page
 
@@ -152,16 +143,15 @@ class TestV450BlackboxFrontendApi:
             "useEffect",
             "useState",
             "getBlackboxPeople",
-            "人物画像列表",
+            "人物与好感度画像",
             "peoplePayload?.items",
             "peoplePayload?.total",
-            "BotProfile.db_id，不是 QQ 号",
+            "BotProfile.db_id，非 QQ号",
             "qq_id",
             "display_name",
             "bot_id",
-            "People 只读数据加载中",
             "People 数据读取失败",
-            "暂无 people/profile 数据",
+            "没有过滤匹配到对应人物画像数据",
         ):
             assert marker in page
 
@@ -175,13 +165,12 @@ class TestV450BlackboxFrontendApi:
             "useState",
             "getBlackboxIndexesSummary",
             "getBlackboxIndexesCheck",
-            "索引健康矩阵",
+            "HNSW 对齐健康矩阵",
             "summary?.counts?.memories",
             "summary?.counts?.memories_missing_vector",
             "summary?.health?.fts5_index",
-            "Indexes 只读数据加载中",
             "Indexes 数据读取失败",
-            "只读诊断完成",
+            "诊断就绪",
         ):
             assert marker in page
 

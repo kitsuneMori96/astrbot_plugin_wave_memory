@@ -21,17 +21,26 @@ class FTS5ChannelTest(unittest.TestCase):
                 importance REAL,
                 source TEXT,
                 group_id TEXT,
-                memory_type TEXT
+                memory_type TEXT,
+                bot_id TEXT,
+                session_id TEXT,
+                visibility TEXT,
+                resolution_state TEXT,
+                quarantine INTEGER
             )"""
         )
         conn.execute("CREATE VIRTUAL TABLE fts_memories USING fts5(content, sender_name, group_id)")
         self.addCleanup(conn.close)
         return DBBox(conn)
 
-    def _insert_memory(self, db, row):
+    def _insert_memory(self, db, row, *, bot_id="bot-a", session_id=None, resolution_state="resolved", quarantine=0):
+        session_id = session_id or f"qq:group:{row[7]}"
         db.conn.execute(
-            "INSERT INTO memories (id, content, sender_id, sender_name, timestamp, importance, source, group_id, memory_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            row,
+            """INSERT INTO memories (
+                   id, content, sender_id, sender_name, timestamp, importance, source, group_id, memory_type,
+                   bot_id, session_id, visibility, resolution_state, quarantine
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (*row, bot_id, session_id, "group", resolution_state, quarantine),
         )
         db.conn.execute(
             "INSERT INTO fts_memories (rowid, content, sender_name, group_id) VALUES (?, ?, ?, ?)",
@@ -39,7 +48,23 @@ class FTS5ChannelTest(unittest.TestCase):
         )
         db.conn.commit()
 
-    def _ctx(self, *, message="明光甲 稀有词", group_id="g1", mode="full", config=None):
+    @staticmethod
+    def _scope(*, bot_id="bot-a", group_id="g1"):
+        from domain.scope import RuntimeScope, SessionRef
+
+        return RuntimeScope(
+            bot_id=bot_id,
+            visibility="group",
+            session=SessionRef(
+                id=f"qq:group:{group_id}",
+                platform_id="qq",
+                kind="group",
+                conversation_id=group_id,
+            ),
+            subject_principal_id="qq:user:u1",
+        )
+
+    def _ctx(self, *, message="明光甲 稀有词", group_id="g1", mode="full", config=None, scope=None):
         from services.injection.context import InjectionContext
 
         return InjectionContext(
@@ -51,6 +76,7 @@ class FTS5ChannelTest(unittest.TestCase):
             sender_name="用户",
             bot_id="bot",
             bot_profile_id="yushu",
+            scope=scope or self._scope(group_id=group_id),
             recent_context=[],
             mode=mode,
             config=config or {"channels": {"fts5": {"top_k": 10, "token_budget": 500, "min_score": 0.0}}},
@@ -71,10 +97,9 @@ class FTS5ChannelTest(unittest.TestCase):
         self.assertEqual(result.status, "hit")
         self.assertIn("<wave_memory>", result.text)
         self.assertIn("用户提到明光甲", result.text)
-        self.assertIn("其他群也提过明光甲", result.text)
-        self.assertEqual([item["id"] for item in result.items], [1, 2])
+        self.assertNotIn("其他群也提过明光甲", result.text)
+        self.assertEqual([item["id"] for item in result.items], [1])
         self.assertEqual(result.items[0]["score"], 1.0)
-        self.assertEqual(result.items[1]["score"], 0.5)
 
     def test_filters_contaminated_and_respects_top_k_and_token_budget(self):
         from services.injection.channels.fts5 import FTS5Channel

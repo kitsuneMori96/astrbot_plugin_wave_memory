@@ -119,6 +119,50 @@ class InjectionActiveTest(unittest.TestCase):
         self.assertEqual(statuses["facts"], "error")
         self.assertEqual(statuses["memory"], "hit")
 
+    def test_active_runner_persists_exact_runtime_scope_for_trace_reads(self):
+        from domain.scope import RuntimeScope, SessionRef
+        from services.config.channel_config import build_default_channel_config
+        from services.injection.active import run_injection_active
+        from services.injection.context import InjectionContext
+
+        scope = RuntimeScope(
+            bot_id="bot-alpha",
+            visibility="group",
+            session=SessionRef("test:group:g1", "test", "group", "g1"),
+            subject_principal_id="test:user:u1",
+        )
+        trace_store = self._trace_store()
+        ctx = InjectionContext(
+            event="event",
+            req=FakeReq(),
+            message="scope metadata",
+            group_id="g1",
+            sender_id="u1",
+            sender_name="用户",
+            bot_id="bot-alpha",
+            bot_profile_id="bot-alpha",
+            scope=scope,
+            mode="full",
+            trace_id="trace-active-scope",
+        )
+
+        asyncio.run(run_injection_active(
+            ctx=ctx,
+            channels=[HitChannel()],
+            config=build_default_channel_config(runtime_mode="full"),
+            trace_store=trace_store,
+            text_part_factory=FakeTextPart,
+        ))
+
+        self.assertIsNotNone(trace_store.get_for_scope("trace-active-scope", scope))
+        foreign = RuntimeScope(
+            bot_id="bot-beta",
+            visibility="group",
+            session=scope.session,
+            subject_principal_id="test:user:u1",
+        )
+        self.assertIsNone(trace_store.get_for_scope("trace-active-scope", foreign))
+
 
 if __name__ == "__main__":
     unittest.main()

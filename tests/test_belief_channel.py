@@ -8,15 +8,27 @@ class FakeBeliefEngine:
         self.bot_id = "old_bot"
         self.calls = []
 
-    def get_injection(self, sender_id=None, keywords=None):
-        self.calls.append({"sender_id": sender_id, "keywords": list(keywords or []), "bot_id": self.bot_id})
+    def get_injection(self, scope, sender_id=None, keywords=None):
+        self.calls.append({"scope": scope, "sender_id": sender_id, "keywords": list(keywords or []), "bot_id": self.bot_id})
         return self.text
 
 
 class BeliefChannelTest(unittest.TestCase):
     def _ctx(self, *, message="剑阵 边界 态度", mode="full", config=None):
+        from domain.scope import RuntimeScope, SessionRef
         from services.injection.context import InjectionContext
 
+        scope = RuntimeScope(
+            bot_id="baizhenzhen",
+            visibility="group",
+            session=SessionRef(
+                id="qq:group:g1",
+                platform_id="qq",
+                kind="group",
+                conversation_id="g1",
+            ),
+            subject_principal_id="qq:user:u1",
+        )
         return InjectionContext(
             event="event",
             req=object(),
@@ -26,6 +38,7 @@ class BeliefChannelTest(unittest.TestCase):
             sender_name="芒果",
             bot_id="1336495069",
             bot_profile_id="baizhenzhen",
+            scope=scope,
             recent_context=[],
             mode=mode,
             config=config or {"channels": {"belief": {"max_items": 5, "token_budget": 200}}},
@@ -44,6 +57,7 @@ class BeliefChannelTest(unittest.TestCase):
         self.assertEqual(result.status, "hit")
         self.assertIn("不喜欢被当成攻击工具", result.text)
         self.assertEqual(engine.bot_id, "baizhenzhen")
+        self.assertEqual(engine.calls[0]["scope"].bot_id, "baizhenzhen")
         self.assertEqual(engine.calls[0]["sender_id"], "u1")
         self.assertEqual(engine.calls[0]["keywords"], ["剑阵", "边界", "态度"])
         self.assertEqual(result.items[0]["source"], "BeliefEngine.get_injection")
@@ -60,6 +74,17 @@ class BeliefChannelTest(unittest.TestCase):
 
         self.assertEqual(memory_only.status, "disabled")
         self.assertEqual(compat_only.status, "disabled")
+        self.assertEqual(engine.calls, [])
+
+    def test_missing_scope_returns_empty_without_querying_engine(self):
+        from dataclasses import replace
+        from services.injection.channels.belief import BeliefChannel
+
+        engine = FakeBeliefEngine("<beliefs>不应调用</beliefs>")
+        result = asyncio.run(BeliefChannel(belief_engine=engine).build(replace(self._ctx(), scope=None)))
+
+        self.assertEqual(result.status, "empty")
+        self.assertEqual(result.warnings, ["scope_required"])
         self.assertEqual(engine.calls, [])
 
     def test_filters_identity_contaminated_belief_text(self):

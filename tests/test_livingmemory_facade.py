@@ -2,14 +2,30 @@ import asyncio
 import unittest
 
 
+def _group_scope(*, bot_id="yushu", group_id="group-1"):
+    from domain.scope import RuntimeScope, SessionRef
+
+    return RuntimeScope(
+        bot_id=bot_id,
+        visibility="group",
+        session=SessionRef(
+            id=f"qq:group:{group_id}",
+            platform_id="qq",
+            kind="group",
+            conversation_id=group_id,
+        ),
+        subject_principal_id="qq:user:10001",
+    )
+
+
 class FakeQueryEngine:
     def __init__(self, results=None, exc=None):
         self.results = results or []
         self.exc = exc
         self.calls = []
 
-    async def query(self, *, text, group_id=None, top_k=5):
-        self.calls.append({"text": text, "group_id": group_id, "top_k": top_k})
+    async def query(self, *, text, group_id=None, top_k=5, scope=None):
+        self.calls.append({"text": text, "group_id": group_id, "top_k": top_k, "scope": scope})
         if self.exc:
             raise self.exc
         return list(self.results)
@@ -43,9 +59,16 @@ class LivingMemoryFacadeTest(unittest.TestCase):
         ])
         facade = WaveMemoryLivingMemoryFacade(query_engine=query_engine, writer=FakeWriter())
 
-        results = asyncio.run(facade.search_memories("苹果派", k=3, session_id="group-1", persona_id="yushu"))
+        scope = _group_scope()
+        results = asyncio.run(facade.search_memories(
+            "苹果派", k=3, session_id="group-1", persona_id="yushu", scope=scope
+        ))
 
-        self.assertEqual(query_engine.calls, [{"text": "苹果派", "group_id": "group-1", "top_k": 3}])
+        self.assertEqual(len(query_engine.calls), 1)
+        self.assertEqual(query_engine.calls[0]["text"], "苹果派")
+        self.assertEqual(query_engine.calls[0]["group_id"], "group-1")
+        self.assertEqual(query_engine.calls[0]["top_k"], 3)
+        self.assertIs(query_engine.calls[0]["scope"], scope)
         self.assertEqual(len(results), 1)
         result = results[0]
         self.assertEqual(result["id"], "7")
@@ -53,7 +76,7 @@ class LivingMemoryFacadeTest(unittest.TestCase):
         self.assertEqual(result["score"], 0.91)
         self.assertEqual(result["importance"], 1.4)
         self.assertEqual(result["metadata"]["source"], "core")
-        self.assertEqual(result["metadata"]["session_id"], "group-1")
+        self.assertEqual(result["metadata"]["session_id"], "qq:group:group-1")
         self.assertEqual(result["metadata"]["persona_id"], "yushu")
         self.assertEqual(result["metadata"]["sender_id"], "10001")
         self.assertEqual(result["metadata"]["similarity"], 0.88)
@@ -64,8 +87,23 @@ class LivingMemoryFacadeTest(unittest.TestCase):
         facade = WaveMemoryLivingMemoryFacade(query_engine=FakeQueryEngine(exc=RuntimeError("boom")), writer=FakeWriter())
 
         self.assertEqual(asyncio.run(facade.search_memories("", k=5)), [])
-        self.assertEqual(asyncio.run(facade.search_memories("会失败", k=5)), [])
+        self.assertEqual(asyncio.run(facade.search_memories("会失败", k=5, scope=_group_scope())), [])
         self.assertEqual(facade.last_error, "boom")
+
+    def test_search_memories_rejects_missing_or_mismatched_scope(self):
+        from services.compat.livingmemory_facade import WaveMemoryLivingMemoryFacade
+
+        engine = FakeQueryEngine(results=[{"id": 1, "content": "不应泄露"}])
+        facade = WaveMemoryLivingMemoryFacade(query_engine=engine, writer=FakeWriter())
+
+        self.assertEqual(asyncio.run(facade.search_memories("查询")), [])
+        self.assertEqual(facade.last_error, "scope_required")
+        self.assertEqual(
+            asyncio.run(facade.search_memories("查询", scope=_group_scope(), session_id="other-group")),
+            [],
+        )
+        self.assertEqual(facade.last_error, "scope_session_mismatch")
+        self.assertEqual(engine.calls, [])
 
     def test_add_memory_enqueues_same_writer_queue_and_returns_stable_queued_id(self):
         from services.compat.livingmemory_facade import WaveMemoryLivingMemoryFacade
@@ -79,18 +117,21 @@ class LivingMemoryFacadeTest(unittest.TestCase):
             persona_id="yushu",
             importance=0.7,
             metadata={"origin": "self_learning"},
+            scope=_group_scope(),
         ))
 
         self.assertTrue(queued_id.startswith("queued:"))
         self.assertEqual(len(writer.items), 1)
         item = writer.items[0]
         self.assertEqual(item["group_id"], "group-1")
-        self.assertEqual(item["sender_id"], "compat:yushu")
+        self.assertEqual(item["sender_id"], "10001")
         self.assertEqual(item["sender_name"], "LivingMemory兼容")
         self.assertEqual(item["content"], "用户喜欢苹果派")
         self.assertEqual(item["timestamp"], 456.0)
         self.assertEqual(item["importance"], 0.7)
         self.assertEqual(item["source"], "compat_livingmemory")
+        self.assertEqual(item["scope"].bot_id, "yushu")
+        self.assertEqual(item["metadata"]["origin_kind"], "livingmemory_compat")
         self.assertEqual(item["metadata"]["session_id"], "group-1")
         self.assertEqual(item["metadata"]["persona_id"], "yushu")
         self.assertEqual(item["metadata"]["origin"], "self_learning")

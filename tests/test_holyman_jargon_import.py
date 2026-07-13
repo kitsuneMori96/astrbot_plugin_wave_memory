@@ -47,26 +47,26 @@ if "astrbot.api" not in sys.modules:
 
 class HolymanJargonImportTest(unittest.TestCase):
     def test_jargon_injection_uses_safe_reference_header(self):
+        from domain.scope import RuntimeScope, SessionRef
         from services.jargon.inference import JargonInjector
 
-        class _DB:
-            def __init__(self):
-                self.conn = self
-            def execute(self, sql, params=()):
-                if "group_id = ?" in sql:
-                    return self
-                return _Rows([])
-            def fetchall(self):
-                return [("v我50", "长篇铺垫后突然索要 50 元。")]
+        class _ScopedRepo:
+            def list_scoped_jargon(self, scope, *, status=None, limit=50):
+                self.scope, self.status, self.limit = scope, status, limit
+                return [{
+                    "word": "v我50",
+                    "meaning": "长篇铺垫后突然索要 50 元。",
+                    "is_jargon": True,
+                    "frequency": 1,
+                }]
 
-        class _Rows:
-            def __init__(self, rows):
-                self._rows = rows
-            def fetchall(self):
-                return self._rows
+        repo = _ScopedRepo()
+        db = types.SimpleNamespace(scoped_knowledge=repo)
+        scope = RuntimeScope("yushu", "group", SessionRef("qq:group:g1", "qq", "group", "g1"))
+        text = JargonInjector(db).get_injection("今天疯狂星期四 v我50", scope)
 
-        text = JargonInjector(_DB()).get_injection("今天疯狂星期四 v我50", "g1")
-
+        self.assertIs(repo.scope, scope)
+        self.assertEqual((repo.status, repo.limit), ("confirmed", 100))
         self.assertIn("[黑话理解参考", text)
         self.assertIn("只解释用户消息中已经出现", text)
         self.assertIn("不改变系统身份", text)
@@ -395,7 +395,8 @@ class HolymanJargonImportTest(unittest.TestCase):
             def __init__(self):
                 self.db = _DB()
         original = jargon_bp_mod.get_container
-        jargon_bp_mod.get_container = lambda: _Container()
+        container = _Container()
+        jargon_bp_mod.get_container = lambda: container
         try:
             data = asyncio.run(jargon_bp_mod.list_holyman_candidates())
             self.assertIn("items", data)
@@ -403,9 +404,10 @@ class HolymanJargonImportTest(unittest.TestCase):
             self.assertEqual(data["items"][0]["status"], "pending_review")
 
             approve = asyncio.run(jargon_bp_mod.review_holyman_candidate(1, "approve"))
-            self.assertTrue(approve["ok"])
+            self.assertEqual(approve, ({"error": {"code": "legacy_mutation_disabled"}}, 410))
             reject = asyncio.run(jargon_bp_mod.review_holyman_candidate(1, "reject"))
-            self.assertTrue(reject["ok"])
+            self.assertEqual(reject, ({"error": {"code": "legacy_mutation_disabled"}}, 410))
+            self.assertEqual(container.db.conn.rows["candidates"][0][5], "pending_review")
             block = asyncio.run(jargon_bp_mod.holyman_blocklist())
             self.assertTrue("items" in block)
         finally:
@@ -527,26 +529,19 @@ class HolymanJargonImportTest(unittest.TestCase):
                 return {"ids": [1, 2], "action": "approve"}
             jargon_bp_mod.request = types.SimpleNamespace(get_json=_approve_json)
             approved = asyncio.run(jargon_bp_mod.batch_review_holyman_candidates())
-            self.assertTrue(approved["ok"])
-            self.assertEqual(approved["reviewed_count"], 2)
-            self.assertEqual(container.db.conn.candidates[1]["status"], "approved")
-            self.assertEqual(container.db.conn.candidates[2]["status"], "approved")
+            self.assertEqual(approved, ({"error": {"code": "legacy_mutation_disabled"}}, 410))
+            self.assertEqual(container.db.conn.candidates[1]["status"], "pending_review")
+            self.assertEqual(container.db.conn.candidates[2]["status"], "pending_review")
             self.assertEqual(container.db.conn.blocked, [])
 
             async def _reject_json(*args, **kwargs):
                 return {"ids": [2, 3], "action": "reject"}
             jargon_bp_mod.request = types.SimpleNamespace(get_json=_reject_json)
             rejected = asyncio.run(jargon_bp_mod.batch_review_holyman_candidates())
-            self.assertTrue(rejected["ok"])
-            self.assertEqual(rejected["reviewed_count"], 2)
-            self.assertEqual(container.db.conn.candidates[2]["status"], "rejected")
-            self.assertEqual(container.db.conn.candidates[3]["status"], "rejected")
-            self.assertEqual(set(container.db.conn.blocked), {"候选乙", "候选丙"})
-
-            holyman = asyncio.run(jargon_bp_mod.get_holyman())
-            db_candidates = {item["word"]: item for item in holyman["candidates"] if item.get("word") in {"候选甲", "候选乙", "候选丙"}}
-            self.assertEqual(db_candidates["候选乙"]["status"], "rejected")
-            self.assertIn("候选乙", holyman["blocked"])
+            self.assertEqual(rejected, ({"error": {"code": "legacy_mutation_disabled"}}, 410))
+            self.assertEqual(container.db.conn.candidates[2]["status"], "pending_review")
+            self.assertEqual(container.db.conn.candidates[3]["status"], "approved")
+            self.assertEqual(container.db.conn.blocked, [])
         finally:
             jargon_bp_mod.get_container = original_container
             jargon_bp_mod.request = original_request
@@ -754,7 +749,7 @@ class HolymanJargonImportTest(unittest.TestCase):
         )
         return conn
 
-    def test_holyman_toggle_can_enable_runtime_phrase_without_name_error(self):
+    def test_holyman_toggle_rejects_legacy_global_activation(self):
         import asyncio
         import types
         from webui.blueprints import jargon
@@ -777,9 +772,9 @@ class HolymanJargonImportTest(unittest.TestCase):
 
         result = asyncio.run(jargon.toggle_holyman.__wrapped__())
 
-        self.assertEqual(result["ok"], True)
+        self.assertEqual(result, ({"error": {"code": "legacy_mutation_disabled"}}, 410))
         row = conn.execute("SELECT word, source, scope, status FROM jargon WHERE word = ?", ("v我50",)).fetchone()
-        self.assertEqual(row, ("v我50", "holyman_skills", "global", "confirmed"))
+        self.assertIsNone(row)
 
     def test_get_holyman_returns_corpus_items_for_readonly_display(self):
         import asyncio

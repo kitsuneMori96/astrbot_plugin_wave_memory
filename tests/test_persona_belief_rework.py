@@ -52,8 +52,8 @@ class _FakeBeliefEngine:
         self.calls = []
         self.bot_id = "baizhenzhen"
 
-    def get_injection(self, sender_id=None, keywords=None):
-        self.calls.append({"sender_id": sender_id, "keywords": keywords})
+    def get_injection(self, scope, sender_id=None, keywords=None):
+        self.calls.append({"scope": scope, "sender_id": sender_id, "keywords": keywords})
         return "<beliefs>\n- 觉得：白真真不喜欢被当成攻击工具\n</beliefs>"
 
 
@@ -71,6 +71,19 @@ class _FakeQueryEngine:
 
     def format_injection(self, memories):
         return "\n".join(f"[记忆#{m['id']}] {m['content']}" for m in memories)
+
+
+class _ScopedBeliefDB:
+    def __init__(self):
+        self.calls = []
+
+    def list_scoped_beliefs(self, scope, *, status=None, limit=50):
+        self.calls.append({"scope": scope, "status": status, "limit": limit})
+        return [
+            {"id": 1, "content": "我会先核实事实再设定边界", "belief_type": "self_identity", "strength": 0.8, "status": "active"},
+            {"id": 2, "content": "u1 在边界问题上值得认真回应", "belief_type": "person_judgment", "strength": 0.6, "status": "active"},
+            {"id": 3, "content": "legacy pending 不得注入", "belief_type": "world_view", "strength": 1.0, "status": "pending_legacy"},
+        ]
 
 
 class PersonaBeliefReworkTest(unittest.TestCase):
@@ -103,6 +116,19 @@ class PersonaBeliefReworkTest(unittest.TestCase):
             default_bot_db_id="baizhenzhen",
         )
 
+        from domain.scope import RuntimeScope, SessionRef
+
+        scope = RuntimeScope(
+            bot_id="baizhenzhen",
+            visibility="group",
+            session=SessionRef(
+                id="qq:group:g1",
+                platform_id="qq",
+                kind="group",
+                conversation_id="g1",
+            ),
+            subject_principal_id="qq:user:u1",
+        )
         result = asyncio.run(composer.build_self_persona(
             bot_id="1336495069",
             group_id="g1",
@@ -110,6 +136,7 @@ class PersonaBeliefReworkTest(unittest.TestCase):
             sender_name="芒果",
             message="你怎么看刚才那件事",
             recent_context=["芒果: 刚才争论有点乱"],
+            scope=scope,
         ))
 
         self.assertIn("persona_block", result)
@@ -122,8 +149,47 @@ class PersonaBeliefReworkTest(unittest.TestCase):
         self.assertIn("不喜欢被当成攻击工具", result["belief_block"])
         self.assertIn("认真解释剑阵", result["experience_block"])
         self.assertNotIn("猫耳朵", result["experience_block"])
-        self.assertIn("先看事实", result["style_block"])
+        self.assertEqual(result["style_block"], "")
         self.assertEqual(result["debug"]["experience_ids"], [1, 3])
+
+    def test_belief_engine_requires_group_scope_and_reads_only_scoped_active_beliefs(self):
+        from domain.scope import RuntimeScope, SessionRef
+        from services.belief_engine import BeliefEngine
+
+        db = _ScopedBeliefDB()
+        engine = BeliefEngine(db=db, llm_client=None, bot_id="legacy_bot")
+        group_scope = RuntimeScope(
+            bot_id="baizhenzhen",
+            visibility="group",
+            session=SessionRef(
+                id="qq:group:g1",
+                platform_id="qq",
+                kind="group",
+                conversation_id="g1",
+            ),
+            subject_principal_id="qq:user:u1",
+        )
+
+        text = engine.get_injection(group_scope, sender_id="u1", keywords=["边界"])
+
+        self.assertIn("核实事实", text)
+        self.assertIn("值得认真回应", text)
+        self.assertNotIn("legacy pending", text)
+        self.assertEqual(db.calls, [{"scope": group_scope, "status": "active", "limit": 50}])
+        self.assertEqual(engine.get_injection(None), "")
+        private_scope = RuntimeScope(
+            bot_id="baizhenzhen",
+            visibility="private",
+            session=SessionRef(
+                id="qq:private:u1",
+                platform_id="qq",
+                kind="private",
+                conversation_id="u1",
+            ),
+            subject_principal_id="qq:user:u1",
+        )
+        self.assertEqual(engine.get_injection(private_scope), "")
+        self.assertEqual(len(db.calls), 1)
 
     def test_layered_injection_parts_keep_self_persona_first(self):
         from services.persona_composer import build_layered_injection_parts

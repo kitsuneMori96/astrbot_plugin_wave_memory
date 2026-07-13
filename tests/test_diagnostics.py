@@ -1,0 +1,385 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _create_main_database(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.executescript(
+            """
+            PRAGMA foreign_keys=OFF;
+            CREATE TABLE memories (
+                id INTEGER PRIMARY KEY,
+                content TEXT,
+                vector BLOB
+            );
+            CREATE TABLE memory_vectors (
+                memory_id INTEGER PRIMARY KEY,
+                vector BLOB NOT NULL,
+                FOREIGN KEY(memory_id) REFERENCES memories(id)
+            );
+            CREATE VIRTUAL TABLE fts_memories USING fts5(content);
+            CREATE TRIGGER fts_memories_ai AFTER INSERT ON memories BEGIN
+                INSERT INTO fts_memories(rowid, content) VALUES (new.id, new.content);
+            END;
+            CREATE TRIGGER fts_memories_ad AFTER DELETE ON memories BEGIN
+                INSERT INTO fts_memories(fts_memories, rowid, content)
+                VALUES ('delete', old.id, old.content);
+            END;
+            CREATE TRIGGER fts_memories_au AFTER UPDATE ON memories BEGIN
+                INSERT INTO fts_memories(fts_memories, rowid, content)
+                VALUES ('delete', old.id, old.content);
+                INSERT INTO fts_memories(rowid, content) VALUES (new.id, new.content);
+            END;
+            CREATE TABLE write_operations (
+                operation_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                write_sequence INTEGER NOT NULL
+            );
+            CREATE TABLE domain_outbox (
+                event_id TEXT PRIMARY KEY,
+                operation_id TEXT NOT NULL,
+                aggregate_kind TEXT NOT NULL,
+                aggregate_id TEXT NOT NULL,
+                aggregate_version INTEGER NOT NULL,
+                created_at REAL NOT NULL
+            );
+            CREATE TABLE outbox_deliveries (
+                event_id TEXT NOT NULL,
+                consumer_name TEXT NOT NULL,
+                state TEXT NOT NULL,
+                processed_at REAL,
+                PRIMARY KEY(event_id, consumer_name)
+            );
+            CREATE TABLE derived_projection_state (
+                consumer_name TEXT NOT NULL,
+                aggregate_kind TEXT NOT NULL,
+                aggregate_id TEXT NOT NULL,
+                applied_version INTEGER NOT NULL,
+                generation INTEGER NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(consumer_name, aggregate_kind, aggregate_id)
+            );
+            CREATE TABLE background_job_runs (
+                run_id TEXT PRIMARY KEY,
+                request_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempt INTEGER NOT NULL,
+                cursor_generation INTEGER NOT NULL,
+                error_code TEXT,
+                updated_at REAL NOT NULL
+            );
+            """
+        )
+        connection.execute("DROP TRIGGER fts_memories_ai")
+        connection.executemany(
+            "INSERT INTO memories(id, content, vector) VALUES (?, ?, ?)",
+            ((1, "first", b"1234"), (2, "second", b"5678")),
+        )
+        connection.execute("INSERT INTO fts_memories(rowid, content) VALUES (1, 'first')")
+        connection.executemany(
+            "INSERT INTO memory_vectors(memory_id, vector) VALUES (?, ?)",
+            ((1, b"1234"), (99, b"orphan")),
+        )
+        connection.execute(
+            "INSERT INTO write_operations(operation_id, status, write_sequence) VALUES ('op-1', 'committed', 1)"
+        )
+        connection.execute(
+            """INSERT INTO domain_outbox(
+                   event_id, operation_id, aggregate_kind, aggregate_id, aggregate_version, created_at
+               ) VALUES ('event-1', 'op-1', 'memory', '1', 2, 100.0)"""
+        )
+        connection.executemany(
+            "INSERT INTO outbox_deliveries(event_id, consumer_name, state, processed_at) VALUES (?, ?, ?, NULL)",
+            (("event-1", "memory_index", "processing"), ("event-1", "tag_index", "pending")),
+        )
+        connection.execute(
+            """INSERT INTO derived_projection_state(
+                   consumer_name, aggregate_kind, aggregate_id, applied_version, generation, updated_at
+               ) VALUES ('memory_index', 'memory', '1', 1, 1, 90.0)"""
+        )
+        connection.executemany(
+            """INSERT INTO background_job_runs(
+                   run_id, request_id, status, attempt, cursor_generation, error_code, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                ("run-active", "request-1", "running", 1, 0, None, 101.0),
+                ("run-failed", "request-2", "failed", 2, 1, "rebuild_failed", 102.0),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _create_book_lore_database(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        for table in ("book_entities", "book_relations", "book_communities", "book_notes"):
+            connection.execute(f'CREATE TABLE "{table}" (id INTEGER PRIMARY KEY)')
+        connection.execute("INSERT INTO book_entities(id) VALUES (1)")
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _create_manifest(index_path: Path) -> None:
+    from engine.index_manifest import (
+        IndexManifest,
+        checksum_file,
+        generation_path,
+        manifest_path,
+    )
+
+    generation_file = generation_path(index_path, 1)
+    generation_file.write_bytes(b"immutable-index-generation")
+    payload = IndexManifest(
+        kind="memory",
+        generation=1,
+        dimension=3,
+        db_watermark=1,
+        count=1,
+        checksum=checksum_file(generation_file),
+        created_at="2026-07-13T00:00:00Z",
+    )
+    manifest_path(index_path).write_text(
+        json.dumps(payload.to_dict(), sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def test_diagnostics_collects_readonly_evidence_and_distinct_health(tmp_path):
+    from services.diagnostics import DiagnosticsService, HEALTH_VALUES, IndexSource
+
+    database_path = tmp_path / "wave_memory.db"
+    book_lore_path = tmp_path / "book_lore.db"
+    memory_index_path = tmp_path / "memory.hnsw"
+    tag_index_path = tmp_path / "tags.hnsw"
+    _create_main_database(database_path)
+    _create_book_lore_database(book_lore_path)
+    _create_manifest(memory_index_path)
+    tag_index_path.write_bytes(b"legacy-index-without-manifest")
+    before_hash = _sha256(database_path)
+
+    service = DiagnosticsService(
+        database_path=database_path,
+        memory_index=IndexSource(memory_index_path, "memory", dimension=3, runtime_count=1),
+        tag_index=IndexSource(tag_index_path, "tags", dimension=3, runtime_count=0),
+        book_lore_path=book_lore_path,
+        clock=lambda: datetime(2026, 7, 13, tzinfo=timezone.utc),
+    )
+    payload = service.collect()
+
+    assert _sha256(database_path) == before_hash
+    assert payload["health"] == "drift"
+    assert payload["source"] == "wave_memory_readonly_diagnostics"
+    assert payload["checked_at"] == "2026-07-13T00:00:00Z"
+    assert payload["evidence"]["read_only"] is True
+    by_name = {item["name"]: item for item in payload["checks"]}
+    assert set(by_name) == {
+        "fts",
+        "memory_vectors",
+        "outbox_consumer_lag",
+        "job_runs",
+        "derived_projection",
+        "memory_manifest",
+        "tag_manifest",
+        "memory_index_shadow",
+        "tag_index_shadow",
+        "book_lore_source",
+    }
+    assert all(item["health"] in HEALTH_VALUES for item in by_name.values())
+    assert all(item["source"] and item["checked_at"] and "evidence" in item for item in by_name.values())
+    assert by_name["fts"]["health"] == "drift"
+    assert by_name["fts"]["evidence"]["missing_rows"] == 1
+    assert by_name["memory_vectors"]["health"] == "drift"
+    assert by_name["memory_vectors"]["evidence"]["orphan_count"] == 1
+    assert by_name["outbox_consumer_lag"]["health"] == "drift"
+    assert by_name["outbox_consumer_lag"]["evidence"]["total_lag"] == 2
+    assert by_name["job_runs"]["health"] == "drift"
+    assert by_name["job_runs"]["evidence"]["failed_count"] == 1
+    assert by_name["derived_projection"]["health"] == "drift"
+    assert by_name["derived_projection"]["evidence"]["lagged_count"] == 2
+    assert by_name["memory_manifest"]["health"] == "healthy"
+    assert by_name["memory_manifest"]["evidence"]["generation"] == 1
+    assert by_name["tag_manifest"]["health"] == "drift"
+    assert by_name["tag_manifest"]["evidence"]["reason"] == "generation_manifest_missing"
+    assert by_name["book_lore_source"]["health"] == "healthy"
+    assert by_name["book_lore_source"]["evidence"]["scope"] == "catalog"
+
+
+def test_diagnostics_shadow_probe_detects_id_and_recall_drift(tmp_path):
+    from services.diagnostics import DiagnosticsService, IndexSource
+
+    database_path = tmp_path / "shadow.db"
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute(
+            "CREATE TABLE memories(id INTEGER PRIMARY KEY, vector BLOB)"
+        )
+        connection.executemany(
+            "INSERT INTO memories(id, vector) VALUES (?, ?)",
+            [
+                (1, np.asarray([1.0, 0.0], dtype=np.float32).tobytes()),
+                (2, np.asarray([0.0, 1.0], dtype=np.float32).tobytes()),
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    def stale_search(vector, k):
+        return [(1, 0.0)]
+
+    payload = DiagnosticsService(
+        database_path=database_path,
+        memory_index=IndexSource(
+            None,
+            "memory",
+            dimension=2,
+            runtime_count=2,
+            runtime_ids=(1, 99),
+            search=stale_search,
+        ),
+    ).collect()
+    shadow = {item["name"]: item for item in payload["checks"]}[
+        "memory_index_shadow"
+    ]
+
+    assert shadow["health"] == "drift"
+    assert shadow["evidence"]["missing_ids"] == [2]
+    assert shadow["evidence"]["orphan_ids"] == [99]
+    assert shadow["evidence"]["sample_recall"] == 0.5
+
+
+def test_diagnostics_without_sources_is_not_configured_and_creates_nothing(tmp_path, monkeypatch):
+    from services.diagnostics import DiagnosticsService
+
+    monkeypatch.chdir(tmp_path)
+    payload = DiagnosticsService(
+        clock=lambda: datetime(2026, 7, 13, tzinfo=timezone.utc)
+    ).collect()
+
+    assert payload["health"] == "not_configured"
+    assert {item["health"] for item in payload["checks"]} == {"not_configured"}
+    assert not (tmp_path / "wave_memory.db").exists()
+    assert not (tmp_path / "book_lore.db").exists()
+
+
+def test_diagnostics_distinguishes_empty_repairing_and_probe_error(tmp_path):
+    from services.diagnostics import DiagnosticsService, IndexSource
+
+    database_path = tmp_path / "active.db"
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE write_operations (
+                operation_id TEXT PRIMARY KEY, status TEXT, write_sequence INTEGER
+            );
+            CREATE TABLE domain_outbox (
+                event_id TEXT PRIMARY KEY, operation_id TEXT, aggregate_kind TEXT,
+                aggregate_id TEXT, aggregate_version INTEGER, created_at REAL
+            );
+            CREATE TABLE outbox_deliveries (
+                event_id TEXT, consumer_name TEXT, state TEXT, processed_at REAL
+            );
+            CREATE TABLE derived_projection_state (
+                consumer_name TEXT, aggregate_kind TEXT, aggregate_id TEXT,
+                applied_version INTEGER, generation INTEGER, updated_at REAL
+            );
+            CREATE TABLE background_job_runs (
+                run_id TEXT PRIMARY KEY, request_id TEXT, status TEXT, attempt INTEGER,
+                cursor_generation INTEGER, error_code TEXT, updated_at REAL
+            );
+            INSERT INTO write_operations VALUES ('op', 'committed', 1);
+            INSERT INTO domain_outbox VALUES ('event', 'op', 'memory', '1', 1, 10.0);
+            INSERT INTO outbox_deliveries VALUES ('event', 'memory_index', 'processing', NULL);
+            INSERT INTO background_job_runs VALUES ('run', 'request', 'running', 1, 0, NULL, 11.0);
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    payload = DiagnosticsService(
+        database_path=database_path,
+        memory_index=IndexSource(tmp_path / "memory.hnsw", "memory"),
+        tag_index=IndexSource(None, "tags"),
+        book_lore_path=tmp_path / "missing-book-lore.db",
+    ).collect()
+    by_name = {item["name"]: item for item in payload["checks"]}
+
+    assert by_name["outbox_consumer_lag"]["health"] == "repairing"
+    assert by_name["job_runs"]["health"] == "repairing"
+    assert by_name["derived_projection"]["health"] == "repairing"
+    assert by_name["memory_manifest"]["health"] == "empty"
+    assert by_name["tag_manifest"]["health"] == "not_configured"
+    assert by_name["book_lore_source"]["health"] == "probe_error"
+
+
+def test_diagnostics_api_is_safe_with_empty_container(tmp_path, monkeypatch):
+    quart = __import__("quart")
+    if not hasattr(quart.Quart, "test_client"):
+        pytest.skip("full-suite Quart test double pollution; API test passes in isolation")
+
+    from webui.app import create_app
+    from webui.container import ServiceContainer
+
+    ServiceContainer.reset()
+    monkeypatch.chdir(tmp_path)
+    app = create_app()
+
+    async def exercise():
+        response = await app.test_client().get("/api/diagnostics/indexes")
+        return response.status_code, await response.get_json()
+
+    try:
+        status, payload = asyncio.run(exercise())
+    finally:
+        ServiceContainer.reset()
+
+    assert status == 200
+    assert payload["health"] == "not_configured"
+    assert payload["evidence"]["read_only"] is True
+    assert not (tmp_path / "wave_memory.db").exists()
+    assert not (tmp_path / "book_lore.db").exists()
+
+
+def test_blueprint_container_resolution_uses_only_live_paths(tmp_path):
+    from webui.blueprints.diagnostics import build_diagnostics_service
+
+    database_path = tmp_path / "configured.db"
+    database_path.write_bytes(b"not-opened-by-construction")
+    memory_index = SimpleNamespace(
+        index_path=str(tmp_path / "memory.hnsw"),
+        kind="memory",
+        dimension=1024,
+        count=7,
+    )
+    service = build_diagnostics_service(SimpleNamespace(
+        db=SimpleNamespace(db_path=str(database_path)),
+        memory_index=memory_index,
+        tag_index=None,
+        plugin_config={},
+        learning_source_registry=None,
+    ))
+
+    assert service.database_path == database_path.resolve()
+    assert service.memory_index.runtime_count == 7
+    assert service.tag_index.path is None
+    assert service.book_lore_path is None

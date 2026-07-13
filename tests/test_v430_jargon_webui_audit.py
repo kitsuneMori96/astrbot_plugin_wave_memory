@@ -80,7 +80,7 @@ class V430JargonWebuiAuditTest(unittest.TestCase):
         jargon_bp_mod.request = types.SimpleNamespace(args=args)
         jargon_bp_mod.jsonify = lambda payload: payload
         try:
-            payload = asyncio.run(jargon_bp_mod.list_jargon.__wrapped__())
+            payload = asyncio.run(jargon_bp_mod.legacy_list_jargon.__wrapped__())
         finally:
             jargon_bp_mod.get_container = old_container
             jargon_bp_mod.request = old_request

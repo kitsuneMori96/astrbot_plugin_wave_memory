@@ -27,9 +27,9 @@ class FakeDB:
         self.added.append(kwargs)
         return len(self.added)
 
-    def find_recent_duplicate_memory(self, *, group_id, normalized_content, since_ts):
+    def find_recent_duplicate_memory(self, *, scope, normalized_content, since_ts):
         self.duplicate_checks.append({
-            "group_id": group_id,
+            "scope": scope,
             "normalized_content": normalized_content,
             "since_ts": since_ts,
         })
@@ -55,6 +55,22 @@ class FakeEmbedding:
         return [np.ones(3, dtype=np.float32) * (idx + 1) for idx, _ in enumerate(texts)]
 
 
+def _group_scope(*, bot_id="bot-a", group_id="group-1"):
+    from astrbot_plugin_wave_memory.domain.scope import RuntimeScope, SessionRef
+
+    return RuntimeScope(
+        bot_id=bot_id,
+        visibility="group",
+        session=SessionRef(
+            id=f"qq:group:{group_id}",
+            platform_id="qq",
+            kind="group",
+            conversation_id=group_id,
+        ),
+        subject_principal_id="qq:user:user-1",
+    )
+
+
 class MessageWriterDedupTest(unittest.TestCase):
     def _writer(self, db=None, *, window_seconds=300):
         from astrbot_plugin_wave_memory.services.message_writer import MemoryDedupPolicy, MessageWriter
@@ -74,6 +90,7 @@ class MessageWriterDedupTest(unittest.TestCase):
 
         asyncio.run(writer._process_batch([
             {
+                "scope": _group_scope(),
                 "group_id": "group-1",
                 "sender_id": "user-1",
                 "sender_name": "用户",
@@ -83,6 +100,7 @@ class MessageWriterDedupTest(unittest.TestCase):
                 "importance": 1.0,
             },
             {
+                "scope": _group_scope(),
                 "group_id": "group-1",
                 "sender_id": "bot_remember",
                 "sender_name": "主动记忆",
@@ -92,6 +110,7 @@ class MessageWriterDedupTest(unittest.TestCase):
                 "importance": 1.5,
             },
             {
+                "scope": _group_scope(),
                 "group_id": "group-1",
                 "sender_id": "compat_livingmemory",
                 "sender_name": "LivingMemory兼容",
@@ -105,6 +124,9 @@ class MessageWriterDedupTest(unittest.TestCase):
         self.assertEqual(len(db.added), 1)
         self.assertEqual(db.added[0]["content"], "用户喜欢苹果派")
         self.assertEqual(db.added[0]["importance"], 1.5)
+        self.assertEqual(db.added[0]["scope"].bot_id, "bot-a")
+        self.assertEqual(db.added[0]["provenance"]["schema"], "memory-origin/v1")
+        self.assertEqual(db.added[0]["origin_metadata"]["origin_kind"], "message_writer:core")
         self.assertEqual(writer.stats.get("duplicate"), 2)
 
     def test_recent_duplicate_is_skipped_without_modifying_existing_memory(self):
@@ -114,6 +136,7 @@ class MessageWriterDedupTest(unittest.TestCase):
 
         asyncio.run(writer._process_batch([
             {
+                "scope": _group_scope(),
                 "group_id": "group-1",
                 "sender_id": "bot_remember",
                 "sender_name": "主动记忆",
@@ -125,10 +148,72 @@ class MessageWriterDedupTest(unittest.TestCase):
         ]))
 
         self.assertEqual(db.added, [])
-        self.assertEqual(db.duplicate_checks[0]["group_id"], "group-1")
+        self.assertEqual(db.duplicate_checks[0]["scope"].bot_id, "bot-a")
+        self.assertEqual(db.duplicate_checks[0]["scope"].session.id, "qq:group:group-1")
         self.assertEqual(db.duplicate_checks[0]["normalized_content"], "用户喜欢苹果派")
         self.assertEqual(db.duplicate_checks[0]["since_ts"], 1880.0)
         self.assertEqual(writer.stats.get("duplicate"), 1)
+
+    def test_scope_payload_projects_real_group_and_prevents_cross_bot_batch_dedup(self):
+        db = FakeDB()
+        writer = self._writer(db)
+
+        asyncio.run(writer._process_batch([
+            {
+                "scope": _group_scope(bot_id="bot-a"),
+                "group_id": "group-1",
+                "sender_id": "user-1",
+                "sender_name": "用户",
+                "content": "两个 Bot 不应互相去重",
+                "timestamp": 3000.0,
+                "source": "core",
+            },
+            {
+                "scope": _group_scope(bot_id="bot-b"),
+                "group_id": "group-1",
+                "sender_id": "user-1",
+                "sender_name": "用户",
+                "content": "两个 Bot 不应互相去重",
+                "timestamp": 3001.0,
+                "source": "core",
+            },
+        ]))
+
+        self.assertEqual(len(db.added), 2)
+        self.assertEqual({item["group_id"] for item in db.added}, {"group-1"})
+
+    def test_scope_payload_rejects_mismatched_or_non_group_legacy_projection(self):
+        from astrbot_plugin_wave_memory.services.message_writer import MessageScopeError
+        from astrbot_plugin_wave_memory.domain.scope import RuntimeScope
+
+        writer = self._writer()
+        with self.assertRaises(MessageScopeError) as missing:
+            asyncio.run(writer._process_batch([{
+                "group_id": "group-1",
+                "content": "缺少作用域必须拒绝",
+            }]))
+        self.assertEqual(missing.exception.code, "scope_required")
+
+        with self.assertRaises(MessageScopeError) as mismatch:
+            asyncio.run(writer._process_batch([{
+                "scope": _group_scope(),
+                "group_id": "other-group",
+                "content": "作用域不一致",
+            }]))
+        self.assertEqual(mismatch.exception.code, "scope_session_mismatch")
+
+        private_scope = RuntimeScope(
+            bot_id="bot-a",
+            visibility="bot_private",
+            session=None,
+            subject_principal_id=None,
+        )
+        with self.assertRaises(MessageScopeError) as unsupported:
+            asyncio.run(writer._process_batch([{
+                "scope": private_scope,
+                "content": "不能伪造成群",
+            }]))
+        self.assertEqual(unsupported.exception.code, "legacy_writer_scope_visibility_unsupported")
 
 
 if __name__ == "__main__":

@@ -48,7 +48,5 @@ class TestV450MemoriesSourceAware:
             "Bot 回复 -> FewShot 候选",
             "世界观内容 -> BookLore 条目候选",
             "稳定关系句子 -> Fact 候选",
-            "星云视图为只读可视化",
-            "不和神经云图职责冲突",
         ):
             assert marker in page

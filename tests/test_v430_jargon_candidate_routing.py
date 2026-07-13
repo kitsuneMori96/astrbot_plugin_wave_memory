@@ -101,6 +101,33 @@ class V430JargonCandidateRoutingTest(unittest.TestCase):
         self.assertTrue(route["enter_llm"])
         self.assertEqual(route["source"], "wave_memory")
 
+    def test_diverted_candidates_never_enter_statistics(self):
+        from domain.scope import RuntimeScope, SessionRef
+        from services.jargon import statistical_filter
+
+        scope = RuntimeScope("yushu", "group", SessionRef("qq:group:g1", "qq", "group", "g1"))
+        original_has_jieba = statistical_filter._HAS_JIEBA
+        statistical_filter._HAS_JIEBA = True
+        self.addCleanup(setattr, statistical_filter, "_HAS_JIEBA", original_has_jieba)
+        self.service._filter._tokenize = lambda text: ["阿洛", "object", "吃饭", "v我50", "猫猫税"]
+        self.db.conn.execute(
+            "INSERT INTO memories (group_id, sender_id, sender_name, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+            ("g1", "u1", "阿洛", "阿洛发言", 1000.0),
+        )
+
+        self.service.feed_message("ignored", scope, sender_id="u1", timestamp=1000.0)
+
+        frequencies = self.service._filter._group_freq[("yushu", "qq:group:g1", "group")]
+        self.assertEqual(dict(frequencies), {"猫猫税": 1})
+
+    def test_holyman_blocklist_uses_same_runtime_classifier(self):
+        self.service._holyman._blocked["v我50"] = "manual block"
+
+        route = self.service.classify_candidate("v我50", "g1", {"sender_id": "u1"})
+
+        self.assertEqual(route["candidate_type"], "local_jargon_candidate")
+        self.assertTrue(route["enter_llm"])
+
 
 if __name__ == "__main__":
     unittest.main()

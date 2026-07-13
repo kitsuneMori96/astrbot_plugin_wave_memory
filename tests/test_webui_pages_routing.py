@@ -7,17 +7,21 @@ from pathlib import Path
 
 
 def _load_pages_module():
-    if "quart" not in sys.modules:
-        class Blueprint:
-            def __init__(self, *args, **kwargs):
-                pass
+    class Blueprint:
+        def __init__(self, *args, **kwargs):
+            pass
 
-            def route(self, *args, **kwargs):
-                def deco(func):
-                    return func
-                return deco
+        def route(self, *args, **kwargs):
+            def deco(func):
+                return func
+            return deco
 
-        sys.modules["quart"] = types.SimpleNamespace(Blueprint=Blueprint)
+        def app_errorhandler(self, *args, **kwargs):
+            def deco(func):
+                return func
+            return deco
+
+    sys.modules["quart"] = types.SimpleNamespace(Blueprint=Blueprint)
     import webui.blueprints.pages as pages
     return importlib.reload(pages)
 
