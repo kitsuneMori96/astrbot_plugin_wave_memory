@@ -18,6 +18,10 @@ try:
     from .soul import soul_bp
     from .jargon import jargon_bp
     from .kg import kg_bp
+    from .knowledge import knowledge_bp
+    from .options import options_bp
+    from .people import people_bp
+    from .maintenance import maintenance_bp
     try:
         from .injection_observatory import injection_observatory_bp
     except Exception:  # pragma: no cover - 新旧版本兼容
@@ -42,16 +46,12 @@ try:
         from .compatibility import compatibility_bp
     except Exception:  # pragma: no cover - 新旧版本兼容
         compatibility_bp = None
-    try:
-        from .blackbox import blackbox_bp
-    except Exception:  # pragma: no cover - 新旧版本兼容
-        blackbox_bp = None
 except Exception:  # pragma: no cover - 本地单测未安装 Quart 时只导入 helper
     class Blueprint:  # type: ignore[no-redef]
         pass
 
     auth_bp = pages_bp = explore_bp = memories_bp = tags_bp = config_bp = system_bp = None
-    beliefs_bp = soul_bp = jargon_bp = kg_bp = injection_observatory_bp = channel_config_bp = learning_object_review_bp = agent_feedback_bp = learning_center_bp = compatibility_bp = blackbox_bp = None
+    beliefs_bp = soul_bp = jargon_bp = kg_bp = knowledge_bp = options_bp = people_bp = maintenance_bp = injection_observatory_bp = channel_config_bp = learning_object_review_bp = agent_feedback_bp = learning_center_bp = compatibility_bp = None
 
 
 def get_blueprints() -> List[Blueprint]:
@@ -69,12 +69,15 @@ def get_blueprints() -> List[Blueprint]:
             soul_bp,
             jargon_bp,
             kg_bp,
+            knowledge_bp,
+            people_bp,
+            options_bp,
+            maintenance_bp,
             injection_observatory_bp,
             channel_config_bp,
             learning_object_review_bp,
             agent_feedback_bp,
             learning_center_bp,
             compatibility_bp,
-            blackbox_bp,
         ] if bp is not None
     ]

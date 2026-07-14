@@ -53,9 +53,9 @@ def build_diagnostics_service(container: Any) -> DiagnosticsService:
 
 def _index_source(index: Any, fallback_kind: str) -> IndexSource:
     if index is None:
-        return IndexSource(None, fallback_kind)
+        return IndexSource(None, _canonical_index_kind(fallback_kind))
     path = _path_value(getattr(index, "index_path", None))
-    kind = str(getattr(index, "kind", None) or fallback_kind)
+    kind = _canonical_index_kind(getattr(index, "kind", None) or fallback_kind)
     dimension = _optional_int(getattr(index, "dimension", None))
     try:
         runtime_count = _optional_int(getattr(index, "count", None))
@@ -69,6 +69,11 @@ def _index_source(index: Any, fallback_kind: str) -> IndexSource:
     if not callable(search):
         search = None
     return IndexSource(path, kind, dimension, runtime_count, runtime_ids, search)
+
+
+def _canonical_index_kind(value: Any) -> str:
+    kind = str(value).strip()
+    return "tag" if kind.lower() in {"tag", "tags"} else kind
 
 
 def _book_lore_path(container: Any, database_path: str | None) -> str | None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Mapping
 
 try:
@@ -39,6 +40,7 @@ try:
         build_channel_config_from_plugin_config,
         build_default_channel_config,
         channel_config_diff,
+        channel_config_revision,
     )
     from services.runtime_mode import resolve_runtime_mode
 except Exception:  # pragma: no cover - AstrBot 包导入路径
@@ -48,13 +50,30 @@ except Exception:  # pragma: no cover - AstrBot 包导入路径
         build_channel_config_from_plugin_config,
         build_default_channel_config,
         channel_config_diff,
+        channel_config_revision,
     )
     from ...services.runtime_mode import resolve_runtime_mode
+
+
+from ..api_contract import field_value_state, mutation_response
 
 
 channel_config_bp = Blueprint("channel_config", __name__, url_prefix="/api")
 
 _EDITABLE_FIELDS = ["enabled", "priority", "top_k", "max_items", "token_budget", "timeout_ms", "min_score"]
+_CHANNEL_DESCRIPTORS = {
+    "safety": ("身份污染、近期去重与安全边界", [], "critical", None),
+    "memory": ("召回当前作用域的长期记忆", ["memory_index"], "high", "/memories"),
+    "timeline": ("读取当前 SoulScope 的时间线事件", ["soul_runtime"], "medium", "/soul"),
+    "facts": ("注入同作用域且证据健康的事实", ["facts_repository"], "high", "/knowledge/facts"),
+    "persona": ("读取当前 Bot/会话的人格投影", ["soul_runtime"], "high", "/soul"),
+    "belief": ("注入 active 且证据健康的信念", ["belief_service", "evidence_resolver"], "high", "/beliefs"),
+    "jargon": ("解释显式命中的本地表达", ["jargon_service"], "medium", "/jargon"),
+    "fewshot": ("提供已审核且健康的 Bot 风格样例", ["fewshot_service"], "high", "/knowledge/style-examples"),
+    "book_lore": ("检索已审核的 BookLore projection", ["book_lore_adapter"], "medium", "/knowledge/book-lore"),
+    "fts5": ("使用 FTS5 补充文字召回", ["fts_memories"], "medium", "/diagnostics/indexes"),
+    "affinity": ("读取当前关系投影；未知值保持为空", ["relationship_projection"], "medium", "/people"),
+}
 
 
 def _plugin_config(container_or_config: Any) -> Mapping[str, Any]:
@@ -145,19 +164,57 @@ def _attach_runtime_status_defaults(config_payload: dict[str, Any], trace_store:
     return config_payload
 
 
-def build_channel_config_payload(plugin_config: Mapping[str, Any] | None, current_config: Any = None, *, trace_store: Any = None) -> dict[str, Any]:
-    """构造 WebUI 通道配置页面所需 payload。"""
+def build_channel_config_payload(
+    plugin_config: Mapping[str, Any] | None,
+    current_config: Any = None,
+    *,
+    trace_store: Any = None,
+    effective_since: float | None = None,
+) -> dict[str, Any]:
+    """构造真实 registry descriptor 与 saved/effective/revision 配置契约。"""
     plugin_config = plugin_config or {}
     defaults = _default_config(plugin_config)
     current = current_config or build_channel_config_from_plugin_config(plugin_config)
     runtime = resolve_runtime_mode(plugin_config).to_web_payload()
+    default_payload = defaults.to_dict()
     current_payload = _attach_runtime_status_defaults(current.to_dict(), trace_store)
+    overrides = plugin_config.get("Channel_Settings", {}) or {}
+    saved_channels = overrides.get("channels", {}) if isinstance(overrides, Mapping) else {}
+    descriptors = []
+    for name, effective_channel in (current_payload.get("channels") or {}).items():
+        purpose, dependencies, risk, management_route = _CHANNEL_DESCRIPTORS[name]
+        default_channel = (default_payload.get("channels") or {}).get(name, {})
+        saved_channel = saved_channels.get(name, {}) if isinstance(saved_channels, Mapping) else {}
+        effective_channel["field_states"] = {
+            field: field_value_state(
+                default=default_channel.get(field),
+                saved=saved_channel.get(field, default_channel.get(field)),
+                effective=effective_channel.get(field),
+                apply_mode="hot",
+                effective_since=effective_since,
+            )
+            for field in _EDITABLE_FIELDS
+        }
+        descriptors.append({
+            "id": name,
+            "purpose": purpose,
+            "dependencies": dependencies,
+            "risk": risk,
+            "management_route": management_route,
+            "verification_filters": {"channel": name},
+            "available": True,
+        })
+    revision = channel_config_revision(current)
     return {
         "runtime": runtime,
         "current": current_payload,
-        "defaults": defaults.to_dict(),
-        "overrides": plugin_config.get("Channel_Settings", {}) or {},
+        "defaults": default_payload,
+        "overrides": overrides,
         "diff": channel_config_diff(defaults, current),
+        "descriptors": descriptors,
+        "revision": revision,
+        "effective_since": effective_since,
+        "verification_url": f"/observatory?config_revision={revision}",
         "editable_fields": list(_EDITABLE_FIELDS),
         "limits": {"timeout_ms_max": MAX_TIMEOUT_MS, "min_score_min": 0, "min_score_max": 1},
     }
@@ -189,6 +246,7 @@ def validate_channel_config_patch(
         "current": current.to_dict(),
         "candidate": candidate.to_dict(),
         "diff": channel_config_diff(current, candidate),
+        "preflight_token": channel_config_revision(candidate),
     }
 
 
@@ -199,6 +257,16 @@ def apply_channel_config_patch(container: Any, patch: Mapping[str, Any] | None) 
     preview = validate_channel_config_patch(plugin_config, patch, current)
     if not preview.get("ok"):
         return preview
+    if (
+        str((patch or {}).get("preflight_token") or "") != str(preview.get("preflight_token") or "")
+        or str((patch or {}).get("confirmation") or "") != "apply"
+    ):
+        return {
+            **preview,
+            "ok": False,
+            "error_code": "channel_config_confirmation_required",
+            "errors": ["应用配置需要使用最新校验返回的 preflight token 并显式确认"],
+        }
 
     candidate = apply_channel_overrides(_default_config(plugin_config), patch or {})
     if container is not None:
@@ -212,13 +280,28 @@ def apply_channel_config_patch(container: Any, patch: Mapping[str, Any] | None) 
             save = getattr(cfg, "save_config", None)
             if callable(save):
                 save()
+        effective = getattr(container, "injection_channel_config", None)
+        if effective is not candidate and getattr(effective, "to_dict", lambda: None)() != candidate.to_dict():
+            return {
+                "ok": False,
+                "errors": ["运行时回读值与候选配置不一致"],
+                "current": current.to_dict(),
+                "candidate": candidate.to_dict(),
+                "diff": channel_config_diff(current, candidate),
+            }
+        setattr(container, "injection_channel_config_effective_since", time.time())
+        setattr(container, "injection_channel_config_revision", channel_config_revision(candidate))
+    revision = channel_config_revision(candidate)
     return {
-        "ok": True,
+        **mutation_response(operation_kind="channel_config.apply", status="succeeded", revision=revision),
         "errors": [],
         "current": current.to_dict(),
         "candidate": candidate.to_dict(),
+        "effective": candidate.to_dict(),
         "diff": channel_config_diff(current, candidate),
-        "message": "通道配置已热应用",
+        "message": "通道配置已热应用并完成运行时回读",
+        "verification_url": f"/observatory?config_revision={revision}",
+        "effective_since": getattr(container, "injection_channel_config_effective_since", None),
     }
 
 
@@ -238,13 +321,19 @@ def reset_channel_config_to_defaults(container: Any) -> dict[str, Any]:
             save = getattr(cfg, "save_config", None)
             if callable(save):
                 save()
+        setattr(container, "injection_channel_config_effective_since", time.time())
+        setattr(container, "injection_channel_config_revision", channel_config_revision(defaults))
+    revision = channel_config_revision(defaults)
     return {
-        "ok": True,
+        **mutation_response(operation_kind="channel_config.reset", status="succeeded", revision=revision),
         "errors": [],
         "current": current.to_dict(),
         "candidate": defaults.to_dict(),
+        "effective": defaults.to_dict(),
         "diff": channel_config_diff(current, defaults),
         "message": "已恢复当前模式默认通道配置",
+        "verification_url": f"/observatory?config_revision={revision}",
+        "effective_since": getattr(container, "injection_channel_config_effective_since", None),
     }
 
 
@@ -256,6 +345,7 @@ async def get_channel_config():
         _plugin_config(c),
         getattr(c, "injection_channel_config", None),
         trace_store=_trace_store_from_container(c),
+        effective_since=getattr(c, "injection_channel_config_effective_since", None),
     ))
 
 
@@ -272,7 +362,9 @@ async def validate_channel_config():
 async def update_channel_config():
     c = get_container()
     body = await request.get_json(silent=True) or {}
-    return jsonify(apply_channel_config_patch(c, body))
+    result = apply_channel_config_patch(c, body)
+    status = 409 if result.get("error_code") == "channel_config_confirmation_required" else 200
+    return jsonify(result), status
 
 
 @channel_config_bp.route("/config/channels/defaults", methods=["POST"])

@@ -35,8 +35,12 @@ def _enable_cors(app: Quart) -> None:
         return response
 
 
-def create_app() -> Quart:
-    """创建并配置 Quart 应用。"""
+def create_app(
+    *,
+    scope_options_source=None,
+    request_scope_provider=None,
+) -> Quart:
+    """创建并配置 Quart 应用，并显式组合请求 Scope 依赖。"""
     static_dir = Path(__file__).parent / "static"
     app = Quart(
         __name__,
@@ -44,6 +48,14 @@ def create_app() -> Quart:
         static_url_path="/static",
     )
     app.secret_key = "wavememory-webui"
+
+    from .api_contract import ObjectRefRegistry
+
+    app.extensions["wave_api_contract"] = {
+        "scope_options_source": scope_options_source,
+        "request_scope_provider": request_scope_provider,
+        "object_refs": ObjectRefRegistry(),
+    }
 
     _enable_cors(app)
 

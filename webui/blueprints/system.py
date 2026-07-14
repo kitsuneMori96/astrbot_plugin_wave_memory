@@ -160,25 +160,15 @@ def classify_services_health(services: list[Mapping[str, Any]] | None) -> tuple[
 
 
 def _get_services_health(c) -> list:
-    """从健康注册表获取所有服务状态（main.py 初始化时注册）。"""
+    """只读取规范健康注册表；注册表缺失时返回显式 unavailable。"""
     try:
         from ...utils.health_registry import get_all_services
         services = get_all_services()
-        if services:
-            return refresh_dynamic_services_health(c, services)
-    except Exception:
-        pass
-    # fallback：如果 registry 为空,用旧逻辑
-    svcs = []
-    def _add(name, obj, reason_if_none="未加载"):
-        if obj:
-            svcs.append({"name": name, "status": "ok", "reason": ""})
-        else:
-            svcs.append({"name": name, "status": "off", "reason": reason_if_none})
-    _add("向量索引", c.memory_index)
-    _add("Embedding", c.embedding_service)
-    _add("Tag 提取", c.tag_extractor)
-    return refresh_dynamic_services_health(c, svcs)
+    except Exception as exc:
+        return [{"name": "健康注册表", "status": "error", "reason": f"registry_unavailable: {exc}"}]
+    if not services:
+        return [{"name": "健康注册表", "status": "off", "reason": "registry_empty"}]
+    return refresh_dynamic_services_health(c, services)
 
 
 def count_existing_tagged_memories(conn) -> int:
@@ -196,6 +186,28 @@ def count_untagged_memories(conn) -> int:
         """SELECT COUNT(*) FROM memories m
            WHERE NOT EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = m.id)"""
     ).fetchone()[0])
+
+
+def _registry_bots(container: Any) -> list[dict[str, Any]]:
+    """复用生产 Scope options 的真实 Bot registry，不读取虚构容器私有字段。"""
+    source = getattr(container, "scope_options_source", None)
+    getter = getattr(source, "get_scope_options", None)
+    if not callable(getter):
+        return []
+    try:
+        bots = getter().get("bots", [])
+    except Exception:
+        return []
+    return [
+        {
+            "qq_id": str(item.get("qq_id") or ""),
+            "name": str(item.get("name") or item.get("db_id") or ""),
+            "db_id": str(item.get("db_id") or ""),
+            "aliases": list(item.get("aliases") or []),
+        }
+        for item in bots
+        if isinstance(item, Mapping) and str(item.get("db_id") or "").strip()
+    ]
 
 
 @system_bp.route("/system", methods=["GET"])
@@ -248,20 +260,8 @@ async def system_status():
         "SELECT nickname, interaction_count FROM user_profiles WHERE interaction_count > 0 ORDER BY interaction_count DESC LIMIT 5"
     ).fetchall()
 
-    # 获取已注册的 Bot 列表
-    registry_bots = []
-    try:
-        registry = getattr(c, "_bot_registry", {})
-        if registry:
-            for bp in registry.values():
-                registry_bots.append({
-                    "qq_id": bp.qq_id,
-                    "name": bp.name,
-                    "db_id": bp.db_id,
-                    "aliases": bp.aliases,
-                })
-    except Exception:
-        pass
+    # 与 /api/options/scopes 共用同一真实 registry 来源。
+    registry_bots = _registry_bots(c)
 
     untagged_count = count_untagged_memories(c.db.conn)
     pending_fewshot = 0

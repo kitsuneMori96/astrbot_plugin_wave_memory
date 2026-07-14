@@ -42,9 +42,10 @@ class _SecureConfig:
 class Server:
     """WebUI 服务器（守护线程 + Hypercorn）。"""
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 7890):
+    def __init__(self, host: str = "127.0.0.1", port: int = 7890, password: str = ""):
         self.host = host
         self.port = port
+        self.password = password or ""
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._shutdown_event: Optional[asyncio.Event] = None
@@ -54,6 +55,8 @@ class Server:
 
     async def start(self) -> None:
         """启动 Hypercorn 守护线程。"""
+        if self.host not in {"127.0.0.1", "localhost", "::1"} and not self.password:
+            raise RuntimeError("WebUI refuses non-loopback binding without a password")
         if self._thread and self._thread.is_alive():
             logger.info("[WaveMemory WebUI] 服务器已在运行中")
             return
@@ -70,7 +73,13 @@ class Server:
                 return
 
         from .app import create_app
-        self.app = create_app()
+        from .container import get_container
+
+        container = get_container()
+        self.app = create_app(
+            scope_options_source=container.scope_options_source,
+            request_scope_provider=container.request_scope_provider,
+        )
 
         self._thread = threading.Thread(
             target=self._run_thread,

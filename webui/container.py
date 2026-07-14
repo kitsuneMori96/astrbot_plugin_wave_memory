@@ -49,6 +49,11 @@ class ServiceContainer:
         self.livingmemory_facade_enabled: bool = False
         self.livingmemory_alias_tools_registered: bool = False
         self.detected_memory_plugins: list[dict[str, Any]] = []
+        self.scope_options_source: Any = None
+        self.request_scope_provider: Any = None
+        self.soul_repository: Any = None
+        self.fewshot_repository: Any = None
+        self.book_lore_repository: Any = None
 
         # ─── 学习中心服务（由 WebUI/API 按需解析，避免循环依赖） ───
         self.learning_repositories: Any = None
@@ -89,6 +94,11 @@ class ServiceContainer:
         livingmemory_facade_enabled: bool | None = None,
         livingmemory_alias_tools_registered: bool = False,
         detected_memory_plugins: list[dict[str, Any]] | None = None,
+        scope_options_source: Any = None,
+        request_scope_provider: Any = None,
+        soul_repository: Any = None,
+        fewshot_repository: Any = None,
+        book_lore_repository: Any = None,
     ) -> None:
         """注入所有服务引用。"""
         self.db = db
@@ -115,6 +125,11 @@ class ServiceContainer:
         self.livingmemory_facade_enabled = bool(livingmemory_facade if livingmemory_facade_enabled is None else livingmemory_facade_enabled)
         self.livingmemory_alias_tools_registered = bool(livingmemory_alias_tools_registered)
         self.detected_memory_plugins = list(detected_memory_plugins or [])
+        self.scope_options_source = scope_options_source
+        self.request_scope_provider = request_scope_provider
+        self.soul_repository = soul_repository or getattr(db, "soul_repository", None)
+        self.fewshot_repository = fewshot_repository or getattr(db, "fewshot_repository", None)
+        self.book_lore_repository = book_lore_repository or getattr(db, "book_lore_repository", None)
 
     def configure_learning_services(
         self,

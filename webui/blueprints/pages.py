@@ -3,7 +3,7 @@
 from pathlib import Path
 
 try:
-    from quart import Blueprint
+    from quart import Blueprint, redirect
 except Exception:  # pragma: no cover - 本地单测未安装 Quart 时的轻量兜底
     class Blueprint:  # type: ignore[no-redef]
         def __init__(self, *args, **kwargs):
@@ -19,45 +19,39 @@ except Exception:  # pragma: no cover - 本地单测未安装 Quart 时的轻量
                 return func
             return deco
 
+    def redirect(location, code=302):  # type: ignore[no-redef]
+        return "", code, {"Location": location}
+
 
 pages_bp = Blueprint("pages", __name__)
 
 _STATIC_DIR = Path(__file__).parent.parent / "static"
 _HTML_HEADERS = {"Content-Type": "text/html"}
-_INDEX_MISSING = "<h1>Wave Memory WebUI</h1><p>static/index.html not found</p>"
+_INDEX_MISSING = "<h1>Wave Memory WebUI</h1><p>built WebUI is unavailable</p>"
 
 
 def _html_response(path: Path, fallback: str) -> tuple[str, int, dict[str, str]]:
     if path.exists():
         return path.read_text(encoding="utf-8"), 200, _HTML_HEADERS
-    return fallback, 200, _HTML_HEADERS
-
-
-def _legacy_index_body() -> str:
-    legacy_path = _STATIC_DIR / "index.html"
-    if legacy_path.exists():
-        return legacy_path.read_text(encoding="utf-8")
-    return _INDEX_MISSING
+    return fallback, 503, _HTML_HEADERS
 
 
 @pages_bp.route("/")
 async def index():
-    return _html_response(_STATIC_DIR / "app" / "index.html", _legacy_index_body())
-
-
-@pages_bp.route("/legacy")
-async def legacy():
-    return _html_response(_STATIC_DIR / "index.html", _INDEX_MISSING)
+    return _html_response(_STATIC_DIR / "app" / "index.html", _INDEX_MISSING)
 
 
 @pages_bp.route("/explore")
 async def explore():
-    return _html_response(_STATIC_DIR / "explore.html", "<h1>Wave Memory</h1><p>explore.html not found</p>")
+    return _html_response(
+        _STATIC_DIR / "explore.html",
+        "<h1>Wave Memory 3D 星图</h1><p>3D 资源暂不可用。</p>",
+    )
 
 
 @pages_bp.route("/maintain")
 async def maintain():
-    return _html_response(_STATIC_DIR / "maintain.html", "<h1>Wave Memory</h1><p>maintain.html not found</p>")
+    return redirect("/#/maintenance", code=302)
 
 
 @pages_bp.app_errorhandler(404)
@@ -66,4 +60,4 @@ async def handle_404(err):
     path = request.path.strip("/")
     if path.startswith("api/") or path.startswith("static/") or path.startswith("assets/"):
         return "Not Found", 404
-    return _html_response(_STATIC_DIR / "app" / "index.html", _legacy_index_body())
+    return _html_response(_STATIC_DIR / "app" / "index.html", _INDEX_MISSING)

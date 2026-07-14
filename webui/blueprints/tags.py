@@ -6,6 +6,7 @@ import asyncio
 import json
 import math
 import time
+from functools import wraps
 
 from quart import Blueprint, jsonify, request, Response
 
@@ -14,6 +15,18 @@ from ..middleware.auth import require_auth
 from ..tag_execution import normalize_tag_execution_options, tag_memory_batch
 
 tags_bp = Blueprint("tags", __name__, url_prefix="/api/tags")
+
+
+def _scope_error(code: str, status: int):
+    return jsonify({"error": {"code": code}}), status
+
+
+def _legacy_mutation_disabled(handler):
+    """Legacy Tag rows remain auditable but cannot be mutated by WebUI routes."""
+    @wraps(handler)
+    async def reject(*args, **kwargs):
+        return _scope_error("legacy_mutation_disabled", 410)
+    return reject
 
 
 @tags_bp.route("/", methods=["GET"])
@@ -44,73 +57,37 @@ async def list_tags():
     total = c.db.conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0]
 
     items = [{"id": r[0], "name": r[1], "type": r[2], "frequency": r[3], "confidence": r[4]} for r in rows]
-    return jsonify({"items": items, "total": total})
+    return jsonify({
+        "items": items,
+        "total": total,
+        "legacy": True,
+        "readonly": True,
+        "capabilities": {"mutation": {"available": False, "reason_code": "legacy_mutation_disabled"}},
+    })
 
 
 @tags_bp.route("/retype", methods=["POST"])
 @require_auth
+@_legacy_mutation_disabled
 async def retype_tag():
-    """修改 Tag 类型。"""
-    c = get_container()
-    body = await request.get_json(silent=True) or {}
-    tag_id = body.get("tag_id")
-    new_type = body.get("new_type")
-    if not tag_id or not new_type:
-        return jsonify({"error": "tag_id and new_type required"}), 400
-    valid_types = {"keyword", "topic", "event", "entity", "fact", "emotion", "person", "location", "time"}
-    if new_type not in valid_types:
-        return jsonify({"error": f"Invalid type. Valid: {sorted(valid_types)}"}), 400
-    c.db.conn.execute("UPDATE tags SET tag_type = ? WHERE id = ?", (new_type, tag_id))
-    c.db.conn.commit()
-    return jsonify({"tag_id": tag_id, "new_type": new_type})
+    """旧 Tag 裸 ID 类型编辑没有 scoped ObjectRef 命令，永久禁用。"""
+    return _scope_error("legacy_mutation_disabled", 410)
 
 
 @tags_bp.route("/rename", methods=["POST"])
 @require_auth
+@_legacy_mutation_disabled
 async def rename_tag():
-    """重命名 Tag。"""
-    c = get_container()
-    body = await request.get_json(silent=True) or {}
-    tag_id = body.get("tag_id")
-    new_name = (body.get("new_name") or "").strip()
-    if not tag_id or not new_name:
-        return jsonify({"error": "tag_id and new_name required"}), 400
-
-    existing = c.db.conn.execute("SELECT id FROM tags WHERE name = ? AND id != ?", (new_name, tag_id)).fetchone()
-    if existing:
-        return jsonify({"error": f"Tag '{new_name}' already exists (id={existing[0]})"}), 409
-
-    old_row = c.db.conn.execute("SELECT name, aliases FROM tags WHERE id = ?", (tag_id,)).fetchone()
-    if not old_row:
-        return jsonify({"error": f"Tag {tag_id} not found"}), 404
-
-    old_name = old_row[0]
-    old_aliases = (old_row[1] or "").split(",") if old_row[1] else []
-    if old_name not in old_aliases:
-        old_aliases.append(old_name)
-    old_aliases = [a for a in old_aliases if a and a != new_name]
-
-    c.db.conn.execute("UPDATE tags SET name = ?, aliases = ? WHERE id = ?", (new_name, ",".join(old_aliases), tag_id))
-    c.db.conn.commit()
-    return jsonify({"tag_id": tag_id, "old_name": old_name, "new_name": new_name})
+    """旧 Tag 裸 ID 自由重命名没有 scoped ObjectRef 命令，永久禁用。"""
+    return _scope_error("legacy_mutation_disabled", 410)
 
 
 @tags_bp.route("/batch-delete", methods=["POST"])
 @require_auth
+@_legacy_mutation_disabled
 async def batch_delete_tags():
-    """批量删除 Tag。"""
-    c = get_container()
-    body = await request.get_json(silent=True) or {}
-    tag_ids = body.get("tag_ids", [])
-    if not tag_ids:
-        return jsonify({"error": "tag_ids required"}), 400
-
-    placeholders = ",".join("?" * len(tag_ids))
-    c.db.conn.execute(f"DELETE FROM memory_tags WHERE tag_id IN ({placeholders})", tag_ids)
-    c.db.conn.execute(f"DELETE FROM tag_relations WHERE source_tag_id IN ({placeholders}) OR target_tag_id IN ({placeholders})", tag_ids + tag_ids)
-    c.db.conn.execute(f"DELETE FROM tags WHERE id IN ({placeholders})", tag_ids)
-    c.db.conn.commit()
-    return jsonify({"deleted": len(tag_ids)})
+    """旧 Tag 裸 ID 批量物理删除永久禁用。"""
+    return _scope_error("legacy_mutation_disabled", 410)
 
 
 def build_tag_quality_payload(conn) -> dict:
@@ -230,79 +207,24 @@ async def get_audit_suggestions():
 
 
 async def _resolve_audit_suggestion(c, suggestion_id: int, decision: str) -> dict:
-    gateway = getattr(c, "write_gateway", None)
-    if gateway is None:
-        return {"error": "write_gateway_unavailable"}
-
-    def _resolve(connection):
-        row = connection.execute(
-            "SELECT id, status FROM tag_audit_suggestions WHERE id=?",
-            (int(suggestion_id),),
-        ).fetchone()
-        if row is None:
-            return {"error": f"Suggestion {suggestion_id} not found"}
-        if row[1] != "pending":
-            return {"error": f"Suggestion already {row[1]}"}
-        if decision == "approve":
-            return {
-                "error": "scope_migration_required",
-                "message": "Legacy unscoped Tag audit suggestions cannot be applied to scoped_tags.",
-            }
-        connection.execute(
-            """UPDATE tag_audit_suggestions
-               SET status='rejected', resolved_at=?
-               WHERE id=? AND status='pending'""",
-            (time.time(), int(suggestion_id)),
-        )
-        return {
-            "suggestion_id": int(suggestion_id),
-            "decision": "reject",
-            "status": "rejected",
-        }
-
-    return await gateway.coordinator.transaction(
-        _resolve,
-        actor="webui.tag_audit.resolve",
-    )
+    """兼容旧调用方的 fail-closed helper；legacy audit 只读，不接受裸 ID resolve。"""
+    return {"error": "legacy_mutation_disabled"}
 
 
 @tags_bp.route("/audit/resolve", methods=["POST"])
 @require_auth
+@_legacy_mutation_disabled
 async def resolve_audit_suggestion():
-    """批准或拒绝审计建议。"""
-    c = get_container()
-    body = await request.get_json(silent=True) or {}
-    suggestion_id = body.get("suggestion_id")
-    decision = body.get("decision")
-    if not suggestion_id or decision not in ("approve", "reject"):
-        return jsonify({"error": "suggestion_id and decision (approve/reject) required"}), 400
-    result = await _resolve_audit_suggestion(c, int(suggestion_id), decision)
-    status = 409 if result.get("error") == "scope_migration_required" else 200
-    return jsonify(result), status
+    """Legacy Tag audit 只读；裸 suggestion ID resolve 永久禁用。"""
+    return _scope_error("legacy_mutation_disabled", 410)
 
 
 @tags_bp.route("/audit/resolve-batch", methods=["POST"])
 @require_auth
+@_legacy_mutation_disabled
 async def resolve_audit_batch():
-    """批量处理审计建议。"""
-    c = get_container()
-    body = await request.get_json(silent=True) or {}
-    items = body.get("items", [])
-    if not items:
-        ids = body.get("suggestion_ids", [])
-        decision = body.get("decision")
-        if ids and decision:
-            items = [{"id": sid, "decision": decision} for sid in ids]
-    if not items:
-        return jsonify({"error": "items or suggestion_ids+decision required"}), 400
-
-    results = []
-    for item in items:
-        sid = item.get("id")
-        dec = item.get("decision")
-        if sid and dec in ("approve", "reject"):
-            results.append(await _resolve_audit_suggestion(c, int(sid), dec))
-    return jsonify({"processed": len(results), "results": results})
+    """Legacy Tag audit 只读；批量裸 ID resolve 永久禁用。"""
+    return _scope_error("legacy_mutation_disabled", 410)
 
 
 def _clamp_batch_size(value: object, *, default: int = 20, maximum: int = 50) -> int:

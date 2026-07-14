@@ -10,8 +10,9 @@ import re
 import time
 from pathlib import Path
 
-from quart import Blueprint, jsonify, request
+from quart import Blueprint, current_app, jsonify, request
 
+from ..api_contract import error_payload, mutation_response, page_response
 from ..container import get_container
 from ..middleware.auth import require_auth
 
@@ -250,35 +251,159 @@ def _scope_from_envelope(body: dict) -> RuntimeScope:
     return scope
 
 
-def _page_from_query() -> tuple[int, int]:
-    if request.args.get("page") is None or request.args.get("page_size") is None:
-        raise ScopedKnowledgeScopeError("pagination_required")
+def _pagination_from_query() -> tuple[int, int]:
     try:
-        page, page_size = int(request.args["page"]), int(request.args["page_size"])
+        limit = int(request.args.get("limit", 25))
+        offset = int(request.args.get("offset", 0))
     except (TypeError, ValueError) as exc:
         raise ScopedKnowledgeScopeError("invalid_pagination") from exc
-    if page < 1 or page_size < 1 or page_size > 100:
+    if limit not in {25, 50, 100} or offset < 0:
         raise ScopedKnowledgeScopeError("invalid_pagination")
-    return page, page_size
+    return limit, offset
 
 
-def _scoped_page(items: list[dict], *, page: int, page_size: int) -> dict:
-    start = (page - 1) * page_size
+def _scope_label(scope: RuntimeScope) -> str:
+    return scope.session.id if scope.session else scope.bot_id
+
+
+def _item_revision(item: dict) -> int:
+    return max(1, int(float(item.get("updated_at") or item.get("created_at") or 1) * 1000))
+
+
+def _object_ref_registry():
+    try:
+        return current_app.extensions.get("wave_api_contract", {}).get("object_refs")
+    except RuntimeError:  # helper 单测没有 Quart app context
+        return None
+
+
+def _scope_query(scope: RuntimeScope) -> dict:
+    query = {"bot_id": scope.bot_id, "visibility": scope.visibility}
+    if scope.session is not None:
+        query["session_id"] = scope.session.id
+    if scope.subject_principal_id:
+        query["subject_principal_id"] = scope.subject_principal_id
+    return query
+
+
+def _item_object_ref(kind: str, item: dict, scope: RuntimeScope) -> dict | None:
+    """签发 opaque ObjectRef；未配置 registry 时诚实返回不可深链。"""
+    registry = _object_ref_registry()
+    if registry is None:
+        return None
+    revision = _item_revision(item)
+    locator = int(item["id"])
+    ref = registry.issue(kind=kind, locator=locator, scope=scope, revision=revision)
     return {
-        "items": items[start:start + page_size],
-        "page": {
-            "number": page,
-            "page_size": page_size,
-            "total": len(items),
-            "total_status": "exact",
-            "has_next": start + page_size < len(items),
-        },
+        "ref": ref,
+        "kind": kind,
+        "locator": locator,
+        "scope_key": _scope_label(scope),
+        "scope_query": _scope_query(scope),
+        "version": revision,
     }
+
+
+def _require_object_ref(body: dict, *, kind: str, locator: int, scope: RuntimeScope, item: dict) -> None:
+    descriptor = body.get("object_ref") or body.get("ref")
+    ref = descriptor.get("ref") if isinstance(descriptor, dict) else descriptor
+    try:
+        revision = int(body.get("revision"))
+    except (TypeError, ValueError) as exc:
+        raise ScopedKnowledgeScopeError("object_ref_revision_required") from exc
+    registry = _object_ref_registry()
+    binding = registry.resolve(ref, kind=kind, locator=locator, request_scope=scope) if registry else None
+    if binding is None or binding.revision != revision or _item_revision(item) != revision:
+        raise ScopedKnowledgeScopeError("object_ref_stale")
+
+
+def _memory_evidence_available(container, scope: RuntimeScope, source_memory_id) -> bool:
+    if source_memory_id is None or scope.session is None:
+        return False
+    conn = getattr(getattr(container, "db", None), "conn", None)
+    try:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(memories)").fetchall()}
+        if not {"id", "bot_id", "session_id", "visibility", "resolution_state", "quarantine"} <= columns:
+            return False
+        return conn.execute(
+            "SELECT 1 FROM memories WHERE id=? AND bot_id=? AND session_id=? AND visibility=? "
+            "AND resolution_state='resolved' AND COALESCE(quarantine,0)=0 LIMIT 1",
+            (int(source_memory_id), scope.bot_id, scope.session.id, scope.visibility),
+        ).fetchone() is not None
+    except Exception:
+        return False
+
+
+def _formal_jargon(item: dict, scope: RuntimeScope, *, evidence_available: bool = False) -> dict:
+    result = dict(item)
+    provenance = result.get("provenance") if isinstance(result.get("provenance"), dict) else {}
+    source_memory_id = result.get("source_memory_id")
+    result.update({
+        "bot_id": scope.bot_id,
+        "session_id": scope.session.id if scope.session else None,
+        "visibility": scope.visibility,
+        "source": provenance.get("source") or "wave_memory",
+        "rule_version": provenance.get("rule_version"),
+        "review_status": result.get("status") or "pending",
+        "promotion": provenance.get("promotion"),
+        "revision": _item_revision(result),
+        "anchors": ([{
+            "type": "memory",
+            "id": str(source_memory_id),
+            "source_scope": _scope_label(scope),
+            "availability": "available",
+            "summary": "同一 Bot/会话内的正式 Jargon 锚点",
+            "object_ref": None,
+        }] if evidence_available else []),
+        "object_ref": _item_object_ref("jargon", result, scope),
+    })
+    return result
+
+
+def _deep_link_error(state: str):
+    return jsonify(error_payload("not_found", "Resource not found")), 404
+
+
+def _resolve_jargon_detail(scope: RuntimeScope, *, locator: int | None = None):
+    ref = request.args.get("ref")
+    if not ref:
+        return None, (jsonify(error_payload("object_ref_required", "Object reference is required")), 400)
+    registry = _object_ref_registry()
+    if registry is None:
+        return None, _deep_link_error("not-found")
+    binding, state = registry.resolve_with_state(
+        ref,
+        kind="jargon",
+        locator=locator,
+        request_scope=scope,
+    )
+    if binding is None:
+        return None, _deep_link_error(state)
+    try:
+        jargon_id = int(binding.locator)
+        repo = _scoped_repo(get_container())
+        row = next(
+            (item for item in repo.list_scoped_jargon(scope, limit=10000) if int(item.get("id", -1)) == jargon_id),
+            None,
+        )
+    except (TypeError, ValueError):
+        row = None
+    if row is None:
+        return None, _deep_link_error("not-found")
+    if _item_revision(row) != binding.revision:
+        return None, _deep_link_error("version-stale")
+    container = get_container()
+    item = _formal_jargon(
+        row,
+        scope,
+        evidence_available=_memory_evidence_available(container, scope, row.get("source_memory_id")),
+    )
+    return item, None
 
 
 def _scope_failure(exc: Exception):
     code = getattr(exc, "reason_code", None) or getattr(exc, "code", None) or "invalid_scope"
-    return _scope_error(str(code), 400 if code in {"scope_required", "pagination_required"} else 422)
+    return _scope_error(str(code), 400 if code in {"scope_required", "pagination_required", "object_ref_revision_required"} else 422)
 
 
 def _legacy_mutation_disabled(handler):
@@ -337,18 +462,70 @@ def _clamp_int(val, default, min_value=0, max_value=50):
 @jargon_bp.route("/", methods=["GET"])
 @require_auth
 async def list_jargon():
-    """正式 scoped 黑话列表；每次请求必须携带完整 Scope 与分页。"""
+    """正式 scoped 黑话列表；使用唯一 PageResponse wire shape。"""
     try:
         scope = _group_scope_from_query()
-        page, page_size = _page_from_query()
+        limit, offset = _pagination_from_query()
         repo = _scoped_repo(get_container())
-        rows = repo.list_scoped_jargon(scope, status=request.args.get("status"), limit=page * page_size + 1)
+        rows = repo.list_scoped_jargon(scope, status=request.args.get("status"), limit=10000)
         search = (request.args.get("search") or "").strip()
         if search:
             rows = [row for row in rows if search in row.get("word", "") or search in row.get("meaning", "")]
-        payload = _scoped_page(rows, page=page, page_size=page_size)
+        # 防御旧/异常 producer：默认列表不把已分流 token 重新包装成候选。
+        rows = [
+            row for row in rows
+            if (row.get("status") == "confirmed" or (row.get("provenance") or {}).get("candidate_type") not in {
+                "technical_noise", "person_alias", "ordinary_word"
+            })
+        ]
+        container = get_container()
+        items = [
+            _formal_jargon(
+                row,
+                scope,
+                evidence_available=_memory_evidence_available(container, scope, row.get("source_memory_id")),
+            )
+            for row in rows[offset:offset + limit]
+        ]
+        payload = page_response(items, total=len(rows), limit=limit, offset=offset)
         payload["scope"] = ScopeCodec.to_dict(scope)
+        payload["capabilities"] = {
+            "review": {
+                "available": callable(getattr(getattr(get_container(), "jargon_service", None), "review", None)),
+                "reason_code": None if callable(getattr(getattr(get_container(), "jargon_service", None), "review", None)) else "jargon_review_command_unavailable",
+            },
+            "create": {"available": False, "reason_code": "anchored_jargon_command_unavailable"},
+            "delete": {"available": False, "reason_code": "physical_delete_disabled"},
+        }
         return jsonify(payload)
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        return _scope_failure(exc)
+
+
+@jargon_bp.route("/resolve", methods=["GET"])
+@require_auth
+async def resolve_jargon():
+    """仅凭 opaque ObjectRef 与显式当前 Scope 解析详情，不接受裸 ID。"""
+    try:
+        scope = _group_scope_from_query()
+        item, failure = _resolve_jargon_detail(scope)
+        if failure is not None:
+            return failure
+        return jsonify({"item": item, "resolution": {"state": "ready"}})
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        return _scope_failure(exc)
+
+
+@jargon_bp.route("/<int:jargon_id>", methods=["GET"])
+@require_auth
+async def get_scoped_jargon(jargon_id: int):
+    """使用 ObjectRef+当前 Scope+canonical revision 读取单条详情。"""
+    try:
+        scope = _group_scope_from_query()
+        item, failure = _resolve_jargon_detail(scope, locator=jargon_id)
+        if failure is not None:
+            return failure
+        return jsonify({"item": item, "resolution": {"state": "ready"}})
     except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
         return _scope_failure(exc)
 
@@ -463,63 +640,38 @@ async def legacy_list_jargon():
 @jargon_bp.route("/", methods=["POST"])
 @require_auth
 async def create_jargon():
-    """手动创建黑话词条。"""
+    """未落地带 anchor/QualityGate 的正式命令前，禁止 WebUI 手工直写。"""
+    return _scope_error("anchored_jargon_command_unavailable", 503)
+
+
+@jargon_bp.route("/<int:jargon_id>/review/<action>", methods=["POST"])
+@require_auth
+async def review_scoped_jargon(jargon_id: int, action: str):
     body = await request.get_json(silent=True) or {}
-
-    # 兼容仍以 group_id 寻址的旧客户端；写入必须在单一事务中完成，
-    # 且响应 ID 直接取自执行 INSERT 的写游标，不能跨连接查询 last_insert_rowid()。
-    if "scope" not in body and "group_id" in body:
-        c = get_container()
-        if not _table_exists(c.db.conn, "jargon"):
-            return jsonify({"ok": False, "error": "jargon table not found"}), 500
-        word = body.get("word", "")
-        meaning = body.get("meaning", "")
-        group_id = body.get("group_id")
-        if not isinstance(word, str) or not word.strip():
-            return jsonify({"ok": False, "error": "Word is required"}), 400
-        if not isinstance(meaning, str):
-            return jsonify({"ok": False, "error": "invalid meaning"}), 400
-        word = word.strip()
-        group_id = None if group_id is None else str(group_id).strip()
-        now = int(time.time())
-        with c.db.conn.write_transaction() as tx:
-            duplicate = tx.execute(
-                "SELECT id FROM jargon WHERE word = ? AND (group_id = ? OR (group_id IS NULL AND ? IS NULL))",
-                (word, group_id, group_id),
-            ).fetchone()
-            if duplicate:
-                return jsonify({"ok": False, "error": f"Jargon '{word}' already exists"}), 400
-            cursor = tx.execute(
-                "INSERT INTO jargon (word, meaning, is_jargon, status, frequency, confidence, is_global, group_id, contexts, created_at, updated_at) VALUES (?, ?, 1, 'confirmed', 1, 1.0, ?, ?, '[]', ?, ?)",
-                (word, meaning, int(group_id is None), group_id, now, now),
-            )
-            jargon_id = cursor.lastrowid
-        if jargon_id is None:  # pragma: no cover - sqlite INSERT cursors always provide it
-            raise RuntimeError("jargon insert did not return lastrowid")
-        return jsonify({"ok": True, "id": int(jargon_id)})
-
     try:
         scope = _scope_from_envelope(body)
-        word = body.get("word", "")
-        meaning = body.get("meaning", "")
-        if not isinstance(word, str) or not word.strip() or word != word.strip():
-            raise ScopedKnowledgeScopeError("word_required")
-        if not isinstance(meaning, str):
-            raise ScopedKnowledgeScopeError("invalid_meaning")
-        jargon_id = _scoped_repo(get_container()).upsert_scoped_jargon(
-            scope,
-            word=word,
-            meaning=meaning,
-            status=str(body.get("status") or "confirmed"),
-            is_jargon=bool(body.get("is_jargon", True)),
-            frequency=_safe_int(body.get("frequency"), 1),
-            confidence=float(body.get("confidence", 1.0)),
-            contexts=body.get("contexts") or [],
-            source_memory_id=body.get("source_memory_id"),
-            source_context=body.get("source_context"),
-            provenance=body.get("provenance") or {},
-        )
-        return jsonify({"ok": True, "id": jargon_id, "scope": ScopeCodec.to_dict(scope)})
+        container = get_container()
+        repo = _scoped_repo(container)
+        current = next((row for row in repo.list_scoped_jargon(scope, limit=10000) if int(row.get("id", -1)) == jargon_id), None)
+        if current is None:
+            return _scope_error("scoped_object_not_found", 404)
+        _require_object_ref(body, kind="jargon", locator=jargon_id, scope=scope, item=current)
+        if action == "approve" and not _memory_evidence_available(container, scope, current.get("source_memory_id")):
+            return _scope_error("jargon_anchor_unavailable", 422)
+        service = getattr(container, "jargon_service", None)
+        review = getattr(service, "review", None)
+        if not callable(review):
+            return _scope_error("jargon_review_command_unavailable", 503)
+        result = review(scope, jargon_id, action)
+        return jsonify(mutation_response(
+            operation_kind=f"jargon.{action}",
+            status="succeeded",
+            revision=None,
+            item={"id": result["id"], "status": result["status"]},
+            include_item=True,
+        ))
+    except LookupError:
+        return _scope_error("scoped_object_not_found", 404)
     except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
         return _scope_failure(exc)
 
@@ -632,133 +784,52 @@ async def get_jargon_context(jargon_id: int):
 async def list_holyman_candidates():
     c = get_container()
     if not _table_exists(c.db.conn, "jargon_candidates"):
-        return jsonify({"items": []})
+        return jsonify({"items": [], "legacy": True, "readonly": True})
     rows = c.db.conn.execute("SELECT id, word, reason, count, source, status, reject_reason FROM jargon_candidates ORDER BY count DESC, word ASC").fetchall()
-    return jsonify({"items": [{"id": r[0], "word": r[1], "reason": r[2], "count": r[3], "source": r[4], "status": r[5], "reject_reason": r[6]} for r in rows]})
+    return jsonify({
+        "items": [{"id": r[0], "word": r[1], "reason": r[2], "count": r[3], "source": r[4], "status": r[5], "reject_reason": r[6]} for r in rows],
+        "legacy": True,
+        "readonly": True,
+    })
 
 
 @jargon_bp.route("/holyman/candidates/<int:candidate_id>/<action>", methods=["POST"])
 @require_auth
 @_legacy_mutation_disabled
 async def review_holyman_candidate(candidate_id: int, action: str):
-    c = get_container()
-    if not _table_exists(c.db.conn, "jargon_candidates"):
-        return jsonify({"ok": False, "error": "jargon_candidates table not found"}), 500
-    if action not in {"approve", "reject"}:
-        return jsonify({"ok": False, "error": "action must be approve or reject"}), 400
-    result = _review_holyman_candidate_ids(c.db.conn, [candidate_id], action)
-    if result.get("missing_ids"):
-        return jsonify({"ok": False, "error": "candidate not found"}), 404
-    return jsonify({"ok": True, "candidate_id": candidate_id, "action": action})
-
+    """Holyman candidate 属于配置/资产审核；统一命令缺失时禁止 apply。"""
+    return _scope_error("legacy_mutation_disabled", 410)
 
 @jargon_bp.route("/holyman/candidates/batch-review", methods=["POST"])
 @require_auth
 @_legacy_mutation_disabled
 async def batch_review_holyman_candidates():
-    c = get_container()
-    if not _table_exists(c.db.conn, "jargon_candidates"):
-        return jsonify({"ok": False, "error": "jargon_candidates table not found"}), 500
-    body = await request.get_json() or {}
-    ids = body.get("ids", [])
-    words = body.get("words", [])
-    action = str(body.get("action", "approve"))
-    if action not in {"approve", "reject"}:
-        return jsonify({"ok": False, "error": "action must be approve or reject"}), 400
-    if not isinstance(ids, list):
-        ids = []
-    if not isinstance(words, list):
-        words = []
-    if not ids and not words:
-        return jsonify({"ok": False, "error": "ids or words list is required"}), 400
-    result = _review_holyman_candidate_ids(c.db.conn, ids, action, words=words)
-    return jsonify({"ok": True, "reviewed_count": result["reviewed_count"], "action": action, "blocked_count": result["blocked_count"]})
-
+    """Holyman candidate 批量审核没有统一配置/资产命令，永久禁用。"""
+    return _scope_error("legacy_mutation_disabled", 410)
 
 def _review_holyman_candidate_ids(conn, ids, action: str, words: list | None = None) -> dict:
-    normalized_ids = []
-    for candidate_id in ids:
-        try:
-            normalized_ids.append(int(candidate_id))
-        except (TypeError, ValueError):
-            continue
-    normalized_words = []
-    for word in words or []:
-        word = str(word or "").strip()
-        if word and word not in normalized_words:
-            normalized_words.append(word)
-    if not normalized_ids and not normalized_words:
-        return {"reviewed_count": 0, "blocked_count": 0, "missing_ids": []}
-
-    clauses = []
-    params = []
-    if normalized_ids:
-        clauses.append(f"id IN ({','.join('?' * len(normalized_ids))})")
-        params.extend(normalized_ids)
-    if normalized_words:
-        clauses.append(f"word IN ({','.join('?' * len(normalized_words))})")
-        params.extend(normalized_words)
-    where_clause = " OR ".join(clauses)
-    rows = conn.execute(
-        f"SELECT id, word, reason, count, source, status, reject_reason FROM jargon_candidates WHERE {where_clause}",
-        params,
-    ).fetchall()
-    found_ids = {int(r[0]) for r in rows}
-    missing_ids = [candidate_id for candidate_id in normalized_ids if candidate_id not in found_ids]
-    if normalized_ids and missing_ids and not normalized_words:
-        return {"reviewed_count": 0, "blocked_count": 0, "missing_ids": missing_ids}
-
-    now = int(time.time())
-    row_ids = [int(r[0]) for r in rows]
-    if row_ids:
-        row_placeholders = ",".join("?" * len(row_ids))
-        if action == "approve":
-            cur = conn.execute(
-                f"UPDATE jargon_candidates SET status = 'approved', updated_at = ? WHERE id IN ({row_placeholders})",
-                [now] + row_ids,
-            )
-            blocked_count = 0
-        else:
-            cur = conn.execute(
-                f"UPDATE jargon_candidates SET status = 'rejected', reject_reason = 'manual_reject', updated_at = ? WHERE id IN ({row_placeholders})",
-                [now] + row_ids,
-            )
-            blocked_count = 0
-            for row in rows:
-                conn.execute(
-                    "INSERT OR IGNORE INTO jargon_blocklist (word, reason, source, created_at) VALUES (?, ?, ?, ?)",
-                    (row[1], "manual_reject", "holyman_review", now),
-                )
-                blocked_count += 1
-        reviewed_count = getattr(cur, "rowcount", len(row_ids))
-    else:
-        reviewed_count = len(normalized_words)
-        blocked_count = 0
-
-    if action == "reject":
-        existing_words = {str(r[1]) for r in rows}
-        for word in normalized_words:
-            if word in existing_words:
-                continue
-            conn.execute(
-                "INSERT OR IGNORE INTO jargon_blocklist (word, reason, source, created_at) VALUES (?, ?, ?, ?)",
-                (word, "manual_reject", "holyman_review", now),
-            )
-            blocked_count += 1
-    conn.commit()
-    return {"reviewed_count": reviewed_count, "blocked_count": blocked_count, "missing_ids": []}
-
+    """兼容旧调用方的 fail-closed helper；不得写 candidate 或 blocklist。"""
+    return {
+        "error": "legacy_mutation_disabled",
+        "reviewed_count": 0,
+        "blocked_count": 0,
+        "missing_ids": [],
+    }
 
 @jargon_bp.route("/holyman/blocklist", methods=["GET", "POST"])
 @require_auth
 async def holyman_blocklist():
+    if getattr(request, "method", "GET") != "GET":
+        return _scope_error("legacy_mutation_disabled", 410)
     c = get_container()
     if not _table_exists(c.db.conn, "jargon_blocklist"):
-        return jsonify({"items": []})
-    if getattr(request, "method", "GET") == "GET":
-        rows = c.db.conn.execute("SELECT id, word, reason, source, created_at FROM jargon_blocklist ORDER BY created_at DESC, word ASC").fetchall()
-        return jsonify({"items": [{"id": r[0], "word": r[1], "reason": r[2], "source": r[3], "created_at": r[4]} for r in rows]})
-    return _scope_error("legacy_mutation_disabled", 410)
+        return jsonify({"items": [], "legacy": True, "readonly": True})
+    rows = c.db.conn.execute("SELECT id, word, reason, source, created_at FROM jargon_blocklist ORDER BY created_at DESC, word ASC").fetchall()
+    return jsonify({
+        "items": [{"id": r[0], "word": r[1], "reason": r[2], "source": r[3], "created_at": r[4]} for r in rows],
+        "legacy": True,
+        "readonly": True,
+    })
 
 
 @jargon_bp.route("/<int:jargon_id>", methods=["PUT"])
@@ -766,179 +837,39 @@ async def holyman_blocklist():
 @require_auth
 @_legacy_mutation_disabled
 async def edit_jargon(jargon_id: int):
-    """编辑黑话词条/释义。"""
-    c = get_container()
-    if not _table_exists(c.db.conn, "jargon"):
-        return jsonify({"ok": False, "error": "jargon table not found"}), 500
-    body = await request.get_json(silent=True) or {}
-    sets = []
-    params = []
-    if "word" in body:
-        sets.append("word = ?")
-        params.append(body["word"])
-    if "meaning" in body:
-        sets.append("meaning = ?")
-        params.append(body["meaning"])
-    if not sets:
-        return jsonify({"error": "Nothing to update"}), 400
-    sets.append("updated_at = ?")
-    params.append(int(time.time()))
-    params.append(jargon_id)
-    try:
-        c.db.conn.execute(f"UPDATE jargon SET {', '.join(sets)} WHERE id = ?", params)
-        c.db.conn.commit()
-    except Exception as e:
-        if "UNIQUE constraint" in str(e):
-            return jsonify({"error": "该群已存在同名词条，请使用其他名称"}), 409
-        raise
-    return jsonify({"ok": True, "jargon_id": jargon_id})
-
+    """旧 jargon 自由编辑绕过 Scope、ObjectRef 与 QualityGate，永久禁用。"""
+    return _scope_error("legacy_mutation_disabled", 410)
 
 @jargon_bp.route("/<int:jargon_id>", methods=["DELETE"])
 @require_auth
 @_legacy_mutation_disabled
 async def delete_jargon(jargon_id: int):
-    """删除黑话。"""
-    c = get_container()
-    if not _table_exists(c.db.conn, "jargon"):
-        return jsonify({"ok": False, "error": "jargon table not found"}), 500
-    c.db.conn.execute("DELETE FROM jargon WHERE id = ?", (jargon_id,))
-    c.db.conn.commit()
-    return jsonify({"ok": True, "deleted": jargon_id})
-
+    """旧 jargon 物理删除永久禁用。"""
+    return _scope_error("legacy_mutation_disabled", 410)
 
 @jargon_bp.route("/<int:jargon_id>/toggle_global", methods=["POST"])
 @jargon_bp.route("/<int:jargon_id>/toggle-global", methods=["POST"])
 @require_auth
 @_legacy_mutation_disabled
 async def toggle_global(jargon_id: int):
-    """切换全局状态。"""
-    c = get_container()
-    if not _table_exists(c.db.conn, "jargon"):
-        return jsonify({"ok": False, "error": "jargon table not found"}), 500
-    row = c.db.conn.execute("SELECT is_global FROM jargon WHERE id = ?", (jargon_id,)).fetchone()
-    if not row:
-        return jsonify({"error": "Not found"}), 404
-    new_val = 0 if row[0] else 1
-    c.db.conn.execute("UPDATE jargon SET is_global = ?, updated_at = ? WHERE id = ?", (new_val, int(time.time()), jargon_id))
-    c.db.conn.commit()
-    return jsonify({"ok": True, "jargon_id": jargon_id, "is_global": bool(new_val)})
-
+    """旧 jargon 全局状态切换绕过 scoped review 命令，永久禁用。"""
+    return _scope_error("legacy_mutation_disabled", 410)
 
 @jargon_bp.route("/batch-review", methods=["POST"])
 @jargon_bp.route("/batch/review", methods=["POST"])
 @require_auth
 @_legacy_mutation_disabled
 async def batch_review_jargon():
-    """批量审核确认/否决黑话词条（支持 all_matching 跨页全选）。"""
-    c = get_container()
-    if not _table_exists(c.db.conn, "jargon"):
-        return jsonify({"ok": False, "error": "jargon table not found"}), 500
-
-    body = await request.get_json() or {}
-    all_matching = body.get("all_matching", False)
-    action = body.get("action", "approve")  # approve 或 reject
-    if action not in {"approve", "reject"}:
-        return jsonify({"ok": False, "error": "invalid action"}), 400
-
-    now = int(time.time())
-    
-    if all_matching:
-        group_id = body.get("group_id")
-        status = body.get("status")
-        search_q = body.get("search")
-        
-        where_parts = ["1=1"]
-        params = []
-        if group_id:
-            where_parts.append("group_id = ?")
-            params.append(group_id)
-        if status:
-            where_parts.append("COALESCE(status, 'pending') = ?")
-            params.append(status)
-        if search_q:
-            where_parts.append("(word LIKE ? OR meaning LIKE ?)")
-            sq = f"%{search_q.strip()}%"
-            params.extend([sq, sq])
-            
-        where_sql = " AND ".join(where_parts)
-        if action == "approve":
-            cur = c.db.conn.execute(
-                f"UPDATE jargon SET is_jargon = 1, status = 'confirmed', updated_at = ? WHERE {where_sql}",
-                [now] + params,
-            )
-        else:
-            cur = c.db.conn.execute(
-                f"UPDATE jargon SET is_jargon = 0, status = 'rejected', reject_reason = 'webui_batch_rejected', updated_at = ? WHERE {where_sql}",
-                [now] + params,
-            )
-        reviewed_count = cur.rowcount
-    else:
-        ids = body.get("ids", [])
-        if not isinstance(ids, list) or not ids:
-            return jsonify({"ok": False, "error": "ids list or all_matching is required"}), 400
-            
-        placeholders = ",".join("?" * len(ids))
-        if action == "approve":
-            c.db.conn.execute(
-                f"UPDATE jargon SET is_jargon = 1, status = 'confirmed', updated_at = ? WHERE id IN ({placeholders})",
-                [now] + ids,
-            )
-        else:
-            c.db.conn.execute(
-                f"UPDATE jargon SET is_jargon = 0, status = 'rejected', reject_reason = 'webui_batch_rejected', updated_at = ? WHERE id IN ({placeholders})",
-                [now] + ids,
-            )
-        reviewed_count = len(ids)
-
-    c.db.conn.commit()
-    return jsonify({"ok": True, "reviewed_count": reviewed_count, "action": action})
-
+    """旧 jargon 批量审核绕过 ObjectRef、证据门禁与统一 review，永久禁用。"""
+    return _scope_error("legacy_mutation_disabled", 410)
 
 @jargon_bp.route("/batch-delete", methods=["POST"])
 @jargon_bp.route("/batch/delete", methods=["POST"])
 @require_auth
 @_legacy_mutation_disabled
 async def batch_delete_jargon():
-    """批量删除黑话词条（支持 all_matching 跨页全选）。"""
-    c = get_container()
-    if not _table_exists(c.db.conn, "jargon"):
-        return jsonify({"ok": False, "error": "jargon table not found"}), 500
-
-    body = await request.get_json() or {}
-    all_matching = body.get("all_matching", False)
-    
-    if all_matching:
-        group_id = body.get("group_id")
-        status = body.get("status")
-        search_q = body.get("search")
-        
-        where_parts = ["1=1"]
-        params = []
-        if group_id:
-            where_parts.append("group_id = ?")
-            params.append(group_id)
-        if status:
-            where_parts.append("COALESCE(status, 'pending') = ?")
-            params.append(status)
-        if search_q:
-            where_parts.append("(word LIKE ? OR meaning LIKE ?)")
-            sq = f"%{search_q.strip()}%"
-            params.extend([sq, sq])
-            
-        where_sql = " AND ".join(where_parts)
-        cur = c.db.conn.execute(f"DELETE FROM jargon WHERE {where_sql}", params)
-    else:
-        ids = body.get("ids", [])
-        if not isinstance(ids, list) or not ids:
-            return jsonify({"ok": False, "error": "ids list or all_matching is required"}), 400
-            
-        placeholders = ",".join("?" * len(ids))
-        cur = c.db.conn.execute(f"DELETE FROM jargon WHERE id IN ({placeholders})", ids)
-        
-    c.db.conn.commit()
-    return jsonify({"ok": True, "deleted_count": cur.rowcount})
-
+    """旧 jargon 批量物理删除永久禁用。"""
+    return _scope_error("legacy_mutation_disabled", 410)
 
 def _fetch_github_commit_info_sync() -> str:
     """同步阻塞式获取远程最新提交的版本哈希；将被托付给外部线程池。"""
@@ -1258,50 +1189,8 @@ async def get_holyman():
 @require_auth
 @_legacy_mutation_disabled
 async def toggle_holyman():
-    """激活或去激活预设 Holyman 词条。"""
-    c = get_container()
-    if not _table_exists(c.db.conn, "jargon"):
-        return jsonify({"ok": False, "error": "jargon table not found"}), 500
-        
-    body = await request.get_json() or {}
-    word = body.get("word", "").strip()
-    meaning = body.get("meaning", "").strip()
-    activate = body.get("activate", False)
-    
-    if not word:
-        return jsonify({"ok": False, "error": "word is required"}), 400
-        
-    now = int(time.time())
-    
-    if activate:
-        phrases = _load_asset_json("phrases.json", {})
-        phrase_item = phrases.get(word) if isinstance(phrases, dict) else None
-        if not (isinstance(phrase_item, dict) and phrase_item.get("runtime_match") is True and phrase_item.get("layer") == "catchphrase"):
-            return jsonify({"ok": False, "error": "only runtime-match catchphrases can be enabled"}), 400
-        # 双重检查是否已存在
-        dup = c.db.conn.execute(
-            "SELECT id FROM jargon WHERE word = ? AND scope = 'global' AND source = 'holyman_skills'", 
-            (word,)
-        ).fetchone()
-        
-        if dup:
-            return jsonify({"ok": True, "db_id": dup[0]})
-            
-        c.db.conn.execute(
-            "INSERT INTO jargon (word, meaning, is_jargon, status, frequency, confidence, is_global, group_id, contexts, created_at, updated_at, scope, source) VALUES (?, ?, 1, 'confirmed', 5, 0.9, 1, 'global_fallback', '[]', ?, ?, 'global', 'holyman_skills')",
-            (word, meaning, now, now)
-        )
-        c.db.conn.commit()
-        new_id = c.db.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        return jsonify({"ok": True, "db_id": new_id})
-    else:
-        c.db.conn.execute(
-            "DELETE FROM jargon WHERE word = ? AND scope = 'global' AND source = 'holyman_skills'",
-            (word,)
-        )
-        c.db.conn.commit()
-        return jsonify({"ok": True})
-
+    """Holyman 激活属于配置/资产变更；统一命令缺失时禁止 apply。"""
+    return _scope_error("legacy_mutation_disabled", 410)
 
 @jargon_bp.route("/holyman/sync/preview", methods=["POST"])
 @require_auth
@@ -1323,24 +1212,7 @@ async def preview_holyman_sync():
 
 @jargon_bp.route("/holyman/sync", methods=["POST"])
 @require_auth
+@_legacy_mutation_disabled
 async def sync_holyman():
-    """同步 Holyman 词库。"""
-    global _HOLYMAN_UPDATE_CHECK_CACHE
-    body = await request.get_json() or {}
-    use_proxy = body.get("use_proxy", True)
-    
-    try:
-        from ...services.jargon.sync import HolymanSyncService
-    except ImportError:
-        from services.jargon.sync import HolymanSyncService
-    sync_service = HolymanSyncService()
-    
-    res = await sync_service.sync_from_github(use_proxy=use_proxy)
-    if res.get("ok"):
-        _HOLYMAN_UPDATE_CHECK_CACHE = None
-        c = get_container()
-        if hasattr(c, "jargon_service") and c.jargon_service:
-            if hasattr(c.jargon_service, "_holyman") and c.jargon_service._holyman:
-                c.jargon_service._holyman.reload()
-                
-    return jsonify(res)
+    """Holyman 资产同步 apply 没有统一安全命令；仅保留 preview。"""
+    return _scope_error("legacy_mutation_disabled", 410)

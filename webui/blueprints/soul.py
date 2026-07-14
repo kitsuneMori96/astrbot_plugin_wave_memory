@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import time
+from functools import wraps
 
 from quart import Blueprint, jsonify, request
 
+from ..api_contract import page_response
 from ..container import get_container
 from ..middleware.auth import require_auth
+
+try:
+    from ...domain.scope import RuntimeScope, ScopeValidationError, SessionRef
+    from ...engine.db.scoped_soul_repo import ScopedSoulScopeError
+except ImportError:  # pragma: no cover - plugin root may be imported directly
+    from domain.scope import RuntimeScope, ScopeValidationError, SessionRef
+    from engine.db.scoped_soul_repo import ScopedSoulScopeError
 
 soul_bp = Blueprint("soul", __name__, url_prefix="/api")
 
@@ -15,7 +24,7 @@ soul_bp = Blueprint("soul", __name__, url_prefix="/api")
 @soul_bp.before_request
 async def _reject_unscoped_soul_mutations():
     if request.method not in {"GET", "HEAD", "OPTIONS"}:
-        return jsonify({"error": {"code": "scoped_soul_mutation_unavailable"}}), 410
+        return jsonify({"error": {"code": "legacy_mutation_disabled"}}), 410
     return None
 
 
@@ -45,12 +54,127 @@ def _legacy_soul_mutation_disabled(handler):
     """Legacy soul tables cannot persist canonical RuntimeScope or evidence."""
     @wraps(handler)
     async def reject(*args, **kwargs):
-        return jsonify({"error": {"code": "scoped_soul_mutation_unavailable"}}), 410
+        return jsonify({"error": {"code": "legacy_mutation_disabled"}}), 410
     return reject
 
 
+def _formal_group_scope() -> RuntimeScope:
+    required = ("bot_id", "session_id", "visibility")
+    if any(request.args.get(field) is None for field in required):
+        raise ScopedSoulScopeError("scope_required")
+    bot_id = str(request.args.get("bot_id") or "")
+    session_id = str(request.args.get("session_id") or "")
+    visibility = str(request.args.get("visibility") or "")
+    if visibility != "group":
+        raise ScopedSoulScopeError("soul_scope_visibility_unsupported")
+    try:
+        platform_id, kind, conversation_id = session_id.split(":", 2)
+    except ValueError as exc:
+        raise ScopeValidationError("invalid_session_id") from exc
+    subject = request.args.get("subject_principal_id")
+    return RuntimeScope(
+        bot_id,
+        visibility,
+        SessionRef(session_id, platform_id, kind, conversation_id),
+        subject_principal_id=str(subject) if subject is not None else None,
+    )
+
+
+def _scope_payload(scope: RuntimeScope) -> dict:
+    assert scope.session is not None
+    return {
+        "kind": "SoulScope",
+        "bot_id": scope.bot_id,
+        "session_id": scope.session.id,
+        "visibility": scope.visibility,
+        "platform_id": scope.session.platform_id,
+        "conversation_id": scope.session.conversation_id,
+        "subject_principal_id": scope.subject_principal_id,
+    }
+
+
+def _scoped_repo(container):
+    repo = getattr(container, "soul_repository", None)
+    if repo is None:
+        repo = getattr(getattr(container, "db", None), "scoped_soul", None)
+    return repo
+
+
+@soul_bp.route("/soul/state", methods=["GET"])
+@require_auth
+async def soul_state():
+    """读取正式 Scoped Soul 聚合；仓储不可用时绝不投影 legacy 数据。"""
+    try:
+        scope = _formal_group_scope()
+        limit = int(request.args.get("limit", 25))
+        offset = int(request.args.get("offset", 0))
+        if limit not in {25, 50, 100} or offset < 0:
+            raise ValueError("invalid_pagination")
+    except (ScopedSoulScopeError, ScopeValidationError, TypeError, ValueError) as exc:
+        code = getattr(exc, "reason_code", None) or getattr(exc, "code", None) or str(exc)
+        return jsonify({"error": {"code": code}}), 400
+
+    repo = _scoped_repo(get_container())
+    if repo is None:
+        reason = "soul_scoped_repository_unavailable"
+        unavailable_page = page_response([], total=None, limit=limit, offset=offset, unavailable_reason=reason)
+        return jsonify({
+            "scope": _scope_payload(scope),
+            "source": {"health": "unavailable", "reason_code": reason},
+            "revision": None,
+            "evidence": [],
+            "mood": {"value": None, "state": "unknown", "components": None,
+                     "policy_version": None, "revision": None, "evidence": []},
+            "concerns": unavailable_page,
+            "timeline": unavailable_page,
+            "relationship": {"affinity": None, "state": "unknown", "revision": None,
+                             "evidence": [], "people_ref": scope.subject_principal_id},
+            "capabilities": {
+                "mutate": {"available": False, "reason_code": "soul_readonly"},
+                "runtime_refresh": {"available": False, "reason_code": "soul_runtime_refresh_unavailable"},
+            },
+            "runtime_refresh": {"status": "unavailable", "operation": None, "reason_code": reason},
+        })
+
+    try:
+        state = repo.get_state(
+            scope,
+            subject_principal_id=scope.subject_principal_id,
+            limit=limit,
+            offset=offset,
+        )
+    except (ScopedSoulScopeError, ScopeValidationError, TypeError, ValueError) as exc:
+        code = getattr(exc, "reason_code", None) or getattr(exc, "code", None) or str(exc)
+        return jsonify({"error": {"code": code}}), 400
+
+    concerns = state["concerns"]
+    timeline = state["timeline"]
+    return jsonify({
+        "scope": _scope_payload(scope),
+        "source": {"health": "ready", "reason_code": None},
+        "revision": state.get("revision"),
+        "evidence": state.get("evidence", []),
+        "mood": state["mood"],
+        "concerns": {
+            **page_response(concerns["items"], total=concerns["total"], limit=limit, offset=offset),
+            "revision": concerns.get("revision"),
+        },
+        "timeline": {
+            **page_response(timeline["items"], total=timeline["total"], limit=limit, offset=offset),
+            "revision": timeline.get("revision"),
+        },
+        "relationship": state["relationship"],
+        "capabilities": {
+            "mutate": {"available": False, "reason_code": "soul_readonly"},
+            "runtime_refresh": {"available": False, "reason_code": "soul_runtime_refresh_unavailable"},
+        },
+        "runtime_refresh": {"status": "unavailable", "operation": None,
+                            "reason_code": "soul_runtime_refresh_unavailable"},
+    })
+
+
 # ═══════════════════════════════════════════
-#  Concerns — 关切管理 CRUD
+#  Concerns — legacy 只读审计
 # ═══════════════════════════════════════════
 
 @soul_bp.route("/concerns", methods=["GET"])
@@ -59,7 +183,7 @@ async def list_concerns():
     """查看当前关切列表（按强度排序）。"""
     c = get_container()
     if not _table_exists(c.db.conn, "concerns"):
-        return jsonify({"items": []})
+        return jsonify({"items": [], "legacy": True, "readonly": True, "source": "legacy_audit"})
     bot_id = request.args.get("bot_id")
     sql = "SELECT id, topic, intensity, bot_id, origin_memory_id, created_at, last_triggered FROM concerns WHERE 1=1"
     params = []
@@ -73,11 +197,12 @@ async def list_concerns():
          "origin_memory_id": r[4], "created_at": r[5], "last_triggered": r[6]}
         for r in rows
     ]
-    return jsonify({"items": items})
+    return jsonify({"items": items, "legacy": True, "readonly": True, "source": "legacy_audit"})
 
 
 @soul_bp.route("/concerns", methods=["POST"])
 @require_auth
+@_legacy_soul_mutation_disabled
 async def create_concern():
     """创建 concern。"""
     c = get_container()
@@ -102,6 +227,7 @@ async def create_concern():
 
 @soul_bp.route("/concerns/<int:concern_id>", methods=["PUT"])
 @require_auth
+@_legacy_soul_mutation_disabled
 async def edit_concern(concern_id: int):
     """编辑 concern topic/intensity。"""
     c = get_container()
@@ -126,6 +252,7 @@ async def edit_concern(concern_id: int):
 
 @soul_bp.route("/concerns/<int:concern_id>", methods=["DELETE"])
 @require_auth
+@_legacy_soul_mutation_disabled
 async def delete_concern(concern_id: int):
     """删除 concern。"""
     c = get_container()
@@ -138,6 +265,7 @@ async def delete_concern(concern_id: int):
 
 @soul_bp.route("/concerns/<int:concern_id>/approve", methods=["POST"])
 @require_auth
+@_legacy_soul_mutation_disabled
 async def approve_concern(concern_id: int):
     """标记为已审核（intensity 提升 + last_triggered 更新）。"""
     c = get_container()
@@ -154,6 +282,7 @@ async def approve_concern(concern_id: int):
 
 @soul_bp.route("/concerns/<int:concern_id>/reject", methods=["POST"])
 @require_auth
+@_legacy_soul_mutation_disabled
 async def reject_concern(concern_id: int):
     """降级 concern（intensity 降低）。"""
     c = get_container()
@@ -177,7 +306,7 @@ async def time_anchors():
     """时间锚点列表（情感权重高的关键事件）。"""
     c = get_container()
     if not _table_exists(c.db.conn, "time_anchors"):
-        return jsonify({"items": []})
+        return jsonify({"items": [], "legacy": True, "readonly": True, "source": "legacy_audit"})
     bot_id = request.args.get("bot_id")
     limit = max(1, min(500, _safe_int(request.args.get("limit", 50), 50)))
     sql = "SELECT id, event_summary, timestamp, emotional_weight, bot_id FROM time_anchors WHERE 1=1"
@@ -193,11 +322,12 @@ async def time_anchors():
          "emotional_weight": r[3], "bot_id": r[4]}
         for r in rows
     ]
-    return jsonify({"items": items})
+    return jsonify({"items": items, "legacy": True, "readonly": True, "source": "legacy_audit"})
 
 
 @soul_bp.route("/time-anchors", methods=["POST"])
 @require_auth
+@_legacy_soul_mutation_disabled
 async def create_time_anchor():
     """创建时间锚点。"""
     c = get_container()
@@ -221,6 +351,7 @@ async def create_time_anchor():
 
 @soul_bp.route("/time-anchors/<int:anchor_id>", methods=["PUT"])
 @require_auth
+@_legacy_soul_mutation_disabled
 async def edit_time_anchor(anchor_id: int):
     """编辑时间锚点。"""
     c = get_container()
@@ -248,6 +379,7 @@ async def edit_time_anchor(anchor_id: int):
 
 @soul_bp.route("/time-anchors/<int:anchor_id>", methods=["DELETE"])
 @require_auth
+@_legacy_soul_mutation_disabled
 async def delete_time_anchor(anchor_id: int):
     """删除时间锚点。"""
     c = get_container()
@@ -260,6 +392,7 @@ async def delete_time_anchor(anchor_id: int):
 
 @soul_bp.route("/time-anchors/<int:anchor_id>/approve", methods=["POST"])
 @require_auth
+@_legacy_soul_mutation_disabled
 async def approve_time_anchor(anchor_id: int):
     """标记为已审核（emotional_weight 提升）。"""
     c = get_container()
@@ -275,6 +408,7 @@ async def approve_time_anchor(anchor_id: int):
 
 @soul_bp.route("/time-anchors/<int:anchor_id>/reject", methods=["POST"])
 @require_auth
+@_legacy_soul_mutation_disabled
 async def reject_time_anchor(anchor_id: int):
     """降级时间锚点（emotional_weight 降低）。"""
     c = get_container()
@@ -315,10 +449,10 @@ async def mood_trajectory():
             for r in rows
         ]
         items.reverse()
-        return jsonify({"items": items})
+        return jsonify({"items": items, "legacy": True, "readonly": True, "source": "legacy_audit"})
 
     if not _table_exists(c.db.conn, "bot_mood"):
-        return jsonify({"items": []})
+        return jsonify({"items": [], "legacy": True, "readonly": True, "source": "legacy_audit"})
     group_id = request.args.get("group_id")
     sql = "SELECT id, group_id, mood_type, intensity, description, start_time, end_time, is_active FROM bot_mood WHERE typeof(start_time) IN ('real', 'integer')"
     params = []
@@ -335,11 +469,12 @@ async def mood_trajectory():
         for r in rows
     ]
     items.reverse()
-    return jsonify({"items": items})
+    return jsonify({"items": items, "legacy": True, "readonly": True, "source": "legacy_audit"})
 
 
 @soul_bp.route("/mood/<int:mood_id>", methods=["PUT"])
 @require_auth
+@_legacy_soul_mutation_disabled
 async def edit_mood(mood_id: int):
     """编辑情绪描述。"""
     c = get_container()

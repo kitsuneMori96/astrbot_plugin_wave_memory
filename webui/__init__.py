@@ -60,7 +60,18 @@ class WaveMemoryWebUI:
         livingmemory_facade_enabled: bool | None = None,
         livingmemory_alias_tools_registered: bool = False,
         detected_memory_plugins: list[dict[str, Any]] | None = None,
+        bot_registry: dict[str, Any] | None = None,
     ):
+        # 生产 WebUI 只从真实 registry/数据库组合 options，并且只接受请求显式 Scope。
+        from .scope_options import ExplicitRequestScopeProvider, RuntimeScopeOptionsSource
+
+        scope_options_source = RuntimeScopeOptionsSource(
+            db=db,
+            bot_registry=bot_registry,
+            channel_config=injection_channel_config,
+        )
+        request_scope_provider = ExplicitRequestScopeProvider(bot_registry=bot_registry)
+
         # 注入所有服务到全局容器
         container = get_container()
         container.initialize(
@@ -87,6 +98,8 @@ class WaveMemoryWebUI:
             livingmemory_facade_enabled=livingmemory_facade_enabled,
             livingmemory_alias_tools_registered=livingmemory_alias_tools_registered,
             detected_memory_plugins=detected_memory_plugins,
+            scope_options_source=scope_options_source,
+            request_scope_provider=request_scope_provider,
         )
 
         self._task_supervisor = task_supervisor
@@ -94,7 +107,7 @@ class WaveMemoryWebUI:
         # 创建服务器实例
         if Server is None:
             raise RuntimeError("WebUI runtime dependencies are unavailable")
-        self._server = Server(host=host, port=port)
+        self._server = Server(host=host, port=port, password=password or "")
         self._kg_warmup_task: asyncio.Task | None = None
 
     async def start(self) -> None:

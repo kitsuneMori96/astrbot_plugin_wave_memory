@@ -8,11 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import json
 from typing import Any, Mapping
 
 try:
-    from quart import Blueprint, jsonify, request
+    from quart import Blueprint, current_app, jsonify, request
 except Exception:  # pragma: no cover - Quart 未安装时允许 helper 导入
     class Blueprint:  # type: ignore[no-redef]
         def __init__(self, *args, **kwargs):
@@ -23,12 +22,14 @@ except Exception:  # pragma: no cover - Quart 未安装时允许 helper 导入
                 return function
             return decorator
 
+    current_app = None  # type: ignore[assignment]
     request = None  # type: ignore[assignment]
 
     def jsonify(value=None, **kwargs):  # type: ignore[no-redef]
         return value if value is not None else kwargs
 
 try:
+    from ..api_contract import mutation_response, page_response
     from ..container import get_container
     from ..middleware.auth import require_auth
 except Exception:  # pragma: no cover - package 相对导入兼容
@@ -39,6 +40,7 @@ except Exception:  # pragma: no cover - package 相对导入兼容
         return function
 
 try:
+    from domain.scope import RuntimeScope
     from engine.db.learning_repository import LearningRepositories
     from engine.db.learning_types import CandidateType, PromotionStatus, ReviewStatus
     from services.learning.dedicated_review import DedicatedReviewBridge
@@ -48,6 +50,7 @@ try:
     from services.learning.source import LearningSourceRegistry
     from services.learning.legacy import read_legacy_projections
 except Exception:  # pragma: no cover - AstrBot 插件包导入路径
+    from ...domain.scope import RuntimeScope
     from ...engine.db.learning_repository import LearningRepositories
     from ...engine.db.learning_types import CandidateType, PromotionStatus, ReviewStatus
     from ...services.learning.dedicated_review import DedicatedReviewBridge
@@ -222,14 +225,144 @@ def _optional_float(*names: str) -> float | None:
     return float(value)
 
 
+def _marker_values(value: Any) -> set[str]:
+    """提取质量/legacy 标记；只匹配显式状态，不猜测正文语义。"""
+    values: set[str] = set()
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if key in {
+                "decision", "quality_decision", "quality_state", "legacy_state", "state",
+                "reason_code", "reason_codes", "traceability", "availability",
+            }:
+                values.update(_marker_values(item))
+    elif isinstance(value, (list, tuple, set)):
+        for item in value:
+            values.update(_marker_values(item))
+    elif value is not None:
+        values.add(str(value).strip().lower())
+    return values
+
+
+def _candidate_guard(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    """把不可自动晋升条件投影为稳定、可测试的只读状态。"""
+    evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), Mapping) else {}
+    metadata = candidate.get("metadata") if isinstance(candidate.get("metadata"), Mapping) else {}
+    markers = _marker_values(evidence) | _marker_values(metadata)
+    legacy = bool(candidate.get("legacy_kind") or metadata.get("legacy") or evidence.get("legacy"))
+    legacy_unlinked = bool(legacy and (
+        not candidate.get("source_id")
+        or not candidate.get("job_id")
+        or markers.intersection({"unavailable", "unresolved", "legacy_unlinked"})
+    ))
+    quarantined = bool(markers.intersection({"quarantine", "quarantined"}))
+    content = str(candidate.get("content") or "")
+    garbled = "\ufffd" in content or bool(markers.intersection({"text_garbled", "mojibake", "garbled"}))
+    reasons: list[str] = []
+    if legacy_unlinked:
+        reasons.append("legacy_unlinked")
+    if quarantined:
+        reasons.append("quarantined")
+    if garbled:
+        reasons.append("text_garbled")
+    return {
+        "legacy_unlinked": legacy_unlinked,
+        "quarantined": quarantined,
+        "garbled": garbled,
+        "promotion_blocked": bool(reasons),
+        "promotion_block_reasons": reasons,
+    }
+
+
+def _candidate_scope(candidate: Mapping[str, Any]) -> RuntimeScope | None:
+    for owner_name in ("metadata", "evidence"):
+        owner = candidate.get(owner_name)
+        if not isinstance(owner, Mapping):
+            continue
+        for key in ("target_scope", "runtime_scope", "scope"):
+            value = owner.get(key)
+            if isinstance(value, Mapping) and value.get("kind") == "RuntimeScope":
+                value = value.get("payload")
+            if isinstance(value, Mapping):
+                try:
+                    return RuntimeScope.from_dict(value)
+                except Exception:
+                    continue
+    # FewShot 正式资源是 Bot-scoped；这不是默认 Bot，而是候选自身的 bot_id。
+    if candidate.get("candidate_type") == CandidateType.FEW_SHOT_STYLE.value:
+        try:
+            return RuntimeScope(bot_id=str(candidate["bot_id"]), visibility="bot_private", session=None)
+        except Exception:
+            return None
+    return None
+
+
+def _target_link(candidate: Mapping[str, Any], promotion: Mapping[str, Any]) -> dict[str, Any] | None:
+    if promotion.get("promotion_status") != PromotionStatus.SUCCEEDED.value or promotion.get("target_id") in (None, ""):
+        return None
+    target_kind = str(promotion.get("target_kind") or "")
+    paths = {
+        "few_shot": "/knowledge/fewshot",
+        "jargon_review": "/jargon",
+        "belief_review": "/beliefs",
+    }
+    path = paths.get(target_kind)
+    scope = _candidate_scope(candidate)
+    if path is None or scope is None or current_app is None:
+        return None
+    try:
+        refs = current_app.extensions.get("wave_api_contract", {}).get("object_refs")
+        if refs is None:
+            return None
+        revision = int(promotion.get("id") or 0)
+        ref = refs.issue(
+            kind=target_kind,
+            locator=promotion["target_id"],
+            scope=scope,
+            revision=revision,
+        )
+        session_id = scope.session.id if scope.session is not None else "bot_private"
+        return {
+            "path": path,
+            "object_ref": {
+                "ref": ref,
+                "kind": target_kind,
+                "scope_key": f"{scope.bot_id}:{session_id}",
+                "version": revision,
+            },
+        }
+    except Exception:
+        return None
+
+
+def _view_promotion(
+    repositories: LearningRepositories,
+    promotion: Mapping[str, Any],
+    *,
+    candidate: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    item = dict(promotion)
+    scoped_candidate = candidate or repositories.candidates.get(
+        int(item["candidate_id"]), bot_id=str(item["bot_id"])
+    )
+    if scoped_candidate:
+        item["candidate_type"] = scoped_candidate.get("candidate_type")
+        item["target_link"] = _target_link(scoped_candidate, item)
+    else:
+        item["target_link"] = None
+    item["retryable"] = item.get("promotion_status") == PromotionStatus.RETRYABLE_FAILED.value
+    return item
+
+
 def _view_candidate(repositories: LearningRepositories, candidate: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
     item = dict(candidate)
+    item.update(_candidate_guard(item))
     bot_id = item["bot_id"]
     source_id = item.get("source_id")
     job_id = item.get("job_id")
     item["source"] = repositories.sources.get(source_id, bot_id=bot_id) if source_id else None
     item["task"] = repositories.jobs.get(job_id, bot_id=bot_id) if job_id else None
-    promotions = repositories.promotions.list_for_candidate(item["id"], bot_id=bot_id)
+    raw_promotions = repositories.promotions.list_for_candidate(item["id"], bot_id=bot_id)
+    promotions = [_view_promotion(repositories, promotion, candidate=item) for promotion in raw_promotions]
     item["promotions"] = promotions
     statuses = {str(p.get("promotion_status") or "") for p in promotions}
     if not statuses:
@@ -286,6 +419,8 @@ def _status_code_for_exception(exc: Exception) -> tuple[str, int, bool]:
         return "not_found", 404, False
     if "required" in str(exc).lower() or "invalid" in str(exc).lower():
         return code or "invalid_request", 400, False
+    if isinstance(exc, (RuntimeError, OSError)):
+        return "service_unavailable", 503, True
     return code or "learning_center_error", 400, bool(getattr(exc, "retryable", False))
 
 
@@ -312,7 +447,7 @@ async def list_sources():
         if repositories is None:
             return api_error("service_unavailable", "learning repositories are unavailable", 503, retryable=True)
         items, total = repositories.sources.list(bot_id=bot_id, limit=limit, offset=offset)
-        return jsonify({"items": items, "total": total, "limit": limit, "offset": offset, "has_more": offset + len(items) < total})
+        return jsonify(page_response(items, total=total, limit=limit, offset=offset))
     except Exception as exc:
         code, status, retryable = _status_code_for_exception(exc)
         return api_error("bot_id_required" if "bot_id" in str(exc) else code, str(exc)[:300], status, retryable=retryable)
@@ -387,7 +522,7 @@ async def list_jobs():
         if repositories is None:
             return api_error("service_unavailable", "learning repositories are unavailable", 503, retryable=True)
         items, total = repositories.jobs.list(bot_id=bot_id, limit=limit, offset=offset)
-        return jsonify({"items": items, "total": total, "limit": limit, "offset": offset, "has_more": offset + len(items) < total})
+        return jsonify(page_response(items, total=total, limit=limit, offset=offset))
     except Exception as exc:
         code, status, retryable = _status_code_for_exception(exc)
         return api_error("bot_id_required" if "bot_id" in str(exc) else code, str(exc)[:300], status, retryable=retryable)
@@ -472,7 +607,15 @@ async def run_job(job_id: int):
         result = runner.manual_run(job_id, bot_id=bot_id)
         if asyncio.iscoroutine(result):
             result = await result
-        payload = _cache(container, "run_job:" + str(job_id), bot_id, key, {"item": _run_result(result), "ok": True})
+        item = _run_result(result)
+        payload = mutation_response(
+            operation_kind="learning.job.run",
+            status=str(item.get("status") or "unknown"),
+            revision=item.get("run_id") or item.get("id") or job_id,
+            item=item,
+            include_item=True,
+        )
+        payload = _cache(container, "run_job:" + str(job_id), bot_id, key, payload)
         return jsonify(payload), 202
     except Exception as exc:
         code, status, retryable = _status_code_for_exception(exc)
@@ -505,7 +648,12 @@ async def list_candidates():
             until=_optional_float("until", "end_time", "created_before", "to"),
 
         )
-        return jsonify({"items": [_view_candidate(repositories, item) for item in items], "total": total, "limit": limit, "offset": offset, "has_more": offset + len(items) < total})
+        return jsonify(page_response(
+            [_view_candidate(repositories, item) for item in items],
+            total=total,
+            limit=limit,
+            offset=offset,
+        ))
     except Exception as exc:
         code, status, retryable = _status_code_for_exception(exc)
         return api_error("bot_id_required" if "bot_id" in str(exc) else code, str(exc)[:300], status, retryable=retryable)
@@ -546,6 +694,18 @@ async def review_candidate(candidate_id: int):
         production_wired = getattr(container, "learning_promotion_orchestrator", None) is not None
         review, promotion, _ = _services(container, repositories)
         action = body.get("action", body.get("review_status", body.get("status")))
+        action_text = str(getattr(action, "value", action) or "").strip().lower()
+        current_candidate = repositories.candidates.get(candidate_id, bot_id=bot_id)
+        if current_candidate is None:
+            return api_error("not_found", "candidate not found", 404)
+        guard = _candidate_guard(current_candidate)
+        if action_text in {"approve", "approved", "delegate", "delegated"} and guard["promotion_blocked"]:
+            return api_error(
+                "candidate_not_promotable",
+                "candidate is read-only and cannot be promoted",
+                409,
+                details={"reason_codes": guard["promotion_block_reasons"]},
+            )
         reviewer = body.get("reviewer", body.get("actor", ""))
         result = review.review(
             candidate_id,
@@ -556,7 +716,6 @@ async def review_candidate(candidate_id: int):
         )
         candidate = result.get("candidate") if isinstance(result, Mapping) else None
         promotions = result.get("promotions", []) if isinstance(result, Mapping) else []
-        action_text = str(getattr(action, "value", action) or "").strip().lower()
         if production_wired and action_text in {"approve", "approved"} and promotions:
             # 领域写入可能包含 embedding/SQLite 操作，放到线程中，避免阻塞 Quart/AstrBot 事件循环。
             promotions = await asyncio.to_thread(
@@ -564,10 +723,21 @@ async def review_candidate(candidate_id: int):
                 candidate_id,
                 bot_id=bot_id,
             )
-        payload = {"item": {
-            "candidate": _view_candidate(repositories, candidate, detail=True) if candidate else None,
-            "promotions": promotions,
-        }, "ok": True}
+        refreshed_candidate = repositories.candidates.get(candidate_id, bot_id=bot_id)
+        item = {
+            "candidate": _view_candidate(repositories, refreshed_candidate, detail=True) if refreshed_candidate else None,
+            "promotions": [
+                _view_promotion(repositories, value, candidate=refreshed_candidate)
+                for value in promotions
+            ],
+        }
+        payload = mutation_response(
+            operation_kind="learning.candidate.review",
+            status="committed",
+            revision=(refreshed_candidate or {}).get("updated_at"),
+            item=item,
+            include_item=True,
+        )
         payload = _cache(container, operation, bot_id, key, payload)
         return jsonify(payload)
     except Exception as exc:
@@ -595,7 +765,12 @@ async def list_promotions():
             since=_optional_float("since", "start_time", "created_after", "from"),
             until=_optional_float("until", "end_time", "created_before", "to"),
         )
-        return jsonify({"items": items, "total": total, "limit": limit, "offset": offset, "has_more": offset + len(items) < total})
+        return jsonify(page_response(
+            [_view_promotion(repositories, item) for item in items],
+            total=total,
+            limit=limit,
+            offset=offset,
+        ))
     except Exception as exc:
         code, status, retryable = _status_code_for_exception(exc)
         return api_error("bot_id_required" if "bot_id" in str(exc) else code, str(exc)[:300], status, retryable=retryable)
@@ -622,8 +797,25 @@ async def retry_promotion(promotion_id: int):
             return api_error("not_found", "promotion not found", 404)
         if current.get("promotion_status") != PromotionStatus.RETRYABLE_FAILED.value:
             return api_error("promotion_not_retryable", "promotion is not retryable", 409, retryable=False)
+        candidate = repositories.candidates.get(int(current["candidate_id"]), bot_id=bot_id)
+        guard = _candidate_guard(candidate or {})
+        if guard["promotion_blocked"]:
+            return api_error(
+                "candidate_not_promotable",
+                "candidate is read-only and cannot be promoted",
+                409,
+                details={"reason_codes": guard["promotion_block_reasons"]},
+            )
         result = await asyncio.to_thread(promotion.retry, promotion_id, bot_id=bot_id)
-        payload = _cache(container, operation, bot_id, key, {"item": result, "ok": True})
+        item = _view_promotion(repositories, result, candidate=candidate)
+        payload = mutation_response(
+            operation_kind="learning.promotion.retry",
+            status=str(item.get("promotion_status") or "unknown"),
+            revision=item.get("updated_at") or item.get("id"),
+            item=item,
+            include_item=True,
+        )
+        payload = _cache(container, operation, bot_id, key, payload)
         return jsonify(payload)
     except Exception as exc:
         code, status, retryable = _status_code_for_exception(exc)
@@ -647,22 +839,13 @@ async def list_few_shot():
         candidates, total = repositories.candidates.list(
             bot_id=bot_id, candidate_type=CandidateType.FEW_SHOT_STYLE.value, limit=limit, offset=offset
         )
-        approved: list[dict[str, Any]] = []
-        conn = repositories.connection
-        try:
-            rows = conn.execute(
-                "SELECT id, content, score, traits, status, bot_id, created_at, approved_at FROM few_shot_examples WHERE bot_id=? AND status='approved' ORDER BY approved_at DESC, id DESC LIMIT ? OFFSET ?",
-                (bot_id, limit, offset),
-            ).fetchall()
-            for row in rows:
-                try:
-                    traits = json.loads(row[3] or "[]")
-                except Exception:
-                    traits = []
-                approved.append({"id": row[0], "content": row[1], "score": row[2], "traits": traits if isinstance(traits, list) else [], "status": row[4], "bot_id": row[5], "created_at": row[6], "approved_at": row[7]})
-        except Exception:
-            approved = []
-        return jsonify({"items": [_view_candidate(repositories, item) for item in candidates], "candidates": [_view_candidate(repositories, item) for item in candidates], "approved_examples": approved, "total": total, "limit": limit, "offset": offset, "has_more": offset + len(candidates) < total})
+        # 这里只返回 style candidate/review/promotion 过程；正式 approved 样例由 FewShot 资源 API 管理。
+        return jsonify(page_response(
+            [_view_candidate(repositories, item) for item in candidates],
+            total=total,
+            limit=limit,
+            offset=offset,
+        ))
     except Exception as exc:
         code, status, retryable = _status_code_for_exception(exc)
         return api_error("bot_id_required" if "bot_id" in str(exc) else code, str(exc)[:300], status, retryable=retryable)
@@ -725,7 +908,25 @@ async def dedicated_review_status(candidate_id: int):
         if target_id is None and dedicated:
             target_id = (dedicated.get("metadata") or {}).get("dedicated_candidate_id")
         result = bridge.status(candidate, bot_id=bot_id, target_id=target_id)
-        return jsonify({"item": {"candidate_id": candidate_id, "candidate_type": candidate["candidate_type"], "target_id": result.target_id, "status": result.status, "deep_link": result.deep_link, "error": result.error, "metadata": result.metadata or {}, "promotion": dedicated}})
+        target_kind = "jargon_review" if candidate["candidate_type"] == CandidateType.JARGON_CANDIDATE.value else "belief_review"
+        link_promotion = {
+            "id": (dedicated or {}).get("id") or candidate_id,
+            "target_kind": target_kind,
+            "target_id": result.target_id,
+            "promotion_status": PromotionStatus.SUCCEEDED.value,
+        }
+        target_link = _target_link(candidate, link_promotion)
+        return jsonify({"item": {
+            "candidate_id": candidate_id,
+            "candidate_type": candidate["candidate_type"],
+            "target_id": result.target_id,
+            "status": result.status,
+            "deep_link": target_link["path"] if target_link else None,
+            "object_ref": target_link["object_ref"] if target_link else None,
+            "error": result.error,
+            "metadata": result.metadata or {},
+            "promotion": _view_promotion(repositories, dedicated, candidate=candidate) if dedicated else None,
+        }})
     except Exception as exc:
         code, status, retryable = _status_code_for_exception(exc)
         return api_error("bot_id_required" if "bot_id" in str(exc) else code, str(exc)[:300], status, retryable=retryable)

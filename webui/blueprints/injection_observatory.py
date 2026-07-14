@@ -31,6 +31,7 @@ except Exception:  # pragma: no cover - AstrBot 包导入路径
     from ...services.injection.trace_store import InjectionTraceStore
     from ...tools.injection_explain import build_injection_explanation
 
+from ..api_contract import error_payload, not_found_payload, page_response
 from ..container import get_container
 try:
     from ..middleware.auth import require_auth
@@ -38,7 +39,7 @@ except Exception:  # pragma: no cover - 本地单测未安装 Quart 时直接放
     def require_auth(func):
         return func
 
-injection_observatory_bp = Blueprint("injection_observatory", __name__, url_prefix="/api/injection")
+injection_observatory_bp = Blueprint("injection_observatory", __name__, url_prefix="/api/observatory")
 
 
 def _float(value: Any, default: float) -> float:
@@ -104,7 +105,27 @@ def build_trace_detail_payload(
     if not trace:
         return None
     payload = build_injection_explanation(trace)
+    raw_payload = str(trace.get("payload_json") or "")
+    if raw_payload:
+        payload["raw_payload"] = raw_payload
+        try:
+            import json
+            decoded = json.loads(raw_payload)
+            raw_trace = decoded.get("trace") if isinstance(decoded, Mapping) else None
+            if isinstance(raw_trace, Mapping):
+                payload["request"] = {
+                    **dict(payload.get("request") or {}),
+                    "message": raw_trace.get("message"),
+                    "metadata": raw_trace.get("metadata"),
+                }
+                payload["final_text"] = raw_trace.get("final_text") or raw_trace.get("final_injection") or ""
+            raw_channels = decoded.get("channels") if isinstance(decoded, Mapping) else None
+            if isinstance(raw_channels, list):
+                payload["raw_channels"] = raw_channels
+        except Exception:
+            payload["raw_payload_status"] = "invalid_json"
     payload["feedback"] = feedback_store.list_for_trace(trace_id) if feedback_store else []
+    payload["feedback_status"] = "present" if payload["feedback"] else "none"
     return payload
 
 
@@ -133,8 +154,32 @@ def _stores_from_container() -> tuple[InjectionTraceStore | None, MemoryFeedback
 async def list_traces():
     trace_store, _ = _stores_from_container()
     if not trace_store:
-        return jsonify({"traces": [], "count": 0, "error": "trace_store_unavailable"})
-    return jsonify(build_trace_list_payload(trace_store, dict(getattr(request, "args", {}) or {})))
+        return jsonify(error_payload("service_unavailable", "Trace store is unavailable", retryable=True)), 503
+    filters = dict(getattr(request, "args", {}) or {})
+    now = time.time()
+    limit = max(1, min(_int(filters.get("limit"), 100), 500))
+    offset = max(0, _int(filters.get("offset"), 0))
+    query_filters = {
+        "from_ts": _float(filters.get("from_ts") or filters.get("from"), 0.0),
+        "to_ts": _float(filters.get("to_ts") or filters.get("to"), now),
+        "group_id": filters.get("group_id") or None,
+        "sender_id": filters.get("sender_id") or None,
+        "bot_id": filters.get("bot_id") or None,
+        "channel": filters.get("channel") or None,
+        "status": filters.get("status") or None,
+        "has_error": _bool_or_none(filters.get("has_error")),
+        "scope": filters.get("scope") or filters.get("chat_type") or None,
+        "session_id": filters.get("session_id") or None,
+        "config_revision": filters.get("config_revision") or None,
+    }
+    try:
+        traces = trace_store.query(**query_filters, limit=limit, offset=offset)
+        total = trace_store.count(**query_filters)
+    except Exception:
+        return jsonify(error_payload("service_unavailable", "Trace store is unavailable", retryable=True)), 503
+    for item in traces:
+        item["detail_url"] = f"/api/observatory/traces/{item['trace_id']}"
+    return jsonify(page_response(traces, total=total, limit=limit, offset=offset))
 
 
 @injection_observatory_bp.route("/traces/<trace_id>", methods=["GET"])
@@ -142,10 +187,10 @@ async def list_traces():
 async def get_trace_detail(trace_id: str):
     trace_store, feedback_store = _stores_from_container()
     if not trace_store:
-        return jsonify({"error": "trace_store_unavailable"}), 503
+        return jsonify(error_payload("service_unavailable", "Trace store is unavailable", retryable=True)), 503
     payload = build_trace_detail_payload(trace_store, feedback_store, trace_id)
     if payload is None:
-        return jsonify({"error": "trace_not_found", "trace_id": trace_id}), 404
+        return jsonify(not_found_payload()), 404
     return jsonify(payload)
 
 
