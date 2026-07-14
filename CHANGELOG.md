@@ -2,10 +2,10 @@
 
 ## v4.5.0 (2026-07-06)
 
-### 前端优化 + 黑盒管理前端
+### 前端优化 + 认知资源管理前端
 
-- **黑盒管理矩阵**：新增 `/blackbox` 能力总入口和 BookLore、FewShot、Facts、People、Indexes 五个子页面，完成“发现 -> 管理 -> 验证 -> 调参”的只读管理闭环。
-- **统一 `/api/blackbox` 后端**：新增只读 API blueprint，覆盖 BookLore summary/entities/communities/relations/notes、FewShot summary/examples、Facts 列表与详情、People 合并视图、Indexes summary/check，危险写操作继续保持二次确认边界。
+- **认知资源管理矩阵**：新增 BookLore、FewShot、Facts、People、Indexes 五个独立页面，完成“发现 -> 管理 -> 验证 -> 调参”的只读管理闭环。
+- **按领域拆分后端**：提供 BookLore、FewShot、Facts、People 与 Indexes 的独立 API，危险写操作继续保持二次确认边界。
 - **BookLore 管理补齐**：BookLore 页面接入真实 API，展示实体、社区、关系、notes 列表和索引健康入口，明确世界观/书设知识库不是群聊记忆、不是人格指令。
 - **FewShot / Facts / People / Indexes 接入真实数据**：风格范例、稳定事实关系、人物画像/好感、向量/FTS5/EPA/BookLore HNSW 诊断页从静态占位升级为 loading/error/empty/list 状态完整的只读页面。
 - **v4.5 WebUI 体验闭环**：总览动作入口、记忆来源语义、智能导入向导、注入观测台、通道热配置、学习对象审查、维护工作台、灵魂只读边界等页面补齐风险标识和跨页面跳转。
