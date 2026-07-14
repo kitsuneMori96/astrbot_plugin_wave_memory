@@ -8,11 +8,19 @@ from __future__ import annotations
 
 import time
 from collections import deque
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-from astrbot.api import logger
+try:
+    from astrbot.api import logger
+except ImportError:  # pragma: no cover - repository tests run without AstrBot
+    import logging
+    logger = logging.getLogger(__name__)
 
-from ..engine.database import WaveMemoryDB
+if TYPE_CHECKING:
+    try:
+        from ..engine.database import WaveMemoryDB
+    except ImportError:  # pragma: no cover
+        from engine.database import WaveMemoryDB
 
 
 class MoodSnapshot:
@@ -30,11 +38,24 @@ class MoodSnapshot:
 class MoodTrajectory:
     """情绪轨迹 — 维护最近 N 个情绪快照。"""
 
-    def __init__(self, db: WaveMemoryDB, bot_id: str = "", window_size: int = 20):
+    def __init__(
+        self,
+        db: WaveMemoryDB,
+        bot_id: str = "",
+        window_size: int = 20,
+        *,
+        scope=None,
+        repository=None,
+        coordinator=None,
+    ):
         self.db = db
         self.bot_id = bot_id
+        self.scope = scope
+        self.repository = repository
+        self.coordinator = coordinator
         self.snapshots: deque[MoodSnapshot] = deque(maxlen=window_size)
-        self._ensure_table()
+        self._scoped_snapshots: dict[tuple[str, str, str], deque[MoodSnapshot]] = {}
+        # Legacy mood_snapshots 只作为审计来源读取；正式持久化必须走 scoped repository。
         self._load()
 
     def _ensure_table(self):
@@ -71,27 +92,78 @@ class MoodTrajectory:
         except Exception:
             pass
 
-    def record(self, valence: float, arousal: float, cause: str = ""):
-        """记录一次情绪快照。
+    @staticmethod
+    def _scope_key(scope) -> tuple[str, str, str]:
+        if scope is None or getattr(scope, "session", None) is None:
+            raise ValueError("scope_required")
+        return scope.bot_id, scope.session.id, scope.visibility
 
-        Args:
-            valence: -1(极差) ~ +1(极好)
-            arousal: 0(平静) ~ 1(激动)
-            cause: 触发原因（简短描述）
-        """
+    def _snapshots_for(self, scope=None) -> deque[MoodSnapshot]:
+        effective_scope = scope or self.scope
+        if effective_scope is None:
+            return self.snapshots
+        key = self._scope_key(effective_scope)
+        bucket = self._scoped_snapshots.get(key)
+        if bucket is None:
+            bucket = deque(maxlen=self.snapshots.maxlen)
+            self._scoped_snapshots[key] = bucket
+            if self.repository is not None and hasattr(self.repository, "get_state"):
+                try:
+                    mood = self.repository.get_state(effective_scope, limit=25, offset=0).get("mood", {})
+                    if mood.get("state") == "known":
+                        components = mood.get("components") or {}
+                        bucket.append(MoodSnapshot(
+                            timestamp=float(mood.get("observed_at") or time.time()),
+                            valence=float(components.get("valence", mood.get("value", 0.0))),
+                            arousal=float(components.get("arousal", 0.0)),
+                            cause=str(mood.get("cause") or ""),
+                            bot_id=effective_scope.bot_id,
+                        ))
+                except Exception as exc:
+                    logger.debug(f"[MoodTrajectory] Scoped load failed: {exc}")
+        return bucket
+
+    def record(
+        self,
+        valence: float,
+        arousal: float,
+        cause: str = "",
+        *,
+        scope=None,
+        evidence=None,
+    ):
+        """按调用方传入的 RuntimeScope 记录，禁止跨会话共享正式状态。"""
+        effective_scope = scope or self.scope
         now = time.time()
-        snap = MoodSnapshot(timestamp=now, valence=valence, arousal=arousal, cause=cause, bot_id=self.bot_id)
-        self.snapshots.append(snap)
+        snap = MoodSnapshot(
+            timestamp=now,
+            valence=valence,
+            arousal=arousal,
+            cause=cause,
+            bot_id=effective_scope.bot_id if effective_scope is not None else self.bot_id,
+        )
+        self._snapshots_for(effective_scope).append(snap)
 
-        # 持久化
+        if self.repository is None or effective_scope is None:
+            return
         try:
-            self.db.conn.execute(
-                "INSERT INTO mood_snapshots (bot_id, timestamp, valence, arousal, cause) VALUES (?, ?, ?, ?, ?)",
-                (self.bot_id, now, valence, arousal, cause),
-            )
-            self.db.conn.commit()
+            kwargs = {
+                "valence": valence,
+                "arousal": arousal,
+                "cause": cause,
+                "evidence": evidence,
+                "observed_at": now,
+            }
+            if self.coordinator is not None:
+                self.coordinator.transaction_blocking(
+                    lambda connection: self.repository.upsert_mood(
+                        effective_scope, connection=connection, **kwargs
+                    )
+                )
+            else:
+                self.repository.upsert_mood(effective_scope, **kwargs)
         except Exception as e:
-            logger.debug(f"[MoodTrajectory] Persist failed: {e}")
+            logger.debug(f"[MoodTrajectory] Scoped persist failed: {e}")
 
     @property
     def current_valence(self) -> float:

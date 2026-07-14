@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from datetime import datetime, timezone
 from typing import Any
 
 KNOWN_MEMORY_PLUGINS: dict[str, dict[str, Any]] = {
@@ -200,6 +201,91 @@ def detect_memory_plugins(*sources: Any, context: Any = None) -> list[dict[str, 
     return [detected[key] for key in KNOWN_MEMORY_PLUGINS if key in detected]
 
 
+def _checked_at() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def plugin_probe_from_result(
+    detected_plugins: list[dict[str, Any]] | None,
+    *,
+    source: str,
+    checked_at: str | None = None,
+) -> dict[str, Any]:
+    """把一次已完成的 registry 探测结果包装成可判定的事实状态。"""
+    detected = list(detected_plugins or [])
+    status = "detected" if detected else "not_detected"
+    evidence = [
+        {
+            "kind": "plugin_registry_entry",
+            "plugin_id": item.get("id"),
+            "name": item.get("name"),
+            "active": bool(item.get("active", False)),
+            "source": item.get("source") or source,
+        }
+        for item in detected
+    ]
+    if not evidence:
+        evidence.append({
+            "kind": "plugin_registry_probe",
+            "summary": "探测已完成，当前 registry 中没有匹配的已知记忆插件。",
+            "source": source,
+        })
+    return {
+        "status": status,
+        "source": source,
+        "checked_at": checked_at or _checked_at(),
+        "error": None,
+        "evidence": evidence,
+        "plugins": detected,
+    }
+
+
+def probe_memory_plugins(*sources: Any, context: Any = None) -> dict[str, Any]:
+    """执行一次可诊断的插件探测，不把未配置或异常折叠成空数组。"""
+    checked_at = _checked_at()
+    source_label = "explicit_sources" if sources else "astrbot.star_registry"
+    try:
+        if sources or context is not None:
+            detected = detect_memory_plugins(*sources, context=context)
+            if context is not None and not sources:
+                source_label = "astrbot_context"
+            return plugin_probe_from_result(detected, source=source_label, checked_at=checked_at)
+
+        try:
+            from astrbot.core.star.star import star_registry
+        except Exception as exc:
+            return {
+                "status": "not_configured",
+                "source": source_label,
+                "checked_at": checked_at,
+                "error": str(exc),
+                "evidence": [{
+                    "kind": "probe_configuration",
+                    "summary": "AstrBot plugin registry 在当前进程中不可用，未执行插件探测。",
+                    "source": source_label,
+                }],
+                "plugins": [],
+            }
+        return plugin_probe_from_result(
+            detect_memory_plugins(star_registry),
+            source=source_label,
+            checked_at=checked_at,
+        )
+    except Exception as exc:
+        return {
+            "status": "probe_failed",
+            "source": source_label,
+            "checked_at": checked_at,
+            "error": str(exc),
+            "evidence": [{
+                "kind": "probe_error",
+                "summary": "插件探测执行失败，当前无法判断是否存在兼容冲突。",
+                "source": source_label,
+            }],
+            "plugins": [],
+        }
+
+
 def build_duplicate_memory_warnings(detected_plugins: list[dict[str, Any]]) -> list[dict[str, Any]]:
     warnings: list[dict[str, Any]] = []
     for plugin in detected_plugins or []:
@@ -216,4 +302,10 @@ def build_duplicate_memory_warnings(detected_plugins: list[dict[str, Any]]) -> l
     return warnings
 
 
-__all__ = ["KNOWN_MEMORY_PLUGINS", "detect_memory_plugins", "build_duplicate_memory_warnings"]
+__all__ = [
+    "KNOWN_MEMORY_PLUGINS",
+    "build_duplicate_memory_warnings",
+    "detect_memory_plugins",
+    "plugin_probe_from_result",
+    "probe_memory_plugins",
+]

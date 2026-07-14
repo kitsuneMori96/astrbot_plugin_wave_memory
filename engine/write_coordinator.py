@@ -13,16 +13,30 @@ import uuid
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Mapping
 
-from domain.commands import (
-    CommandRejectedError,
-    DomainCommand,
-    DomainWriteResult,
-    EntityChange,
-    IdempotencyConflictError,
-    OutboxEventRef,
-)
-from domain.scope import scope_to_dict
-from engine.db.outbox_repo import OutboxRepository
+try:
+    from ..domain.commands import (
+        CommandRejectedError,
+        DomainCommand,
+        DomainWriteResult,
+        EntityChange,
+        IdempotencyConflictError,
+        OutboxEventRef,
+    )
+    from ..domain.scope import scope_to_dict
+    from .db.outbox_repo import OutboxRepository
+    from .writer_lease import WriterLease, WriterLeaseUnavailableError
+except ImportError:  # pragma: no cover - repository tests import top-level packages
+    from domain.commands import (
+        CommandRejectedError,
+        DomainCommand,
+        DomainWriteResult,
+        EntityChange,
+        IdempotencyConflictError,
+        OutboxEventRef,
+    )
+    from domain.scope import scope_to_dict
+    from engine.db.outbox_repo import OutboxRepository
+    from engine.writer_lease import WriterLease, WriterLeaseUnavailableError
 
 
 @dataclass(frozen=True)
@@ -58,8 +72,11 @@ class WriteCoordinator:
         queue_capacity: int = 256,
     ) -> None:
         self.database_path = os.path.abspath(database_path)
-        self._lease_path = self.database_path + ".writer.lock"
-        self._lease_file = self._acquire_writer_lease()
+        self._state_lock = threading.Lock()
+        try:
+            self._writer_lease = WriterLease.acquire(self.database_path)
+        except WriterLeaseUnavailableError as exc:
+            raise CommandRejectedError("writer_lease_unavailable") from exc
         self._handlers = dict(command_handlers)
         self._consumer_names = tuple(sorted(set(consumer_names)))
         self._clock = clock
@@ -75,50 +92,15 @@ class WriteCoordinator:
         try:
             self._ready.result(timeout=30)
         except BaseException:
+            # The lease must outlive the bootstrap connection even when migration fails.
+            self._thread.join(timeout=30)
             self._release_writer_lease()
             raise
 
-    def _acquire_writer_lease(self):
-        parent = os.path.dirname(self._lease_path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        lease = open(self._lease_path, "a+b")
-        lease.seek(0, os.SEEK_END)
-        if lease.tell() == 0:
-            lease.write(b"\0")
-            lease.flush()
-        lease.seek(0)
-        try:
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(lease.fileno(), msvcrt.LK_NBLCK, 1)
-            else:  # pragma: no cover - native deployment is Windows
-                import fcntl
-
-                fcntl.flock(lease.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            lease.close()
-            raise CommandRejectedError("writer_lease_unavailable") from exc
-        return lease
-
     def _release_writer_lease(self) -> None:
-        lease = getattr(self, "_lease_file", None)
-        if lease is None:
-            return
-        try:
-            lease.seek(0)
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(lease.fileno(), msvcrt.LK_UNLCK, 1)
-            else:  # pragma: no cover - native deployment is Windows
-                import fcntl
-
-                fcntl.flock(lease.fileno(), fcntl.LOCK_UN)
-        finally:
-            lease.close()
-            self._lease_file = None
+        lease = getattr(self, "_writer_lease", None)
+        if lease is not None:
+            lease.release()
 
     def _writer_main(self) -> None:
         connection: sqlite3.Connection | None = None
@@ -181,24 +163,39 @@ class WriteCoordinator:
             if connection is not None:
                 connection.close()
 
+    def _enqueue(
+        self,
+        function: Callable[[sqlite3.Connection], Any],
+        transactional: bool,
+        future: concurrent.futures.Future[Any],
+    ) -> None:
+        # Keep the stopped check and enqueue on the same side of the shutdown sentinel.
+        with self._state_lock:
+            if self._stopped:
+                raise RuntimeError("write coordinator is stopped")
+            self._queue.put((function, transactional, future))
+
     async def _dispatch(self, function: Callable[[sqlite3.Connection], Any], transactional: bool) -> Any:
-        if self._stopped:
-            raise RuntimeError("write coordinator is stopped")
         future: concurrent.futures.Future[Any] = concurrent.futures.Future()
-        self._queue.put((function, transactional, future))
+        self._enqueue(function, transactional, future)
         return await asyncio.wrap_future(future)
 
-    async def transaction(self, function: Callable[[sqlite3.Connection], Any]) -> Any:
+    async def transaction(
+        self,
+        function: Callable[[sqlite3.Connection], Any],
+        *,
+        actor: str | None = None,
+    ) -> Any:
+        """Run a serialized transaction; ``actor`` is accepted for caller audit context."""
+        del actor
         return await self._dispatch(function, True)
 
     def transaction_blocking(self, function: Callable[[sqlite3.Connection], Any]) -> Any:
         """Submit a short synchronous caller operation to the writer-owned transaction."""
-        if self._stopped:
-            raise RuntimeError("write coordinator is stopped")
         if threading.current_thread() is self._thread:
             raise RuntimeError("writer thread cannot synchronously dispatch to itself")
         future: concurrent.futures.Future[Any] = concurrent.futures.Future()
-        self._queue.put((function, True, future))
+        self._enqueue(function, True, future)
         return future.result(timeout=30)
 
     async def read(self, function: Callable[[sqlite3.Connection], Any]) -> Any:
@@ -213,9 +210,7 @@ class WriteCoordinator:
                 raise CommandRejectedError("ingress_closed")
             # Enqueue while holding the ingress lock: close_accepting is therefore a real
             # acceptance fence rather than a check-then-enqueue race.
-            self._queue.put(
-                (lambda conn: self._execute_command(conn, command), True, future)
-            )
+            self._enqueue(lambda conn: self._execute_command(conn, command), True, future)
         return await asyncio.wrap_future(future)
 
     def _execute_command(
@@ -321,14 +316,14 @@ class WriteCoordinator:
             self._accepting = False
 
     async def shutdown(self) -> None:
-        if self._stopped:
-            return
         await self.close_accepting()
-        self._stopped = True
-        self._queue.put(None)
-        try:
-            await asyncio.to_thread(self._thread.join, 30)
-            if self._thread.is_alive():
-                raise RuntimeError("writer thread did not stop")
-        finally:
-            self._release_writer_lease()
+        with self._state_lock:
+            if not self._stopped:
+                self._stopped = True
+                self._queue.put(None)
+        # Concurrent/repeated shutdown callers all wait for the same writer exit.
+        await asyncio.to_thread(self._thread.join, 30)
+        if self._thread.is_alive():
+            # Never expose the database to a replacement writer while this one lives.
+            raise RuntimeError("writer thread did not stop")
+        self._release_writer_lease()

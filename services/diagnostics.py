@@ -235,19 +235,36 @@ class DiagnosticsService:
     @staticmethod
     def _probe_memory_vectors(connection: sqlite3.Connection) -> tuple[str, dict[str, Any]]:
         existing = _existing_tables(connection)
-        required = {"memories", "memory_vectors"}
-        missing_tables = sorted(required - existing)
-        if missing_tables:
+        if "memories" not in existing:
             return "not_configured", {
-                "reason": "memory_vector_schema_not_configured",
-                "missing_tables": missing_tables,
+                "reason": "canonical_memory_schema_not_configured",
+                "missing_tables": ["memories"],
             }
 
-        vector_count = _scalar(connection, "SELECT COUNT(*) FROM memory_vectors")
         canonical_vector_count = _scalar(
             connection,
             "SELECT COUNT(*) FROM memories WHERE vector IS NOT NULL",
         )
+        canonical_blob_sizes = [
+            {"bytes": int(row[0] or 0), "count": int(row[1] or 0)}
+            for row in connection.execute(
+                """SELECT length(vector), COUNT(*) FROM memories
+                     WHERE vector IS NOT NULL
+                     GROUP BY length(vector) ORDER BY COUNT(*) DESC LIMIT 5"""
+            ).fetchall()
+        ]
+        if "memory_vectors" not in existing:
+            evidence = {
+                "scope": "canonical_memory_rows",
+                "storage_mode": "memories.vector",
+                "canonical_vector_count": canonical_vector_count,
+                "legacy_table_present": False,
+                "orphan_count": 0,
+                "blob_sizes": canonical_blob_sizes,
+            }
+            return ("empty" if canonical_vector_count == 0 else "healthy"), evidence
+
+        vector_count = _scalar(connection, "SELECT COUNT(*) FROM memory_vectors")
         orphan_count = _scalar(
             connection,
             """SELECT COUNT(*) FROM memory_vectors mv
@@ -259,7 +276,13 @@ class DiagnosticsService:
             """SELECT COUNT(*) FROM memory_vectors mv
                  JOIN memories m ON m.id=mv.memory_id""",
         )
-        blob_sizes = [
+        mismatched_count = _scalar(
+            connection,
+            """SELECT COUNT(*) FROM memory_vectors mv
+                 JOIN memories m ON m.id=mv.memory_id
+                WHERE m.vector IS NULL OR m.vector != mv.vector""",
+        )
+        legacy_blob_sizes = [
             {"bytes": int(row[0] or 0), "count": int(row[1] or 0)}
             for row in connection.execute(
                 """SELECT length(vector), COUNT(*) FROM memory_vectors
@@ -268,15 +291,19 @@ class DiagnosticsService:
         ]
         evidence = {
             "scope": "canonical_memory_ids",
+            "storage_mode": "legacy_duplicate_table",
             "count": vector_count,
             "canonical_vector_count": canonical_vector_count,
             "matched_count": matched_count,
+            "mismatched_count": mismatched_count,
             "orphan_count": orphan_count,
-            "blob_sizes": blob_sizes,
+            "legacy_table_present": True,
+            "blob_sizes": legacy_blob_sizes,
+            "canonical_blob_sizes": canonical_blob_sizes,
         }
         if vector_count == 0 and canonical_vector_count == 0:
             return "empty", evidence
-        if orphan_count:
+        if orphan_count or mismatched_count or vector_count != canonical_vector_count:
             return "drift", evidence
         return "healthy", evidence
 
@@ -459,11 +486,12 @@ class DiagnosticsService:
         source = f"file:{manifest_path(index_path)}"
         manifest_file = manifest_path(index_path)
         try:
+            expected_kind = None if _is_tag_kind(index.kind) else index.kind
             manifest = read_index_manifest(
                 index_path,
-                expected_kind=index.kind,
+                expected_kind=expected_kind,
                 expected_dimension=index.dimension,
-                verify_checksum=False,
+                verify_checksum=True,
             )
             if manifest is None:
                 generation = latest_generation(index_path)
@@ -478,19 +506,33 @@ class DiagnosticsService:
                 health = "drift" if index_path.is_file() or generation > 0 else "empty"
                 return _result(name, health, source, checked_at, evidence)
 
+            if not _index_kinds_match(index.kind, manifest.kind):
+                raise ManifestValidationError(
+                    f"manifest kind mismatch: expected {index.kind!r}, got {manifest.kind!r}"
+                )
+
+            watermark_relation, watermark_delta = _watermark_relation(
+                manifest.db_watermark,
+                committed_watermark,
+            )
             evidence = manifest.to_dict()
             evidence.update({
                 "index_path": str(index_path),
                 "manifest_path": str(manifest_file),
                 "runtime_count": index.runtime_count,
-                "checksum_verified": False,
+                "checksum_verified": True,
                 "committed_watermark": committed_watermark,
+                "committed_write_sequence_watermark": committed_watermark,
+                "watermark_relation": watermark_relation,
+                "watermark_delta": watermark_delta,
             })
             drift_reasons: list[str] = []
             if index.runtime_count is not None and manifest.count != index.runtime_count:
                 drift_reasons.append("runtime_count_mismatch")
-            if committed_watermark is not None and manifest.db_watermark < committed_watermark:
+            if watermark_relation == "lag":
                 drift_reasons.append("db_watermark_lag")
+            elif watermark_relation == "ahead":
+                drift_reasons.append("db_watermark_ahead")
             evidence["drift_reasons"] = drift_reasons
             if drift_reasons:
                 health = "drift"
@@ -526,7 +568,7 @@ class DiagnosticsService:
                 checked_at,
                 {"reason": "runtime_index_probe_not_available", "kind": index.kind},
             )
-        table = "memories" if index.kind == "memory" else "tags" if index.kind == "tags" else None
+        table = "memories" if index.kind == "memory" else "tags" if _is_tag_kind(index.kind) else None
         if table is None:
             return _result(
                 name,
@@ -693,6 +735,30 @@ def _committed_watermark(connection: sqlite3.Connection) -> int | None:
         connection,
         "SELECT COALESCE(MAX(write_sequence), 0) FROM write_operations WHERE status='committed'",
     )
+
+
+def _is_tag_kind(kind: str) -> bool:
+    return str(kind).strip().lower() in {"tag", "tags"}
+
+
+def _index_kinds_match(expected: str, actual: str) -> bool:
+    if _is_tag_kind(expected):
+        return _is_tag_kind(actual)
+    return expected == actual
+
+
+def _watermark_relation(
+    index_watermark: int,
+    committed_watermark: int | None,
+) -> tuple[str, int | None]:
+    if committed_watermark is None:
+        return "unavailable", None
+    delta = index_watermark - committed_watermark
+    if delta < 0:
+        return "lag", delta
+    if delta > 0:
+        return "ahead", delta
+    return "equal", 0
 
 
 def _result(

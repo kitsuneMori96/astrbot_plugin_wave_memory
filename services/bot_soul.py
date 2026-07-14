@@ -32,13 +32,12 @@ class BotSoulRuntime:
 
 
 class BotSoulRegistry:
-    """Lookup helper with explicit fallback to the first configured bot."""
+    """Exact lookup helper for configured bot soul runtimes."""
 
     def __init__(self, runtimes: list[BotSoulRuntime] | None = None):
         self._runtimes = list(runtimes or [])
         self.by_qq_id = {r.qq_id: r for r in self._runtimes if r.qq_id}
         self.by_db = {r.db_id: r for r in self._runtimes if r.db_id}
-        self.default = self._runtimes[0] if self._runtimes else None
 
     def by_qq(self, qq_id: str) -> BotSoulRuntime | None:
         """Return an exact configured bot runtime; unknown IDs must not inherit the default soul."""

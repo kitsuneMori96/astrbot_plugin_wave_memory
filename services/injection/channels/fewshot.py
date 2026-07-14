@@ -109,7 +109,7 @@ class FewShotChannel:
 
         try:
             text = self.few_shot_service.get_injection(
-                bot_id=runtime_scope.bot_id,
+                scope=runtime_scope,
                 max_items=max_items,
             ) or ""
             text = str(text).strip()

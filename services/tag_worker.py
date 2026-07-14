@@ -8,7 +8,11 @@ from dataclasses import dataclass
 from typing import Optional
 
 from astrbot.api import logger
-from domain.scope import RuntimeScope, ScopeValidationError, SessionRef
+
+try:
+    from ..domain.scope import RuntimeScope, ScopeValidationError, SessionRef
+except ImportError:  # pragma: no cover - repository tests import top-level packages
+    from domain.scope import RuntimeScope, ScopeValidationError, SessionRef
 
 
 @dataclass(frozen=True)

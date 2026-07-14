@@ -19,7 +19,11 @@ except ImportError:  # 兼容独立测试/外部调用 services.learning
     from engine.db.book_experience_repo import BookExperienceEpisodeRepository
 
 from .book_experience import BookExperienceEvidenceValidator
-from .scope_policy import LearningPromotionScopeError, resolve_learning_promotion_scope
+from .scope_policy import (
+    LearningPromotionScopeError,
+    resolve_learning_promotion_scope,
+    resolve_reviewed_catalog_projection,
+)
 
 
 def _text(value: Any) -> str:
@@ -49,6 +53,30 @@ def _scope(
 
         raise PromotionTerminalError(str(exc), code=exc.reason_code) from exc
     return resolved.group_id, resolved.user_id
+
+
+def _runtime_promotion_context(
+    candidate: Mapping[str, Any], bot_id: str, *, command_type: str
+):
+    try:
+        return resolve_learning_promotion_scope(
+            candidate,
+            bot_id=bot_id,
+            command_type=command_type,
+        )
+    except LearningPromotionScopeError as exc:
+        from .promotion import PromotionTerminalError
+
+        raise PromotionTerminalError(str(exc), code=exc.reason_code) from exc
+
+
+def _catalog_projection_context(candidate: Mapping[str, Any], bot_id: str):
+    try:
+        return resolve_reviewed_catalog_projection(candidate, bot_id=bot_id)
+    except LearningPromotionScopeError as exc:
+        from .promotion import PromotionTerminalError
+
+        raise PromotionTerminalError(str(exc), code=exc.reason_code) from exc
 
 
 def _invoke_legacy(function: Callable[..., Any], values: dict[str, Any]) -> Any:
@@ -244,10 +272,10 @@ class BookExperiencePromotionService:
 
 
 class FewShotStylePromotionService:
-    """将批准样例交给 FewShotService 的 approved 写入/去重路径。"""
+    """将批准样例交给可注入 formal writer，不直接执行 SQL/commit。"""
 
-    def __init__(self, few_shot_service: Any):
-        self.service = few_shot_service
+    def __init__(self, writer: Any):
+        self.service = writer
 
     def promote(self, *, candidate: Mapping[str, Any], bot_id: str, target_kind: str):
         evidence = _evidence(candidate)
@@ -256,25 +284,36 @@ class FewShotStylePromotionService:
         if callable(health_check) and not health_check(content):
             from .promotion import PromotionTerminalError
             raise PromotionTerminalError("few-shot example failed domain safety validation", code="unsafe_example")
-        method = _method(self.service, "add_approved_example", "create_approved_example")
+        method = _method(self.service, "write_approved", "add_approved_example")
         if method is None:
-            raise ValueError("FewShot service has no approved example writer")
-        group_id, user_id = _scope(
+            raise ValueError("FewShot formal writer is unavailable")
+        context = _runtime_promotion_context(
             candidate,
             bot_id,
             command_type="learning.few_shot_style.promote",
         )
-        target_id = _invoke_legacy(method, {
-            "content": content,
-            "score": float(evidence.get("score") or 0.0),
-            "traits": list(evidence.get("traits") or []),
+        candidate_id = candidate.get("id")
+        key = (
+            f"candidate:{candidate_id}"
+            if candidate_id is not None
+            else f"fingerprint:{candidate.get('source_fingerprint', '')}"
+        )
+        target_id = method(
+            scope=context.scope,
+            candidate=dict(candidate),
+            evidence_refs=context.evidence_refs,
+            evidence_bindings=context.evidence_bindings,
+            content=content,
+            score=float(evidence.get("score") or 0.0),
+            traits=tuple(evidence.get("traits") or ()),
+            source_candidate_id=int(candidate_id) if candidate_id is not None else None,
+            idempotency_key=key,
+        )
+        return _result(target_id, self.service, metadata={
             "bot_id": bot_id,
-            "group_id": group_id,
-            "user_id": user_id,
+            "runtime_scope": context.scope.to_dict(),
             "status": "approved",
-            "candidate_id": candidate.get("id"),
         })
-        return _result(target_id, self.service, metadata={"bot_id": bot_id, "group_id": group_id, "user_id": user_id, "status": "approved"})
 
 
 class FactPromotionService:
@@ -352,35 +391,45 @@ class RelationshipPromotionService:
 
 
 class BookLorePromotionService:
-    """将批准 BookLore 候选交给 BookLore repository/service 的去重路径。"""
+    """写入 reviewed Catalog→Runtime projection；raw Catalog 永远只读。"""
 
-    def __init__(self, book_lore_service: Any):
-        self.service = book_lore_service
+    def __init__(self, writer: Any):
+        self.service = writer
 
     def promote(self, *, candidate: Mapping[str, Any], bot_id: str, target_kind: str):
         evidence = _evidence(candidate)
-        method = _method(self.service, "upsert_lore", "upsert_community", "add_community", "create")
+        method = _method(self.service, "write_reviewed_projection")
         if method is None:
-            raise ValueError("BookLore service has no lore writer")
-        group_id, user_id = _scope(
-            candidate,
-            bot_id,
-            command_type="learning.book_lore.promote",
+            raise ValueError("reviewed BookLore projection writer is unavailable")
+        context = _catalog_projection_context(candidate, bot_id)
+        candidate_id = candidate.get("id")
+        key = (
+            f"candidate:{candidate_id}"
+            if candidate_id is not None
+            else f"fingerprint:{candidate.get('source_fingerprint', '')}"
         )
-        values = {
-            "community_id": evidence.get("community_id"),
-            "title": _text(evidence.get("title")),
-            "summary": _text(evidence.get("summary_snapshot") or evidence.get("summary")),
-            "summary_snapshot": _text(evidence.get("summary_snapshot") or evidence.get("summary")),
-            "rank": evidence.get("rank"),
-            "source_library_id": _text(evidence.get("source_library_id")),
-            "content": _text(candidate.get("content")),
-            "bot_id": bot_id,
-            "group_id": group_id,
-            "user_id": user_id,
-            "candidate_id": candidate.get("id"),
-        }
-        return _result(_invoke_legacy(method, values), self.service, metadata={"bot_id": bot_id, "group_id": group_id, "user_id": user_id})
+        target_id = method(
+            source_scope=context.source_scope,
+            target_scope=context.target_scope,
+            candidate=dict(candidate),
+            evidence_refs=context.evidence_refs,
+            evidence_bindings=context.evidence_bindings,
+            derivation=context.derivation,
+            community_id=_text(evidence.get("community_id")),
+            title=_text(evidence.get("title")),
+            summary=_text(evidence.get("summary_snapshot") or evidence.get("summary")),
+            content=_text(candidate.get("content")),
+            rank=float(evidence.get("rank") or 0.0),
+            status="approved",
+            source_candidate_id=int(candidate_id) if candidate_id is not None else None,
+            idempotency_key=key,
+        )
+        return _result(target_id, self.service, metadata={
+            "source_catalog_scope": context.source_scope.to_dict(),
+            "target_runtime_scope": context.target_scope.to_dict(),
+            "status": "approved",
+            "derivation_version": context.derivation.derivation_version,
+        })
 
 
 def register_learning_domain_targets(registry: Any, services: Mapping[str, Any]) -> dict[str, Any]:

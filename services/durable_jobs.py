@@ -4,14 +4,43 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 try:
     from ..engine.db.job_repo import JobRepository, JobRequest, JobRun
 except ImportError:  # pragma: no cover - focused tests import top-level packages
     from engine.db.job_repo import JobRepository, JobRequest, JobRun
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class DurableJobEnvelope:
+    """Stable HTTP-facing identity for one accepted durable job run."""
+
+    request_id: str
+    job_id: str
+    kind: str
+    status: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "accepted": True,
+            "request_id": self.request_id,
+            "job_id": self.job_id,
+            "status": self.status,
+            "operation": {
+                "id": self.job_id,
+                "kind": self.kind,
+                "status": self.status,
+            },
+            "revision": None,
+        }
 
 
 class _SystemClock:
@@ -61,6 +90,53 @@ class DurableJobService:
 
     submit_request = create_request
 
+    async def enqueue(
+        self,
+        *,
+        idempotency_key: str,
+        kind: str,
+        scope: Any,
+        payload: Any,
+        schedule_slot: str,
+        cursor_generation: int = 0,
+        cursor: Any | None = None,
+        request_id: str | None = None,
+        run_id: str | None = None,
+        reschedule_terminal: bool = False,
+    ) -> DurableJobEnvelope:
+        """Create the immutable request and first run in one writer transaction."""
+        now = self._now()
+
+        def transaction(connection):
+            request_row = JobRepository.create_request(
+                connection,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+                kind=kind,
+                scope=scope,
+                payload=payload,
+                created_at=now,
+            )
+            run = JobRepository.schedule_run(
+                connection,
+                request_id=request_row.request_id,
+                schedule_slot=schedule_slot,
+                cursor_generation=cursor_generation,
+                cursor=cursor,
+                run_id=run_id,
+                created_at=now,
+                reschedule_terminal=reschedule_terminal,
+            )
+            status = "queued" if run.status == JobRepository.PENDING else run.status
+            return DurableJobEnvelope(
+                request_id=request_row.request_id,
+                job_id=run.run_id,
+                kind=request_row.kind,
+                status=status,
+            )
+
+        return await self._coordinator.transaction(transaction)
+
     async def schedule_run(
         self,
         *,
@@ -69,6 +145,7 @@ class DurableJobService:
         cursor_generation: int = 0,
         cursor: Any | None = None,
         run_id: str | None = None,
+        reschedule_terminal: bool = False,
     ) -> JobRun:
         now = self._now()
         return await self._coordinator.transaction(
@@ -80,6 +157,7 @@ class DurableJobService:
                 cursor=cursor,
                 run_id=run_id,
                 created_at=now,
+                reschedule_terminal=reschedule_terminal,
             )
         )
 
@@ -282,17 +360,32 @@ class DurableJobRunner:
             self._task.cancel()
 
     async def _loop(self) -> None:
-        await self.service.recover_expired_leases()
+        try:
+            await self.service.recover_expired_leases()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("durable job lease recovery failed; polling will continue")
+
         while self._running:
-            run = await self.service.claim_next(
-                lease_owner=self.lease_owner,
-                lease_seconds=self.lease_seconds,
-                kinds=tuple(self.handlers),
-            )
-            if run is None:
-                await asyncio.sleep(self.poll_interval)
-                continue
-            await self._execute(run)
+            try:
+                run = await self.service.claim_next(
+                    lease_owner=self.lease_owner,
+                    lease_seconds=self.lease_seconds,
+                    kinds=tuple(self.handlers),
+                )
+                if run is None:
+                    await asyncio.sleep(self.poll_interval)
+                    continue
+                await self._execute(run)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # A stale lease or one failed terminal mark belongs to that run; it
+                # must not take down the process-wide durable polling loop.
+                logger.exception("durable job iteration failed; polling will continue")
+                if self._running:
+                    await asyncio.sleep(self.poll_interval)
 
     async def _execute(self, run: JobRun) -> None:
         request = await self.service.get_request(run.request_id)
@@ -355,4 +448,4 @@ class DurableJobRunner:
 
 DurableJobs = DurableJobService
 
-__all__ = ["DurableJobService", "DurableJobRunner", "DurableJobs"]
+__all__ = ["DurableJobEnvelope", "DurableJobService", "DurableJobRunner", "DurableJobs"]

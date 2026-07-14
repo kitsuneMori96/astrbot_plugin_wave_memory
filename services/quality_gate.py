@@ -182,6 +182,16 @@ class QualityGate:
     require_writable = enforce
 
     def _structural_decision(self, proposal: QualityProposal) -> tuple[str | None, list[str]]:
+        raw_hash = str(proposal.raw_artifact.content_hash or "")
+        if not raw_hash.startswith("sha256:"):
+            return "reject", ["raw_artifact_hash_invalid"]
+        # Message ingestion constructs RawArtifactRef from the exact content that
+        # is about to be written. Reject a forged hash instead of treating a
+        # caller-supplied artifact token as evidence of the bytes inspected.
+        if proposal.raw_artifact.kind == "chat_message":
+            expected_hash = "sha256:" + hashlib.sha256(proposal.content.encode("utf-8")).hexdigest()
+            if raw_hash != expected_hash:
+                return "reject", ["raw_artifact_hash_mismatch"]
         if proposal.target_scope is None:
             if proposal.evidence_refs or proposal.evidence_bindings:
                 return "reject", ["scope_required"]
@@ -209,10 +219,19 @@ class QualityGate:
             if ref.source_scope == proposal.target_scope:
                 continue
             binding = binding_by_evidence.get(ref.id)
-            catalog_projection = (
+            is_catalog_projection = (
                 isinstance(ref.source_scope, CatalogScope)
                 and isinstance(proposal.target_scope, RuntimeScope)
                 and binding is not None
+            )
+            if is_catalog_projection and binding.policy_version not in {
+                "scope-derivation/v1",
+                "book-experience/v1",
+                "worldview-internalization/v1",
+            }:
+                return "reject", ["evidence_policy_unsupported"]
+            catalog_projection = (
+                is_catalog_projection
                 and binding.derivation_chain == FULL_EVIDENCE_DERIVATION_CHAIN
             )
             if not catalog_projection:

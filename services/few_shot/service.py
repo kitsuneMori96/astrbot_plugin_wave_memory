@@ -13,9 +13,24 @@ import json
 import random
 import re
 import time
+from collections.abc import Mapping, Sequence
 from typing import Any, Dict, List, Optional
 
-from astrbot.api import logger
+try:
+    from astrbot.api import logger
+except ImportError:  # pragma: no cover - 领域单测不依赖 AstrBot runtime
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+try:
+    from ...domain.evidence import EvidenceBinding, EvidenceRef
+    from ...domain.scope import RuntimeScope
+    from ...engine.db.scoped_learning_projection_repo import ScopedFewShotRepository
+except ImportError:  # pragma: no cover - 独立测试兼容
+    from domain.evidence import EvidenceBinding, EvidenceRef
+    from domain.scope import RuntimeScope
+    from engine.db.scoped_learning_projection_repo import ScopedFewShotRepository
 
 from ..identity_safety import is_identity_contamination
 
@@ -52,12 +67,25 @@ _AGGRESSIVE_STYLE_RE = re.compile(
 class FewShotService:
     """Few-Shot 风格学习主服务。"""
 
-    def __init__(self, db: Any, llm_client: Any = None, embedding_service: Any = None, enabled: bool = True, config: dict = None):
+    def __init__(
+        self,
+        db: Any,
+        llm_client: Any = None,
+        embedding_service: Any = None,
+        enabled: bool = True,
+        config: dict = None,
+        repository: Any = None,
+        writer: Any = None,
+    ):
         self._db = db
         self._llm = llm_client
         self._embedding = embedding_service
         self._enabled = enabled
         self._config = config or {}
+        connection = getattr(db, "conn", db)
+        # 默认实例只用于读取，绝不在构造时绕过正式 writer 创建 schema。
+        self._repository = repository or ScopedFewShotRepository(connection, ensure_schema=False)
+        self._writer = writer
         self._last_extract: float = 0  # 上次提取时间
         self._last_injected_ids: List[int] = []  # 避免连续注入同一条
 
@@ -65,26 +93,6 @@ class FewShotService:
         self._min_score = float(self._config.get("min_score", 0.7))
         self._max_inject = int(self._config.get("max_inject", 3))
         self._drift_threshold = float(self._config.get("drift_threshold", 0.5))
-        self._ensure_table()
-
-    def _ensure_table(self) -> None:
-        """创建 few_shot_examples 表。"""
-        try:
-            self._db.conn.execute("""
-                CREATE TABLE IF NOT EXISTS few_shot_examples (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    content TEXT NOT NULL,
-                    score REAL DEFAULT 0,
-                    traits TEXT DEFAULT '[]',
-                    status TEXT DEFAULT 'pending',
-                    bot_id TEXT DEFAULT '',
-                    created_at INTEGER,
-                    approved_at INTEGER DEFAULT NULL
-                )
-            """)
-            self._db.conn.commit()
-        except Exception as e:
-            logger.debug(f"[FewShot] table ensure: {e}")
 
     # ─── US-5.1: 提取风格范例 ───
 
@@ -138,47 +146,50 @@ class FewShotService:
     def add_approved_example(
         self,
         *,
+        scope: RuntimeScope,
+        candidate: Mapping[str, Any],
+        evidence_refs: Sequence[EvidenceRef],
+        evidence_bindings: Sequence[EvidenceBinding],
         content: str,
         score: float = 0.0,
-        traits: list[str] | None = None,
-        bot_id: str = "",
-        status: str = "approved",
-        approved_at: int | None = None,
+        traits: Sequence[str] | None = None,
+        source_candidate_id: int | None = None,
+        idempotency_key: str | None = None,
     ) -> int:
-        """写入批准的风格样例并按 bot_id+content 幂等去重。
+        """通过可注入正式仓储写入 scoped approved 样例。
 
-        学习中心晋升器只调用这个领域入口；不会直接拼接 few_shot_examples SQL。
+        legacy ``few_shot_examples`` 只保留审计价值，不再作为正式写入或注入来源。
         """
         content = str(content or "").strip()
-        bot_id = str(bot_id or "").strip()
-        status = str(status or "approved").strip().lower()
-        if not content or not bot_id:
-            raise ValueError("content and bot_id are required")
-        if status != "approved":
-            raise ValueError("FewShot promotion requires approved status")
+        if not isinstance(scope, RuntimeScope):
+            raise TypeError("scope must be RuntimeScope")
+        if not content:
+            raise ValueError("content is required")
         if not self._is_healthy_example(content):
             raise ValueError("few-shot example failed safety validation")
-        existing = self._db.conn.execute(
-            "SELECT id, status FROM few_shot_examples WHERE bot_id=? AND content=? ORDER BY id LIMIT 1",
-            (bot_id, content),
-        ).fetchone()
-        now = int(time.time() if approved_at is None else approved_at)
-        if existing:
-            if str(existing[1] or "").lower() != "approved":
-                self._db.conn.execute(
-                    "UPDATE few_shot_examples SET score=?, traits=?, status='approved', approved_at=? WHERE id=?",
-                    (float(score), json.dumps(list(traits or []), ensure_ascii=False), now, int(existing[0])),
-                )
-                self._db.conn.commit()
-            return int(existing[0])
-        cur = self._db.conn.execute(
-            """INSERT INTO few_shot_examples
-               (content, score, traits, status, bot_id, created_at, approved_at)
-               VALUES (?, ?, ?, 'approved', ?, ?, ?)""",
-            (content, float(score), json.dumps(list(traits or []), ensure_ascii=False), bot_id, now, now),
-        )
-        self._db.conn.commit()
-        return int(getattr(cur, "lastrowid", 0) or 0)
+        candidate_id = source_candidate_id
+        if candidate_id is None and isinstance(candidate, Mapping):
+            raw_id = candidate.get("id")
+            candidate_id = int(raw_id) if raw_id is not None else None
+        key = str(idempotency_key or "").strip()
+        if not key:
+            if candidate_id is None:
+                raise ValueError("source_candidate_id or idempotency_key is required")
+            key = f"candidate:{candidate_id}"
+        writer = getattr(self._writer, "write_approved", None)
+        if not callable(writer):
+            raise RuntimeError("formal scoped FewShot writer is unavailable")
+        return int(writer(
+            scope=scope,
+            candidate=candidate,
+            evidence_refs=tuple(evidence_refs),
+            evidence_bindings=tuple(evidence_bindings),
+            content=content,
+            score=float(score),
+            traits=tuple(traits or ()),
+            source_candidate_id=candidate_id,
+            idempotency_key=key,
+        ))
 
     def refresh(self, **kwargs: Any) -> None:
         """清理注入游标，确保新晋升样例下一次可参与缓存选择。"""
@@ -186,26 +197,24 @@ class FewShotService:
 
     # ─── US-5.2: 注入 few-shot ───
 
-    def get_injection(self, bot_id: str = "", max_items: int = None) -> str:
-        """获取 2-3 条已批准 few-shot 注入文本。"""
-        bot_id = str(bot_id or "").strip()
-        if not self._enabled or not bot_id:
+    def get_injection(self, scope: RuntimeScope, max_items: int = None) -> str:
+        """获取当前完整 RuntimeScope 下 2-3 条 approved few-shot。"""
+        if not self._enabled or not isinstance(scope, RuntimeScope):
             self._last_injected_ids = []
             return ""
         if max_items is None:
             max_items = self._max_inject
 
-        rows = self._db.conn.execute(
-            """SELECT id, content FROM few_shot_examples
-               WHERE status = 'approved' AND bot_id = ?
-               ORDER BY score DESC LIMIT 20""",
-            (bot_id,),
-        ).fetchall()
-
+        rows = self._repository.list_approved(scope=scope, limit=20)
         if not rows:
+            self._last_injected_ids = []
             return ""
 
-        healthy_rows = [(r[0], r[1]) for r in rows if self._is_healthy_example(r[1])]
+        healthy_rows = [
+            (int(row["id"]), str(row["content"]))
+            for row in rows
+            if self._is_healthy_example(row.get("content", ""))
+        ]
         if not healthy_rows:
             self._last_injected_ids = []
             return ""
@@ -223,26 +232,16 @@ class FewShotService:
 
     # ─── US-5.4: 风格漂移检测 ───
 
-    async def check_drift(self, recent_reply: str, bot_id: str = "") -> Optional[Dict]:
-        """检查最新回复是否风格漂移。返回 None 表示无漂移。"""
-        if not self._enabled or not self._llm:
+    async def check_drift(self, recent_reply: str, scope: RuntimeScope | None = None) -> Optional[Dict]:
+        """检查当前完整 RuntimeScope 下的风格漂移。"""
+        if not self._enabled or not self._llm or not isinstance(scope, RuntimeScope):
             return None
 
-        bot_id = str(bot_id or "").strip()
-        if not bot_id:
-            return None
-        # 获取同一 bot 的已批准范例，不接受 legacy 空 bot 回退。
-        rows = self._db.conn.execute(
-            """SELECT content FROM few_shot_examples
-               WHERE status = 'approved' AND bot_id = ?
-               ORDER BY score DESC LIMIT 5""",
-            (bot_id,),
-        ).fetchall()
-
+        rows = self._repository.list_approved(scope=scope, limit=5)
         if len(rows) < 3:
             return None  # 范例太少无法判断
 
-        examples_text = "\n".join(f"- {r[0]}" for r in rows)
+        examples_text = "\n".join(f"- {row['content']}" for row in rows)
         prompt = _DRIFT_CHECK_PROMPT.format(examples=examples_text, recent=recent_reply)
 
         try:

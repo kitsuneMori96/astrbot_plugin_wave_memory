@@ -7,11 +7,19 @@
 from __future__ import annotations
 
 import time
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-from astrbot.api import logger
+try:
+    from astrbot.api import logger
+except ImportError:  # pragma: no cover - repository tests run without AstrBot
+    import logging
+    logger = logging.getLogger(__name__)
 
-from ..engine.database import WaveMemoryDB
+if TYPE_CHECKING:
+    try:
+        from ..engine.database import WaveMemoryDB
+    except ImportError:  # pragma: no cover
+        from engine.database import WaveMemoryDB
 
 
 class TimeAnchor:
@@ -28,12 +36,25 @@ class TimeAnchor:
 class SubjectiveTime:
     """主观时间引擎 — 用锚点描述时间间隔。"""
 
-    def __init__(self, db: WaveMemoryDB, bot_id: str = "", max_anchors: int = 20):
+    def __init__(
+        self,
+        db: WaveMemoryDB,
+        bot_id: str = "",
+        max_anchors: int = 20,
+        *,
+        scope=None,
+        repository=None,
+        coordinator=None,
+    ):
         self.db = db
         self.bot_id = bot_id
+        self.scope = scope
+        self.repository = repository
+        self.coordinator = coordinator
         self.anchors: list[TimeAnchor] = []
+        self._scoped_anchors: dict[tuple[str, str, str], list[TimeAnchor]] = {}
         self.max_anchors = max_anchors
-        self._ensure_table()
+        # Legacy time_anchors 仅作为审计来源读取。
         self._load()
 
     def _ensure_table(self):
@@ -65,31 +86,78 @@ class SubjectiveTime:
         except Exception:
             pass
 
-    def add_anchor(self, event_summary: str, emotional_weight: float = 0.5, timestamp: float = None):
-        """添加时间锚点。"""
+    @staticmethod
+    def _scope_key(scope) -> tuple[str, str, str]:
+        if scope is None or getattr(scope, "session", None) is None:
+            raise ValueError("scope_required")
+        return scope.bot_id, scope.session.id, scope.visibility
+
+    def _anchors_for(self, scope=None) -> list[TimeAnchor]:
+        effective_scope = scope or self.scope
+        if effective_scope is None:
+            return self.anchors
+        key = self._scope_key(effective_scope)
+        bucket = self._scoped_anchors.get(key)
+        if bucket is None:
+            bucket = []
+            self._scoped_anchors[key] = bucket
+            if self.repository is not None and hasattr(self.repository, "get_state"):
+                try:
+                    items = self.repository.get_state(effective_scope, limit=self.max_anchors, offset=0)["timeline"]["items"]
+                    bucket.extend(TimeAnchor(
+                        event_summary=item["event_summary"],
+                        timestamp=float(item.get("timestamp") or 0),
+                        emotional_weight=float(item.get("emotional_weight") or 0.5),
+                        bot_id=effective_scope.bot_id,
+                    ) for item in items)
+                except Exception as exc:
+                    logger.debug(f"[SubjectiveTime] Scoped load failed: {exc}")
+        return bucket
+
+    def add_anchor(
+        self,
+        event_summary: str,
+        emotional_weight: float = 0.5,
+        timestamp: float = None,
+        *,
+        scope=None,
+        evidence=None,
+    ):
+        """在调用方 RuntimeScope 内添加时间锚点。"""
+        effective_scope = scope or self.scope
         ts = timestamp or time.time()
-        anchor = TimeAnchor(event_summary=event_summary, timestamp=ts, emotional_weight=emotional_weight, bot_id=self.bot_id)
-        self.anchors.insert(0, anchor)  # 最新的在前
+        anchor = TimeAnchor(event_summary=event_summary, timestamp=ts, emotional_weight=emotional_weight, bot_id=getattr(effective_scope, "bot_id", self.bot_id))
+        anchors = self._anchors_for(effective_scope)
+        anchors.insert(0, anchor)
+        if len(anchors) > self.max_anchors:
+            del anchors[self.max_anchors:]
 
-        # 容量控制
-        if len(self.anchors) > self.max_anchors:
-            self.anchors = self.anchors[:self.max_anchors]
-
+        if self.repository is None or effective_scope is None:
+            return
         try:
-            self.db.conn.execute(
-                "INSERT INTO time_anchors (event_summary, timestamp, emotional_weight, bot_id) VALUES (?, ?, ?, ?)",
-                (event_summary, ts, emotional_weight, self.bot_id),
-            )
-            self.db.conn.commit()
+            kwargs = {
+                "event_summary": event_summary,
+                "emotional_weight": emotional_weight,
+                "timestamp": ts,
+                "evidence": evidence,
+            }
+            if self.coordinator is not None:
+                self.coordinator.transaction_blocking(
+                    lambda connection: self.repository.add_timeline_event(
+                        effective_scope, connection=connection, **kwargs
+                    )
+                )
+            else:
+                self.repository.add_timeline_event(effective_scope, **kwargs)
         except Exception as e:
-            logger.debug(f"[SubjectiveTime] Persist failed: {e}")
+            logger.debug(f"[SubjectiveTime] Scoped persist failed: {e}")
 
-    def describe_interval(self, target_timestamp: float) -> str:
-        """将绝对时间差转为主观描述。"""
+    def describe_interval(self, target_timestamp: float, *, scope=None) -> str:
+        """将绝对时间差转为指定 RuntimeScope 内的主观描述。"""
         elapsed = time.time() - target_timestamp
 
-        # 查找最近的锚点
-        nearest_anchor = self._find_nearest_anchor(target_timestamp)
+        # 查找同一作用域内最近的锚点
+        nearest_anchor = self._find_nearest_anchor(target_timestamp, scope=scope)
 
         if nearest_anchor and elapsed < 7 * 86400:
             return f"{nearest_anchor.event_summary}之后"
@@ -149,11 +217,11 @@ class SubjectiveTime:
         day_name = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][weekday]
         return f"{day_name}{period}"
 
-    def _find_nearest_anchor(self, target_ts: float) -> Optional[TimeAnchor]:
-        """找到距目标时间最近且在其之前的锚点。"""
+    def _find_nearest_anchor(self, target_ts: float, *, scope=None) -> Optional[TimeAnchor]:
+        """在指定 RuntimeScope 内找到距目标时间最近且在其之前的锚点。"""
         best = None
         best_diff = float('inf')
-        for anchor in self.anchors:
+        for anchor in self._anchors_for(scope):
             diff = target_ts - anchor.timestamp
             if 0 < diff < best_diff:
                 best_diff = diff

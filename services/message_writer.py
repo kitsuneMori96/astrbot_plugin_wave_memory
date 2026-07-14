@@ -284,11 +284,18 @@ class MessageWriter:
         provenance = self._provenance(item, quarantined=quarantine)
         metadata = item.get("metadata")
         metadata = metadata if isinstance(metadata, Mapping) else {}
-        idempotency_hint = (
+        raw_idempotency_hint = (
             metadata.get("event_id")
             or item.get("event_id")
             or item.get("message_id")
         )
+        idempotency_hint = None
+        if raw_idempotency_hint not in {None, ""}:
+            scope = item["scope"]
+            session_id = scope.session.id if getattr(scope, "session", None) is not None else "no-session"
+            idempotency_hint = (
+                f"{scope.bot_id}:{scope.visibility}:{session_id}:{raw_idempotency_hint}"
+            )
         if self.write_gateway is not None:
             return await self.write_gateway.append_memory(
                 scope=item["scope"],
@@ -402,7 +409,9 @@ class MessageWriter:
                 ),
                 target_scope=raw_scope,
             )
-            decision = self.quality_gate.evaluate(proposal)
+            # CoordinatorQualityRepository persists synchronously; keep its
+            # transaction and filesystem wait off the AstrBot event loop.
+            decision = await asyncio.to_thread(self.quality_gate.evaluate, proposal)
             
             if decision.outcome == "reject":
                 continue

@@ -183,10 +183,10 @@ class FTS5Channel:
                 (expr, *params, limit),
             ).fetchall()
             if not rows:
-                rows = self._like_fallback(words=words, limit=limit, scope=scope)
+                rows = self._scoped_like_search(words=words, limit=limit, scope=scope)
         except Exception:
-            # Missing scoped schema or an invalid FTS expression must never fall
-            # back to an unscoped legacy read.
+            # Missing scoped schema or an invalid FTS expression fails closed;
+            # no unscoped historical read is permitted.
             return []
 
         return [
@@ -198,7 +198,7 @@ class FTS5Channel:
             for row in rows
         ]
 
-    def _like_fallback(self, *, words: list[str], limit: int, scope: RuntimeScope) -> list[tuple[Any, ...]]:
+    def _scoped_like_search(self, *, words: list[str], limit: int, scope: RuntimeScope) -> list[tuple[Any, ...]]:
         if not words or scope.session is None:
             return []
         conditions = " OR ".join(["m.content LIKE ?"] * len(words))

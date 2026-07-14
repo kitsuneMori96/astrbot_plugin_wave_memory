@@ -15,19 +15,33 @@ import logging
 from typing import Any
 
 try:
-    from ...domain.evidence import EvidenceBinding, EvidenceRef
+    from ...domain.evidence import (
+        EvidenceBinding,
+        EvidenceDerivation,
+        EvidenceRef,
+        FULL_EVIDENCE_DERIVATION_CHAIN,
+    )
     from ...domain.scope import (
+        CatalogScope,
         RuntimeScope,
         ScopeValidationError,
+        ScopeValidator,
         build_command_scope_policy_registry,
         scope_from_value,
     )
     from ..compat.scope_adapter import LegacyScopeAdapter
 except ImportError:  # 兼容独立测试/外部调用 services.learning
-    from domain.evidence import EvidenceBinding, EvidenceRef
+    from domain.evidence import (
+        EvidenceBinding,
+        EvidenceDerivation,
+        EvidenceRef,
+        FULL_EVIDENCE_DERIVATION_CHAIN,
+    )
     from domain.scope import (
+        CatalogScope,
         RuntimeScope,
         ScopeValidationError,
+        ScopeValidator,
         build_command_scope_policy_registry,
         scope_from_value,
     )
@@ -47,6 +61,20 @@ class LearningPromotionScope:
     scope: RuntimeScope
     group_id: str
     user_id: str | None
+    policy_version: str
+    evidence_refs: tuple[EvidenceRef, ...]
+    evidence_bindings: tuple[EvidenceBinding, ...]
+
+
+@dataclass(frozen=True)
+class ReviewedCatalogProjectionScope:
+    """经过完整证据校验的 Catalog→Runtime reviewed projection 上下文。"""
+
+    source_scope: CatalogScope
+    target_scope: RuntimeScope
+    evidence_refs: tuple[EvidenceRef, ...]
+    evidence_bindings: tuple[EvidenceBinding, ...]
+    derivation: EvidenceDerivation
     policy_version: str
 
 
@@ -128,7 +156,7 @@ def resolve_learning_promotion_scope(
     if scope.bot_id != stable_bot_id:
         raise LearningPromotionScopeError("scope_bot_mismatch", "target scope Bot does not match promotion Bot")
 
-    _validate_evidence_bindings(evidence, scope)
+    evidence_refs, evidence_bindings = _validate_evidence_bindings(evidence, scope)
     _validate_high_commitment_anchor(evidence, scope)
 
     projected = _LEGACY_SCOPE_ADAPTER.project_runtime(
@@ -151,6 +179,8 @@ def resolve_learning_promotion_scope(
         group_id=projected.group_id,
         user_id=projected.user_id,
         policy_version=decision.policy_version,
+        evidence_refs=evidence_refs,
+        evidence_bindings=evidence_bindings,
     )
 
 
@@ -177,7 +207,113 @@ def _target_scope(evidence: Mapping[str, Any]) -> RuntimeScope:
     return scope
 
 
-def _validate_evidence_bindings(evidence: Mapping[str, Any], target_scope: RuntimeScope) -> None:
+def resolve_reviewed_catalog_projection(
+    candidate: Mapping[str, Any],
+    *,
+    bot_id: str,
+    command_type: str = "learning.book_lore.promote",
+) -> ReviewedCatalogProjectionScope:
+    """校验完整的 CatalogScope→RuntimeScope reviewed derivation，不做 legacy 投影。"""
+    stable_bot_id = require_learning_bot_id(bot_id)
+    evidence = candidate.get("evidence") if isinstance(candidate, Mapping) else None
+    if not isinstance(evidence, Mapping):
+        raise LearningPromotionScopeError("scope_required", "candidate evidence must declare scopes")
+    target_scope = _target_scope(evidence)
+    decision = _POLICY_REGISTRY.validate(command_type, target_scope)
+    if not decision.allowed:
+        raise LearningPromotionScopeError(
+            decision.reason_code or "scope_rejected", "target scope is not accepted"
+        )
+    if target_scope.bot_id != stable_bot_id:
+        raise LearningPromotionScopeError("scope_bot_mismatch", "target scope Bot does not match promotion Bot")
+
+    raw_catalog_scope = evidence.get("catalog_scope")
+    try:
+        source_scope = scope_from_value(raw_catalog_scope)
+    except ScopeValidationError as exc:
+        raise LearningPromotionScopeError(exc.reason_code, str(exc)) from exc
+    if not isinstance(source_scope, CatalogScope):
+        raise LearningPromotionScopeError("catalog_scope_required", "BookLore source must be CatalogScope")
+
+    refs = _decode_many(
+        evidence, plural="evidence_refs", singular="evidence_ref", decoder=EvidenceRef.from_dict
+    )
+    if not refs:
+        raise LearningPromotionScopeError("evidence_required", "projection requires at least one EvidenceRef")
+    ref_ids: set[str] = set()
+    for ref in refs:
+        if not ref.available:
+            raise LearningPromotionScopeError("evidence_unavailable", "projection evidence is unavailable")
+        if ref.source_scope != source_scope:
+            raise LearningPromotionScopeError(
+                "evidence_scope_mismatch", "BookLore EvidenceRef must use the source CatalogScope"
+            )
+        ref_ids.add(ref.id)
+
+    bindings = _decode_many(
+        evidence,
+        plural="evidence_bindings",
+        singular="evidence_binding",
+        decoder=EvidenceBinding.from_dict,
+    )
+    if not bindings:
+        raise LearningPromotionScopeError(
+            "evidence_binding_required", "projection requires an EvidenceBinding"
+        )
+    for binding in bindings:
+        if binding.evidence_id not in ref_ids:
+            raise LearningPromotionScopeError(
+                "evidence_binding_mismatch", "EvidenceBinding must reference supplied evidence"
+            )
+        if binding.target_scope != target_scope:
+            raise LearningPromotionScopeError(
+                "evidence_scope_mismatch", "EvidenceBinding target must equal RuntimeScope"
+            )
+        if binding.derivation_chain != FULL_EVIDENCE_DERIVATION_CHAIN:
+            raise LearningPromotionScopeError(
+                "invalid_derivation_chain", "BookLore binding must preserve the full derivation chain"
+            )
+
+    raw_derivation = evidence.get("evidence_derivation")
+    if raw_derivation is None:
+        raise LearningPromotionScopeError(
+            "evidence_derivation_required", "reviewed BookLore projection requires EvidenceDerivation"
+        )
+    try:
+        derivation = (
+            raw_derivation
+            if isinstance(raw_derivation, EvidenceDerivation)
+            else EvidenceDerivation.from_dict(raw_derivation)
+        )
+    except ScopeValidationError as exc:
+        raise LearningPromotionScopeError(exc.reason_code, str(exc)) from exc
+    compatibility = ScopeValidator().compatibility(
+        catalog=source_scope,
+        runtime=target_scope,
+        evidence_derivation=derivation,
+    )
+    if not compatibility.allowed:
+        raise LearningPromotionScopeError(
+            compatibility.reason_code or "invalid_evidence_derivation",
+            "Catalog-to-Runtime derivation is not compatible",
+        )
+    if any(binding.policy_version != derivation.policy_version for binding in bindings):
+        raise LearningPromotionScopeError(
+            "derivation_policy_mismatch", "EvidenceBinding policy must match EvidenceDerivation"
+        )
+    return ReviewedCatalogProjectionScope(
+        source_scope=source_scope,
+        target_scope=target_scope,
+        evidence_refs=refs,
+        evidence_bindings=bindings,
+        derivation=derivation,
+        policy_version=compatibility.policy_version or derivation.policy_version,
+    )
+
+
+def _validate_evidence_bindings(
+    evidence: Mapping[str, Any], target_scope: RuntimeScope
+) -> tuple[tuple[EvidenceRef, ...], tuple[EvidenceBinding, ...]]:
     refs = _decode_many(evidence, plural="evidence_refs", singular="evidence_ref", decoder=EvidenceRef.from_dict)
     if not refs:
         raise LearningPromotionScopeError("evidence_required", "promotion requires at least one EvidenceRef")
@@ -211,6 +347,7 @@ def _validate_evidence_bindings(evidence: Mapping[str, Any], target_scope: Runti
                 "evidence_scope_mismatch",
                 "EvidenceBinding target must equal the promotion RuntimeScope",
             )
+    return refs, bindings
 
 
 def _validate_high_commitment_anchor(evidence: Mapping[str, Any], target_scope: RuntimeScope) -> None:
@@ -258,7 +395,9 @@ def _decode_many(
 __all__ = [
     "LearningPromotionScope",
     "LearningPromotionScopeError",
+    "ReviewedCatalogProjectionScope",
     "legacy_scope_projection_metrics",
     "require_learning_bot_id",
     "resolve_learning_promotion_scope",
+    "resolve_reviewed_catalog_projection",
 ]

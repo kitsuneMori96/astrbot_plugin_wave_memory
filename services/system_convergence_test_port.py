@@ -5,14 +5,24 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from domain.commands import DomainCommand, EntityChange
-from engine.write_coordinator import (
-    MutationOutcome,
-    OutboxEventDraft,
-    WriteCoordinator,
-)
-from services.outbox_dispatcher import OutboxDispatcher
-from services.task_supervisor import TaskSupervisor
+try:
+    from ..domain.commands import DomainCommand, EntityChange
+    from ..engine.write_coordinator import (
+        MutationOutcome,
+        OutboxEventDraft,
+        WriteCoordinator,
+    )
+    from .outbox_dispatcher import OutboxDispatcher
+    from .task_supervisor import TaskSupervisor
+except ImportError:  # pragma: no cover - repository tests import top-level packages
+    from domain.commands import DomainCommand, EntityChange
+    from engine.write_coordinator import (
+        MutationOutcome,
+        OutboxEventDraft,
+        WriteCoordinator,
+    )
+    from services.outbox_dispatcher import OutboxDispatcher
+    from services.task_supervisor import TaskSupervisor
 
 _PROBE_COMMAND = "system_convergence.probe.upsert"
 

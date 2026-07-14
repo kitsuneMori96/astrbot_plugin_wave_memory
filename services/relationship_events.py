@@ -131,12 +131,16 @@ class RelationshipEventService:
         daily_delta_cap: float = 15,
         hostility_delta_cap: float = 8,
         target_profiles: dict[str, dict[str, str]] | None = None,
+        repository=None,
+        coordinator=None,
     ):
         self.conn = conn
         self.single_delta_cap = abs(float(single_delta_cap))
         self.daily_delta_cap = abs(float(daily_delta_cap))
         self.hostility_delta_cap = abs(float(hostility_delta_cap))
         self.target_profiles = target_profiles or {}
+        self.repository = repository
+        self.coordinator = coordinator
 
     def record_event(
         self,
@@ -182,6 +186,36 @@ class RelationshipEventService:
 
         now = float(created_at or time.time())
         requested_delta = float(delta)
+        if self.repository is not None and scope is not None:
+            kwargs = {
+                "event_type": event_type,
+                "dimension": dimension,
+                "delta": requested_delta,
+                "reason": reason,
+                "source_episode_id": source_episode_id,
+                "source_memory_id": source_memory_id,
+                "created_at": now,
+            }
+            if self.coordinator is not None:
+                stored = self.coordinator.transaction_blocking(
+                    lambda connection: self.repository.record_relationship_event(
+                        scope, connection=connection, **kwargs
+                    )
+                )
+            else:
+                stored = self.repository.record_relationship_event(scope, **kwargs)
+            return RelationshipEventResult(
+                event_id=int(stored["event_id"]),
+                bot_id=bot_id,
+                group_id=group_id,
+                user_id=user_id,
+                dimension=str(stored["dimension"]),
+                requested_delta=float(stored["requested_delta"]),
+                applied_delta=float(stored["applied_delta"]),
+                before_affection=int(stored["before_affinity"]),
+                after_affection=int(stored["after_affinity"]),
+                reason=str(stored["reason"]),
+            )
         applied_delta = self._constrain_delta(
             bot_id=bot_id,
             group_id=group_id,

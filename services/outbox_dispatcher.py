@@ -7,7 +7,10 @@ import uuid
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from engine.db.outbox_repo import OutboxEvent, OutboxRepository
+try:
+    from ..engine.db.outbox_repo import OutboxEvent, OutboxRepository
+except ImportError:  # pragma: no cover - repository tests import top-level packages
+    from engine.db.outbox_repo import OutboxEvent, OutboxRepository
 
 
 class OutboxDispatcher:

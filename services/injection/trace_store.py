@@ -95,9 +95,13 @@ class InjectionTraceStore:
                 total_latency_ms REAL DEFAULT 0,
                 status TEXT NOT NULL,
                 error TEXT,
-                metadata_json TEXT
+                metadata_json TEXT,
+                payload_json TEXT
             )"""
         )
+        columns = {str(row[1]) for row in self.conn.execute("PRAGMA table_info(injection_traces)").fetchall()}
+        if "payload_json" not in columns:
+            self.conn.execute("ALTER TABLE injection_traces ADD COLUMN payload_json TEXT")
         self.conn.execute(
             """CREATE TABLE IF NOT EXISTS injection_trace_channels (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -153,13 +157,20 @@ class InjectionTraceStore:
         message = str(trace.get("message") or "")
         final_text = str(trace.get("final_text") or trace.get("final_injection") or "")
         metadata_json = json.dumps(self._bounded_redact(trace.get("metadata") or {}), ensure_ascii=False, sort_keys=True)
+        channel_items = [self._channel_dict(result) for result in (channels or [])]
+        payload_json = json.dumps(
+            _redact({"trace": trace, "channels": channel_items}),
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
 
         self.conn.execute(
             """INSERT OR REPLACE INTO injection_traces
                (trace_id, timestamp, mode, group_id, sender_id, sender_name, bot_id, bot_profile_id,
                 message_hash, message_preview, final_preview, total_tokens, total_chars,
-                total_latency_ms, status, error, metadata_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                total_latency_ms, status, error, metadata_json, payload_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 trace_id,
                 ts,
@@ -178,12 +189,12 @@ class InjectionTraceStore:
                 str(trace.get("status") or "ok"),
                 self._preview(trace.get("error") or ""),
                 metadata_json,
+                payload_json,
             ),
         )
         self.conn.execute("DELETE FROM injection_trace_channels WHERE trace_id = ?", (trace_id,))
 
-        for result in channels or []:
-            item = self._channel_dict(result)
+        for item in channel_items:
             text = str(item.get("text") or "")
             details = {
                 "items": self._bounded_redact(item.get("items") or []),
@@ -226,7 +237,8 @@ class InjectionTraceStore:
         row = self.conn.execute(
             """SELECT trace_id, timestamp, mode, group_id, sender_id, sender_name, bot_id,
                       bot_profile_id, message_hash, message_preview, final_preview,
-                      total_tokens, total_chars, total_latency_ms, status, error, metadata_json
+                      total_tokens, total_chars, total_latency_ms, status, error, metadata_json,
+                      payload_json
                FROM injection_traces WHERE trace_id = ?""",
             (trace_id,),
         ).fetchone()
@@ -251,6 +263,7 @@ class InjectionTraceStore:
             "status": row[14],
             "error": row[15],
             "metadata_json": row[16] or "{}",
+            "payload_json": row[17] or "",
             "channels": channels,
         }
 
@@ -297,6 +310,55 @@ class InjectionTraceStore:
             })
         return result
 
+    @staticmethod
+    def _query_filter(
+        *,
+        from_ts: float,
+        to_ts: float,
+        group_id: str | None = None,
+        sender_id: str | None = None,
+        bot_id: str | None = None,
+        channel: str | None = None,
+        status: str | None = None,
+        has_error: bool | None = None,
+        scope: str | None = None,
+        session_id: str | None = None,
+        config_revision: str | None = None,
+    ) -> tuple[str, list[Any]]:
+        conditions = ["timestamp >= ?", "timestamp <= ?"]
+        params: list[Any] = [float(from_ts), float(to_ts)]
+        normalized_scope = str(scope or "").strip().lower()
+        if normalized_scope in {"group", "group_chat"}:
+            conditions.append("COALESCE(group_id, '') != ''")
+        elif normalized_scope in {"private", "private_chat", "direct"}:
+            conditions.append("COALESCE(group_id, '') = ''")
+        for column, value in (("group_id", group_id), ("sender_id", sender_id), ("bot_id", bot_id), ("status", status)):
+            if value:
+                conditions.append(f"{column} = ?")
+                params.append(value)
+        if session_id:
+            conditions.append("json_extract(metadata_json, '$.runtime_scope.session.id') = ?")
+            params.append(session_id)
+        if config_revision:
+            conditions.append("json_extract(metadata_json, '$.config_revision') = ?")
+            params.append(config_revision)
+        channel_error_exists = (
+            "EXISTS (SELECT 1 FROM injection_trace_channels ec "
+            "WHERE ec.trace_id = injection_traces.trace_id "
+            "AND (ec.status IN ('error', 'timeout') OR COALESCE(json_extract(ec.details, '$.error'), '') != ''))"
+        )
+        if has_error is True:
+            conditions.append(f"(COALESCE(error, '') != '' OR {channel_error_exists})")
+        elif has_error is False:
+            conditions.append(f"(COALESCE(error, '') = '' AND NOT {channel_error_exists})")
+        if channel:
+            conditions.append(
+                "EXISTS (SELECT 1 FROM injection_trace_channels c "
+                "WHERE c.trace_id = injection_traces.trace_id AND c.channel = ?)"
+            )
+            params.append(channel)
+        return " AND ".join(conditions), params
+
     def query(
         self,
         *,
@@ -309,68 +371,55 @@ class InjectionTraceStore:
         status: str | None = None,
         has_error: bool | None = None,
         scope: str | None = None,
+        session_id: str | None = None,
+        config_revision: str | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
-        conditions = ["timestamp >= ?", "timestamp <= ?"]
-        params: list[Any] = [float(from_ts), float(to_ts)]
-        scope = str(scope or "").strip().lower()
-        if scope in {"group", "group_chat"}:
-            conditions.append("COALESCE(group_id, '') != ''")
-        elif scope in {"private", "private_chat", "direct"}:
-            conditions.append("COALESCE(group_id, '') = ''")
-        if group_id:
-            conditions.append("group_id = ?")
-            params.append(group_id)
-        if sender_id:
-            conditions.append("sender_id = ?")
-            params.append(sender_id)
-        if bot_id:
-            conditions.append("bot_id = ?")
-            params.append(bot_id)
-        if status:
-            conditions.append("status = ?")
-            params.append(status)
-        channel_error_exists = (
-            "EXISTS (SELECT 1 FROM injection_trace_channels ec "
-            "WHERE ec.trace_id = injection_traces.trace_id "
-            "AND (ec.status IN ('error', 'timeout') OR COALESCE(json_extract(ec.details, '$.error'), '') != ''))"
+        where, params = self._query_filter(
+            from_ts=from_ts, to_ts=to_ts, group_id=group_id, sender_id=sender_id,
+            bot_id=bot_id, channel=channel, status=status, has_error=has_error, scope=scope,
+            session_id=session_id, config_revision=config_revision,
         )
-        if has_error is True:
-            conditions.append(f"(COALESCE(error, '') != '' OR {channel_error_exists})")
-        elif has_error is False:
-            conditions.append(f"(COALESCE(error, '') = '' AND NOT {channel_error_exists})")
-        if channel:
-            conditions.append("EXISTS (SELECT 1 FROM injection_trace_channels c WHERE c.trace_id = injection_traces.trace_id AND c.channel = ?)")
-            params.append(channel)
-        where = " AND ".join(conditions)
         rows = self.conn.execute(
             f"""SELECT trace_id, timestamp, mode, group_id, sender_id, sender_name, bot_id,
                        bot_profile_id, message_preview, final_preview, total_tokens,
-                       total_chars, total_latency_ms, status, error
+                       total_chars, total_latency_ms, status, error, metadata_json
                 FROM injection_traces WHERE {where}
-                ORDER BY timestamp DESC LIMIT ?""",
-            params + [int(limit)],
+                ORDER BY timestamp DESC LIMIT ? OFFSET ?""",
+            params + [max(1, int(limit)), max(0, int(offset))],
         ).fetchall()
-        return [
-            {
-                "trace_id": r[0],
-                "timestamp": r[1],
-                "mode": r[2],
-                "group_id": r[3],
-                "sender_id": r[4],
-                "sender_name": r[5],
-                "bot_id": r[6],
-                "bot_profile_id": r[7],
-                "message_preview": r[8],
-                "final_preview": r[9],
-                "total_tokens": r[10],
-                "total_chars": r[11],
-                "total_latency_ms": r[12],
-                "status": r[13],
-                "error": r[14],
-            }
-            for r in rows
-        ]
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                metadata = json.loads(row[15] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                metadata = {}
+            runtime_scope = metadata.get("runtime_scope") if isinstance(metadata, dict) else None
+            session = runtime_scope.get("session") if isinstance(runtime_scope, dict) else None
+            result.append({
+                "trace_id": row[0], "timestamp": row[1], "mode": row[2], "group_id": row[3],
+                "sender_id": row[4], "sender_name": row[5], "bot_id": row[6],
+                "bot_profile_id": row[7], "message_preview": row[8], "final_text_preview": row[9],
+                "total_tokens": row[10], "total_chars": row[11], "latency_ms": row[12],
+                "status": row[13], "error": row[14],
+                "has_error": bool(row[14]),
+                "session": session if isinstance(session, dict) else None,
+                "session_id": session.get("id") if isinstance(session, dict) else None,
+                "config_revision": metadata.get("config_revision") if isinstance(metadata, dict) else None,
+            })
+        return result
+
+    def count(self, **filters: Any) -> int:
+        """返回与 ``query`` 完全相同筛选条件的精确总数。"""
+        allowed = {
+            key: value for key, value in filters.items()
+            if key in {"from_ts", "to_ts", "group_id", "sender_id", "bot_id", "channel", "status", "has_error", "scope", "session_id", "config_revision"}
+        }
+        where, params = self._query_filter(**allowed)
+        return int(self.conn.execute(
+            f"SELECT COUNT(*) FROM injection_traces WHERE {where}", params
+        ).fetchone()[0])
 
     def cleanup(self, *, now: float | None = None, retention_seconds: float | None = 14 * 86400, max_rows: int | None = None) -> int:
         delete_ids: list[str] = []

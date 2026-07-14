@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
+import hashlib
+import json
 from typing import Any, Mapping
 
 
@@ -228,6 +230,12 @@ def build_channel_config_from_plugin_config(plugin_config: Mapping[str, Any] | N
         inject_cfg=plugin_config.get("Inject_Settings", {}) or {},
     )
     return apply_channel_overrides(base, plugin_config.get("Channel_Settings", {}) or {})
+
+
+def channel_config_revision(config: ChannelConfigSet) -> str:
+    """返回可复现的有效配置 revision，供 API 与后续 Trace 对账。"""
+    canonical = json.dumps(config.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return f"cfg-{hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:16]}"
 
 
 def channel_config_diff(base: ChannelConfigSet, target: ChannelConfigSet) -> list[dict[str, Any]]:

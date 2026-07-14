@@ -270,8 +270,14 @@ class JobRepository:
         cursor: Any | None = None,
         created_at: float,
         run_id: str | None = None,
+        reschedule_terminal: bool = False,
     ) -> JobRun:
-        """Idempotently schedule one run for a request/slot/generation tuple."""
+        """Idempotently schedule one run for a request/slot/generation tuple.
+
+        ``cursor`` is mutable checkpoint state and therefore never participates in
+        schedule identity. Maintenance callers may request a new generation only
+        after the latest run for the slot has reached a terminal state.
+        """
 
         request_identifier = cls._text(request_id, "request_id")
         slot = cls._text(schedule_slot, "schedule_slot")
@@ -280,6 +286,20 @@ class JobRepository:
             raise ValueError("cursor_generation must be non-negative")
         if cls.get_request(connection, request_identifier) is None:
             raise ValueError(f"unknown job request: {request_identifier}")
+
+        if reschedule_terminal:
+            latest_row = connection.execute(
+                f"SELECT {cls._RUN_COLUMNS} FROM background_job_runs "
+                "WHERE request_id=? AND schedule_slot=? AND cursor_generation>=? "
+                "ORDER BY cursor_generation DESC LIMIT 1",
+                (request_identifier, slot, generation),
+            ).fetchone()
+            if latest_row is not None:
+                latest = cls._run_from_row(latest_row)
+                if latest.status not in cls.TERMINAL_STATUSES:
+                    return latest
+                generation = latest.cursor_generation + 1
+
         cursor_json = cls._dump({} if cursor is None else cursor)
         identifier = cls._text(
             run_id
@@ -312,12 +332,7 @@ class JobRepository:
                     f"{conflicting.cursor_generation}"
                 )
             raise JobRepositoryError("job run insert did not produce a row")
-        existing = cls._run_from_row(row)
-        if cls._dump(existing.cursor) != cursor_json:
-            raise JobRunConflictError(
-                "schedule slot/generation already exists with a different initial cursor"
-            )
-        return existing
+        return cls._run_from_row(row)
 
     create_run = schedule_run
     schedule = schedule_run

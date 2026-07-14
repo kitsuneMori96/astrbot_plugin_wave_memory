@@ -5,7 +5,12 @@ from .livingmemory_facade import (
     WaveMemoryLivingMemoryFacade,
     build_livingmemory_compat_surface,
 )
-from .plugin_detection import build_duplicate_memory_warnings, detect_memory_plugins
+from .plugin_detection import (
+    build_duplicate_memory_warnings,
+    detect_memory_plugins,
+    plugin_probe_from_result,
+    probe_memory_plugins,
+)
 
 __all__ = [
     "LivingMemoryCompatSurface",
@@ -13,4 +18,6 @@ __all__ = [
     "build_livingmemory_compat_surface",
     "build_duplicate_memory_warnings",
     "detect_memory_plugins",
+    "plugin_probe_from_result",
+    "probe_memory_plugins",
 ]

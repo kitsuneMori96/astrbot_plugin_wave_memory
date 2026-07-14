@@ -74,7 +74,7 @@ _REGISTRY = (
         key="memory",
         source="普通消息事件 main.py:on_message、bot 回复 main.py:on_bot_sent、/teach、显式“记住”、Agent WaveMemoryRememberTool、未来兼容 facade 写入",
         write_path="main.py:on_message/_process_in_lock -> MessageWriter.enqueue -> MessageWriter._process_batch -> WaveMemoryDB.add_memory -> engine.db.memory_repo.MemoryRepo.add_memory；/teach/显式记住直接调用 self.db.add_memory；WaveMemoryRememberTool 进入 writer 队列",
-        storage_location="SQLite memories 表（content/vector/timestamp/source/summary/memory_type）+ memory_tags + memory_vectors + VectorIndex/HNSW 内存索引；FTS5 fts_memories 由 DB FTS 维护",
+        storage_location="SQLite memories 表（content/vector/timestamp/source/summary/memory_type，vector 为唯一向量真相）+ memory_tags + VectorIndex/HNSW 内存索引；FTS5 fts_memories 由 DB FTS 维护",
         dedup_rule="当前普通 MessageWriter 写入未发现统一内容去重；memory_tags 用主键去重；显式忘记只降权；未来 Agent/facade 需共用去重规则（第38项）。",
         review_rule="写入前受 Message_Filter 长度、群黑白名单、ignore_bot_messages、防抖合并、classify_source、identity_safety 隔离约束；普通消息无人工审核直接入库。",
         recall_path="engine.query_engine.QueryEngine.query / shotgun_query；FTS5 精确召回；WaveMemorySearchTool / deep/person tools；WebUI memories 列表与搜索",
@@ -89,7 +89,7 @@ _REGISTRY = (
             "无审核风险：普通消息和显式记住会直接写 memories，只有身份污染/长度/群过滤，缺少人工 review 队列。",
             "人格污染风险：已有 identity_quarantine 和注入过滤，但普通 memories 仍可能保存角色扮演材料，需依赖后续安全通道。",
             "隐藏注入风险：main_search、experience、relation、FTS5 在旧 inject_memory 中合并为 memories，当前 trace 不区分每个来源。",
-            "旧版本兼容风险：memories.vector 与 memory_vectors 双路径并存，旧库 summary/source/memory_type 字段质量不一致。",
+            "旧版本兼容风险：治理前旧库可能仍残留已退役的 memory_vectors 重复表；运行时只读取 memories.vector。旧库 summary/source/memory_type 字段质量仍可能不一致。",
         ),
     ),
     LearningObjectDescription(

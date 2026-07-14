@@ -10,7 +10,10 @@ from typing import Any
 
 import numpy as np
 
-from engine.db.outbox_repo import OutboxEvent
+try:
+    from ..engine.db.outbox_repo import OutboxEvent
+except ImportError:  # pragma: no cover - repository tests import top-level packages
+    from engine.db.outbox_repo import OutboxEvent
 
 
 _INACTIVE_MEMORY_TYPES = {"archived", "evicted", "deleted"}

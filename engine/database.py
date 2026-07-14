@@ -15,7 +15,14 @@ from .db.connection import ConnectionManager
 from .db.memory_repo import MemoryRepo
 from .db.migrations.memories_v2 import ensure_memories_v2_schema
 from .db.migrations.scoped_derived_knowledge import ensure_scoped_derived_knowledge_schema
+from .db.migrations.scoped_learning_projections import ensure_scoped_learning_projection_schema
+from .db.migrations.scoped_soul import ensure_scoped_soul_schema
 from .db.scoped_knowledge_repo import ScopedKnowledgeRepo
+from .db.scoped_learning_projection_repo import (
+    ReviewedBookLoreProjectionRepository,
+    ScopedFewShotRepository,
+)
+from .db.scoped_soul_repo import ScopedSoulRepository
 from .db.tag_repo import TagRepo
 from .db.social_repo import SocialRepo
 from .db.knowledge_repo import KnowledgeRepo
@@ -44,9 +51,16 @@ class WaveMemoryDB:
             self._knowledge_repo = KnowledgeRepo(self._cm)
             self._booklore_repo = BookLoreRepo(self._cm)
             self._belief_repo = BeliefRepo(self._cm)
-            # 仅创建新的 scoped_* 派生知识数据面；绝不回填或改写 legacy 表。
+            # 仅创建新的 scoped_* 正式数据面；绝不回填或改写 legacy 表。
             ensure_scoped_derived_knowledge_schema(self._cm)
+            ensure_scoped_soul_schema(self._cm)
+            ensure_scoped_learning_projection_schema(self._cm)
             self._scoped_knowledge_repo = ScopedKnowledgeRepo(self._cm)
+            self._soul_repository = ScopedSoulRepository(self._cm)
+            self._fewshot_repository = ScopedFewShotRepository(self._cm, ensure_schema=False)
+            self._book_lore_repository = ReviewedBookLoreProjectionRepository(
+                self._cm, ensure_schema=False
+            )
             # 学习中心 schema/repository 随数据库 Facade 初始化，迁移纯增量且不做 legacy backfill。
             self.learning = LearningRepositories.from_connection(self._cm.conn)
             self._injection_metrics = InjectionMetricStore(self._cm)
@@ -70,6 +84,21 @@ class WaveMemoryDB:
     def scoped_knowledge(self):
         """正式 scoped 派生知识边界；禁止调用方回退 legacy 表。"""
         return self._scoped_knowledge_repo
+
+    @property
+    def soul_repository(self) -> ScopedSoulRepository:
+        """正式 Scoped Soul 仓储。"""
+        return self._soul_repository
+
+    @property
+    def fewshot_repository(self) -> ScopedFewShotRepository:
+        """正式 scoped FewShot projection 仓储。"""
+        return self._fewshot_repository
+
+    @property
+    def book_lore_repository(self) -> ReviewedBookLoreProjectionRepository:
+        """正式 reviewed BookLore projection 仓储。"""
+        return self._book_lore_repository
 
     @property
     def memory_index(self):

@@ -78,7 +78,6 @@ class PersonaComposer:
         query_engine: Any = None,
         few_shot_service: Any = None,
         bot_profiles: dict[str, Any] | None = None,
-        default_bot_db_id: str = "",
         max_experiences: int = 3,
         max_experience_chars: int = 700,
     ):
@@ -87,7 +86,6 @@ class PersonaComposer:
         self.query_engine = query_engine
         self.few_shot_service = few_shot_service
         self.bot_profiles = bot_profiles or {}
-        self.default_bot_db_id = default_bot_db_id or "bot"
         self.max_experiences = max(1, int(max_experiences or 3))
         self.max_experience_chars = max(120, int(max_experience_chars or 700))
 

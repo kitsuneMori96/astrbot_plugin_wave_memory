@@ -121,6 +121,39 @@ class JargonService:
                 results.append({"word": word, "meaning": meaning, "confidence": confidence})
         return results
 
+    def review(self, runtime_scope: RuntimeScope, jargon_id: int, action: str) -> dict[str, Any]:
+        """通过领域服务执行 scoped 候选审核；approve 必须已有同 Scope anchor。"""
+        scope = self._group_scope(runtime_scope)
+        if scope is None or not self._repository_available():
+            raise ValueError("jargon_review_command_unavailable")
+        if action not in {"approve", "reject"}:
+            raise ValueError("invalid_review_action")
+        current = next(
+            (row for row in self._repo.list_scoped_jargon(scope, limit=10000) if int(row.get("id", -1)) == int(jargon_id)),
+            None,
+        )
+        if current is None:
+            raise LookupError("scoped_object_not_found")
+        if action == "approve" and not current.get("source_memory_id"):
+            raise ValueError("jargon_anchor_required")
+        status = "confirmed" if action == "approve" else "rejected"
+        provenance = dict(current.get("provenance") or {})
+        provenance.update({"reviewed_by": "webui", "review_action": action})
+        self._repo.upsert_scoped_jargon(
+            scope,
+            word=current["word"],
+            meaning=current.get("meaning") or "",
+            status=status,
+            is_jargon=action == "approve",
+            frequency=int(current.get("frequency") or 0),
+            confidence=float(current.get("confidence") or 0.0),
+            contexts=current.get("contexts") or [],
+            source_memory_id=current.get("source_memory_id"),
+            source_context=current.get("source_context"),
+            provenance=provenance,
+        )
+        return {"id": int(jargon_id), "status": status, "scope": scope}
+
     def get_injection(self, text: str, runtime_scope: RuntimeScope | None) -> str:
         if not self._enabled or self._group_scope(runtime_scope) is None or not self._repository_available():
             return ""

@@ -1,4 +1,4 @@
-"""MemoryRepo — memories + memory_tags + memory_vectors 表操作"""
+"""MemoryRepo — memories 与 memory_tags 的规范存储操作。"""
 
 from __future__ import annotations
 
@@ -26,6 +26,23 @@ class MemoryScopeError(ValueError):
         self.code = code
         self.reason_code = code
         super().__init__(message or code)
+
+
+class MemoryRevisionConflict(ValueError):
+    """Scoped memory mutation failed its in-transaction revision precondition."""
+
+    def __init__(self, message: str = "memory revision precondition failed") -> None:
+        self.code = "memory_revision_conflict"
+        self.reason_code = self.code
+        super().__init__(message)
+
+
+_UNSET = object()
+
+
+def _has_table_column(connection, table: str, column: str) -> bool:
+    """Return whether an already-open SQLite connection exposes a column."""
+    return any(str(row[1]) == column for row in connection.execute(f"PRAGMA table_info({table})").fetchall())
 
 
 def _require_group_scope(scope: RuntimeScope | None, group_id: str) -> RuntimeScope:
@@ -57,7 +74,7 @@ def _canonical_json(value: Mapping[str, Any]) -> str:
 
 
 class MemoryRepo:
-    """记忆数据仓库：memories / memory_tags / memory_vectors 表。"""
+    """记忆数据仓库；向量唯一真相为 ``memories.vector``。"""
 
     def __init__(self, cm: ConnectionManager):
         self.cm = cm
@@ -89,12 +106,6 @@ class MemoryRepo:
                 PRIMARY KEY (memory_id, tag_id),
                 FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE,
                 FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS memory_vectors (
-                memory_id INTEGER PRIMARY KEY,
-                vector BLOB NOT NULL,
-                FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
             );
 
             CREATE INDEX IF NOT EXISTS idx_memories_group ON memories(group_id);
@@ -331,39 +342,172 @@ class MemoryRepo:
         self.cm.commit()
 
     def get_memory_vectors(self, memory_ids: list) -> dict:
-        """批量获取记忆向量。返回 {memory_id: np.ndarray}。"""
+        """从规范列批量获取记忆向量，返回 ``{memory_id: np.ndarray}``。"""
         if not memory_ids:
             return {}
         placeholders = ",".join("?" * len(memory_ids))
-        # 先从 memory_vectors 表查
         rows = self.cm.execute_read(
-            f"SELECT memory_id, vector FROM memory_vectors WHERE memory_id IN ({placeholders})",
+            f"SELECT id, vector FROM memories WHERE id IN ({placeholders}) AND vector IS NOT NULL",
             memory_ids,
         ).fetchall()
         result = {}
         for row in rows:
             try:
-                vec = np.frombuffer(row[1], dtype=np.float32)
-                if len(vec) > 0:
-                    result[row[0]] = vec
+                vector = np.frombuffer(row[1], dtype=np.float32)
+                if len(vector) > 0:
+                    result[row[0]] = vector
             except Exception:
                 continue
-        # fallback: 从 memories.vector 列读
-        missing = [mid for mid in memory_ids if mid not in result]
-        if missing:
-            ph2 = ",".join("?" * len(missing))
-            rows2 = self.cm.execute_read(
-                f"SELECT id, vector FROM memories WHERE id IN ({ph2}) AND vector IS NOT NULL",
-                missing,
-            ).fetchall()
-            for row in rows2:
-                try:
-                    vec = np.frombuffer(row[1], dtype=np.float32)
-                    if len(vec) > 0:
-                        result[row[0]] = vec
-                except Exception:
-                    continue
         return result
+
+    @staticmethod
+    def update_scoped_memory(
+        connection,
+        *,
+        scope: RuntimeScope,
+        memory_id: int,
+        expected_revision: int,
+        content: Any = _UNSET,
+        importance: Any = _UNSET,
+        vector: Any = _UNSET,
+    ) -> dict[str, int]:
+        """Update one resolved memory under exact Scope/revision without committing.
+
+        Content changes invalidate the canonical vector unless a replacement vector is
+        supplied in the same transaction. The caller owns commit/rollback and outbox.
+        """
+        scope = _require_group_scope(
+            scope,
+            scope.session.conversation_id if isinstance(scope, RuntimeScope) and scope.session else "",
+        )
+        if content is _UNSET and importance is _UNSET and vector is _UNSET:
+            raise ValueError("at least one mutable memory field is required")
+        updates: list[str] = []
+        parameters: list[Any] = []
+        if content is not _UNSET:
+            updates.append("content=?")
+            parameters.append(str(content or ""))
+            if vector is _UNSET:
+                updates.append("vector=NULL")
+        if importance is not _UNSET:
+            try:
+                normalized_importance = float(importance)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("importance must be numeric") from exc
+            if not 0.0 <= normalized_importance <= 3.0:
+                raise ValueError("importance must be between 0 and 3")
+            updates.append("importance=?")
+            parameters.append(normalized_importance)
+        if vector is not _UNSET:
+            if vector is None:
+                vector_blob = None
+            elif isinstance(vector, np.ndarray):
+                vector_blob = vector.astype(np.float32).tobytes()
+            else:
+                vector_blob = np.asarray(vector, dtype=np.float32).reshape(-1).tobytes()
+            updates.append("vector=?")
+            parameters.append(vector_blob)
+        updates.append("version=version+1")
+        assert scope.session is not None
+        quarantine_filter = " AND COALESCE(quarantine, 0)=0" if _has_table_column(connection, "memories", "quarantine") else ""
+        cursor = connection.execute(
+            f"UPDATE memories SET {', '.join(updates)} "
+            "WHERE id=? AND version=? AND bot_id=? AND session_id=? AND visibility=? "
+            "AND group_id=? AND resolution_state='resolved'" + quarantine_filter,
+            (
+                *parameters,
+                int(memory_id),
+                int(expected_revision),
+                scope.bot_id,
+                scope.session.id,
+                scope.visibility,
+                scope.session.conversation_id,
+            ),
+        )
+        if int(cursor.rowcount or 0) != 1:
+            raise MemoryRevisionConflict()
+        return {
+            "memory_id": int(memory_id),
+            "previous_revision": int(expected_revision),
+            "revision": int(expected_revision) + 1,
+        }
+
+    @staticmethod
+    def delete_scoped_memories(
+        connection,
+        *,
+        scope: RuntimeScope,
+        expected_revisions: Mapping[int, int],
+    ) -> tuple[dict[str, int], ...]:
+        """Delete a scoped batch atomically after validating every expected revision.
+
+        No row is changed until all targets pass the same Scope/revision predicate.
+        The caller owns the surrounding transaction and committed outbox events.
+        """
+        scope = _require_group_scope(
+            scope,
+            scope.session.conversation_id if isinstance(scope, RuntimeScope) and scope.session else "",
+        )
+        targets = {
+            int(memory_id): int(revision)
+            for memory_id, revision in expected_revisions.items()
+        }
+        if not targets:
+            raise ValueError("at least one memory target is required")
+        ids = tuple(targets)
+        placeholders = ",".join("?" for _ in ids)
+        assert scope.session is not None
+        quarantine_filter = " AND COALESCE(quarantine, 0)=0" if _has_table_column(connection, "memories", "quarantine") else ""
+        rows = connection.execute(
+            f"SELECT id, version FROM memories WHERE id IN ({placeholders}) "
+            "AND bot_id=? AND session_id=? AND visibility=? AND group_id=? "
+            "AND resolution_state='resolved'" + quarantine_filter,
+            (
+                *ids,
+                scope.bot_id,
+                scope.session.id,
+                scope.visibility,
+                scope.session.conversation_id,
+            ),
+        ).fetchall()
+        actual = {int(row[0]): int(row[1]) for row in rows}
+        if len(actual) != len(targets) or any(actual.get(mid) != revision for mid, revision in targets.items()):
+            raise MemoryRevisionConflict()
+
+        table_names = {
+            str(row[0])
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        if "scoped_memory_tags" in table_names:
+            connection.execute(
+                f"DELETE FROM scoped_memory_tags WHERE memory_id IN ({placeholders})", ids
+            )
+        if "memory_tags" in table_names:
+            connection.execute(
+                f"DELETE FROM memory_tags WHERE memory_id IN ({placeholders})", ids
+            )
+        if "facts" in table_names:
+            fact_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(facts)").fetchall()
+            }
+            if "source_memory_id" in fact_columns:
+                connection.execute(
+                    f"DELETE FROM facts WHERE source_memory_id IN ({placeholders})", ids
+                )
+        cursor = connection.execute(
+            f"DELETE FROM memories WHERE id IN ({placeholders})", ids
+        )
+        if int(cursor.rowcount or 0) != len(ids):
+            raise MemoryRevisionConflict()
+        return tuple(
+            {
+                "memory_id": memory_id,
+                "previous_revision": targets[memory_id],
+                "revision": targets[memory_id] + 1,
+            }
+            for memory_id in ids
+        )
 
     def delete_memory(self, memory_id: int) -> bool:
         existing = self.cm.execute_read("SELECT id FROM memories WHERE id=?", (memory_id,)).fetchone()
