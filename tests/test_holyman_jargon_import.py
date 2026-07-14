@@ -46,6 +46,15 @@ if "astrbot.api" not in sys.modules:
 
 
 class HolymanJargonImportTest(unittest.TestCase):
+    def setUp(self):
+        from webui.blueprints import jargon
+        original_jsonify = jargon.jsonify
+        original_request = jargon.request
+        jargon.jsonify = lambda value=None, **kwargs: value if value is not None else kwargs
+        jargon.request = types.SimpleNamespace(method="GET", args={}, get_json=lambda *args, **kwargs: {})
+        self.addCleanup(lambda: setattr(jargon, "jsonify", original_jsonify))
+        self.addCleanup(lambda: setattr(jargon, "request", original_request))
+
     def test_jargon_injection_uses_safe_reference_header(self):
         from domain.scope import RuntimeScope, SessionRef
         from services.jargon.inference import JargonInjector
@@ -428,35 +437,28 @@ class HolymanJargonImportTest(unittest.TestCase):
         self.assertIsNone(item["custom_meaning"])
         self.assertIn("索要 50", item["meaning"])
 
-    def test_holyman_candidate_batch_review_accepts_word_fallback(self):
+    def test_holyman_candidate_batch_review_word_fallback_is_fail_closed(self):
         from webui.blueprints.jargon import _review_holyman_candidate_ids
 
-        class _Cursor:
-            def __init__(self, rows=None, rowcount=0):
-                self._rows = rows or []
-                self.rowcount = rowcount
-            def fetchall(self):
-                return self._rows
-
         class _Conn:
-            def __init__(self):
-                self.blocked = []
-            def execute(self, sql, params=()):
-                if "FROM jargon_candidates" in sql:
-                    return _Cursor([])
-                if "INSERT OR IGNORE INTO jargon_blocklist" in sql:
-                    self.blocked.append(params[0])
-                    return _Cursor(rowcount=1)
-                return _Cursor([])
+            def execute(self, *_args, **_kwargs):
+                self.fail("Holyman candidate review must not execute SQL")
+
             def commit(self):
-                pass
+                self.fail("Holyman candidate review must not commit")
 
         conn = _Conn()
-        result = _review_holyman_candidate_ids(conn, ["holyman-candidate-0001"], "reject", words=["资产候选词"])
+        conn.fail = self.fail
+        result = _review_holyman_candidate_ids(
+            conn,
+            ["holyman-candidate-0001"],
+            "reject",
+            words=["资产候选词"],
+        )
 
-        self.assertEqual(result["reviewed_count"], 1)
-        self.assertEqual(result["blocked_count"], 1)
-        self.assertIn("资产候选词", conn.blocked)
+        self.assertEqual(result["error"], "legacy_mutation_disabled")
+        self.assertEqual(result["reviewed_count"], 0)
+        self.assertEqual(result["blocked_count"], 0)
 
     def test_holyman_candidate_batch_review_updates_selected_and_blocks_rejected(self):
         import asyncio

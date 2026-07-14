@@ -55,15 +55,10 @@ class AgentFeedbackWebUITest(unittest.TestCase):
         self.assertEqual(rejected["review_status"], "rejected")
 
     def test_frontend_removes_agent_feedback_route_but_keeps_configuration_compatibility_api(self):
-        page = Path("webui/frontend/src/pages/review/AgentFeedbackPage.tsx").read_text(encoding="utf-8")
         api = Path("webui/frontend/src/api/review.ts").read_text(encoding="utf-8")
         routes = Path("webui/frontend/src/app/routes.tsx").read_text(encoding="utf-8")
         sidebar = Path("webui/frontend/src/components/layout/WaveSidebar.tsx").read_text(encoding="utf-8")
         channel_config = Path("webui/frontend/src/pages/channels/ChannelConfigPage.tsx").read_text(encoding="utf-8")
-        injection = Path("webui/frontend/src/pages/injection/InjectionPage.tsx").read_text(encoding="utf-8")
-
-        self.assertNotIn("getAgentFeedback", page)
-        self.assertNotIn("reviewCandidate", page)
         self.assertIn("/api/agent-feedback", api)
         self.assertIn("config-suggestions", api)
         self.assertNotIn("review-candidates", api)
@@ -71,8 +66,6 @@ class AgentFeedbackWebUITest(unittest.TestCase):
         self.assertNotIn("/agent-feedback", sidebar)
         self.assertIn("getAgentFeedback", channel_config)
         self.assertIn("reviewConfigSuggestion", channel_config)
-        self.assertIn("反馈记录", injection)
-        self.assertIn("getAgentFeedback", injection)
 
 
 if __name__ == "__main__":

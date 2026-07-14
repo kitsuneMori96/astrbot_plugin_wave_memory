@@ -97,10 +97,11 @@ async def test_candidates_are_scoped_filtered_paginated_and_detail_is_traceable(
     )
     assert response.status_code == 200
     payload = await response.get_json()
-    assert payload["total"] == 1
+    assert payload["page"]["total"] == 1
+    assert payload["page"]["total_status"] == "exact"
     assert payload["items"][0]["id"] == candidate_id
     assert payload["items"][0]["bot_id"] == "bot-a"
-    assert payload["has_more"] is False
+    assert payload["page"]["has_more"] is False
 
     detail = await quart_client.get(f"/api/learning-center/candidates/{candidate_id}?bot_id=bot-a")
     assert detail.status_code == 200
@@ -168,7 +169,9 @@ async def test_sources_jobs_classification_and_promotion_routes_are_available(ap
     )
     assert reviewed.status_code == 200
     promotions = await quart_client.get("/api/learning-center/promotions?bot_id=bot-a&promotion_status=queued")
-    assert (await promotions.get_json())["total"] == 1
+    promotions_payload = await promotions.get_json()
+    assert promotions_payload["page"]["total"] == 1
+    assert promotions_payload["page"]["total_status"] == "exact"
 
     few_shot = await quart_client.get("/api/learning-center/few-shot?bot_id=bot-a")
     assert few_shot.status_code == 200
@@ -214,7 +217,8 @@ async def test_dedicated_review_endpoint_delegates_and_exposes_deep_link(api_con
     assert status.status_code == 200
     status_payload = await status.get_json()
     assert status_payload["item"]["target_id"] == "dedicated-1"
-    assert status_payload["item"]["deep_link"] == "/jargon?id=dedicated-1"
+    assert status_payload["item"]["deep_link"] is None
+    assert status_payload["item"]["object_ref"] is None
 
 
 @pytest.mark.asyncio

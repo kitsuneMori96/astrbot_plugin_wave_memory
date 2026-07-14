@@ -14,9 +14,9 @@ class TestV450ReleaseMetadata:
         changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
         assert "## v4.5.0" in changelog
         for marker in (
-            "前端优化 + 黑盒管理前端",
-            "黑盒管理矩阵",
-            "/api/blackbox",
+            "前端优化 + 认知资源管理前端",
+            "认知资源管理矩阵",
+            "按领域拆分后端",
             "BookLore",
             "FewShot",
             "Facts",
@@ -32,5 +32,5 @@ class TestV450ReleaseMetadata:
         readme = Path("README.md").read_text(encoding="utf-8")
         assert "version-v4.5.0-blue.svg" in readme
         assert "| **v4.5.0** |" in readme
-        assert "前端优化 + 黑盒管理前端" in readme
-        assert "黑盒管理矩阵" in readme
+        assert "前端优化 + 认知资源管理" in readme
+        assert "独立 API 与真实数据闭环" in readme

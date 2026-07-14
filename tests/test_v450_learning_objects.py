@@ -1,18 +1,16 @@
 from pathlib import Path
 
 
-class TestV450LearningObjects:
-    def test_learning_object_review_frontend_is_consolidated_into_learning_center(self):
-        page = Path("webui/frontend/src/pages/review/LearningObjectsPage.tsx").read_text(encoding="utf-8")
-        routes = Path("webui/frontend/src/app/routes.tsx").read_text(encoding="utf-8")
-
-        assert 'to="/learning-center"' in page
-        assert "getLearningObjectsReview" not in page
-        assert "reviewCandidate" not in page
-        assert "/learning-objects" not in routes
-
-    def test_learning_center_keeps_structured_candidate_and_history_sections(self):
+class TestStage5LearningCenter:
+    def test_learning_process_is_consolidated_into_current_route(self):
         page = Path("webui/frontend/src/pages/learning/LearningCenterPage.tsx").read_text(encoding="utf-8")
+        routes = Path("webui/frontend/src/app/routes.tsx").read_text(encoding="utf-8")
+        assert "LearningCenterPage" in routes
+        assert "path: '/learning'" in routes
+        for marker in ("候选", "review_status", "reviewLearningCandidate", "retryLearningPromotion", "target_link"):
+            assert marker in page
 
-        for marker in ("候选", "审核状态", "晋升历史", "reviewLearningCandidate", "retryLearningPromotion"):
+    def test_learning_center_keeps_process_state_separate_from_domain_truth(self):
+        page = Path("webui/frontend/src/pages/learning/LearningCenterPage.tsx").read_text(encoding="utf-8")
+        for marker in ("来源", "任务", "晋升", "promotion_status", "不冒充正式样例", "legacy_history", "quarantined", "target_link"):
             assert marker in page

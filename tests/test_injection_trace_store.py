@@ -111,6 +111,40 @@ class InjectionTraceStoreTest(unittest.TestCase):
         self.assertLessEqual(len(details["filtered"][0]["content"]), 30)
         self.assertLessEqual(len(details["warnings"][0]), 30)
 
+    def test_full_payload_and_revision_session_filters_preserve_tail(self):
+        from services.injection.channel_base import InjectionResult
+
+        store, _ = self._store(max_preview_chars=30)
+        final_text = f"body-{'x' * 60_000}-TAIL-MARKER"
+        store.record(
+            {
+                "trace_id": "full-payload",
+                "timestamp": 10,
+                "mode": "full",
+                "message": "request",
+                "final_text": final_text,
+                "status": "ok",
+                "metadata": {
+                    "config_revision": "cfg-abc",
+                    "runtime_scope": {"session": {"id": "qq:group:g1", "kind": "group", "label": "g1"}},
+                },
+            },
+            [InjectionResult.hit("memory", "result")],
+        )
+
+        detail = store.get("full-payload")
+        self.assertIn("TAIL-MARKER", detail["payload_json"])
+        self.assertLess(len(detail["final_preview"]), len(final_text))
+        rows = store.query(
+            from_ts=0,
+            to_ts=20,
+            session_id="qq:group:g1",
+            config_revision="cfg-abc",
+        )
+        self.assertEqual([row["trace_id"] for row in rows], ["full-payload"])
+        self.assertEqual(rows[0]["session_id"], "qq:group:g1")
+        self.assertEqual(rows[0]["config_revision"], "cfg-abc")
+
     def test_record_applies_configured_retention_days_and_max_rows(self):
         from services.injection.channel_base import InjectionResult
 

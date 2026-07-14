@@ -1,52 +1,28 @@
 from pathlib import Path
 
 
-class TestV450MemoriesSourceAware:
-    def test_memories_page_declares_source_asset_semantics(self):
+class TestStage5ScopedMemories:
+    def test_memories_page_requires_explicit_scope_and_server_options(self):
         page = Path("webui/frontend/src/pages/memories/MemoriesPage.tsx").read_text(encoding="utf-8")
-
         for marker in (
-            "sourceAssetMetadata",
-            "sourceAssetMeta",
-            "资产类型语义",
-            "live",
-            "群聊长期记忆",
-            "保持在记忆管理器",
-            "bzz_experience",
-            "第一人称经历",
-            "/soul",
-            "book_lore",
-            "书设知识",
-            "提示去 BookLore 管理",
-            "/blackbox/book-lore",
-            "bot_reply",
-            "Bot 回复素材",
-            "可送入 FewShot 候选",
-            "/blackbox/fewshot",
-            "fewshot",
-            "风格范例",
-            "提示去 FewShot 管理",
+            "getScopeOptions",
+            "scopeOptionsFor",
+            "ScopeSelect",
+            "bot_id",
+            "session_id",
+            "请选择真实 Bot 与会话",
+            "不会从裸 ID 补默认 Scope",
         ):
             assert marker in page
 
-    def test_memories_page_declares_association_and_risk_contracts(self):
+    def test_memories_page_uses_page_response_and_opaque_object_links(self):
         page = Path("webui/frontend/src/pages/memories/MemoriesPage.tsx").read_text(encoding="utf-8")
+        api = Path("webui/frontend/src/api/memories.ts").read_text(encoding="utf-8")
+        for marker in ("PaginationControls", "payload.page", "QueryState", "item.ref", "item.detail_url", "mutation_url", "ObjectRefDescriptor", "PageResponse"):
+            assert marker in page + api
+        assert "?id=" not in page
 
-        for marker in (
-            "详情关联区",
-            "Tags",
-            "Facts",
-            "Beliefs",
-            "Person links",
-            "Injection traces",
-            "Similar memories",
-            "危险等级",
-            "re-embed：中风险",
-            "改 source：中风险",
-            "删除：高风险，必须二次确认",
-            "转为管理对象",
-            "Bot 回复 -> FewShot 候选",
-            "世界观内容 -> BookLore 条目候选",
-            "稳定关系句子 -> Fact 候选",
-        ):
+    def test_memories_mutations_reuse_server_issued_urls_and_revisions(self):
+        page = Path("webui/frontend/src/pages/memories/MemoriesPage.tsx").read_text(encoding="utf-8")
+        for marker in ("updateMemory(detail.mutation_url", "deleteMemory(detail.mutation_url", "result.item", "保存并回读 revision", "删除当前 ObjectRef"):
             assert marker in page

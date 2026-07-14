@@ -331,10 +331,10 @@ async def test_jargon_mutation_returns_nontrivial_id_from_its_write_cursor(tmp_p
             ServiceContainer.reset()
         finally:
             manager.close()
-    contract_assert(response is not None and response.status_code == 200, reason, "jargon mutation HTTP failed")
-    contract_assert(actual is not None and actual[0] >= 129, reason, "fixture did not create nontrivial canonical ID")
+    contract_assert(response is not None and response.status_code == 503, reason, "legacy jargon mutation was not fail-closed")
+    contract_assert(actual is None, reason, "legacy jargon mutation changed the database")
     contract_assert(
-        isinstance(payload, dict) and payload.get("id") == actual[0],
+        isinstance(payload, dict) and payload.get("error", {}).get("code") == "anchored_jargon_command_unavailable",
         reason,
-        f"response ID was not the write cursor ID: response={payload!r}, canonical={actual!r}",
+        f"legacy jargon mutation returned an unexpected payload: {payload!r}",
     )

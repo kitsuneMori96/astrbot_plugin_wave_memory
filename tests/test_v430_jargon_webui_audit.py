@@ -104,17 +104,13 @@ class V430JargonWebuiAuditTest(unittest.TestCase):
         page = Path("webui/frontend/src/pages/jargon/JargonPage.tsx").read_text(encoding="utf-8")
         api = Path("webui/frontend/src/api/jargon.ts").read_text(encoding="utf-8")
 
-        self.assertIn("source?: string", api)
-        self.assertIn("include_rejected?: boolean", api)
-        self.assertIn("showAuditRows", page)
-        self.assertIn("显示分流/噪声审计", page)
-        self.assertIn("include_rejected: showAuditRows", page)
-        self.assertIn("候选类型", page)
-        self.assertIn("来源", page)
-        self.assertIn("拒绝原因", page)
-        self.assertIn("j.candidate_type", page)
-        self.assertIn("j.source", page)
-        self.assertIn("j.reject_reason", page)
+        self.assertIn("source: string", api)
+        self.assertIn("anchors: EvidenceRef[]", api)
+        self.assertIn("ScopeSelect", page)
+        self.assertIn("广域资产审计", page)
+        self.assertIn("EvidenceList", page)
+        self.assertIn("ObjectDeepLink", page)
+        self.assertIn("catalog_sync_command_unavailable", page)
 
 
 if __name__ == "__main__":

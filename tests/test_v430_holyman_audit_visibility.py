@@ -118,13 +118,13 @@ class V430HolymanAuditVisibilityTest(unittest.TestCase):
         self.assertIn("manifest_summary?:", api)
         self.assertIn("quality_summary?:", api)
         self.assertIn("资产审计", page)
-        self.assertIn("holymanManifestSummary", page)
-        self.assertIn("holymanQualitySummary", page)
-        self.assertIn("source_count", page)
-        self.assertIn("declared_corpus_count", page)
-        self.assertIn("parsed_corpus_count", page)
-        self.assertIn("error_count", page)
-        self.assertIn("parse_statuses", page)
+        self.assertIn("catalog", page)
+        self.assertIn("local_version", page)
+        self.assertIn("remote_version", page)
+        self.assertIn("quality_summary", page)
+        self.assertIn("reference-only", page)
+        self.assertIn("runtime-match", page)
+        self.assertIn("catalog_sync_command_unavailable", page)
 
 
 if __name__ == "__main__":

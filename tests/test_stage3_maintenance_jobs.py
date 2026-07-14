@@ -7,8 +7,9 @@ import numpy as np
 import pytest
 
 from engine.db.job_repo import JobRequest, JobRun
+from engine.write_coordinator import WriteCoordinator
 from services.pair_similarity_projection import compute_pair_similarity_projection
-from webui.blueprints import blackbox, memories, tags
+from webui.blueprints import maintenance, memories, tags
 
 
 class _Request:
@@ -59,23 +60,23 @@ class _Jobs:
 @pytest.mark.asyncio
 async def test_index_rebuild_route_requires_preflight_and_confirmation(monkeypatch):
     jobs = _Jobs()
-    monkeypatch.setattr(blackbox, "get_container", lambda: SimpleNamespace(durable_jobs=jobs))
-    monkeypatch.setattr(blackbox, "request", _Request({"kind": "memory_index"}))
-    monkeypatch.setattr(blackbox, "jsonify", lambda value: value)
+    monkeypatch.setattr(maintenance, "get_container", lambda: SimpleNamespace(durable_jobs=jobs))
+    monkeypatch.setattr(maintenance, "request", _Request({"kind": "memory_index"}))
+    monkeypatch.setattr(maintenance, "jsonify", lambda value: value)
 
-    payload, status = await blackbox.rebuild_indexes_action()
+    payload, status = await maintenance.schedule_rebuild()
 
     assert status == 409
-    assert payload["error"] == "maintenance_confirmation_required"
+    assert payload["error"]["code"] == "maintenance_confirmation_required"
     assert jobs.requests == []
 
 
 @pytest.mark.asyncio
 async def test_index_rebuild_route_only_schedules_durable_job(monkeypatch):
     jobs = _Jobs()
-    monkeypatch.setattr(blackbox, "get_container", lambda: SimpleNamespace(durable_jobs=jobs))
+    monkeypatch.setattr(maintenance, "get_container", lambda: SimpleNamespace(durable_jobs=jobs))
     monkeypatch.setattr(
-        blackbox,
+        maintenance,
         "request",
         _Request({
             "kind": "memory_index",
@@ -84,19 +85,20 @@ async def test_index_rebuild_route_only_schedules_durable_job(monkeypatch):
             "schedule_slot": "slot-1",
         }),
     )
-    monkeypatch.setattr(blackbox, "jsonify", lambda value: value)
+    monkeypatch.setattr(maintenance, "jsonify", lambda value: value)
 
-    payload, status = await blackbox.rebuild_indexes_action()
+    payload, status = await maintenance.schedule_rebuild()
 
     assert status == 202
-    assert payload == {
-        "ok": True,
-        "accepted": True,
-        "request_id": "request-1",
-        "job_id": "run-1",
-        "status": "pending",
-        "repair_kind": "memory_index",
+    assert payload["ok"] is False
+    assert payload["operation"] == {
+        "id": "run-1",
+        "kind": "maintenance.memory_index.rebuild",
+        "status": "queued",
     }
+    assert payload["request_id"] == "request-1"
+    assert payload["job_id"] == "run-1"
+    assert payload["item"]["status"] == "pending"
     assert jobs.requests[0]["kind"] == "maintenance.memory_index.rebuild"
     assert jobs.runs[0]["schedule_slot"] == "slot-1"
 
@@ -157,42 +159,20 @@ async def test_import_start_only_schedules_durable_job(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_audit_rejection_uses_coordinator_and_approval_fails_closed():
-    connection = sqlite3.connect(":memory:")
-    connection.execute(
-        """CREATE TABLE tag_audit_suggestions(
-               id INTEGER PRIMARY KEY, status TEXT, resolved_at REAL
-           )"""
-    )
-    connection.executemany(
-        "INSERT INTO tag_audit_suggestions(id, status) VALUES (?, 'pending')",
-        [(1,), (2,)],
-    )
-    actors = []
-
+async def test_legacy_audit_resolution_is_read_only_and_never_enters_coordinator():
     class _Coordinator:
         async def transaction(self, callback, *, actor):
-            actors.append(actor)
-            result = callback(connection)
-            connection.commit()
-            return result
+            pytest.fail("legacy Tag audit resolve must not enter a write transaction")
 
     container = SimpleNamespace(
         write_gateway=SimpleNamespace(coordinator=_Coordinator())
     )
 
     rejected = await tags._resolve_audit_suggestion(container, 1, "reject")
-    blocked = await tags._resolve_audit_suggestion(container, 2, "approve")
+    approved = await tags._resolve_audit_suggestion(container, 2, "approve")
 
-    assert rejected["status"] == "rejected"
-    assert connection.execute(
-        "SELECT status FROM tag_audit_suggestions WHERE id=1"
-    ).fetchone()[0] == "rejected"
-    assert blocked["error"] == "scope_migration_required"
-    assert connection.execute(
-        "SELECT status FROM tag_audit_suggestions WHERE id=2"
-    ).fetchone()[0] == "pending"
-    assert actors == ["webui.tag_audit.resolve", "webui.tag_audit.resolve"]
+    assert rejected == {"error": "legacy_mutation_disabled"}
+    assert approved == {"error": "legacy_mutation_disabled"}
 
 
 def test_pair_similarity_projection_builder_is_pure_and_filters_noise():
@@ -209,3 +189,46 @@ def test_pair_similarity_projection_builder_is_pure_and_filters_noise():
     assert cache[(1, 2)] == pytest.approx(params[0][2])
     assert (1, 3) not in cache
     assert (2, 3) not in cache
+
+
+@pytest.mark.asyncio
+async def test_write_coordinator_transaction_accepts_actor_audit_context():
+    coordinator = object.__new__(WriteCoordinator)
+    calls = []
+
+    async def _dispatch(callback, transactional):
+        calls.append((callback, transactional))
+        return "committed"
+
+    coordinator._dispatch = _dispatch
+
+    result = await coordinator.transaction(lambda connection: connection, actor="maintenance.test")
+
+    assert result == "committed"
+    assert calls[0][1] is True
+
+
+@pytest.mark.asyncio
+async def test_write_coordinator_shutdown_is_idempotent_and_releases_lease(tmp_path):
+    class Clock:
+        @staticmethod
+        def now():
+            return 1.0
+
+    path = str(tmp_path / "coordinator-shutdown.sqlite3")
+    coordinator = WriteCoordinator(
+        path,
+        command_handlers={},
+        consumer_names=(),
+        clock=Clock(),
+    )
+    await coordinator.shutdown()
+    await coordinator.shutdown()
+
+    replacement = WriteCoordinator(
+        path,
+        command_handlers={},
+        consumer_names=(),
+        clock=Clock(),
+    )
+    await replacement.shutdown()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import pytest
 
 from domain.scope import RuntimeScope, SessionRef
@@ -65,6 +66,27 @@ def test_new_legacy_table_receives_all_v2_columns_and_scope_index(manager):
     indexes = {row[1] for row in manager.execute_read("PRAGMA index_list(memories)").fetchall()}
     assert "idx_memories_v2_scope" in indexes
     assert manager.execute_read("PRAGMA foreign_keys").fetchone()[0] == 1
+
+
+def test_memory_repo_uses_memories_vector_as_single_source_of_truth(manager):
+    repo = _repo_with_legacy_memories(manager)
+    ensure_memories_v2_schema(manager)
+    vector = np.asarray([0.25, 0.75], dtype=np.float32)
+
+    memory_id = repo.add_memory(
+        "group-1",
+        "canonical vector",
+        vector=vector,
+        scope=_group_scope(),
+    )
+
+    legacy_table = manager.execute_read(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_vectors'"
+    ).fetchone()
+    loaded = repo.get_memory_vectors([memory_id])
+
+    assert legacy_table is None
+    assert np.array_equal(loaded[memory_id], vector)
 
 
 def test_old_rows_keep_all_new_columns_null_without_backfill(manager):

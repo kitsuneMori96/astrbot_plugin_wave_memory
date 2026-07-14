@@ -55,6 +55,15 @@ class FakeEmbedding:
         return [np.ones(3, dtype=np.float32) * (idx + 1) for idx, _ in enumerate(texts)]
 
 
+class FakeWriteGateway:
+    def __init__(self):
+        self.calls = []
+
+    async def append_memory(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        return len(self.calls)
+
+
 def _group_scope(*, bot_id="bot-a", group_id="group-1"):
     from astrbot_plugin_wave_memory.domain.scope import RuntimeScope, SessionRef
 
@@ -181,6 +190,43 @@ class MessageWriterDedupTest(unittest.TestCase):
 
         self.assertEqual(len(db.added), 2)
         self.assertEqual({item["group_id"] for item in db.added}, {"group-1"})
+
+    def test_gateway_idempotency_hint_is_bound_to_runtime_scope(self):
+        from astrbot_plugin_wave_memory.services.message_writer import MessageWriter
+
+        gateway = FakeWriteGateway()
+        writer = MessageWriter(
+            db=FakeDB(),
+            memory_index=FakeIndex(),
+            embedding_service=FakeEmbedding(),
+            bot_keywords=set(),
+            noise_max_length=1,
+            write_gateway=gateway,
+        )
+        base = {
+            "group_id": "group-1",
+            "sender_id": "user-1",
+            "sender_name": "用户",
+            "content": "同一平台事件号",
+            "timestamp": 3100.0,
+            "source": "core",
+            "event_id": "event-42",
+        }
+
+        asyncio.run(writer._persist_memory(
+            {**base, "scope": _group_scope(bot_id="bot-a")},
+            vector=np.ones(3), importance=1.0, source="core",
+        ))
+        asyncio.run(writer._persist_memory(
+            {**base, "scope": _group_scope(bot_id="bot-b")},
+            vector=np.ones(3), importance=1.0, source="core",
+        ))
+
+        self.assertEqual(len(gateway.calls), 2)
+        hints = [call["idempotency_hint"] for call in gateway.calls]
+        self.assertNotEqual(hints[0], hints[1])
+        self.assertIn("bot-a:group:qq:group:group-1:event-42", hints[0])
+        self.assertIn("bot-b:group:qq:group:group-1:event-42", hints[1])
 
     def test_scope_payload_rejects_mismatched_or_non_group_legacy_projection(self):
         from astrbot_plugin_wave_memory.services.message_writer import MessageScopeError

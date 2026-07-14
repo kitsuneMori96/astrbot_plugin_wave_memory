@@ -30,9 +30,19 @@ class FakeFewShotService:
         self._last_injected_ids = ids or []
         self.calls = []
 
-    def get_injection(self, bot_id="", max_items=None):
-        self.calls.append({"bot_id": bot_id, "max_items": max_items})
+    def get_injection(self, scope=None, max_items=None):
+        self.calls.append({"scope": scope, "max_items": max_items})
         return self.text
+
+
+class FakeScopedFewShotRepo:
+    def __init__(self, rows=None):
+        self.rows = list(rows or [])
+        self.calls = []
+
+    def list_approved(self, *, scope, limit):
+        self.calls.append({"scope": scope, "limit": limit})
+        return self.rows[:limit]
 
 
 class FewShotChannelTest(unittest.TestCase):
@@ -72,7 +82,8 @@ class FewShotChannelTest(unittest.TestCase):
         self.assertEqual(result.channel, "fewshot")
         self.assertEqual(result.status, "hit")
         self.assertIn("先看事实", result.text)
-        self.assertEqual(service.calls[0], {"bot_id": "baizhenzhen", "max_items": 2})
+        self.assertEqual(service.calls[0]["scope"], self._ctx().scope)
+        self.assertEqual(service.calls[0]["max_items"], 2)
         self.assertEqual([item["example_id"] for item in result.items], [11, 12])
         self.assertIn("简短设边界", result.items[1]["preview"])
 
@@ -107,18 +118,16 @@ class FewShotChannelTest(unittest.TestCase):
 
         conn = sqlite3.connect(":memory:")
         self.addCleanup(conn.close)
-        service = FewShotService(db=SimpleNamespace(conn=conn), enabled=True, config={"max_inject": 3})
-        now = int(time.time())
-        conn.executemany(
-            """INSERT INTO few_shot_examples (content, score, traits, status, bot_id, created_at, approved_at)
-               VALUES (?, ?, '[]', ?, ?, ?, ?)""",
-            [
-                ("先看事实，再冷淡回应。", 0.95, "approved", "baizhenzhen", now, now),
-                ("狠狠怼回去，别客气。", 0.99, "approved", "baizhenzhen", now, now),
-                ("未审核样例不应注入。", 0.98, "pending", "baizhenzhen", now, None),
-            ],
+        repository = FakeScopedFewShotRepo([
+            {"id": 1, "content": "先看事实，再冷淡回应。"},
+            {"id": 2, "content": "狠狠怼回去，别客气。"},
+        ])
+        service = FewShotService(
+            db=SimpleNamespace(conn=conn),
+            enabled=True,
+            config={"max_inject": 3},
+            repository=repository,
         )
-        conn.commit()
         channel = FewShotChannel(few_shot_service=service)
 
         result = asyncio.run(channel.build(self._ctx(config={"channels": {"fewshot": {"max_items": 3}}})))
@@ -152,17 +161,14 @@ class FewShotChannelTest(unittest.TestCase):
 
         conn = sqlite3.connect(":memory:")
         self.addCleanup(conn.close)
-        service = FewShotService(db=SimpleNamespace(conn=conn), enabled=True)
-        now = int(time.time())
-        conn.executemany(
-            """INSERT INTO few_shot_examples (content, score, traits, status, bot_id, created_at, approved_at)
-               VALUES (?, 1.0, '[]', 'approved', ?, ?, ?)""",
-            [("legacy 全局样例", "", now, now), ("其他 bot 样例", "yushu", now, now)],
-        )
-        conn.commit()
+        repository = FakeScopedFewShotRepo([])
+        service = FewShotService(db=SimpleNamespace(conn=conn), enabled=True, repository=repository)
+        scope = self._ctx().scope
 
-        self.assertEqual(service.get_injection(bot_id="baizhenzhen"), "")
-        self.assertEqual(service.get_injection(bot_id=""), "")
+        self.assertEqual(service.get_injection(scope=scope), "")
+        self.assertEqual(repository.calls[0]["scope"], scope)
+        with self.assertRaises(TypeError):
+            service.get_injection(bot_id="baizhenzhen")
 
     def test_extract_candidates_does_not_write_formal_table(self):
         from services.few_shot.service import FewShotService
@@ -183,7 +189,9 @@ class FewShotChannelTest(unittest.TestCase):
         candidates = asyncio.run(service.extract_candidates(bot_id="baizhenzhen"))
 
         self.assertEqual(len(candidates), 1)
-        self.assertEqual(conn.execute("SELECT COUNT(*) FROM few_shot_examples").fetchone()[0], 0)
+        self.assertIsNone(conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='few_shot_examples'"
+        ).fetchone())
 
     def test_disabled_config_or_missing_service_returns_without_query(self):
         from services.injection.channels.fewshot import FewShotChannel

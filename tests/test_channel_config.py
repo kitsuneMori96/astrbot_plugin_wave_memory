@@ -1,6 +1,7 @@
 import sqlite3
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 class ChannelConfigTest(unittest.TestCase):
@@ -167,6 +168,32 @@ class ChannelConfigTest(unittest.TestCase):
         self.assertEqual(jargon["last_latency_ms"], 35)
         self.assertEqual(jargon["last_hit_count"], 2)
 
+    def test_apply_requires_latest_preflight_and_returns_runtime_revision(self):
+        from services.config.channel_config import build_default_channel_config
+        from webui.blueprints.channel_config import apply_channel_config_patch, validate_channel_config_patch
+
+        current = build_default_channel_config(runtime_mode="full")
+        container = SimpleNamespace(
+            plugin_config={},
+            injection_channel_config=current,
+            injection_channel_config_setter=lambda value: None,
+        )
+        patch = {"channels": {"memory": {"top_k": 9}}}
+        denied = apply_channel_config_patch(container, patch)
+        self.assertFalse(denied["ok"])
+        self.assertEqual(denied["error_code"], "channel_config_confirmation_required")
+
+        preview = validate_channel_config_patch({}, patch, current)
+        applied = apply_channel_config_patch(container, {
+            **patch,
+            "preflight_token": preview["preflight_token"],
+            "confirmation": "apply",
+        })
+        self.assertTrue(applied["ok"])
+        self.assertEqual(applied["operation"]["status"], "succeeded")
+        self.assertEqual(applied["revision"], preview["preflight_token"])
+        self.assertIn("config_revision=", applied["verification_url"])
+
     def test_frontend_exposes_channel_config_page(self):
         page = Path("webui/frontend/src/pages/channels/ChannelConfigPage.tsx").read_text(encoding="utf-8")
         table = Path("webui/frontend/src/pages/channels/ChannelConfigTable.tsx").read_text(encoding="utf-8")
@@ -180,57 +207,29 @@ class ChannelConfigTest(unittest.TestCase):
         self.assertIn("safety channel", page)
         self.assertIn("disabled={safety}", table)
         self.assertIn("运行状态", table)
-        self.assertIn("最近延迟", table)
-        self.assertIn("最近命中", table)
+        self.assertIn("last_hit_count", table)
+        self.assertIn("last_latency_ms", table)
+        self.assertIn("默认 ", table)
+        self.assertIn("保存 ", table)
+        self.assertIn("生效 ", table)
         self.assertIn("status?: string", api)
         self.assertIn("last_latency_ms?: number", api)
         self.assertIn("last_hit_count?: number", api)
         self.assertIn("/api/config/channels", api)
         self.assertIn("/channels", routes)
 
-    def test_v450_frontend_channel_config_exposes_metadata_and_navigation(self):
+    def test_stage5_channel_config_uses_server_descriptors_and_revision_verification(self):
         page = Path("webui/frontend/src/pages/channels/ChannelConfigPage.tsx").read_text(encoding="utf-8")
         table = Path("webui/frontend/src/pages/channels/ChannelConfigTable.tsx").read_text(encoding="utf-8")
+        backend = Path("webui/blueprints/channel_config.py").read_text(encoding="utf-8")
 
-        for marker in (
-            "通道语义与风险",
-            "管理入口",
-            "风险提示",
-            "身份污染、近期去重、安全兜底",
-            "群聊长期记忆召回",
-            "事实关系注入",
-            "风格范例注入",
-            "书设知识注入",
-            "全文检索补召回",
-            "好感/关系信号",
-            "/blackbox/facts",
-            "/blackbox/fewshot",
-            "/blackbox/book-lore",
-            "/blackbox/indexes",
-            "/blackbox/people",
-            "关闭 memory：长期记忆不注入",
-            "关闭 facts：稳定事实关系不注入",
-            "关闭 belief：Bot 判断/认知不注入",
-            "关闭 fewshot：风格示例不注入",
-            "关闭 book_lore：书设知识不注入",
-            "调低 token_budget：可能丢关键信息",
-            "调低 timeout：可能导致慢通道被跳过",
-        ):
-            self.assertIn(marker, table)
-
-        for marker in (
-            "字段说明",
-            "enabled：是否参与注入",
-            "priority：通道执行/拼接优先级",
-            "top_k：检索类通道候选数",
-            "max_items：非检索类通道最多注入条目",
-            "token_budget：单通道预算",
-            "timeout_ms：单通道超时",
-            "min_score：检索命中最低分",
-            "去注入观测台验证最近 trace",
-            "to=\"/injection\"",
-        ):
+        for marker in ("descriptors", "purpose", "dependencies", "risk", "management_route", "verification_filters"):
+            self.assertIn(marker, backend)
+        for marker in ("revision", "effectiveSince", "verificationUrl", "operation?.status === 'succeeded'"):
             self.assertIn(marker, page)
+        for marker in ("descriptorMap", "默认 ", "保存 ", "生效 ", "apply_mode"):
+            self.assertIn(marker, table)
+        self.assertNotIn("channelMetadata", table)
 
 
 if __name__ == "__main__":

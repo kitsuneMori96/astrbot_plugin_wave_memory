@@ -70,7 +70,7 @@ class FTS5ChannelScopeTest(unittest.TestCase):
     def test_like_fallback_keeps_the_same_scope_predicate(self):
         from services.injection.channels.fts5 import FTS5Channel
 
-        rows = FTS5Channel(db=self.db)._like_fallback(words=["咖啡"], limit=20, scope=self._scope())
+        rows = FTS5Channel(db=self.db)._scoped_like_search(words=["咖啡"], limit=20, scope=self._scope())
         self.assertEqual([row[0] for row in rows], [1])
 
     def test_missing_scope_is_empty_not_a_legacy_group_query(self):

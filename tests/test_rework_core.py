@@ -295,7 +295,7 @@ class ReworkCoreTest(unittest.TestCase):
         )
         service = RelationshipEventService(conn)
         tool = WaveMemoryAffinityUpdateTool(db=_DB(conn), relationship_events=service)
-        missing_ctx = _ContextWrapper(context=type("C", (), {"event": _Event()})())
+        missing_ctx = types.SimpleNamespace(context=type("C", (), {"event": _Event()})())
         missing = asyncio.run(tool.call(
             missing_ctx,
             target_user="当前群用户",
@@ -306,7 +306,7 @@ class ReworkCoreTest(unittest.TestCase):
         ))
         self.assertIn("scope_required", missing)
 
-        scoped_ctx = _ContextWrapper(context=type("C", (), {"event": _Event(runtime_scope)})())
+        scoped_ctx = types.SimpleNamespace(context=type("C", (), {"event": _Event(runtime_scope)})())
         recorded = asyncio.run(tool.call(
             scoped_ctx,
             target_user="当前群用户",

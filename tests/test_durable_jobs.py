@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,7 +11,7 @@ from engine.db.job_repo import (
     JobRepository,
     JobRequestConflictError,
 )
-from services.durable_jobs import DurableJobService
+from services.durable_jobs import DurableJobRunner, DurableJobService
 
 
 def _connection() -> sqlite3.Connection:
@@ -81,6 +83,101 @@ def test_request_idempotency_and_schedule_slot_generation_are_independent():
             created_at=15.0,
         )
         assert len({run_1.run_id, next_generation.run_id, next_slot.run_id}) == 3
+    finally:
+        connection.close()
+
+
+def test_schedule_replay_ignores_mutable_checkpoint_cursor():
+    connection = _connection()
+    try:
+        request = _request(connection)
+        scheduled = JobRepository.schedule_run(
+            connection,
+            request_id=request.request_id,
+            schedule_slot="checkpoint-replay",
+            cursor_generation=0,
+            cursor={"after_id": 0},
+            created_at=16.0,
+        )
+        claimed = JobRepository.claim_run(
+            connection,
+            scheduled.run_id,
+            now=17.0,
+            lease_owner="worker-A",
+            lease_seconds=30.0,
+        )
+        assert claimed is not None
+        progressed = JobRepository.update_progress(
+            connection,
+            scheduled.run_id,
+            lease_owner="worker-A",
+            now=18.0,
+            cursor={"after_id": 99},
+        )
+
+        replay = JobRepository.schedule_run(
+            connection,
+            request_id=request.request_id,
+            schedule_slot="checkpoint-replay",
+            cursor_generation=0,
+            cursor={"after_id": 0},
+            created_at=19.0,
+        )
+
+        assert replay.run_id == scheduled.run_id
+        assert replay.cursor == progressed.cursor == {"after_id": 99}
+    finally:
+        connection.close()
+
+
+def test_terminal_maintenance_reschedule_advances_generation_once():
+    connection = _connection()
+    try:
+        request = _request(connection)
+        first = JobRepository.schedule_run(
+            connection,
+            request_id=request.request_id,
+            schedule_slot="startup-drift",
+            cursor_generation=1,
+            created_at=20.0,
+            reschedule_terminal=True,
+        )
+        claimed = JobRepository.claim_run(
+            connection,
+            first.run_id,
+            now=21.0,
+            lease_owner="worker-A",
+        )
+        assert claimed is not None
+        JobRepository.mark_failed(
+            connection,
+            first.run_id,
+            lease_owner="worker-A",
+            now=22.0,
+            error_code="drift_remaining",
+            error_message="verification still reports drift",
+        )
+
+        second = JobRepository.schedule_run(
+            connection,
+            request_id=request.request_id,
+            schedule_slot="startup-drift",
+            cursor_generation=1,
+            created_at=23.0,
+            reschedule_terminal=True,
+        )
+        replay = JobRepository.schedule_run(
+            connection,
+            request_id=request.request_id,
+            schedule_slot="startup-drift",
+            cursor_generation=1,
+            created_at=24.0,
+            reschedule_terminal=True,
+        )
+
+        assert second.cursor_generation == 2
+        assert replay.run_id == second.run_id
+        assert len(JobRepository.list_runs(connection, request_id=request.request_id)) == 2
     finally:
         connection.close()
 
@@ -249,6 +346,52 @@ def test_graceful_worker_release_requeues_immediately():
         assert replay.attempt == 2
     finally:
         connection.close()
+
+
+@pytest.mark.asyncio
+async def test_runner_survives_individual_recovery_claim_and_mark_failures():
+    class Service:
+        def __init__(self):
+            self.claim_calls = 0
+            self.mark_calls = 0
+
+        async def recover_expired_leases(self):
+            raise RuntimeError("recovery unavailable")
+
+        async def claim_next(self, **kwargs):
+            self.claim_calls += 1
+            if self.claim_calls == 1:
+                raise RuntimeError("lease transaction failed")
+            if self.claim_calls == 2:
+                return SimpleNamespace(run_id="run-1", request_id="request-1")
+            runner._running = False
+            return None
+
+        async def get_request(self, request_id):
+            return SimpleNamespace(kind="repair")
+
+        async def cancellation_requested(self, run_id):
+            return False
+
+        async def mark_succeeded(self, run_id, **kwargs):
+            self.mark_calls += 1
+            raise RuntimeError("terminal mark failed")
+
+    handled = []
+
+    async def handler(run, request, active_runner):
+        handled.append(run.run_id)
+        return {"ok": True}
+
+    service = Service()
+    runner = DurableJobRunner(service, {"repair": handler}, poll_interval=0.01)
+    runner._running = True
+
+    await asyncio.wait_for(runner._loop(), timeout=1.0)
+
+    assert handled == ["run-1"]
+    assert service.mark_calls == 1
+    assert service.claim_calls == 3
 
 
 @pytest.mark.asyncio

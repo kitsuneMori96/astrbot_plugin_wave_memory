@@ -146,34 +146,13 @@ class V440QueryDebugContractTest(unittest.TestCase):
         self.assertNotIn("enable_epa: false", js)
         self.assertNotIn("enable_geodesic: false", js)
 
-    def test_kg_config_separates_view_and_query_controls(self):
+    def test_kg_query_runtime_support_remains_on_scoped_explore_page(self):
         from pathlib import Path
 
         html = Path("webui/static/explore.html").read_text(encoding="utf-8")
+        self.assertIn("scope-bot-id", html)
+        self.assertIn("scope-session-id", html)
         js = Path("webui/static/kg.js").read_text(encoding="utf-8")
-
-        for marker in (
-            "view-config-section",
-            "query-config-section",
-            "视图配置",
-            "查询配置",
-            "只影响当前画布显示",
-            "影响 /api/query 调试请求",
-            "query-stage-epa",
-            "query-stage-pyramid",
-            "query-stage-spike",
-            "query-stage-geodesic",
-            "query-mode-preset",
-            "baseline",
-            "ablation",
-            "query-top-k",
-            "query-source-filter",
-            "query-debug-toggle",
-            "query-pyramid-top-k",
-            "query-spike-max-hops",
-            "query-geodesic-alpha",
-        ):
-            self.assertIn(marker, html)
 
         for marker in (
             "readQueryConfig",
@@ -195,26 +174,12 @@ class V440QueryDebugContractTest(unittest.TestCase):
         ):
             self.assertIn(marker, js)
 
-    def test_kg_runtime_and_event_status_are_separate(self):
+    def test_kg_runtime_status_helpers_remain_on_read_only_explore_page(self):
         from pathlib import Path
 
         html = Path("webui/static/explore.html").read_text(encoding="utf-8")
+        self.assertIn("只读", html)
         js = Path("webui/static/kg.js").read_text(encoding="utf-8")
-
-        for marker in (
-            "runtime-config-section",
-            "event-status-section",
-            "运行配置",
-            "事件状态",
-            "只读诊断",
-            "不修改 AstrBot 静态配置",
-            "runtime-status-view",
-            "runtime-status-query",
-            "event-status-current",
-            "event-status-warning-list",
-            "event-status-last-action",
-        ):
-            self.assertIn(marker, html)
 
         for marker in (
             "updateRuntimeConfigStatus",

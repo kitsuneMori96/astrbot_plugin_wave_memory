@@ -137,7 +137,12 @@ def _create_book_lore_database(path: Path) -> None:
         connection.close()
 
 
-def _create_manifest(index_path: Path) -> None:
+def _create_manifest(
+    index_path: Path,
+    *,
+    kind: str = "memory",
+    watermark: int = 1,
+) -> Path:
     from engine.index_manifest import (
         IndexManifest,
         checksum_file,
@@ -148,10 +153,10 @@ def _create_manifest(index_path: Path) -> None:
     generation_file = generation_path(index_path, 1)
     generation_file.write_bytes(b"immutable-index-generation")
     payload = IndexManifest(
-        kind="memory",
+        kind=kind,
         generation=1,
         dimension=3,
-        db_watermark=1,
+        db_watermark=watermark,
         count=1,
         checksum=checksum_file(generation_file),
         created_at="2026-07-13T00:00:00Z",
@@ -160,6 +165,7 @@ def _create_manifest(index_path: Path) -> None:
         json.dumps(payload.to_dict(), sort_keys=True),
         encoding="utf-8",
     )
+    return generation_file
 
 
 def test_diagnostics_collects_readonly_evidence_and_distinct_health(tmp_path):
@@ -216,10 +222,111 @@ def test_diagnostics_collects_readonly_evidence_and_distinct_health(tmp_path):
     assert by_name["derived_projection"]["evidence"]["lagged_count"] == 2
     assert by_name["memory_manifest"]["health"] == "healthy"
     assert by_name["memory_manifest"]["evidence"]["generation"] == 1
+    assert by_name["memory_manifest"]["evidence"]["checksum_verified"] is True
+    assert by_name["memory_manifest"]["evidence"]["watermark_relation"] == "equal"
     assert by_name["tag_manifest"]["health"] == "drift"
     assert by_name["tag_manifest"]["evidence"]["reason"] == "generation_manifest_missing"
     assert by_name["book_lore_source"]["health"] == "healthy"
     assert by_name["book_lore_source"]["evidence"]["scope"] == "catalog"
+
+
+@pytest.mark.parametrize(
+    ("manifest_watermark", "relation", "health", "reason"),
+    (
+        (0, "lag", "drift", "db_watermark_lag"),
+        (1, "equal", "healthy", None),
+        (2, "ahead", "drift", "db_watermark_ahead"),
+    ),
+)
+def test_manifest_watermark_is_compared_to_committed_write_sequence(
+    tmp_path,
+    manifest_watermark,
+    relation,
+    health,
+    reason,
+):
+    from services.diagnostics import DiagnosticsService, IndexSource
+
+    database_path = tmp_path / "watermark.db"
+    index_path = tmp_path / "memory.hnsw"
+    _create_main_database(database_path)
+    _create_manifest(index_path, watermark=manifest_watermark)
+
+    payload = DiagnosticsService(
+        database_path=database_path,
+        memory_index=IndexSource(index_path, "memory", dimension=3, runtime_count=1),
+    ).collect()
+    check = {item["name"]: item for item in payload["checks"]}["memory_manifest"]
+
+    assert check["health"] == health
+    assert check["evidence"]["watermark_relation"] == relation
+    assert check["evidence"]["committed_write_sequence_watermark"] == 1
+    assert check["evidence"]["watermark_delta"] == manifest_watermark - 1
+    if reason is None:
+        assert check["evidence"]["drift_reasons"] == []
+    else:
+        assert reason in check["evidence"]["drift_reasons"]
+
+
+@pytest.mark.parametrize(("manifest_kind", "source_kind"), (("tag", "tags"), ("tags", "tag")))
+def test_tag_manifest_accepts_singular_and_plural_kind_aliases(
+    tmp_path,
+    manifest_kind,
+    source_kind,
+):
+    from services.diagnostics import DiagnosticsService, IndexSource
+
+    index_path = tmp_path / f"{manifest_kind}.hnsw"
+    _create_manifest(index_path, kind=manifest_kind, watermark=0)
+    payload = DiagnosticsService(
+        tag_index=IndexSource(index_path, source_kind, dimension=3, runtime_count=1),
+    ).collect()
+    check = {item["name"]: item for item in payload["checks"]}["tag_manifest"]
+
+    assert check["health"] == "healthy"
+    assert check["evidence"]["kind"] == manifest_kind
+    assert check["evidence"]["checksum_verified"] is True
+
+
+def test_manifest_checksum_is_verified_by_default(tmp_path):
+    from services.diagnostics import DiagnosticsService, IndexSource
+
+    index_path = tmp_path / "memory.hnsw"
+    generation_file = _create_manifest(index_path, watermark=0)
+    generation_file.write_bytes(b"tampered-generation")
+
+    payload = DiagnosticsService(
+        memory_index=IndexSource(index_path, "memory", dimension=3, runtime_count=1),
+    ).collect()
+    check = {item["name"]: item for item in payload["checks"]}["memory_manifest"]
+
+    assert check["health"] == "drift"
+    assert check["evidence"]["reason"] == "invalid_generation_manifest"
+    assert "checksum mismatch" in check["evidence"]["error"]
+
+
+def test_diagnostics_treats_retired_memory_vectors_table_as_healthy(tmp_path):
+    from services.diagnostics import DiagnosticsService
+
+    database_path = tmp_path / "canonical-vectors.db"
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute("CREATE TABLE memories(id INTEGER PRIMARY KEY, vector BLOB)")
+        connection.execute(
+            "INSERT INTO memories(id, vector) VALUES (?, ?)",
+            (1, np.asarray([1.0, 0.0], dtype=np.float32).tobytes()),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    payload = DiagnosticsService(database_path=database_path).collect()
+    vector_check = {item["name"]: item for item in payload["checks"]}["memory_vectors"]
+
+    assert vector_check["health"] == "healthy"
+    assert vector_check["evidence"]["storage_mode"] == "memories.vector"
+    assert vector_check["evidence"]["legacy_table_present"] is False
+    assert vector_check["evidence"]["canonical_vector_count"] == 1
 
 
 def test_diagnostics_shadow_probe_detects_id_and_recall_drift(tmp_path):
@@ -374,12 +481,19 @@ def test_blueprint_container_resolution_uses_only_live_paths(tmp_path):
     service = build_diagnostics_service(SimpleNamespace(
         db=SimpleNamespace(db_path=str(database_path)),
         memory_index=memory_index,
-        tag_index=None,
+        tag_index=SimpleNamespace(
+            index_path=str(tmp_path / "tags.hnsw"),
+            kind="tags",
+            dimension=1024,
+            count=3,
+        ),
         plugin_config={},
         learning_source_registry=None,
     ))
 
     assert service.database_path == database_path.resolve()
     assert service.memory_index.runtime_count == 7
-    assert service.tag_index.path is None
+    assert Path(service.tag_index.path) == (tmp_path / "tags.hnsw").resolve()
+    assert service.tag_index.kind == "tag"
+    assert service.tag_index.runtime_count == 3
     assert service.book_lore_path is None

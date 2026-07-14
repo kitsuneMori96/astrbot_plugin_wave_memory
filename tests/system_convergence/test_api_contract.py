@@ -16,6 +16,7 @@ import pytest
 from engine.db.connection import ConnectionManager
 from engine.db.learning_repository import LearningRepositories
 from engine.db.memory_repo import MemoryRepo
+from engine.db.outbox_repo import OutboxRepository
 from services.injection.trace_store import InjectionTraceStore
 from tests.system_convergence.contracts import (
     contract_assert,
@@ -52,6 +53,23 @@ class _ApiMemoryRepo(MemoryRepo):
 
     def get_memory_detail(self, memory_id: int):
         return self.get_memory_by_id(memory_id)
+
+
+class _ApiWriteCoordinator:
+    """Test adapter preserving the production transaction(callback) contract."""
+
+    _consumer_names = ()
+
+    def __init__(self, manager: ConnectionManager):
+        self.manager = manager
+
+    async def transaction(self, callback, *, actor=None):
+        del actor
+        with self.manager.write_transaction() as connection:
+            return callback(connection)
+
+    async def read(self, callback):
+        return callback(self.manager.conn)
 
 
 def _registry_input(mode: str) -> _RegistryInput:
@@ -182,6 +200,8 @@ async def _api_context(
                 [],
             )
         connection.commit()
+        with manager.write_transaction() as transaction:
+            OutboxRepository.migrate(transaction)
 
         ServiceContainer.reset()
         container = get_container()
@@ -192,6 +212,7 @@ async def _api_context(
             memory_index=None,
             tag_index=None,
             cooccurrence=None,
+            write_gateway=SimpleNamespace(coordinator=_ApiWriteCoordinator(manager)),
             password="",
         )
         container.configure_learning_services(
@@ -286,8 +307,13 @@ def _page_violations(label: str, status: int, payload, *, limit: int, offset: in
     return violations
 
 
-async def _assert_page_endpoint(reason: str, label: str, url: str) -> None:
-    async with _api_context(reason) as (client, _, _):
+async def _assert_page_endpoint(reason: str, label: str, url: str, *, use_api_binding: bool = False, request_scope_input=None) -> None:
+    async with _api_context(
+        reason,
+        use_api_binding=use_api_binding,
+        registry_input=_registry_input("healthy") if use_api_binding else None,
+        request_scope_input=request_scope_input,
+    ) as (client, _, _):
         response = await client.get(url)
         violations = _page_violations(
             label, response.status_code, await response.get_json(), limit=2, offset=0
@@ -296,7 +322,6 @@ async def _assert_page_endpoint(reason: str, label: str, url: str) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_PAGE_MEMORIES")
 async def test_memories_list_uses_complete_nested_page_response():
     await _assert_page_endpoint(
         "R13_PAGE_MEMORIES", "memories", "/api/memories?limit=2&offset=0"
@@ -304,7 +329,6 @@ async def test_memories_list_uses_complete_nested_page_response():
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_PAGE_LEARNING_SOURCES")
 async def test_learning_sources_list_uses_complete_nested_page_response():
     await _assert_page_endpoint(
         "R13_PAGE_LEARNING_SOURCES",
@@ -314,7 +338,6 @@ async def test_learning_sources_list_uses_complete_nested_page_response():
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_PAGE_LEARNING_JOBS")
 async def test_learning_jobs_list_uses_complete_nested_page_response():
     await _assert_page_endpoint(
         "R13_PAGE_LEARNING_JOBS",
@@ -324,7 +347,6 @@ async def test_learning_jobs_list_uses_complete_nested_page_response():
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_PAGE_LEARNING_CANDIDATES")
 async def test_learning_candidates_list_uses_complete_nested_page_response():
     await _assert_page_endpoint(
         "R13_PAGE_LEARNING_CANDIDATES",
@@ -334,7 +356,6 @@ async def test_learning_candidates_list_uses_complete_nested_page_response():
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_PAGE_LEARNING_PROMOTIONS")
 async def test_learning_promotions_list_uses_complete_nested_page_response():
     await _assert_page_endpoint(
         "R13_PAGE_LEARNING_PROMOTIONS",
@@ -344,7 +365,6 @@ async def test_learning_promotions_list_uses_complete_nested_page_response():
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_PAGE_TRACES")
 async def test_trace_list_uses_complete_nested_page_response():
     await _assert_page_endpoint(
         "R13_PAGE_TRACES", "traces", "/api/observatory/traces?limit=2&offset=0"
@@ -352,7 +372,6 @@ async def test_trace_list_uses_complete_nested_page_response():
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_PAGE_FACTS")
 async def test_facts_list_uses_complete_nested_page_response():
     await _assert_page_endpoint(
         "R13_PAGE_FACTS", "facts", "/api/facts?limit=2&offset=0"
@@ -360,10 +379,13 @@ async def test_facts_list_uses_complete_nested_page_response():
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_PAGE_PEOPLE")
 async def test_people_list_uses_complete_nested_page_response():
     await _assert_page_endpoint(
-        "R13_PAGE_PEOPLE", "people", "/api/people?limit=2&offset=0"
+        "R13_PAGE_PEOPLE",
+        "people",
+        "/api/people?bot_id=bot-alpha&session_id=qq:group:group-alpha&visibility=group&limit=2&offset=0",
+        use_api_binding=True,
+        request_scope_input=_MutableRequestScopeInput(lambda: _runtime_scope("R13_PAGE_PEOPLE")),
     )
 
 
@@ -378,7 +400,6 @@ async def _get_options(reason: str, mode: str):
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_OPTIONS_HEALTHY")
 async def test_scope_options_healthy_registry_payload():
     reason = "R13_OPTIONS_HEALTHY"
     status, payload = await _get_options(reason, "healthy")
@@ -416,7 +437,6 @@ async def test_scope_options_healthy_registry_payload():
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_OPTIONS_EMPTY")
 async def test_scope_options_empty_registry_is_explicit():
     reason = "R13_OPTIONS_EMPTY"
     status, payload = await _get_options(reason, "empty")
@@ -435,7 +455,6 @@ async def test_scope_options_empty_registry_is_explicit():
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_OPTIONS_ERROR")
 async def test_scope_options_provider_error_is_retryable():
     reason = "R13_OPTIONS_ERROR"
     status, payload = await _get_options(reason, "error")
@@ -512,7 +531,6 @@ def _assert_non_leaking_not_found(response, body, forbidden: tuple[str, ...], re
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_OBJECT_REF_DETAIL")
 async def test_server_object_ref_detail_url_opens_real_scoped_object():
     reason = "R13_OBJECT_REF_DETAIL"
     request_scope = _MutableRequestScopeInput(lambda: _runtime_scope(reason))
@@ -539,7 +557,6 @@ async def test_server_object_ref_detail_url_opens_real_scoped_object():
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_OBJECT_REF_TAMPER")
 async def test_middle_character_ref_tamper_is_non_leaking_404():
     reason = "R13_OBJECT_REF_TAMPER"
     request_scope = _MutableRequestScopeInput(lambda: _runtime_scope(reason))
@@ -563,7 +580,6 @@ async def test_middle_character_ref_tamper_is_non_leaking_404():
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_OBJECT_REF_SCOPE")
 async def test_server_ref_is_rejected_after_real_request_scope_switch():
     reason = "R13_OBJECT_REF_SCOPE"
     request_scope = _MutableRequestScopeInput(
@@ -588,7 +604,6 @@ async def test_server_ref_is_rejected_after_real_request_scope_switch():
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_OBJECT_REF_VERSION")
 async def test_old_server_ref_expires_after_scoped_server_url_update():
     reason = "R13_OBJECT_REF_VERSION"
     request_scope = _MutableRequestScopeInput(lambda: _runtime_scope(reason))
@@ -663,7 +678,6 @@ async def test_old_server_ref_expires_after_scoped_server_url_update():
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_OBJECT_REF_BARE_MUTATION")
 async def test_bare_id_mutation_without_scope_or_ref_is_rejected_without_change():
     reason = "R13_OBJECT_REF_BARE_MUTATION"
     async with _api_context(reason, seed_memory=True) as (client, _, connection):
@@ -699,7 +713,6 @@ async def _trace_item(client, reason: str):
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_TRACE_LIST")
 async def test_observatory_trace_list_exposes_real_trace_and_detail_url():
     reason = "R13_TRACE_LIST"
     async with _api_context(reason, seed_trace=True) as (client, _, _):
@@ -709,7 +722,6 @@ async def test_observatory_trace_list_exposes_real_trace_and_detail_url():
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_TRACE_DETAIL")
 async def test_observatory_trace_detail_follows_server_url():
     reason = "R13_TRACE_DETAIL"
     async with _api_context(reason, seed_trace=True) as (client, _, _):
@@ -723,7 +735,6 @@ async def test_observatory_trace_detail_follows_server_url():
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_TRACE_FEEDBACK")
 async def test_trace_without_feedback_has_explicit_none_state():
     reason = "R13_TRACE_FEEDBACK"
     async with _api_context(reason, seed_trace=True) as (client, _, _):
@@ -737,7 +748,6 @@ async def test_trace_without_feedback_has_explicit_none_state():
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_TRACE_UNKNOWN")
 async def test_unknown_trace_id_is_controlled_non_leaking_404():
     reason = "R13_TRACE_UNKNOWN"
     missing_id = "trace-does-not-exist"
@@ -771,7 +781,6 @@ async def _candidate_state(reason: str, repositories_override=None):
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_STATE_EMPTY")
 async def test_empty_state_is_known_exact_zero():
     reason = "R13_STATE_EMPTY"
     status, payload = await _candidate_state(reason)
@@ -789,7 +798,6 @@ async def test_empty_state_is_known_exact_zero():
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_STATE_ERROR")
 async def test_backend_error_state_is_retryable_service_unavailable():
     reason = "R13_STATE_ERROR"
     status, payload = await _candidate_state(reason, SimpleNamespace(candidates=_ErrorCandidates()))
@@ -803,7 +811,6 @@ async def test_backend_error_state_is_retryable_service_unavailable():
 
 
 @pytest.mark.asyncio
-@pytest.mark.contract_red(reason="R13_STATE_UNKNOWN")
 async def test_unknown_total_state_is_successful_unavailable_total():
     reason = "R13_STATE_UNKNOWN"
     status, payload = await _candidate_state(reason, SimpleNamespace(candidates=_UnknownCandidates()))

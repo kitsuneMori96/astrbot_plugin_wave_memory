@@ -113,7 +113,6 @@ class PersonaBeliefReworkTest(unittest.TestCase):
                     exclude_sources=[],
                 )
             },
-            default_bot_db_id="baizhenzhen",
         )
 
         from domain.scope import RuntimeScope, SessionRef
@@ -293,21 +292,30 @@ class PersonaBeliefReworkTest(unittest.TestCase):
     def test_few_shot_filters_aggressive_or_identity_contaminated_examples(self):
         from services.few_shot.service import FewShotService
 
-        conn = self._connect()
-        service = FewShotService(db=SimpleNamespace(conn=conn), enabled=True, config={"max_inject": 3})
-        now = int(time.time())
-        conn.executemany(
-            """INSERT INTO few_shot_examples (content, score, traits, status, bot_id, created_at, approved_at)
-               VALUES (?, ?, '[]', 'approved', ?, ?, ?)""",
-            [
-                ("先看事实，再简短回应。", 0.95, "1336495069", now, now),
-                ("这种人就该狠狠怼回去，别客气。", 0.99, "1336495069", now, now),
-                ("（猫耳朵一抖）本真君才不是猫娘喵。", 0.98, "1336495069", now, now),
-            ],
-        )
-        conn.commit()
+        from domain.scope import RuntimeScope, SessionRef
 
-        injection = service.get_injection(bot_id="1336495069", max_items=3)
+        class _Repo:
+            def list_approved(self, *, scope, limit):
+                return [
+                    {"id": 1, "content": "先看事实，再简短回应。"},
+                    {"id": 2, "content": "这种人就该狠狠怼回去，别客气。"},
+                    {"id": 3, "content": "（猫耳朵一抖）本真君才不是猫娘喵。"},
+                ][:limit]
+
+        conn = self._connect()
+        service = FewShotService(
+            db=SimpleNamespace(conn=conn),
+            enabled=True,
+            config={"max_inject": 3},
+            repository=_Repo(),
+        )
+        scope = RuntimeScope(
+            bot_id="bot-profile-main",
+            visibility="group",
+            session=SessionRef("test:group:g1", "test", "group", "g1"),
+        )
+
+        injection = service.get_injection(scope=scope, max_items=3)
 
         self.assertIn("先看事实", injection)
         self.assertNotIn("怼回去", injection)

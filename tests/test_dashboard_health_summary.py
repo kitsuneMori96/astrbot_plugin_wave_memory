@@ -63,7 +63,7 @@ def test_health_registry_reasons_distinguish_missing_bot_profile_from_llm_missin
     assert "belief_engine 初始化失败或未启用" in source
 
 
-def test_bot_profile_schema_and_runtime_fallback_are_kept():
+def test_bot_profile_schema_is_explicit_and_runtime_has_no_fixed_identity_fallback():
     import json
 
     schema = json.loads(Path("_conf_schema.json").read_text(encoding="utf-8"))
@@ -73,9 +73,10 @@ def test_bot_profile_schema_and_runtime_fallback_are_kept():
     assert "MetaThinking_Bot2" in schema
     assert schema["MetaThinking_Bot1"]["items"]["db_id"]["default"] == "yushu"
     assert schema["MetaThinking_Bot2"]["items"]["db_id"]["default"] == "baizz"
-    assert "_BUILTIN_BOT_PROFILE_CONFIGS" in source
-    assert "_bot_registry_compat_fallback" in source
-    assert "不写回、不覆盖用户 WebUI 配置" in source
+    assert "_BUILTIN_BOT_PROFILE_CONFIGS" not in source
+    assert "_bot_registry_compat_fallback" not in source
+    assert "BotProfile requires explicit qq_id and stable db_id" in source
+    assert "no implicit bot administrator granted" in source
 
 
 def test_core_off_or_runtime_error_makes_system_critical():

@@ -101,31 +101,32 @@ class ScopedBlueprintApiTest(unittest.TestCase):
         self.assertEqual(belief_payload["items"][0]["type"], "world_view")
         self.assertEqual(belief_payload["scope"]["kind"], "RuntimeScope")
 
-    def test_mutations_require_scope_codec_envelope_and_never_use_legacy(self):
+    def test_kg_mutations_are_read_only_while_beliefs_fail_closed(self):
         _, envelope = _scope_envelope()
         self.kg.request = types.SimpleNamespace(get_json=lambda **_: _value({
             "scope": envelope, "subject": "qq:user:1", "predicate": "likes", "object": "猫",
         }))
-        fact_payload = asyncio.run(self.kg.create_scoped_fact.__wrapped__())
-        self.assertEqual(fact_payload["fact_id"], 11)
-        self.assertEqual(self.repo.fact_calls[-1][0].session.id, "qq:group:g1")
+        fact_payload, fact_status = asyncio.run(self.kg.create_scoped_fact.__wrapped__())
+        self.assertEqual((fact_payload, fact_status), ({"error": {"code": "legacy_mutation_disabled"}}, 410))
+        self.assertEqual(self.repo.fact_calls, [])
 
         self.beliefs.request = types.SimpleNamespace(get_json=lambda **_: _value({
             "scope": envelope, "belief_key": "pet-care", "content": "要温柔对待宠物",
         }))
-        belief_payload = asyncio.run(self.beliefs.create_belief.__wrapped__())
-        self.assertEqual(belief_payload["belief_id"], 21)
-        self.assertEqual(self.repo.belief_calls[-1][0].bot_id, "bot-alpha")
+        belief_payload, belief_status = asyncio.run(self.beliefs.create_belief.__wrapped__())
+        self.assertEqual(belief_status, 503)
+        self.assertEqual(belief_payload["error"]["code"], "anchored_belief_command_unavailable")
+        self.assertEqual(self.repo.belief_calls, [])
 
         self.beliefs.request = types.SimpleNamespace(get_json=lambda **_: _value({"content": "缺 Scope"}))
         missing_payload, missing_status = asyncio.run(self.beliefs.create_belief.__wrapped__())
-        self.assertEqual((missing_payload, missing_status), ({"error": {"code": "scope_required"}}, 400))
+        self.assertEqual((missing_payload, missing_status), ({"error": {"code": "anchored_belief_command_unavailable"}}, 503))
 
     def test_cross_scope_object_is_hidden_as_not_found(self):
         _, envelope = _scope_envelope()
         self.beliefs.request = types.SimpleNamespace(get_json=lambda **_: _value({"scope": envelope}))
         payload, status = asyncio.run(self.beliefs.edit_belief.__wrapped__(999))
-        self.assertEqual((payload, status), ({"error": {"code": "scoped_object_not_found"}}, 404))
+        self.assertEqual((payload, status), ({"error": {"code": "belief_edit_command_unavailable"}}, 503))
 
     def test_legacy_kg_and_belief_mutations_are_terminally_rejected(self):
         payload, status = asyncio.run(self.kg.update_tag.__wrapped__(9))
@@ -155,16 +156,16 @@ class ScopedBlueprintApiTest(unittest.TestCase):
         self.kg.request = types.SimpleNamespace(args={"page": "1", "page_size": "10"})
         self.beliefs.request = types.SimpleNamespace(args={"page": "1", "page_size": "10"})
 
-        facts = asyncio.run(self.kg.legacy_audit_facts.__wrapped__())
+        facts_payload, facts_status = asyncio.run(self.kg.legacy_audit_facts.__wrapped__())
         beliefs = asyncio.run(self.beliefs.legacy_list_beliefs.__wrapped__())
 
-        for payload in (facts, beliefs):
-            self.assertTrue(payload["legacy"])
-            self.assertTrue(payload["unresolved_legacy"])
-            self.assertIsNone(payload["scope"])
-            self.assertTrue(payload["readonly"])
-            self.assertEqual(payload["page"]["total"], 1)
-            self.assertTrue(payload["items"][0]["legacy"])
+        self.assertEqual(facts_status, 410)
+        self.assertEqual(facts_payload["error"]["code"], "legacy_mutation_disabled")
+        self.assertTrue(beliefs["legacy"])
+        self.assertTrue(beliefs["unresolved_legacy"])
+        self.assertIsNone(beliefs["scope"])
+        self.assertTrue(beliefs["readonly"])
+        self.assertEqual(beliefs["page"]["total"], 1)
 
 
 if __name__ == "__main__":

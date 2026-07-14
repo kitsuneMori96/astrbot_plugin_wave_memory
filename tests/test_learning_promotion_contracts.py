@@ -4,6 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from domain.evidence import EvidenceBinding, EvidenceDerivation, EvidenceRef, FULL_EVIDENCE_DERIVATION_CHAIN
+from domain.scope import CatalogScope, RuntimeScope, SessionRef
 from engine.db.learning_repository import LearningRepositories
 from services.learning.candidate_service import LearningCandidateService
 from services.learning.promotion import PromotionOrchestrator
@@ -30,6 +32,54 @@ def _evidence(candidate_type, *, group_id="group-1", user_id="user-1"):
         },
         "subject_principal_id": f"test:user:{user_id}",
     }
+    if candidate_type == "book_lore":
+        target = RuntimeScope(
+            bot_id="bot-a",
+            visibility="group",
+            session=SessionRef(f"test:group:{group_id}", "test", "group", group_id),
+            subject_principal_id=f"test:user:{user_id}",
+        )
+        source = CatalogScope(catalog_id="lore-a", corpus_id="corpus-a", version="v1")
+        ref = EvidenceRef(
+            kind="reviewed_book_lore_projection",
+            id="community:7",
+            content_hash="hash:book_lore",
+            captured_at=100.0,
+            source_scope=source,
+            available=True,
+        )
+        binding = EvidenceBinding(
+            evidence_id=ref.id,
+            target_scope=target,
+            derivation_chain=FULL_EVIDENCE_DERIVATION_CHAIN,
+            policy_version="scope-derivation/v1",
+        )
+        derivation = EvidenceDerivation(
+            kind="EvidenceDerivation",
+            reviewed=True,
+            review_status="reviewed",
+            derivation_version="book-lore/v1",
+            policy_version="scope-derivation/v1",
+            source=source,
+            target=target,
+            derivation_chain=FULL_EVIDENCE_DERIVATION_CHAIN,
+        )
+        return {
+            "group_id": group_id,
+            "user_id": user_id,
+            "scope": scope,
+            "target_scope": target.to_dict(),
+            "catalog_scope": source.to_dict(),
+            "evidence_refs": (ref.to_dict(),),
+            "evidence_bindings": (binding.to_dict(),),
+            "evidence_derivation": derivation.to_dict(),
+            "community_id": 7,
+            "title": "旧港",
+            "summary_snapshot": "潮汐改变商路",
+            "rank": 8.5,
+            "source_library_id": "lore-a",
+        }
+
     evidence_ref = {
         "kind": "raw_message",
         "id": f"message:{candidate_type}",
@@ -124,7 +174,7 @@ class _BookLoreDomain:
         self.calls = []
         self.refresh_calls = []
 
-    def upsert_lore(self, **kwargs):
+    def write_reviewed_projection(self, **kwargs):
         self.calls.append(kwargs)
         return 303
 
@@ -235,8 +285,10 @@ def test_fewshot_uses_approved_domain_path_and_reuses_cache_refresh(promotion_co
     result = orchestrator.promote_candidate(candidate_id, bot_id="bot-a")[0]
 
     assert result["target_id"] == "202"
-    assert domain.calls[0]["bot_id"] == "bot-a"
-    assert domain.calls[0]["status"] == "approved"
+    assert domain.calls[0]["scope"].bot_id == "bot-a"
+    assert domain.calls[0]["scope"].session.conversation_id == "group-1"
+    assert domain.calls[0]["evidence_refs"]
+    assert domain.calls[0]["evidence_bindings"]
     assert domain.refresh_calls[0]["target_id"] == "202"
     repeated = orchestrator.promote_candidate(candidate_id, bot_id="bot-a")[0]
     assert repeated["target_id"] == "202"
@@ -267,8 +319,14 @@ def test_remaining_domain_promotions_preserve_scope_and_target_id(
     assert result["promotion_status"] == "succeeded"
     assert result["target_id"] == target_id
     calls = getattr(target, "calls", None) or getattr(target.service, "calls", None)
-    assert calls[0]["group_id"] == "group-1"
-    assert calls[0]["user_id"] == "user-1"
+    if target_kind == "book_lore":
+        assert calls[0]["target_scope"].session.conversation_id == "group-1"
+        assert calls[0]["source_scope"].catalog_id == "lore-a"
+        assert calls[0]["evidence_refs"]
+        assert calls[0]["evidence_bindings"]
+    else:
+        assert calls[0]["group_id"] == "group-1"
+        assert calls[0]["user_id"] == "user-1"
     repeated = orchestrator.promote_candidate(candidate_id, bot_id="bot-a")[0]
     assert repeated["target_id"] == target_id
     assert len(calls) == 1

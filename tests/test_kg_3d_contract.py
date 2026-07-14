@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 import sys
 import tempfile
@@ -39,16 +40,6 @@ if "quart" not in sys.modules:
                 return func
             return decorator
 
-    class _Quart:
-        def __init__(self, *args, **kwargs):
-            self.secret_key = ""
-
-        def after_request(self, func):
-            return func
-
-        def register_blueprint(self, bp):
-            return None
-
     class _Request:
         headers = {}
         args = {}
@@ -57,411 +48,225 @@ if "quart" not in sys.modules:
             return {}
 
     def _jsonify(obj=None, *args, **kwargs):
-        if obj is None:
-            obj = {}
-        if kwargs:
-            if isinstance(obj, dict):
-                obj.update(kwargs)
-            else:
-                obj = kwargs
-        return obj
-
-    class _Response:
-        def __init__(self, *args, **kwargs):
-            self.args = args
-            self.kwargs = kwargs
+        return {} if obj is None else obj
 
     quart_mod.Blueprint = _Blueprint
-    quart_mod.Quart = _Quart
-    quart_mod.Response = _Response
     quart_mod.request = _Request()
     quart_mod.jsonify = _jsonify
     sys.modules["quart"] = quart_mod
 
 
+_SCOPE_ARGS = {
+    "bot_id": "bot-alpha",
+    "session_id": "qq:group:g1",
+    "visibility": "group",
+}
+
+
 class NeuroGalaxy3DFrontendContractTest(unittest.TestCase):
-    def test_explore_uses_threejs_without_sigma_or_graphology(self):
-        html = (REPO_ROOT / "webui" / "static" / "explore.html").read_text(encoding="utf-8")
-
-        self.assertIn("three", html.lower())
-        self.assertIn("OrbitControls", html)
+    def test_explore_product_entry_is_retained_and_scope_is_explicit(self):
+        html_path = REPO_ROOT / "webui" / "static" / "explore.html"
+        self.assertTrue(html_path.exists())
+        html = html_path.read_text(encoding="utf-8")
         self.assertIn("galaxy-container", html)
-        self.assertNotIn("sigma.js", html)
-        self.assertNotIn("graphology", html.lower())
-        self.assertNotIn("sigma-container", html)
+        self.assertIn("OrbitControls", html)
+        self.assertIn("scope-bot-id", html)
+        self.assertIn("scope-session-id", html)
+        self.assertIn("scope-visibility", html)
+        self.assertIn("installScopedApiFetch", html)
+        self.assertIn("只读", html)
 
-    def test_kg_js_exposes_3d_graph_state_and_business_migrations(self):
+    def test_kg_js_keeps_3d_read_runtime(self):
         js = (REPO_ROOT / "webui" / "static" / "kg.js").read_text(encoding="utf-8")
-
-        self.assertIn("new THREE.Scene", js)
-        self.assertIn("new THREE.Raycaster", js)
-        self.assertIn("graphState", js)
-        self.assertIn("nodes: new Map", js)
-        self.assertIn("edges: new Map", js)
-        self.assertIn("appendGraphData", js)
-        self.assertIn("doQuery", js)
-        self.assertIn("doPathFind", js)
-        self.assertIn("loadPersonGraph", js)
-        self.assertIn("focusPerson", js)
-        self.assertIn("focusNode", js)
-        self.assertIn("loadTimeline", js)
-        self.assertIn("deriveExpansionFromEntity", js)
-        self.assertIn("d.facts", js)
-        self.assertIn("d.relations", js)
+        for marker in (
+            "new THREE.Scene", "new THREE.Raycaster", "graphState", "nodes: new Map",
+            "edges: new Map", "appendGraphData", "doQuery", "doPathFind",
+            "loadPersonGraph", "focusPerson", "focusNode", "loadTimeline",
+        ):
+            self.assertIn(marker, js)
         self.assertNotIn("new Sigma", js)
         self.assertNotIn("graphology.Graph", js)
-        self.assertNotIn("renderer.getCamera", js)
-        self.assertNotIn("window.focus =", js)
 
-    def test_person_graph_contract_includes_focusable_person_node(self):
-        py = (REPO_ROOT / "webui" / "blueprints" / "explore.py").read_text(encoding="utf-8")
-        js = (REPO_ROOT / "webui" / "static" / "kg.js").read_text(encoding="utf-8")
-
-        self.assertIn('person_node_id = f"p{qq_id}"', py)
-        self.assertIn('"type": "person"', py)
-        self.assertIn('"source": person_node_id', py)
-        self.assertIn('`p${qqId}`', js)
-
-    def test_kg_config_exposes_3d_layer_node_types(self):
-        py = (REPO_ROOT / "webui" / "blueprints" / "kg.py").read_text(encoding="utf-8")
-
-        for node_type in ("memory", "belief", "concern", "jargon", "community", "affinity", "source"):
-            self.assertIn(f'"{node_type}"', py)
-
-    def test_neuro_toy_table_frontend_exposes_layout_labels_and_relation_hud(self):
+    def test_multilayer_threejs_contract_is_explicit_and_read_only(self):
         html = (REPO_ROOT / "webui" / "static" / "explore.html").read_text(encoding="utf-8")
         js = (REPO_ROOT / "webui" / "static" / "kg.js").read_text(encoding="utf-8")
-
-        for html_marker in (
-            "layout-mode",
-            "label-density",
-            "camera-preset",
-            "relation-panel",
-            "relation-edit-dialog",
-            "node-action-ring",
+        config = (REPO_ROOT / "webui" / "static" / "kg-config.js").read_text(encoding="utf-8")
+        for layer in (
+            "facts", "memories", "beliefs", "jargon", "concerns", "mood",
+            "timeline", "affinity", "few_shot", "book_lore", "communities",
         ):
-            self.assertIn(html_marker, html)
-
-        for js_marker in (
-            "LAYOUT_MODES",
-            "applySemanticLayout",
-            "setLabelDensity",
-            "createAllReadableLabels",
-            "createEdgeLabelObject",
-            "pickEdge",
-            "showRelationDetail",
-            "saveRelationEdit",
-            "createContextActionRing",
-            "applyCameraPreset",
-            "getEdgesForNode",
-            "relationState",
+            self.assertIn(f'data-layer="{layer}"', html)
+        for marker in (
+            "_kgFullNodes", "data.nodes", "cfg-memory-limit", "cfg-similarity-k",
+            "cfg-similarity-threshold", "buildProjectionMetadataHtml",
         ):
-            self.assertIn(js_marker, js)
+            self.assertIn(marker, html + js + config)
+        self.assertNotIn("fact-edit-dialog", html)
+        self.assertNotIn("relation-edit-dialog", html)
+        self.assertNotIn("method: 'DELETE'", js)
+        self.assertNotIn("method: 'PUT'", js)
+        self.assertNotIn("/api/kg/add-fact", js)
+
+    def test_explore_blueprint_has_auth_on_every_route(self):
+        source = (REPO_ROOT / "webui" / "blueprints" / "explore.py").read_text(encoding="utf-8")
+        route_count = source.count("@explore_bp.route")
+        self.assertGreater(route_count, 0)
+        self.assertEqual(route_count, source.count("@require_auth"))
+        for legacy_query in ("FROM person_registry", "JOIN memory_tags ", "FROM tags ", "FROM facts ", "FROM tag_relations "):
+            self.assertNotIn(legacy_query, source)
 
 
-class KGCacheWarmupContractTest(unittest.TestCase):
-    def _connect(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        conn = sqlite3.connect(Path(tmp.name) / "wave_memory.db")
-        conn.row_factory = sqlite3.Row
-        conn.executescript(
+class ScopedExploreKgContractTest(unittest.TestCase):
+    def setUp(self):
+        from webui.container import ServiceContainer, get_container
+        from webui.blueprints import explore, kg
+
+        ServiceContainer.reset()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.conn = sqlite3.connect(Path(self.tmp.name) / "wave_memory.db")
+        self.addCleanup(self.conn.close)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(
             """
             CREATE TABLE memories (
-                id INTEGER PRIMARY KEY,
-                sender_id TEXT,
-                sender_name TEXT,
-                content TEXT,
-                timestamp REAL
+                id INTEGER PRIMARY KEY, sender_id TEXT, sender_name TEXT, group_id TEXT,
+                content TEXT, timestamp REAL, bot_id TEXT, session_id TEXT, visibility TEXT,
+                resolution_state TEXT, quarantine INTEGER, version INTEGER
             );
-            CREATE TABLE tags (
-                id INTEGER PRIMARY KEY,
-                name TEXT,
-                tag_type TEXT,
-                description TEXT
+            CREATE TABLE scoped_facts (
+                id INTEGER PRIMARY KEY, bot_id TEXT, session_id TEXT, visibility TEXT,
+                subject TEXT, predicate TEXT, object TEXT, confidence REAL, status TEXT,
+                source_memory_id INTEGER, provenance TEXT, valid_from REAL, valid_until REAL,
+                created_at REAL, updated_at REAL
             );
-            CREATE TABLE tag_relations (
-                id INTEGER PRIMARY KEY,
-                source_tag_id INTEGER,
-                target_tag_id INTEGER,
-                relation_type TEXT,
-                weight REAL,
-                confidence REAL,
-                metadata TEXT,
-                created_at REAL
+            CREATE TABLE scoped_tags (
+                id INTEGER PRIMARY KEY, bot_id TEXT, session_id TEXT, visibility TEXT,
+                name TEXT, tag_type TEXT, description TEXT, confidence REAL, metadata TEXT,
+                created_at REAL, updated_at REAL
             );
-            CREATE TABLE facts (
-                id INTEGER PRIMARY KEY,
-                subject TEXT,
-                predicate TEXT,
-                object TEXT,
-                group_id TEXT,
-                source_memory_id INTEGER,
-                confidence REAL,
-                created_at REAL,
-                last_reinforced REAL,
-                fact_type TEXT
+            CREATE TABLE scoped_memory_tags (
+                bot_id TEXT, session_id TEXT, visibility TEXT, memory_id INTEGER, tag_id INTEGER,
+                position INTEGER, relevance REAL, created_at REAL
             );
-            CREATE TABLE beliefs (
-                id INTEGER PRIMARY KEY,
-                content TEXT,
-                type TEXT,
-                strength REAL,
-                bot_id TEXT,
-                status TEXT
+            CREATE TABLE scoped_tag_relations (
+                id INTEGER PRIMARY KEY, bot_id TEXT, session_id TEXT, visibility TEXT,
+                source_tag_id INTEGER, target_tag_id INTEGER, relation_type TEXT,
+                weight REAL, confidence REAL, metadata TEXT, created_at REAL, updated_at REAL
             );
-            CREATE TABLE concerns (
-                id INTEGER PRIMARY KEY,
-                topic TEXT,
-                intensity REAL,
-                bot_id TEXT
-            );
-            CREATE TABLE jargon (
-                id INTEGER PRIMARY KEY,
-                word TEXT,
-                meaning TEXT,
-                frequency INTEGER,
-                group_id TEXT,
-                is_jargon INTEGER
-            );
-            CREATE TABLE user_profiles (
-                id INTEGER PRIMARY KEY,
-                user_id TEXT,
-                nickname TEXT,
-                affection INTEGER,
-                bot_id TEXT
-            );
+            CREATE TABLE facts (id INTEGER PRIMARY KEY, subject TEXT, predicate TEXT, object TEXT);
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE tag_relations (id INTEGER PRIMARY KEY, source_tag_id INTEGER, target_tag_id INTEGER);
+
+            INSERT INTO memories VALUES
+                (1, 'u1', '同域用户', 'g1', '规范记忆', 10, 'bot-alpha', 'qq:group:g1', 'group', 'resolved', 0, 1),
+                (2, 'u2', '跨域用户', 'g2', '跨域记忆', 11, 'bot-beta', 'qq:group:g2', 'group', 'resolved', 0, 1),
+                (3, 'u3', '未解析用户', 'g1', '旧记忆', 12, NULL, NULL, NULL, 'unresolved', 1, NULL);
+            INSERT INTO scoped_facts VALUES
+                (11, 'bot-alpha', 'qq:group:g1', 'group', '同域用户', '喜欢', '猫', 0.9, 'reviewed', 1, '{}', NULL, NULL, 10, 10),
+                (12, 'bot-beta', 'qq:group:g2', 'group', '跨域用户', '知道', '秘密', 0.9, 'reviewed', 2, '{}', NULL, NULL, 11, 11);
+            INSERT INTO scoped_tags VALUES
+                (21, 'bot-alpha', 'qq:group:g1', 'group', '同域用户', 'person', '', 0.9, '{}', 10, 10),
+                (22, 'bot-alpha', 'qq:group:g1', 'group', '猫', 'entity', '', 0.9, '{}', 10, 10),
+                (23, 'bot-beta', 'qq:group:g2', 'group', '秘密', 'entity', '', 0.9, '{}', 11, 11);
+            INSERT INTO scoped_memory_tags VALUES ('bot-alpha', 'qq:group:g1', 'group', 1, 22, 0, 1.0, 10);
+            INSERT INTO scoped_tag_relations VALUES
+                (31, 'bot-alpha', 'qq:group:g1', 'group', 21, 22, '关注', 0.8, 0.8, '{}', 10, 10),
+                (32, 'bot-beta', 'qq:group:g2', 'group', 23, 23, '泄漏', 1.0, 1.0, '{}', 11, 11);
+            INSERT INTO facts VALUES (99, 'legacy', '泄漏', 'legacy-secret');
             """
         )
-        conn.execute("INSERT INTO memories (id, sender_id, sender_name, content, timestamp) VALUES (1, 'u1', '羽书', '你好', 100)")
-        conn.execute("INSERT INTO tags (id, name, tag_type) VALUES (1, '羽书', 'person'), (2, '记忆', 'topic')")
-        conn.execute("INSERT INTO tag_relations (id, source_tag_id, target_tag_id, relation_type, weight, confidence, metadata, created_at) VALUES (7, 1, 2, '喜欢', 0.8, 0.77, '{\"source\":\"test\"}', 100)")
-        conn.execute("INSERT INTO facts (id, subject, predicate, object, group_id, source_memory_id, confidence, created_at, last_reinforced, fact_type) VALUES (11, '羽书', '关心', '记忆', 'g1', 1, 0.9, 100, 120, 'FACTUAL')")
-        conn.commit()
-        return conn
-
-    def test_warmup_populates_full_graph_cache_without_http_request(self):
-        from webui.container import ServiceContainer, get_container
-        from webui.blueprints import kg
-
-        ServiceContainer.reset()
-        conn = self._connect()
-        self.addCleanup(conn.close)
+        self.conn.commit()
         container = get_container()
-        container.db = types.SimpleNamespace(conn=conn)
-        container.cooccurrence = None
+        container.db = types.SimpleNamespace(conn=self.conn, scoped_knowledge=None)
+        container.plugin_config = {}
+        self.explore = explore
+        self.kg = kg
+        self.originals = []
+        for module in (explore, kg):
+            self.originals.append((module, module.jsonify, module.request))
+            module.jsonify = lambda value: value
 
-        kg.clear_kg_cache()
-        result = kg.warmup_kg_cache(layers="facts")
+    def tearDown(self):
+        for module, jsonify, request in self.originals:
+            module.jsonify = jsonify
+            module.request = request
 
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["layers"], "facts")
-        self.assertGreaterEqual(result["edges"], 1)
-        self.assertIn("full:facts", kg._overview_cache)
-        cached = kg._overview_cache["full:facts"]
-        self.assertGreaterEqual(cached["total"], 1)
-        self.assertEqual(cached["layers"], ["facts"])
-
-    def test_full_graph_cache_version_refreshes_non_fact_layers(self):
-        from webui.container import ServiceContainer, get_container
-        from webui.blueprints import kg
-
-        ServiceContainer.reset()
-        conn = self._connect()
-        self.addCleanup(conn.close)
-        container = get_container()
-        container.db = types.SimpleNamespace(conn=conn)
-        container.cooccurrence = None
-
-        kg.clear_kg_cache()
-        first = kg.build_full_graph_data("jargon", use_cache=True)
-        conn.execute("INSERT INTO jargon (word, meaning, frequency, group_id, is_jargon) VALUES ('大声暗道', '公开说出私密话', 7, 'g1', 1)")
-        conn.commit()
-        second = kg.build_full_graph_data("jargon", use_cache=True)
-
-        self.assertEqual(first["total"], 0)
-        self.assertEqual(second["total"], 1)
-        self.assertIn("full:jargon_version", kg._overview_cache)
-
-    def test_full_graph_edges_include_editable_relation_metadata(self):
-        from webui.container import ServiceContainer, get_container
-        from webui.blueprints import kg
-
-        ServiceContainer.reset()
-        conn = self._connect()
-        self.addCleanup(conn.close)
-        container = get_container()
-        container.db = types.SimpleNamespace(conn=conn)
-        container.cooccurrence = None
-
-        kg.clear_kg_cache()
-        data = kg.build_full_graph_data("facts", use_cache=False)
-        edges = data["edges"]
-        fact_edge = next(e for e in edges if e.get("kind") == "fact")
-        tag_edge = next(e for e in edges if e.get("kind") == "tag_relation")
-
-        self.assertEqual(fact_edge["id"], "fact:11")
-        self.assertEqual(fact_edge["fact_id"], 11)
-        self.assertEqual(fact_edge["source_memory_id"], 1)
-        self.assertEqual(fact_edge["fact_type"], "FACTUAL")
-        self.assertTrue(fact_edge["editable"])
-        self.assertEqual(tag_edge["id"], "tagrel:7")
-        self.assertEqual(tag_edge["relation_id"], 7)
-        self.assertEqual(tag_edge["source_tag_id"], 1)
-        self.assertEqual(tag_edge["target_tag_id"], 2)
-        self.assertEqual(tag_edge["confidence"], 0.77)
-        self.assertEqual(tag_edge["metadata"], {"source": "test"})
-        self.assertTrue(tag_edge["editable"])
-
-    def test_update_tag_relation_and_tag_and_entity_rename_contracts(self):
-        from webui.container import ServiceContainer, get_container
-        from webui.blueprints import kg
-
+    def _request(self, args=None, body=None):
         class FakeRequest:
-            args = {}
-            def __init__(self, payload):
-                self.payload = payload
+            def __init__(self):
+                self.args = args or {}
+
             async def get_json(self, silent=False):
-                return self.payload
+                return body or {}
 
-        async def run():
-            ServiceContainer.reset()
-            conn = self._connect()
-            self.addCleanup(conn.close)
-            container = get_container()
-            container.db = types.SimpleNamespace(conn=conn)
-            container.cooccurrence = None
+        return FakeRequest()
 
-            with patch.object(kg, "request", FakeRequest({"relation_type": "讨厌", "weight": 0.33, "confidence": 0.44})):
-                rel_result = await kg.update_tag_relation(7)
-            rel = conn.execute("SELECT relation_type, weight, confidence FROM tag_relations WHERE id=7").fetchone()
+    def test_explore_requires_complete_runtime_scope(self):
+        self.explore.request = self._request({})
+        payload, status = asyncio.run(self.explore.persons.__wrapped__())
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["code"], "scope_required")
 
-            with patch.object(kg, "request", FakeRequest({"name": "记忆体", "tag_type": "entity", "description": "可编辑标签"})):
-                tag_result = await kg.update_tag(2)
-            tag = conn.execute("SELECT name, tag_type, description FROM tags WHERE id=2").fetchone()
+    def test_explore_reads_only_exact_scope_memories(self):
+        self.explore.request = self._request({**_SCOPE_ARGS, "limit": "50"})
+        people = asyncio.run(self.explore.persons.__wrapped__())
+        self.assertEqual([item["name"] for item in people], ["同域用户"])
 
-            with patch.object(kg, "request", FakeRequest({"from": "羽书", "to": "羽書"})):
-                preview_result = await kg.rename_entity_preview()
-            with patch.object(kg, "request", FakeRequest({"from": "羽书", "to": "羽書"})):
-                rename_result = await kg.rename_entity()
-            renamed = conn.execute("SELECT subject FROM facts WHERE id=11").fetchone()[0]
-            return rel_result, rel, tag_result, tag, preview_result, rename_result, renamed
+        self.explore.request = self._request({**_SCOPE_ARGS, "max_memories": "50"})
+        person = asyncio.run(self.explore.person.__wrapped__("u1"))
+        self.assertEqual([item["content"] for item in person["memories"]], ["规范记忆"])
+        self.assertNotIn("跨域记忆", str(person))
 
-        import asyncio
-        rel_result, rel, tag_result, tag, preview_result, rename_result, renamed = asyncio.run(run())
+    def test_kg_full_uses_scoped_facts_and_relations_only(self):
+        self.kg.request = self._request({**_SCOPE_ARGS, "layers": "facts"})
+        payload = asyncio.run(self.kg.kg_full.__wrapped__())
+        serialized = str(payload)
+        self.assertEqual(payload["scope"]["payload"]["bot_id"], "bot-alpha")
+        self.assertTrue(payload["read_only"])
+        self.assertIn("同域用户", serialized)
+        self.assertIn("猫", serialized)
+        self.assertNotIn("legacy-secret", serialized)
+        self.assertNotIn("跨域用户", serialized)
+        self.assertNotIn("秘密", serialized)
 
-        self.assertEqual(rel_result, ({"error": {"code": "scope_required"}}, 400))
-        self.assertEqual(tuple(rel), ("喜欢", 0.8, 0.77))
-        self.assertEqual(tag_result, ({"error": {"code": "legacy_mutation_disabled"}}, 410))
-        self.assertEqual(tuple(tag), ("记忆", "topic", None))
-        self.assertEqual(preview_result["affected_facts"], 1)
-        self.assertEqual(rename_result, ({"error": {"code": "legacy_mutation_disabled"}}, 410))
-        self.assertEqual(renamed, "羽书")
+    def test_legacy_and_bare_id_mutations_are_gone(self):
+        for call in (
+            lambda: self.kg.create_scoped_fact.__wrapped__(),
+            lambda: self.kg.create_scoped_relation.__wrapped__(),
+            lambda: self.kg.update_fact.__wrapped__(11),
+            lambda: self.kg.delete_fact.__wrapped__(11),
+            lambda: self.kg.update_tag_relation.__wrapped__(31),
+            lambda: self.kg.delete_tag_relation.__wrapped__(31),
+            lambda: self.kg.update_tag.__wrapped__(21),
+            lambda: self.kg.rename_entity.__wrapped__(),
+            lambda: self.kg.rename_entity_preview.__wrapped__(),
+            lambda: self.kg.legacy_audit_facts.__wrapped__(),
+            lambda: self.kg.legacy_audit_relations.__wrapped__(),
+        ):
+            payload, status = asyncio.run(call())
+            self.assertEqual(status, 410)
+            self.assertEqual(payload["error"]["code"], "legacy_mutation_disabled")
 
-    def test_kg_edit_apis_report_missing_rows_and_rename_preview_counts_tags(self):
-        from webui.container import ServiceContainer, get_container
-        from webui.blueprints import kg
+    def test_payment_is_disabled_without_strong_secret_and_never_writes_knowledge(self):
+        before = (
+            self.conn.execute("SELECT COUNT(*) FROM scoped_facts").fetchone()[0],
+            self.conn.execute("SELECT COUNT(*) FROM scoped_tag_relations").fetchone()[0],
+        )
+        self.kg.request = self._request(_SCOPE_ARGS, {"amount": 100, "secret": "wavemoney"})
+        payload, status = asyncio.run(self.kg.payment_webhook.__wrapped__())
+        after = (
+            self.conn.execute("SELECT COUNT(*) FROM scoped_facts").fetchone()[0],
+            self.conn.execute("SELECT COUNT(*) FROM scoped_tag_relations").fetchone()[0],
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["error"]["code"], "payment_disabled")
+        self.assertEqual(after, before)
 
-        class FakeRequest:
-            args = {}
-            def __init__(self, payload):
-                self.payload = payload
-            async def get_json(self, silent=False):
-                return self.payload
-
-        async def run():
-            ServiceContainer.reset()
-            conn = self._connect()
-            self.addCleanup(conn.close)
-            container = get_container()
-            container.db = types.SimpleNamespace(conn=conn)
-            container.cooccurrence = None
-
-            with patch.object(kg, "request", FakeRequest({"relation_type": "不存在"})):
-                missing_rel = await kg.update_tag_relation(999)
-            with patch.object(kg, "request", FakeRequest({"name": "不存在"})):
-                missing_tag = await kg.update_tag(999)
-            with patch.object(kg, "request", FakeRequest({})):
-                missing_delete = await kg.delete_tag_relation(999)
-            with patch.object(kg, "request", FakeRequest({"from": "记忆", "to": "记忆体"})):
-                preview = await kg.rename_entity_preview()
-            with patch.object(kg, "request", FakeRequest({"from": "记忆", "to": "记忆体", "sync_tags": True})):
-                renamed = await kg.rename_entity()
-            tag_name = conn.execute("SELECT name FROM tags WHERE id=2").fetchone()[0]
-            return missing_rel, missing_tag, missing_delete, preview, renamed, tag_name
-
-        import asyncio
-        missing_rel, missing_tag, missing_delete, preview, renamed, tag_name = asyncio.run(run())
-
-        self.assertEqual(missing_rel, ({"error": {"code": "scope_required"}}, 400))
-        self.assertEqual(missing_tag, ({"error": {"code": "legacy_mutation_disabled"}}, 410))
-        self.assertEqual(missing_delete, ({"error": {"code": "scope_required"}}, 400))
-        self.assertEqual(preview["tag_matches"], 1)
-        self.assertEqual(renamed, ({"error": {"code": "legacy_mutation_disabled"}}, 410))
-        self.assertEqual(tag_name, "记忆")
-
-    def test_add_fact_requires_scope_and_never_writes_legacy_fact_table(self):
-        from webui.container import ServiceContainer, get_container
-        from webui.blueprints import kg
-
-        ServiceContainer.reset()
-        inserted = []
-
-        class FakeDB:
-            def insert_fact(self, subject, predicate, obj, confidence=0.8, **kwargs):
-                inserted.append((subject, predicate, obj, confidence))
-
-        class FakeRequest:
-            async def get_json(self, silent=False):
-                return {"subject": "羽书", "predicate": "关心", "object": "记忆", "confidence": 0.42}
-
-        container = get_container()
-        container.db = FakeDB()
-        kg._overview_cache["full:facts"] = {"total": 1}
-
-        async def run():
-            with patch.object(kg, "request", FakeRequest()):
-                return await kg.add_fact()
-
-        import asyncio
-        result = asyncio.run(run())
-
-        self.assertEqual(result, ({"error": {"code": "scope_required"}}, 400))
-        self.assertEqual(inserted, [])
-        self.assertIn("full:facts", kg._overview_cache)
-
-    def test_webui_start_triggers_background_kg_warmup_without_waiting(self):
-        from webui import WaveMemoryWebUI
-
-        calls = []
-
-        async def fake_start(self):
-            return None
-
-        async def fake_warmup(self):
-            calls.append("warmup-started")
-            await asyncio.Event().wait()
-
-        async def run():
-            with patch("webui.server.Server.start", fake_start), patch("webui.WaveMemoryWebUI._async_kg_cache_warmup", fake_warmup):
-                ui = WaveMemoryWebUI(
-                    db=types.SimpleNamespace(conn=None),
-                    query_engine=None,
-                    embedding_service=None,
-                    memory_index=None,
-                    tag_index=None,
-                    cooccurrence=None,
-                )
-                await asyncio.wait_for(ui.start(), timeout=0.1)
-                await asyncio.sleep(0)
-                self.assertEqual(calls, ["warmup-started"])
-                self.assertIsNotNone(ui._kg_warmup_task)
-                self.assertFalse(ui._kg_warmup_task.done())
-                await ui.stop()
-                self.assertIsNone(ui._kg_warmup_task)
-
-        import asyncio
-        asyncio.run(run())
+    def test_scope_less_cache_warmup_never_reads_legacy_tables(self):
+        result = self.kg.warmup_kg_cache("facts")
+        self.assertEqual(result["edges"], 0)
+        self.assertEqual(result["reason_code"], "scope_required")
 
 
 if __name__ == "__main__":

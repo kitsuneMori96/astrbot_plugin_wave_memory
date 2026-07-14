@@ -171,19 +171,17 @@ class TagsBatchExtractStreamTest(unittest.TestCase):
         self.assertIn("payload.error", source)
         self.assertIn("throw new Error", source)
 
-    def test_frontend_maintain_page_has_pause_abort_and_cumulative_progress(self):
+    def test_frontend_maintain_page_tracks_cancellable_durable_job_progress(self):
         page = open("webui/frontend/src/pages/maintain/MaintainPage.tsx", encoding="utf-8").read()
-        stream_api = open("webui/frontend/src/api/memories.ts", encoding="utf-8").read()
 
-        self.assertIn("stopRequestedRef", page)
+        self.assertIn("waitForMaintenanceJob", page)
+        self.assertIn("cancelMaintenanceJob", page)
         self.assertIn("AbortController", page)
-        self.assertIn("暂停", page)
-        self.assertIn("handleStopLLMExtract", page)
-        self.assertIn("<span>停止</span>", page)
-        self.assertIn("cumulativeProcessed", page)
-        self.assertIn("已处理总计", page)
-        self.assertIn("streamLog.length > 0", page)
-        self.assertIn("signal?: AbortSignal", stream_api)
+        self.assertIn("请求取消", page)
+        self.assertIn("progress.processed", page)
+        self.assertIn("progress.total", page)
+        self.assertIn("jobLogs", page)
+        self.assertIn("在任务历史查看", page)
 
 
 async def _collect(generator):

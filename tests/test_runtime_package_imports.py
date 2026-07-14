@@ -56,6 +56,10 @@ def test_injection_shadow_channels_import_under_plugin_package_name():
         "astrbot_plugin_wave_memory.services.injection.channels.fewshot",
         "astrbot_plugin_wave_memory.services.injection.channels.book_lore",
         "astrbot_plugin_wave_memory.services.injection.channels.fts5",
+        "astrbot_plugin_wave_memory.engine.db.migrations.scoped_learning_projections",
+        "astrbot_plugin_wave_memory.engine.db.migrations.scoped_soul",
+        "astrbot_plugin_wave_memory.engine.db.scoped_learning_projection_repo",
+        "astrbot_plugin_wave_memory.engine.db.scoped_soul_repo",
     ]
 
     with _astrbot_package_import_context():

@@ -90,11 +90,14 @@ class JargonScopedApiTest(unittest.TestCase):
 
         self.assertEqual(payload["items"][0]["word"], "团建")
         self.assertEqual(payload["page"], {
-            "number": 1,
-            "page_size": 10,
             "total": 1,
             "total_status": "exact",
-            "has_next": False,
+            "reason_code": None,
+            "limit": 25,
+            "offset": 0,
+            "page": 1,
+            "page_count": 1,
+            "has_more": False,
         })
         self.assertEqual(self.repo.list_calls[0][0].bot_id, "bot-alpha")
         self.assertEqual(self.repo.list_calls[0][0].session.id, "qq:group:g1")
@@ -112,11 +115,11 @@ class JargonScopedApiTest(unittest.TestCase):
             )
         )
 
-        payload = asyncio.run(self.module.create_jargon.__wrapped__())
+        payload, status = asyncio.run(self.module.create_jargon.__wrapped__())
 
-        self.assertEqual(payload["id"], 8)
-        self.assertEqual(self.repo.upsert_calls[0][0].bot_id, "bot-alpha")
-        self.assertEqual(self.repo.upsert_calls[0][1]["word"], "团建")
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["error"]["code"], "anchored_jargon_command_unavailable")
+        self.assertEqual(self.repo.upsert_calls, [])
 
     def test_legacy_jargon_mutations_are_terminally_rejected(self):
         payload, status = asyncio.run(self.module.edit_jargon.__wrapped__(7))
