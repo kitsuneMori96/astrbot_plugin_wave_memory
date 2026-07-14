@@ -1,47 +1,54 @@
 import { fetchJson } from './client'
+import type { PageResponse, PageSize } from '@/components/shared/types'
 
 export interface TraceFilters {
   from_ts?: number | string
   to_ts?: number | string
-  from?: number | string
-  to?: number | string
   group_id?: string
   sender_id?: string
   bot_id?: string
+  session_id?: string
   channel?: string
   status?: string
   has_error?: boolean | string
   scope?: string
   chat_type?: string
-  limit?: number
+  config_revision?: string
+  limit?: PageSize
+  offset?: number
+}
+
+export interface TraceSessionDto {
+  id: string
+  kind: string
+  label: string
+  platform_id?: string
+  conversation_id?: string
 }
 
 export interface InjectionTraceSummary {
-  trace_id?: string
-  timestamp?: number
-  created_at?: number
-  scope?: string
-  chat_type?: string
+  trace_id: string
+  timestamp: number
+  status: string
+  session?: TraceSessionDto | null
+  session_id?: string
   group_id?: string
   sender_id?: string
   bot_id?: string
+  bot_profile_id?: string
   mode?: string
-  status?: string
-  session_id?: string
+  config_revision?: string | number | null
   preview?: string
   final_text_preview?: string
   total_tokens?: number
   latency_ms?: number
   has_error?: boolean
+  channels?: Array<Record<string, unknown>>
+  detail_url?: string
   [key: string]: unknown
 }
 
-export interface TraceListPayload {
-  traces?: InjectionTraceSummary[]
-  count?: number
-  limit?: number
-  error?: string
-}
+export type TraceListPayload = PageResponse<InjectionTraceSummary>
 
 export interface TraceDetailPayload {
   trace_id?: string
@@ -53,6 +60,8 @@ export interface TraceDetailPayload {
   final_text?: string
   final_injection_text?: string
   feedback?: Array<Record<string, unknown>>
+  warnings?: unknown
+  errors?: unknown
   error?: string
   [key: string]: unknown
 }
@@ -60,18 +69,16 @@ export interface TraceDetailPayload {
 function toSearchParams(filters: TraceFilters): string {
   const params = new URLSearchParams()
   Object.entries(filters).forEach(([key, value]) => {
-    if (value !== undefined && value !== null && value !== '') {
-      params.set(key, String(value))
-    }
+    if (value !== undefined && value !== null && value !== '') params.set(key, String(value))
   })
   return params.toString()
 }
 
 export function listInjectionTraces(filters: TraceFilters = {}): Promise<TraceListPayload> {
   const query = toSearchParams(filters)
-  return fetchJson<TraceListPayload>(`/api/injection/traces${query ? `?${query}` : ''}`)
+  return fetchJson<TraceListPayload>(`/api/observatory/traces${query ? `?${query}` : ''}`)
 }
 
 export function getInjectionTrace(traceId: string): Promise<TraceDetailPayload> {
-  return fetchJson<TraceDetailPayload>(`/api/injection/traces/${encodeURIComponent(traceId)}`)
+  return fetchJson<TraceDetailPayload>(`/api/observatory/traces/${encodeURIComponent(traceId)}`)
 }

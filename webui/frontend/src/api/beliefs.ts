@@ -1,187 +1,140 @@
 import { fetchJson } from './client'
+import type { EvidenceRef, ObjectRefDescriptor, PageResponse } from '@/components/shared/types'
 
 export type BeliefType = 'self_identity' | 'person_judgment' | 'world_view' | 'preference'
-export type LegacyBeliefType = 'self' | 'other' | 'world' | 'value'
 
-const LEGACY_TYPE_MAP: Record<LegacyBeliefType, BeliefType> = {
-  self: 'self_identity',
-  other: 'person_judgment',
-  world: 'world_view',
-  value: 'preference',
+export interface ScopedSelection {
+  bot_id: string
+  session_id: string
+  visibility: 'group'
 }
 
-export interface BeliefTag {
-  id: number
-  name: string
-  type?: string
+export interface BeliefActionAvailability {
+  available: boolean
+  reason_code: string | null
 }
 
 export interface BeliefItem {
   id: number
+  belief_key: string
   content: string
   type: BeliefType
-  status: 'pending' | 'active' | 'archived' | 'pending_legacy'
-  source?: string
-  confidence?: number
-  strength?: number
-  timestamp?: number
-  created_at?: number
-  last_reinforced?: number
+  status: 'pending' | 'active' | 'archived' | 'quarantined'
+  confidence: number | null
+  confidence_components: Record<string, number> | null
+  confidence_policy_version: string | null
+  anchor_sentence: string | null
+  evidence_health: 'available' | 'unavailable' | 'quarantined' | 'unknown'
+  quarantine_reason: string | null
+  bot_id: string
+  session_id: string
+  visibility: 'group'
+  evidence: EvidenceRef[]
+  object_ref: ObjectRefDescriptor | null
+  revision: number
+  actions: Record<'approve' | 'archive' | 'restore' | 'delete', BeliefActionAvailability>
   updated_at?: number
-  bot_id?: string
-  sources?: string[]
 }
 
-export interface BeliefsFilters {
-  page?: number
-  size?: number
-  type?: 'self_identity' | 'person_judgment' | 'world_view' | 'preference' | ''
+export interface BeliefFilters extends ScopedSelection {
+  limit: 25 | 50 | 100
+  offset: number
+  type?: BeliefType
   status?: string
-  bot_id?: string
   search?: string
 }
 
-export interface BeliefsResponse {
-  items: BeliefItem[]
+export interface BeliefsResponse extends PageResponse<BeliefItem> {
+  scope: { kind: string; payload: unknown }
+  capabilities: Record<string, unknown>
+}
+
+export interface LegacyBeliefItem {
+  id: number
+  content: string
+  type: BeliefType
+  confidence: number | null
+  bot_id: string
+  source: string
+  status: string
+  created_at?: number
+  updated_at?: number
+  legacy: true
+  unresolved_legacy: true
+  scope: null
+}
+
+export interface LegacyBeliefsResponse {
+  items: LegacyBeliefItem[]
   total: number
   pending_count: number
+  legacy: true
+  unresolved_legacy: true
+  readonly: true
+  scope: null
+  page: { number: number; page_size: number; total: number; total_status: 'exact'; has_next: boolean }
 }
 
-export interface EvidenceMessage {
-  id: string
-  role: 'anchor' | 'before' | 'after'
-  content: string
-  sender_id?: string
-  sender_name?: string
-  timestamp: number
-}
-
-export interface EvidencePayload {
+export interface MutationResult {
   ok: boolean
-  belief?: BeliefItem
-  anchor?: { id: string; content: string }
-  messages: EvidenceMessage[]
-  used_fallback: boolean
-  relationship_events?: any[]  // 新增对齐旧版
-  episodes?: any[]             // 新增对齐旧版自省独白
-  memories?: any[]             // 新增对齐旧版
+  operation: { kind: string; status: string; id?: string }
+  revision: number | string | null
+  item?: { id: number; status: string }
 }
 
-function normalizeBeliefType(type: unknown): BeliefType {
-  const raw = String(type || '').trim()
-  if (raw === 'self_identity' || raw === 'person_judgment' || raw === 'world_view' || raw === 'preference') {
-    return raw
-  }
-  return LEGACY_TYPE_MAP[raw as LegacyBeliefType] ?? 'world_view'
-}
-
-function normalizeBeliefItem(item: any): BeliefItem {
+function scopeEnvelope(scope: ScopedSelection) {
+  const [platform_id, kind, conversation_id] = scope.session_id.split(':', 3)
   return {
-    ...item,
-    type: normalizeBeliefType(item?.type),
-    confidence: item?.confidence ?? item?.strength,
-    strength: item?.strength ?? item?.confidence,
-    timestamp: item?.timestamp ?? item?.created_at,
-    last_reinforced: item?.last_reinforced ?? item?.updated_at,
+    kind: 'RuntimeScope',
+    payload: {
+      bot_id: scope.bot_id,
+      visibility: scope.visibility,
+      session: { id: scope.session_id, platform_id, kind, conversation_id },
+      subject_principal_id: null,
+    },
   }
 }
 
-function normalizeBeliefPayload(payload: Partial<BeliefItem>): Record<string, unknown> {
-  const next: Record<string, unknown> = { ...payload }
-  if (payload.type) next.type = normalizeBeliefType(payload.type)
-  if (payload.confidence != null && next.strength == null) next.strength = payload.confidence
-  delete next.confidence
-  delete next.timestamp
-  delete next.last_reinforced
-  delete next.created_at
-  delete next.updated_at
-  return next
-}
-
-function pageOffset(filters: BeliefsFilters): { limit: number; offset: number } {
-  const limit = Math.max(1, Number(filters.size || 50))
-  const page = Math.max(1, Number(filters.page || 1))
-  return { limit, offset: (page - 1) * limit }
-}
-
-export async function listBeliefs(filters: BeliefsFilters): Promise<BeliefsResponse> {
-  const params = new URLSearchParams()
-  const { limit, offset } = pageOffset(filters)
-  params.set('limit', String(limit))
-  params.set('offset', String(offset))
+export function listBeliefs(filters: BeliefFilters): Promise<BeliefsResponse> {
+  const params = new URLSearchParams({
+    bot_id: filters.bot_id,
+    session_id: filters.session_id,
+    visibility: filters.visibility,
+    limit: String(filters.limit),
+    offset: String(filters.offset),
+  })
   if (filters.type) params.set('type', filters.type)
   if (filters.status) params.set('status', filters.status)
-  if (filters.bot_id) params.set('bot_id', filters.bot_id)
   if (filters.search) params.set('search', filters.search)
-
-  const res = await fetchJson<BeliefsResponse>(`/api/beliefs?${params.toString()}`)
-  return { ...res, items: (res.items ?? []).map(normalizeBeliefItem) }
+  return fetchJson<BeliefsResponse>(`/api/beliefs?${params.toString()}`)
 }
 
-export function createBelief(payload: Partial<BeliefItem>): Promise<{ ok: boolean; id?: number; belief_id?: number }> {
-  return fetchJson<{ ok: boolean; id?: number; belief_id?: number }>('/api/beliefs', {
+export function listLegacyBeliefs(filters: { bot_id?: string; type?: BeliefType; status?: string; search?: string; limit: 25 | 50 | 100; offset: number }): Promise<LegacyBeliefsResponse> {
+  const params = new URLSearchParams({ limit: String(filters.limit), offset: String(filters.offset) })
+  if (filters.bot_id) params.set('bot_id', filters.bot_id)
+  if (filters.type) params.set('type', filters.type)
+  if (filters.status) params.set('status', filters.status)
+  if (filters.search) params.set('search', filters.search)
+  return fetchJson<LegacyBeliefsResponse>(`/api/beliefs/legacy/audit?${params.toString()}`)
+}
+
+function transitionBelief(item: BeliefItem | number, action: 'approve' | 'archive', scope: ScopedSelection): Promise<MutationResult> {
+  const id = typeof item === 'number' ? item : item.id
+  const objectRef = typeof item === 'number' ? null : item.object_ref
+  const revision = typeof item === 'number' ? null : item.revision
+  // Keep the historical client call shape for source compatibility; the server
+  // rejects this branch with object_ref_revision_required instead of mutating.
+  if (!objectRef) {
+    return fetchJson<MutationResult>(`/api/beliefs/${id}/${action}`, {
+      method: 'POST',
+      body: JSON.stringify({ scope: scopeEnvelope(scope) }),
+    })
+  }
+  return fetchJson<MutationResult>(`/api/beliefs/${id}/${action}`, {
     method: 'POST',
-    body: JSON.stringify(normalizeBeliefPayload(payload)),
+    body: JSON.stringify({ scope: scopeEnvelope(scope), object_ref: objectRef, revision }),
   })
 }
 
-export function updateBelief(id: number, payload: Partial<BeliefItem>): Promise<{ ok: boolean }> {
-  return fetchJson<{ ok: boolean }>(`/api/beliefs/${id}`, {
-    method: 'PUT',
-    body: JSON.stringify(normalizeBeliefPayload(payload)),
-  })
-}
-
-export function deleteBelief(id: number): Promise<{ ok: boolean }> {
-  return fetchJson<{ ok: boolean }>(`/api/beliefs/${id}`, {
-    method: 'DELETE',
-  })
-}
-
-export function approveBelief(id: number): Promise<{ ok: boolean }> {
-  return fetchJson<{ ok: boolean }>(`/api/beliefs/${id}/approve`, {
-    method: 'POST',
-  })
-}
-
-export function archiveBelief(id: number): Promise<{ ok: boolean }> {
-  return fetchJson<{ ok: boolean }>(`/api/beliefs/${id}/archive`, {
-    method: 'POST',
-  })
-}
-
-export async function getBeliefEvidence(id: number, before = 5, after = 5): Promise<EvidencePayload> {
-  const res = await fetchJson<EvidencePayload>(`/api/beliefs/${id}/evidence?before=${before}&after=${after}`)
-  return { ...res, belief: res.belief ? normalizeBeliefItem(res.belief) : res.belief }
-}
-
-export async function batchArchiveBeliefsLegacy(): Promise<{ ok: boolean; archived: number }> {
-  const res = await fetchJson<{ ok: boolean; archived?: number; archived_count?: number }>('/api/beliefs/batch-archive', {
-    method: 'POST',
-  })
-  return { ok: res.ok, archived: res.archived ?? res.archived_count ?? 0 }
-}
-
-export async function batchArchiveSelectedBeliefs(ids: number[]): Promise<{ ok: boolean; archived: number }> {
-  const res = await fetchJson<{ ok: boolean; archived?: number; archived_count?: number }>('/api/beliefs/batch-archive-selected', {
-    method: 'POST',
-    body: JSON.stringify({ ids }),
-  })
-  return { ok: res.ok, archived: res.archived ?? res.archived_count ?? 0 }
-}
-
-export async function batchApproveBeliefs(ids: number[]): Promise<{ ok: boolean; approved: number }> {
-  const res = await fetchJson<{ ok: boolean; approved?: number; approved_count?: number }>('/api/beliefs/batch-approve', {
-    method: 'POST',
-    body: JSON.stringify({ ids }),
-  })
-  return { ok: res.ok, approved: res.approved ?? res.approved_count ?? 0 }
-}
-
-export async function batchDeleteBeliefs(ids: number[]): Promise<{ ok: boolean; deleted: number }> {
-  const res = await fetchJson<{ ok: boolean; deleted?: number; deleted_count?: number }>('/api/beliefs/batch-delete', {
-    method: 'POST',
-    body: JSON.stringify({ ids }),
-  })
-  return { ok: res.ok, deleted: res.deleted ?? res.deleted_count ?? 0 }
-}
+export const approveBelief = (item: BeliefItem | number, scope: ScopedSelection) => transitionBelief(item, 'approve', scope)
+export const archiveBelief = (item: BeliefItem | number, scope: ScopedSelection) => transitionBelief(item, 'archive', scope)

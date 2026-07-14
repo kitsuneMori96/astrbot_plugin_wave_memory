@@ -1,180 +1,48 @@
 import type { ComponentType } from 'react'
-import {
-  ActivityIcon,
-  BookHeartIcon,
-  BookOpenIcon,
-  BrainCircuitIcon,
-  DatabaseIcon,
-  DownloadIcon,
-  GaugeIcon,
-  GitBranchIcon,
-  GitCompareArrowsIcon,
-  HeartIcon,
-  SearchCheckIcon,
-  Settings2Icon,
-  SlidersIcon,
-  SmileIcon,
-  UsersIcon,
-} from 'lucide-react'
+import { ActivityIcon, BookHeartIcon, BookOpenIcon, BrainCircuitIcon, DatabaseIcon, DownloadIcon, GaugeIcon, GitBranchIcon, GitCompareArrowsIcon, HeartIcon, SearchCheckIcon, Settings2Icon, SlidersIcon, SmileIcon, UsersIcon, CompassIcon } from 'lucide-react'
 
-import { ChannelConfigPage } from '@/pages/channels/ChannelConfigPage'
-import { CompatibilityPage } from '@/pages/review/CompatibilityPage'
-import { DashboardPage } from '@/pages/dashboard/DashboardPage'
-import { InjectionPage } from '@/pages/injection/InjectionPage'
-import { SettingsPage } from '@/pages/settings/SettingsPage'
-import { MemoriesPage } from '@/pages/memories/MemoriesPage'
-import { ImportPage } from '@/pages/import/ImportPage'
 import { BeliefsPage } from '@/pages/beliefs/BeliefsPage'
+import { ChannelConfigPage } from '@/pages/channels/ChannelConfigPage'
+import { DashboardPage } from '@/pages/dashboard/DashboardPage'
+import { IndexesPage } from '@/pages/diagnostics/IndexesPage'
+import { ImportPage } from '@/pages/import/ImportPage'
+import { InjectionPage } from '@/pages/injection/InjectionPage'
 import { JargonPage } from '@/pages/jargon/JargonPage'
-import { SoulPage } from '@/pages/soul/SoulPage'
-import { BlackboxHubPage } from '@/pages/blackbox/BlackboxHubPage'
-import { BlackboxBookLorePage } from '@/pages/blackbox/BlackboxBookLorePage'
-import { BlackboxFewShotPage } from '@/pages/blackbox/BlackboxFewShotPage'
-import { BlackboxFactsPage } from '@/pages/blackbox/BlackboxFactsPage'
-import { BlackboxPeoplePage } from '@/pages/blackbox/BlackboxPeoplePage'
-import { BlackboxIndexesPage } from '@/pages/blackbox/BlackboxIndexesPage'
-import { MaintainPage } from '@/pages/maintain/MaintainPage'
+import { BookLorePage } from '@/pages/knowledge/BookLorePage'
+import { FactsPage } from '@/pages/knowledge/FactsPage'
+import { FewShotPage } from '@/pages/knowledge/FewShotPage'
 import { LearningCenterPage } from '@/pages/learning/LearningCenterPage'
+import { MaintenancePage } from '@/pages/maintenance/MaintenancePage'
+import { MemoriesPage } from '@/pages/memories/MemoriesPage'
+import { PeoplePage } from '@/pages/people/PeoplePage'
+import { CompatibilityPage } from '@/pages/review/CompatibilityPage'
+import { SettingsPage } from '@/pages/settings/SettingsPage'
+import { SoulPage } from '@/pages/soul/SoulPage'
+import { ExplorePage } from '@/pages/PlaceholderPage'
 
-export interface AppRoute {
-  path: string
-  title: string
-  description: string
-  icon: ComponentType<{ className?: string }>
-  element: ComponentType
-}
+export type RouteGroup = 'overview' | 'data' | 'runtime' | 'cognition' | 'knowledge' | 'system'
+export interface AppRoute { path: string; title: string; description: string; group: RouteGroup; icon: ComponentType<{ className?: string }>; element: ComponentType }
 
 export const appRoutes: AppRoute[] = [
-  {
-    path: '/dashboard',
-    title: '总览仪表盘',
-    description: '系统健康、覆盖率、注入趋势与最近错误',
-    icon: GaugeIcon,
-    element: DashboardPage,
-  },
-  {
-    path: '/memories',
-    title: '记忆管理器',
-    description: '搜索、查看、修改长期记忆权重或物理擦除记忆',
-    icon: DatabaseIcon,
-    element: MemoriesPage,
-  },
-  {
-    path: '/import',
-    title: '智能导入',
-    description: '自动发现外部老记忆数据并排重，对无标签记忆提取 Tag',
-    icon: DownloadIcon,
-    element: ImportPage,
-  },
-  {
-    path: '/maintain',
-    title: '标签与维护中心',
-    description: '历史记忆批量标签分析分类、合并治理与系统算法自检',
-    icon: SlidersIcon,
-    element: MaintainPage,
-  },
-  {
-    path: '/injection',
-    title: '注入观测台',
-    description: 'trace 筛选、通道瀑布和最终注入预览',
-    icon: ActivityIcon,
-    element: InjectionPage,
-  },
-  {
-    path: '/channels',
-    title: '通道热配置',
-    description: '注入通道热配置、校验与回滚',
-    icon: Settings2Icon,
-    element: ChannelConfigPage,
-  },
-  {
-    path: '/learning-center',
-    title: '通用学习中心',
-    description: '来源、候选、经历内化与晋升历史的统一审核入口',
-    icon: BrainCircuitIcon,
-    element: LearningCenterPage,
-  },
-  {
-    path: '/beliefs',
-    title: '信念审核',
-    description: '审核/新建 Bot 对世界/自我的心智信念，追溯证据链',
-    icon: BookHeartIcon,
-    element: BeliefsPage,
-  },
-  {
-    path: '/jargon',
-    title: '黑话与口癖',
-    description: '群聊习得本地黑话，在线同步 Holyman 广域抽象黑话分层资产',
-    icon: SmileIcon,
-    element: JargonPage,
-  },
-  {
-    path: '/soul',
-    title: '灵魂与情绪',
-    description: '心里话动机展示、生平大事 Timeline、SVG 情绪波动轨迹图',
-    icon: HeartIcon,
-    element: SoulPage,
-  },
-  {
-    path: '/blackbox',
-    title: '黑盒管理',
-    description: 'BookLore、FewShot、Facts、人物与索引能力的只读诊断与联动入口',
-    icon: DatabaseIcon,
-    element: BlackboxHubPage,
-  },
-  {
-    path: '/blackbox/book-lore',
-    title: 'BookLore 管理',
-    description: '世界观/书设知识库、索引健康、搜索分页与未开放写操作标识',
-    icon: BookOpenIcon,
-    element: BlackboxBookLorePage,
-  },
-  {
-    path: '/blackbox/fewshot',
-    title: 'FewShot 管理',
-    description: '风格范例库只读搜索、状态筛选与未开放写操作标识',
-    icon: BrainCircuitIcon,
-    element: BlackboxFewShotPage,
-  },
-  {
-    path: '/blackbox/facts',
-    title: 'Facts / 关系管理',
-    description: '稳定事实关系、PERSON_ALIAS、详情查看与证据记忆跳转',
-    icon: GitBranchIcon,
-    element: BlackboxFactsPage,
-  },
-  {
-    path: '/blackbox/people',
-    title: '人物与好感管理',
-    description: '人物画像、UserProfile、Affinity、搜索分页与详情展开',
-    icon: UsersIcon,
-    element: BlackboxPeoplePage,
-  },
-  {
-    path: '/blackbox/indexes',
-    title: '索引与 FTS5 管理',
-    description: '向量索引、FTS5、EPA basis 与 BookLore HNSW 健康入口',
-    icon: SearchCheckIcon,
-    element: BlackboxIndexesPage,
-  },
-  {
-    path: '/compatibility',
-    title: '生态兼容',
-    description: 'LivingMemory 兼容接口、工具别名和重复插件风险',
-    icon: GitCompareArrowsIcon,
-    element: CompatibilityPage,
-  },
-  {
-    path: '/settings',
-    title: '系统配置',
-    description: 'Schema 全量配置表单与运行时滑块热更新调参',
-    icon: SlidersIcon,
-    element: SettingsPage,
-  },
+  { path: '/dashboard', title: '总览', description: '真实健康、待办与近期异常', group: 'overview', icon: GaugeIcon, element: DashboardPage },
+  { path: '/explore', title: '神经云图', description: '3D 交互式高维记忆与关系星图', group: 'overview', icon: CompassIcon, element: ExplorePage },
+  { path: '/memories', title: '记忆', description: 'Scoped PageResponse 与 ObjectRef 记忆资源', group: 'data', icon: DatabaseIcon, element: MemoriesPage },
+  { path: '/import', title: '导入', description: '真实来源预检与 durable import job', group: 'data', icon: DownloadIcon, element: ImportPage },
+  { path: '/maintenance', title: '维护任务', description: '可恢复任务、checkpoint、日志与取消语义', group: 'runtime', icon: SlidersIcon, element: MaintenancePage },
+  { path: '/observatory', title: '注入观测台', description: '可复现筛选、完整 Trace 与配置 revision', group: 'runtime', icon: ActivityIcon, element: InjectionPage },
+  { path: '/channels', title: '通道配置', description: '真实 descriptor、saved/effective 与 Trace 验证', group: 'runtime', icon: Settings2Icon, element: ChannelConfigPage },
+  { path: '/learning', title: '学习过程', description: '来源、任务、候选、审核与晋升账本', group: 'cognition', icon: BrainCircuitIcon, element: LearningCenterPage },
+  { path: '/beliefs', title: '信念', description: '证据健康与生命周期审核', group: 'cognition', icon: BookHeartIcon, element: BeliefsPage },
+  { path: '/jargon', title: '本地表达', description: '本地 scoped 词条与广域资产审计', group: 'cognition', icon: SmileIcon, element: JargonPage },
+  { path: '/soul', title: 'Soul 状态', description: '真实 Bot/会话 Mood、Concern、Timeline 与关系投影', group: 'cognition', icon: HeartIcon, element: SoulPage },
+  { path: '/knowledge/book-lore', title: 'BookLore', description: '独立只读语料、解析、本地化与隔离', group: 'knowledge', icon: BookOpenIcon, element: BookLorePage },
+  { path: '/knowledge/style-examples', title: '风格样例', description: '仅 approved/healthy 正式 FewShot', group: 'knowledge', icon: BrainCircuitIcon, element: FewShotPage },
+  { path: '/knowledge/facts', title: '事实', description: 'Scoped subject/predicate/object 与证据', group: 'knowledge', icon: GitBranchIcon, element: FactsPage },
+  { path: '/people', title: '人物与关系', description: '按 Bot/session/user 复合作用域展示', group: 'knowledge', icon: UsersIcon, element: PeoplePage },
+  { path: '/diagnostics/indexes', title: '索引诊断', description: '只读来源、count、generation 与健康证据', group: 'system', icon: SearchCheckIcon, element: IndexesPage },
+  { path: '/compatibility', title: '生态兼容', description: '真实探测状态、来源、错误与证据', group: 'system', icon: GitCompareArrowsIcon, element: CompatibilityPage },
+  { path: '/settings', title: '系统配置', description: 'default/saved/effective 与生效方式', group: 'system', icon: SlidersIcon, element: SettingsPage },
 ]
 
 export const defaultRoute = '/dashboard'
-
-export function getRouteByPath(pathname: string): AppRoute {
-  return appRoutes.find((route) => route.path === pathname) ?? appRoutes[0]
-}
+export function getRouteByPath(pathname: string): AppRoute { return appRoutes.find((route) => route.path === pathname) ?? appRoutes[0] }

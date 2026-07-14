@@ -10,6 +10,7 @@ import {
   safeValidation,
   validateChannelConfig,
   type ChannelConfigData,
+  type ChannelDescriptor,
   type ChannelPatch,
   type ChannelSettings,
   type ChannelValidationPayload,
@@ -70,6 +71,10 @@ export function ChannelConfigPage() {
   const [draft, setDraft] = useState<ChannelConfigData | null>(null)
   const [original, setOriginal] = useState<ChannelConfigData | null>(null)
   const [runtime, setRuntime] = useState<Record<string, unknown>>({})
+  const [descriptors, setDescriptors] = useState<ChannelDescriptor[]>([])
+  const [revision, setRevision] = useState('')
+  const [effectiveSince, setEffectiveSince] = useState<number | null>(null)
+  const [verificationUrl, setVerificationUrl] = useState('/observatory')
   const [validation, setValidation] = useState<ChannelValidationPayload | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -89,10 +94,15 @@ export function ChannelConfigPage() {
         // 配置建议属于配置域；读取失败不能阻断通道配置本身。
         getAgentFeedback().catch((): AgentFeedbackPayload => ({ config_suggestions: [] })),
       ])
-      const currentData = payload.current ?? { channels: {}, recent_dedup_minutes: 30, trace_enabled: true }
+      if (!payload.current) throw new Error('服务端未返回当前有效通道配置')
+      const currentData = payload.current
       setDraft(currentData)
       setOriginal(JSON.parse(JSON.stringify(currentData)))
       setRuntime(payload.runtime ?? {})
+      setDescriptors(payload.descriptors ?? [])
+      setRevision(payload.revision ?? '')
+      setEffectiveSince(payload.effective_since ?? null)
+      setVerificationUrl(payload.verification_url ?? '/observatory')
       setValidation(null)
       setConfigSuggestions(feedbackPayload.config_suggestions ?? [])
     } catch (err) {
@@ -130,12 +140,15 @@ export function ChannelConfigPage() {
     }
     setSaving(true)
     try {
-      const result = safeValidation(await applyChannelConfig(serializePatch(draft)))
+      const result = safeValidation(await applyChannelConfig(serializePatch(draft), validation?.preflight_token ?? ''))
       setValidation(result)
-      if (result.ok) {
-        setDraft(result.candidate ?? draft)
-        setOriginal(JSON.parse(JSON.stringify(result.candidate ?? draft)))
-        toast.success(result.message ?? '通道配置已热应用')
+      if (result.ok && result.operation?.status === 'succeeded' && result.effective) {
+        setDraft(result.effective)
+        setOriginal(JSON.parse(JSON.stringify(result.effective)))
+        setRevision(String(result.revision ?? ''))
+        setEffectiveSince(typeof result.effective_since === 'number' ? result.effective_since : null)
+        setVerificationUrl(result.verification_url ?? '/observatory')
+        toast.success(result.message ?? '通道配置已应用并完成运行时回读')
       } else {
         toast.error(result.errors.join('；') || '通道配置应用失败')
       }
@@ -153,9 +166,12 @@ export function ChannelConfigPage() {
     try {
       const result = safeValidation(await resetChannelConfigDefaults())
       setValidation(result)
-      if (result.ok) {
-        setDraft(result.candidate ?? draft)
-        setOriginal(JSON.parse(JSON.stringify(result.candidate ?? draft)))
+      if (result.ok && result.operation?.status === 'succeeded' && result.effective) {
+        setDraft(result.effective)
+        setOriginal(JSON.parse(JSON.stringify(result.effective)))
+        setRevision(String(result.revision ?? ''))
+        setEffectiveSince(typeof result.effective_since === 'number' ? result.effective_since : null)
+        setVerificationUrl(result.verification_url ?? '/observatory')
         toast.success(result.message ?? '已恢复默认通道配置')
       } else {
         toast.error(result.errors.join('；') || '恢复默认失败')
@@ -234,8 +250,9 @@ export function ChannelConfigPage() {
           <FieldGroup className="grid gap-4 md:grid-cols-3">
             <Field>
               <FieldLabel htmlFor="runtime-mode">运行模式</FieldLabel>
-              <div id="runtime-mode" className="flex h-10 items-center rounded-md border px-3 text-sm">
-                {String(runtime.mode ?? draft.mode ?? '-')}
+              <div id="runtime-mode" className="flex min-h-10 flex-col justify-center rounded-md border px-3 py-2 text-sm">
+                <span>{String(runtime.mode ?? draft.mode ?? 'unknown')}</span>
+                <span className="text-muted-foreground">revision: {revision || '未记录'} · 生效时间：{effectiveSince ? new Date(effectiveSince * 1000).toLocaleString('zh-CN') : '未记录'}</span>
               </div>
             </Field>
             <Field>
@@ -265,7 +282,7 @@ export function ChannelConfigPage() {
               {saving ? <Loader2Icon className="animate-spin" data-icon="inline-start" /> : <WandSparklesIcon data-icon="inline-start" />}
               校验预览
             </Button>
-            <Button disabled={saving || (validation !== null && !validationShape.ok)} onClick={() => void apply()}>
+            <Button disabled={saving || !validationShape.ok || !validation?.preflight_token} onClick={() => void apply()}>
               {saving ? <Loader2Icon className="animate-spin" data-icon="inline-start" /> : <SaveIcon data-icon="inline-start" />}
               应用配置
             </Button>
@@ -281,7 +298,7 @@ export function ChannelConfigPage() {
               </Badge>
             ) : null}
             <Button asChild variant="outline">
-              <Link to="/injection">
+              <Link to={verificationUrl}>
                 去注入观测台验证最近 trace
                 <ArrowRightIcon data-icon="inline-end" />
               </Link>
@@ -302,8 +319,9 @@ export function ChannelConfigPage() {
             return (
               <div key={`config-suggestion-${String(suggestion.id ?? index)}`} className="flex flex-col gap-3 rounded-lg border p-3">
                 <div className="flex items-start justify-between gap-3"><span className="font-medium">{title}</span><Badge variant="secondary">待处理</Badge></div>
-                <p className="text-xs text-muted-foreground">范围：{String(suggestion.scope ?? '未指定')} · 通道：{String(suggestion.channel ?? '未指定')}</p>
-                <pre className="overflow-auto rounded-md bg-muted p-2 text-xs font-mono">{JSON.stringify(suggestion, null, 2)}</pre>
+                <p className="text-sm text-muted-foreground">范围：{String(suggestion.scope ?? '未指定')} · 通道：{String(suggestion.channel ?? '未指定')}</p>
+                <p className="text-sm leading-relaxed">{String(suggestion.reason ?? suggestion.description ?? '服务端未提供补充说明。')}</p>
+                <details className="text-xs text-muted-foreground"><summary className="cursor-pointer">技术详情</summary><pre className="mt-2 max-h-48 overflow-auto rounded-md bg-muted p-2 font-mono">{JSON.stringify(suggestion, null, 2)}</pre></details>
                 <div className="flex flex-wrap gap-2">
                   {(['approve', 'reject', 'ignore'] as const).map((action) => (
                     <Button key={action} size="sm" variant={action === 'approve' ? 'default' : action === 'reject' ? 'destructive' : 'secondary'} disabled={suggestionsLoading || !Number.isFinite(id)} onClick={() => void handleSuggestionReview(id, action)}>
@@ -317,23 +335,14 @@ export function ChannelConfigPage() {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>字段说明</CardTitle>
-          <CardDescription>这些字段都是 WaveMemory 热参数；影响注入通道启用、优先级、预算和过滤阈值。</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-            {fieldHelp.map((item) => (
-              <div key={item} className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
-                {item}
-              </div>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
+      <details className="rounded-xl border border-border/70 bg-muted/10 px-4 py-3 text-sm">
+        <summary className="cursor-pointer font-medium">参数说明</summary>
+        <ul className="mt-3 grid gap-x-8 gap-y-2 text-muted-foreground md:grid-cols-2 xl:grid-cols-3">
+          {fieldHelp.map((item) => <li key={item}>{item}</li>)}
+        </ul>
+      </details>
 
-      <ChannelConfigTable draft={draft} onDraftChange={setDraft} />
+      <ChannelConfigTable draft={draft} descriptors={descriptors} onDraftChange={setDraft} />
       <ChannelDiffCard diff={validationShape.diff} validation={validation} />
     </div>
   )

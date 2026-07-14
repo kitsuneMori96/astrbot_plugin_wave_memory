@@ -1,71 +1,128 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   AlertCircleIcon,
   CheckCircle2Icon,
+  CheckIcon,
   HelpCircleIcon,
-  Loader2,
+  HistoryIcon,
+  Loader2Icon,
   PlayIcon,
   RefreshCwIcon,
-  CheckIcon,
+  SquareIcon,
   XIcon,
 } from 'lucide-react'
 import { toast } from 'sonner'
 
-import { getTagQuality, getAuditSuggestions, resolveAuditSuggestion, resolveAuditBatch, type TagQualityPayload, type AuditSuggestionItem, type TagExecutionOptions, type TagWritePolicy } from '@/api/tags'
+import {
+  cancelMaintenanceJob,
+  getMaintenanceLogs,
+  startTagAudit,
+  startTagBackfill,
+  waitForMaintenanceJob,
+  type MaintenanceJob,
+  type MaintenanceLog,
+  type TagAuditStrategy,
+} from '@/api/maintenance'
+import {
+  getAuditSuggestions,
+  getTagQuality,
+  resolveAuditBatch,
+  resolveAuditSuggestion,
+  type AuditSuggestionItem,
+  type TagExecutionOptions,
+  type TagQualityPayload,
+} from '@/api/tags'
 import { getSystemStatus, type SystemPayload } from '@/api/system'
-import { runPostStream, type StreamProgress } from '@/api/memories'
 import { TagExtractionConfigPanel } from '@/components/tag/TagExtractionConfigPanel'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Field, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+
+const activeJobStatuses = new Set(['pending', 'queued', 'running'])
+
+function valueFrom(records: Array<Record<string, unknown> | null | undefined>, keys: string[]): number | null {
+  for (const record of records) {
+    if (!record) continue
+    for (const key of keys) {
+      const value = Number(record[key])
+      if (Number.isFinite(value)) return value
+    }
+  }
+  return null
+}
+
+function jobProgress(job: MaintenanceJob | null) {
+  const records = [job?.progress, job?.cursor, job?.result]
+  const processed = valueFrom(records, ['processed', 'processed_count', 'imported', 'current']) ?? 0
+  const total = valueFrom(records, ['total', 'total_count', 'total_scanned', 'selected']) ?? 0
+  const tagged = valueFrom(records, ['tagged', 'written']) ?? 0
+  const errors = valueFrom(records, ['errors', 'failed']) ?? 0
+  const explicit = valueFrom(records, ['progress', 'ratio', 'percent'])
+  const ratio = explicit === null
+    ? (total > 0 ? processed / total : 0)
+    : explicit > 1 ? explicit / 100 : explicit
+  return { processed, total, tagged, errors, ratio: Math.min(1, Math.max(0, ratio)) }
+}
+
+function statusLabel(status?: string): string {
+  return ({
+    pending: '等待调度',
+    queued: '排队中',
+    running: '执行中',
+    succeeded: '已成功',
+    failed: '已失败',
+    cancelled: '已取消',
+  } as Record<string, string>)[status ?? ''] ?? '状态未知'
+}
+
+function formatLog(log: MaintenanceLog): string {
+  const time = log.at ? new Date(log.at * 1000).toLocaleTimeString('zh-CN') : '--:--:--'
+  const data = log.data && typeof log.data === 'object' ? log.data as Record<string, unknown> : null
+  const message = data && typeof data.message === 'string'
+    ? data.message
+    : data && typeof data.status === 'string'
+      ? `状态：${statusLabel(data.status)}`
+      : ''
+  return `[${time}] ${log.event}${message ? ` · ${message}` : ''}`
+}
 
 export function MaintainPage() {
+  const [, setParams] = useSearchParams()
   const [sys, setSys] = useState<SystemPayload | null>(null)
   const [quality, setQuality] = useState<TagQualityPayload | null>(null)
   const [suggestions, setSuggestions] = useState<AuditSuggestionItem[]>([])
   const [pendingCount, setPendingCount] = useState(0)
-
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [activeTab, setActiveTab] = useState('extract')
+  const [submitting, setSubmitting] = useState(false)
+  const [job, setJob] = useState<MaintenanceJob | null>(null)
+  const [jobLogs, setJobLogs] = useState<MaintenanceLog[]>([])
+  const [jobType, setJobType] = useState<'extract' | 'audit' | null>(null)
+  const pollingRef = useRef<AbortController | null>(null)
 
-  // SSE 状态
-  const [running, setRunning] = useState(false)
-  const [streamProgress, setStreamProgress] = useState<StreamProgress | null>(null)
-  const [streamLog, setStreamLog] = useState<string[]>([])
-  const [streamType, setStreamType] = useState<'extract' | 'audit' | null>(null)
-  const [taskState, setTaskState] = useState<'idle' | 'running' | 'paused' | 'stopped' | 'done' | 'error'>('idle')
-  const [cumulativeProcessed, setCumulativeProcessed] = useState(0)
-  const [cumulativeTagged, setCumulativeTagged] = useState(0)
-  const [cumulativeErrors, setCumulativeErrors] = useState(0)
-  const stopRequestedRef = useRef(false)
-  const stopModeRef = useRef<'pause' | 'stop' | null>(null)
-  const currentAbortRef = useRef<AbortController | null>(null)
-
-  // 批量分析提取参数
   const [tagBatchSize, setTagBatchSize] = useState(20)
-  const [tagWritePolicy, setTagWritePolicy] = useState<TagWritePolicy>('missing_only')
   const [skipShortMinLength, setSkipShortMinLength] = useState(10)
-  const [maxAutoBatches, setMaxAutoBatches] = useState(200)
+  const [auditStrategy, setAuditStrategy] = useState<TagAuditStrategy>('mixed')
+  const [auditCount, setAuditCount] = useState(200)
+
+  const running = submitting || Boolean(job && activeJobStatuses.has(job.status))
+  const progress = jobProgress(job)
 
   const handleTagOptionsChange = useCallback((options: Required<TagExecutionOptions>) => {
     setTagBatchSize(options.tag_batch_size)
-    setTagWritePolicy(options.tag_write_policy)
     setSkipShortMinLength(options.skip_short_min_length)
   }, [])
 
-  // 审计策略参数
-  const [auditStrategy, setAuditStrategy] = useState('mixed')
-  const [auditCount, setAuditCount] = useState(200)
-
-  async function loadData() {
+  const loadData = useCallback(async () => {
     setError('')
     try {
       const [sysPayload, qualityPayload, auditPayload] = await Promise.all([
@@ -77,581 +134,218 @@ export function MaintainPage() {
       setQuality(qualityPayload)
       setSuggestions(auditPayload.suggestions ?? [])
       setPendingCount(auditPayload.counts?.pending ?? 0)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '标签与维护数据加载失败')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '标签与维护数据加载失败')
     }
-  }
-
-  useEffect(() => {
-    async function init() {
-      setLoading(true)
-      await loadData()
-      setLoading(false)
-    }
-    void init()
   }, [])
 
-  // 触发无标签记忆的 LLM 批量分析提取 (SSE)
-  function handleStartLLMExtract() {
-    if (running) return
-    stopRequestedRef.current = false
-    stopModeRef.current = null
-    currentAbortRef.current = null
-    setRunning(true)
-    setTaskState('running')
-    setStreamType('extract')
-    setStreamProgress(null)
-    setCumulativeProcessed(0)
-    setCumulativeTagged(0)
-    setCumulativeErrors(0)
-    setStreamLog(['[INIT] 正在启动无标签记忆的 LLM 智能分类与 Tag 批分析提取引擎...'])
+  useEffect(() => {
+    void loadData().finally(() => setLoading(false))
+    return () => pollingRef.current?.abort()
+  }, [loadData])
 
-    const runLoop = async () => {
-      let rounds = 0
-      let previousRemaining: number | null = null
-      let totalInitial: number | null = null
-      let processedTotal = 0
-      let taggedTotal = 0
-      let errorsTotal = 0
+  const exposeJobInUrl = useCallback((jobId: string, openHistory = false) => {
+    setParams((current) => {
+      const next = new URLSearchParams(current)
+      next.set('job_id', jobId)
+      next.set('tab', openHistory ? 'jobs' : 'workbench')
+      return next
+    })
+  }, [setParams])
 
-      while (!stopRequestedRef.current) {
-        rounds += 1
-        const controller = new AbortController()
-        currentAbortRef.current = controller
-        const result = await runPostStream(`/api/tags/batch-extract?tag_batch_size=${tagBatchSize}&tag_write_policy=${tagWritePolicy}&skip_short_min_length=${skipShortMinLength}`, [], (state) => {
-          if (totalInitial === null && typeof state.total === 'number') {
-            totalInitial = state.total
-          }
-          const displayTotal = totalInitial ?? state.total
-          const displayProcessed = processedTotal + (state.processed ?? 0)
-          const displayTagged = taggedTotal + (state.tagged ?? 0)
-          const displayErrors = errorsTotal + (state.errors ?? 0)
-          const aggregateProgress = displayTotal > 0 ? Math.min(displayProcessed / displayTotal, 1) : state.progress
-
-          setStreamProgress({
-            ...state,
-            progress: aggregateProgress,
-            processed: displayProcessed,
-            total: displayTotal,
-            tagged: displayTagged,
-            errors: displayErrors,
-          })
-          if (state.message) {
-            setStreamLog((prev) => [...prev, `[EXTRACT] ${state.message}`].slice(-80))
-          } else if (state.processed !== undefined) {
-            setStreamLog((prev) => [
-              ...prev,
-              `[EXTRACT] 本轮: ${state.processed}/${state.total} | 已处理总计: ${displayProcessed}/${displayTotal} | 写入: ${displayTagged} | 失败: ${displayErrors}`,
-            ].slice(-80))
-          }
-        }, { signal: controller.signal })
-        currentAbortRef.current = null
-
-        if (!result) break
-        processedTotal += result.processed ?? 0
-        taggedTotal += result.tagged ?? 0
-        errorsTotal += result.errors ?? 0
-        setCumulativeProcessed(processedTotal)
-        setCumulativeTagged(taggedTotal)
-        setCumulativeErrors(errorsTotal)
-
-        const displayTotal = totalInitial ?? result.total
-        setStreamProgress({
-          ...result,
-          processed: processedTotal,
-          total: displayTotal,
-          tagged: taggedTotal,
-          errors: errorsTotal,
-          progress: displayTotal > 0 ? Math.min(processedTotal / displayTotal, 1) : result.progress,
-        })
-
-        if (stopRequestedRef.current) break
-        if (!result.partial || !result.remaining || result.remaining <= 0) break
-        if ((result.tagged ?? 0) <= 0 || (previousRemaining !== null && result.remaining >= previousRemaining)) {
-          throw new Error(`本轮已处理 ${result.processed ?? 0} 条但没有减少未标注数量，请调小 batch_size 或检查 Tag LLM 输出。`)
-        }
-        if (rounds >= maxAutoBatches) {
-          throw new Error(`已达到最大自动批次数 ${maxAutoBatches}，暂停以避免无限循环。可调大上限后继续。`)
-        }
-
-        previousRemaining = result.remaining
-        setStreamLog((prev) => [...prev, `[NEXT] 已处理总计 ${processedTotal} 条；剩余 ${result.remaining} 条，自动继续下一批...`].slice(-80))
+  const followJob = useCallback(async (acceptedJob: MaintenanceJob) => {
+    pollingRef.current?.abort()
+    const controller = new AbortController()
+    pollingRef.current = controller
+    setJob(acceptedJob)
+    try {
+      const completed = await waitForMaintenanceJob(acceptedJob.run_id, (next) => {
+        setJob(next)
+        void getMaintenanceLogs(next.run_id, 100, 0).then((page) => setJobLogs(page.items)).catch(() => undefined)
+      }, controller.signal)
+      if (completed.status === 'succeeded') toast.success('维护任务已成功完成')
+      else if (completed.status === 'failed') toast.error(completed.error_message || '维护任务执行失败')
+      else toast.info(`维护任务终态：${statusLabel(completed.status)}`)
+      await loadData()
+    } catch (reason) {
+      if (!(reason instanceof DOMException && reason.name === 'AbortError')) {
+        toast.error(reason instanceof Error ? reason.message : '任务状态跟踪失败')
       }
-
-      if (stopRequestedRef.current) {
-        const stopped = stopModeRef.current === 'stop'
-        setStreamLog((prev) => [...prev, `${stopped ? '[STOP]' : '[PAUSE]'} 已${stopped ? '停止' : '暂停'}。已处理总计 ${processedTotal} 条，写入 ${taggedTotal} 条。`].slice(-80))
-        toast.info(stopped ? '标签提取已停止' : '标签提取已暂停')
-      }
+    } finally {
+      if (pollingRef.current === controller) pollingRef.current = null
     }
+  }, [loadData])
 
-    void runLoop().then(() => {
-      if (!stopRequestedRef.current) {
-        setStreamLog((prev) => [...prev, '[SUCCESS] 批量标签提取任务已结束。'])
-        setTaskState('done')
-      } else {
-        setTaskState(stopModeRef.current === 'stop' ? 'stopped' : 'paused')
-      }
-      setRunning(false)
-      currentAbortRef.current = null
-      void loadData()
-    }).catch((err) => {
-      const isAbort = err instanceof DOMException && err.name === 'AbortError'
-      if (stopRequestedRef.current || isAbort) {
-        const stopped = stopModeRef.current === 'stop'
-        setStreamLog((prev) => [...prev, `${stopped ? '[STOP]' : '[PAUSE]'} 已${stopped ? '停止' : '暂停'}当前标签提取任务。`].slice(-80))
-        setTaskState(stopped ? 'stopped' : 'paused')
-        toast.info(stopped ? '标签提取已停止' : '标签提取已暂停')
-      } else {
-        const msg = err instanceof Error ? err.message : '连接异常'
-        setStreamLog((prev) => [...prev, `[CRITICAL] 提取失败: ${msg}`])
-        setTaskState('error')
-        toast.error(`提取异常: ${msg}`)
-      }
-      setRunning(false)
-      currentAbortRef.current = null
-      void loadData()
-    })
-  }
-
-  function handlePauseLLMExtract() {
-    stopRequestedRef.current = true
-    stopModeRef.current = 'pause'
-    currentAbortRef.current?.abort()
-    setStreamLog((prev) => [...prev, '[PAUSE] 正在暂停：将停止自动继续下一批，并中止当前连接...'].slice(-80))
-  }
-
-  function handleStopLLMExtract() {
-    stopRequestedRef.current = true
-    stopModeRef.current = 'stop'
-    currentAbortRef.current?.abort()
-    setStreamLog((prev) => [...prev, '[STOP] 正在停止：将中止当前连接并保留已完成的处理结果...'].slice(-80))
-  }
-
-  // 触发自检审计 (SSE)
-  function handleStartAudit() {
+  async function handleStartExtract() {
     if (running) return
-    setRunning(true)
-    setTaskState('running')
-    setStreamType('audit')
-    setStreamProgress(null)
-    setStreamLog([`[INIT] 正在触发 Tag 质量自检，策略: ${auditStrategy}...`])
-
-    void runPostStream(`/api/tags/audit/trigger?strategy=${auditStrategy}&total_count=${auditCount}`, [], (state: any) => {
-      setStreamProgress({
-        progress: (state.progress ?? 0) / 100,
-        processed: state.processed_count ?? 0,
-        total: state.total_scanned ?? auditCount,
-      })
-      if (state.message) {
-        setStreamLog((prev) => [...prev, `[AUDIT] ${state.message}`].slice(-60))
+    setSubmitting(true)
+    setJobType('extract')
+    setJob(null)
+    setJobLogs([])
+    try {
+      const accepted = await startTagBackfill({ tag_batch_size: tagBatchSize, skip_short_min_length: skipShortMinLength })
+      const initial: MaintenanceJob = {
+        run_id: accepted.job_id,
+        request_id: accepted.request_id,
+        status: accepted.status,
+        kind: 'maintenance.tag_backfill.run',
+        operation: accepted.operation,
       }
-    }).then(() => {
-      setStreamLog((prev) => [...prev, '[SUCCESS] 系统自检审计完成！'])
-      setTaskState('done')
-      setRunning(false)
-      void loadData()
-    }).catch((err) => {
-      const msg = err instanceof Error ? err.message : '连接异常'
-      setStreamLog((prev) => [...prev, `[CRITICAL] 审计中断: ${msg}`])
-      setTaskState('error')
-      toast.error(`自检异常: ${msg}`)
-      setRunning(false)
-    })
+      exposeJobInUrl(accepted.job_id)
+      toast.info('标签提取任务已进入 durable 队列，可离开页面后从任务历史恢复查看。')
+      void followJob(initial)
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : '标签提取任务创建失败')
+    } finally {
+      setSubmitting(false)
+    }
   }
 
-  // 处理单条建议
+  async function handleStartAudit() {
+    if (running) return
+    setSubmitting(true)
+    setJobType('audit')
+    setJob(null)
+    setJobLogs([])
+    try {
+      const accepted = await startTagAudit(auditStrategy, auditCount)
+      const initial: MaintenanceJob = {
+        run_id: accepted.job_id,
+        request_id: accepted.request_id,
+        status: accepted.status,
+        kind: 'maintenance.tag_audit.run',
+        operation: accepted.operation,
+      }
+      exposeJobInUrl(accepted.job_id)
+      toast.info('质量审计已进入 durable 队列；完成后会刷新待审核建议。')
+      void followJob(initial)
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : '质量审计任务创建失败')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function handleCancelJob() {
+    if (!job || !activeJobStatuses.has(job.status)) return
+    try {
+      const result = await cancelMaintenanceJob(job.run_id)
+      setJob(result.item)
+      toast.info('取消请求已提交；请以任务最终状态为准。')
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : '取消请求失败')
+    }
+  }
+
   async function handleResolve(id: string | number, decision: 'approve' | 'reject') {
     try {
-      const res = await resolveAuditSuggestion(id, decision)
-      if (res.ok) {
-        toast.success(decision === 'approve' ? '建议已批准并落库生效' : '建议已拒绝并丢弃')
-        void loadData()
-      } else {
-        toast.error(res.message ?? '处理失败')
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '请求异常')
+      const result = await resolveAuditSuggestion(id, decision)
+      if (result.ok === false) throw new Error(result.message || '建议处理失败')
+      toast.success(decision === 'approve' ? '建议已批准' : '建议已拒绝')
+      await loadData()
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : '建议处理失败')
     }
   }
 
-  // 批量处理全部建议
-  async function handleBatchResolve(decision: 'approve' | 'reject') {
-    if (suggestions.length === 0) return
-    const ids = suggestions.map((s) => s.id)
+  async function handleBatchReject() {
+    if (!suggestions.length) return
     try {
-      const res = await resolveAuditBatch(ids, decision)
-      toast.success(`批量处理完成，共处理 ${res.processed} 条建议`)
-      void loadData()
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '批量处理异常')
+      const result = await resolveAuditBatch(suggestions.map((item) => item.id), 'reject')
+      toast.success(`已拒绝 ${result.processed} 条建议`)
+      await loadData()
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : '批量处理失败')
     }
   }
 
   function sourceTagLabel(item: AuditSuggestionItem): string {
     if (item.source_tag_name) return item.source_tag_name
-    const ids = item.tag_ids ?? []
-    const names = ids
-      .map((id) => item.tag_names?.[String(id)])
+    const labels = (item.tag_ids ?? []).map((id) => item.tag_names?.[String(id)])
       .filter(Boolean)
-      .map((tag) => tag?.type ? `${tag.name} (${tag.type})` : String(tag?.name ?? ''))
+      .map((tag) => tag?.type ? `${tag.name}（${tag.type}）` : String(tag?.name ?? ''))
       .filter(Boolean)
-    return names.length ? names.join(' / ') : '-'
+    return labels.length ? labels.join(' / ') : '未记录'
   }
 
   function targetLabel(item: AuditSuggestionItem): string {
-    if (item.action === 'merge') {
-      return item.target_name || item.target_tag_name || '-'
-    }
-    if (item.action === 'retype') {
-      return item.target_type || item.new_type || '-'
-    }
-    if (item.action === 'delete') {
-      return '删除源标签'
-    }
-    return '-'
+    if (item.action === 'merge') return item.target_name || item.target_tag_name || '未记录'
+    if (item.action === 'retype') return item.target_type || item.new_type || '未记录'
+    return item.action === 'delete' ? '删除源标签' : '未记录'
   }
 
   if (loading) {
-    return (
-      <div className="flex flex-col gap-6">
-        <Skeleton className="h-16 w-full" />
-        <Skeleton className="h-96 w-full" />
-      </div>
-    )
+    return <div className="flex flex-col gap-6"><Skeleton className="h-24 w-full" /><Skeleton className="h-96 w-full" /></div>
   }
 
   if (error) {
-    return (
-      <Alert variant="destructive">
-        <AlertCircleIcon />
-        <AlertTitle>加载失败</AlertTitle>
-        <AlertDescription>{error}</AlertDescription>
-      </Alert>
-    )
+    return <Alert variant="destructive"><AlertCircleIcon /><AlertTitle>维护数据加载失败</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>
   }
 
   const untaggedCount = Math.max(0, Number(quality?.untagged_memories ?? ((sys?.memories?.total ?? 0) - (sys?.memories?.with_tags ?? 0))))
-  const extractableUntaggedCount = Math.max(0, Number(quality?.extractable_untagged_memories ?? untaggedCount))
-  const skippedShortUntaggedCount = Math.max(0, Number(quality?.skipped_short_untagged_memories ?? 0))
-  const orphanMemoryTagRefs = Math.max(0, Number(quality?.orphan_memory_tag_refs ?? 0))
-  const tagCoveragePct = quality ? (quality.coverage * 100).toFixed(1) : '-'
+  const extractableCount = Math.max(0, Number(quality?.extractable_untagged_memories ?? untaggedCount))
+  const skippedShortCount = Math.max(0, Number(quality?.skipped_short_untagged_memories ?? 0))
+  const orphanRefs = Math.max(0, Number(quality?.orphan_memory_tag_refs ?? 0))
+  const coverage = quality ? `${(quality.coverage * 100).toFixed(1)}%` : '未记录'
 
-  return (
-    <div className="flex flex-col gap-6">
-      {/* 头部 Metrics 概览 */}
-      <div className="grid gap-4 md:grid-cols-4">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardDescription className="text-xs">系统总 Tag 数</CardDescription>
-            <CardTitle className="text-2xl font-bold font-mono">
-              {quality?.total_tags ? new Intl.NumberFormat('zh-CN').format(quality.total_tags) : '-'}
-            </CardTitle>
-          </CardHeader>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardDescription className="text-xs">记忆标签覆盖率</CardDescription>
-            <CardTitle className="text-2xl font-bold font-mono">
-              {tagCoveragePct}%
-            </CardTitle>
-          </CardHeader>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardDescription className="text-xs">待审核治理建议</CardDescription>
-            <CardTitle className="text-2xl font-bold font-mono text-amber-500">
-              {pendingCount}
-            </CardTitle>
-          </CardHeader>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardDescription className="text-xs">可提取无标签记忆</CardDescription>
-            <CardTitle className={`text-2xl font-bold font-mono ${extractableUntaggedCount > 0 ? 'text-destructive' : 'text-primary'}`}>
-              {extractableUntaggedCount}
-            </CardTitle>
-            <CardDescription className="text-[10px] leading-relaxed">
-              总无标签 {new Intl.NumberFormat('zh-CN').format(untaggedCount)}；短文本跳过 {new Intl.NumberFormat('zh-CN').format(skippedShortUntaggedCount)}
-              {orphanMemoryTagRefs > 0 ? `；孤儿关联 ${new Intl.NumberFormat('zh-CN').format(orphanMemoryTagRefs)}` : ''}
-            </CardDescription>
-          </CardHeader>
-        </Card>
-      </div>
-
-      <Card className="border-border/60">
-        <CardHeader className="pb-4">
-          <CardTitle className="text-lg font-semibold">标签与维护中心</CardTitle>
-          <CardDescription className="text-sm">
-            管理、清洗和审核已有记忆的结构化标签；支持运行大批量分类提取分析和系统自检审计。
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <Tabs value={activeTab} onValueChange={setActiveTab} className="flex flex-col gap-5">
-            <TabsList className="w-fit">
-              <TabsTrigger value="extract">批量标签提取</TabsTrigger>
-              <TabsTrigger value="audit">审计建议与治理</TabsTrigger>
-            </TabsList>
-
-            {/* Tab 1: 批量标签提取 */}
-            <TabsContent value="extract" className="flex flex-col gap-4 mt-0">
-              <TagExtractionConfigPanel
-                title="维护中心 Tag 提取配置"
-                description="全库无标签补跑默认使用 missing_only；append/replace 会被后端拒绝，避免误扫全库改写已有标签。"
-                onOptionsChange={handleTagOptionsChange}
-                disabled={running}
-                showSkipShort
-              />
-              <div className="rounded-xl border border-border/80 bg-muted/5 p-5">
-                <div className="flex flex-col gap-1">
-                  <h3 className="text-sm font-semibold tracking-tight">批量分类提取分析</h3>
-                  <p className="text-xs text-muted-foreground leading-relaxed">
-                    扫描 memories 主表中尚未提取任何结构化标签的长期记忆，使用配置的 LLM 分类提取生成对应的标签。
-                  </p>
-                </div>
-
-                <div className="grid gap-4 mt-6 md:grid-cols-2 max-w-2xl">
-                  <Field className="flex flex-col gap-2">
-                    <FieldLabel className="text-xs font-semibold">每批处理记忆数量 (batch_size)</FieldLabel>
-                    <Input
-                      type="number"
-                      min={1}
-                      max={50}
-                      value={tagBatchSize}
-                      onChange={(e) => setTagBatchSize(Math.max(1, Math.min(50, Number(e.target.value))))}
-                      disabled={running}
-                      className="h-9 text-xs"
-                    />
-                  </Field>
-                  <Field className="flex flex-col gap-2">
-                    <FieldLabel className="text-xs font-semibold">最大自动批次数</FieldLabel>
-                    <Input
-                      type="number"
-                      min={1}
-                      max={2000}
-                      value={maxAutoBatches}
-                      onChange={(e) => setMaxAutoBatches(Math.max(1, Math.min(2000, Number(e.target.value))))}
-                      disabled={running}
-                      className="h-9 text-xs"
-                    />
-                  </Field>
-                </div>
-
-                <div className="mt-4 flex flex-wrap items-center gap-2">
-                  {extractableUntaggedCount > 0 ? (
-                    <>
-                      <Button onClick={handleStartLLMExtract} disabled={running} size="sm" className="w-fit h-9">
-                        {running && streamType === 'extract' ? (
-                          <>
-                            <Loader2 className="size-3.5 animate-spin" />
-                            <span>提取中...</span>
-                          </>
-                        ) : (
-                          <>
-                            <PlayIcon className="size-3.5" />
-                            <span>运行标签批量分析 ({extractableUntaggedCount} 条可提取)</span>
-                          </>
-                        )}
-                      </Button>
-                      {running && streamType === 'extract' ? (
-                        <>
-                          <Button onClick={handlePauseLLMExtract} variant="outline" size="sm" className="h-9">
-                            <XIcon className="size-3.5" />
-                            <span>暂停</span>
-                          </Button>
-                          <Button onClick={handleStopLLMExtract} variant="destructive" size="sm" className="h-9">
-                            <XIcon className="size-3.5" />
-                            <span>停止</span>
-                          </Button>
-                        </>
-                      ) : null}
-                      <span className="text-[10px] text-muted-foreground">
-                        配置：每批 {tagBatchSize} 条，最多自动运行 {maxAutoBatches} 批；可随时暂停。
-                      </span>
-                    </>
-                  ) : (
-                    <div className="flex items-center gap-2 text-xs text-primary font-medium bg-primary/5 rounded-lg px-4 py-3 border border-primary/10">
-                      <CheckCircle2Icon className="size-4 shrink-0" />
-                      <span>当前暂无可提取的无标签长文本记忆；短文本/空内容会被跳过。</span>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </TabsContent>
-
-            {/* Tab 2: 审计建议与治理 */}
-            <TabsContent value="audit" className="flex flex-col gap-5 mt-0">
-              {/* 自检审计控制条 */}
-              <div className="rounded-xl border border-border/80 bg-muted/5 p-5">
-                <div className="flex flex-col gap-1">
-                  <h3 className="text-sm font-semibold tracking-tight">触发系统自检审计</h3>
-                  <p className="text-xs text-muted-foreground leading-relaxed">
-                    使用标签置信度模型扫描数据库，自动诊断并生成关于标签合并、类型重分类或删除建议。
-                  </p>
-                </div>
-
-                <div className="flex flex-wrap items-end gap-4 mt-6">
-                  <Field className="flex flex-col gap-1.5 min-w-[180px]">
-                    <FieldLabel className="text-[10px] font-bold text-muted-foreground uppercase">自检扫描算法</FieldLabel>
-                    <select
-                      value={auditStrategy}
-                      onChange={(e) => setAuditStrategy(e.target.value)}
-                      disabled={running}
-                      className="h-9 bg-background border border-input rounded-md px-3 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-                    >
-                      <option value="mixed">Mixed · 混合采样</option>
-                      <option value="lowconf">LowConf · 低置信关系</option>
-                      <option value="orphan">Orphan · 孤立标签</option>
-                      <option value="duplicate">Duplicate · 重复候选</option>
-                    </select>
-                  </Field>
-
-                  <Field className="flex flex-col gap-1.5 w-24">
-                    <FieldLabel className="text-[10px] font-bold text-muted-foreground uppercase">采样数量</FieldLabel>
-                    <Input
-                      type="number"
-                      value={auditCount}
-                      min={20}
-                      max={2000}
-                      step={20}
-                      onChange={(e) => setAuditCount(Number(e.target.value))}
-                      disabled={running}
-                      className="h-9 text-xs"
-                    />
-                  </Field>
-
-                  <div className="flex gap-2">
-                    <Button onClick={handleStartAudit} disabled={running} size="sm" className="h-9">
-                      {running && streamType === 'audit' ? (
-                        <>
-                          <Loader2 className="size-3.5 animate-spin" />
-                          <span>自检扫描中...</span>
-                        </>
-                      ) : (
-                        <>
-                          <RefreshCwIcon className="size-3.5" />
-                          <span>启动系统自检</span>
-                        </>
-                      )}
-                    </Button>
-
-                    {suggestions.length > 0 ? (
-                      <>
-                        <Button onClick={() => void handleBatchResolve('approve')} variant="secondary" size="sm" className="h-9">
-                          <CheckIcon className="size-3.5 text-green-500" />
-                          <span>全部批准 ({suggestions.length})</span>
-                        </Button>
-                        <Button onClick={() => void handleBatchResolve('reject')} variant="ghost" size="sm" className="h-9">
-                          <XIcon className="size-3.5 text-destructive" />
-                          <span>全部拒绝</span>
-                        </Button>
-                      </>
-                    ) : null}
-                  </div>
-                </div>
-              </div>
-
-              {/* 建议大表 */}
-              {suggestions.length > 0 ? (
-                <div className="rounded-xl border border-border/60 overflow-hidden">
-                  <Table>
-                    <TableHeader className="bg-muted/30">
-                      <TableRow>
-                        <TableHead className="text-xs font-semibold">治理类型</TableHead>
-                        <TableHead className="text-xs font-semibold">源标签</TableHead>
-                        <TableHead className="text-xs font-semibold">目标对象</TableHead>
-                        <TableHead className="text-xs font-semibold">治理建议原因</TableHead>
-                        <TableHead className="text-xs font-semibold text-right">动作</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {suggestions.map((item) => (
-                        <TableRow key={item.id} className="hover:bg-muted/5">
-                          <TableCell className="py-3">
-                            <Badge variant={item.action === 'delete' ? 'destructive' : 'secondary'} className="text-[10px] font-normal px-2 py-0.5">
-                              {item.action === 'merge' ? '合并' : item.action === 'retype' ? '重分类' : '删除'}
-                            </Badge>
-                          </TableCell>
-                          <TableCell className="py-3 font-medium text-xs font-mono">{sourceTagLabel(item)}</TableCell>
-                          <TableCell className="py-3 text-xs font-mono text-muted-foreground">
-                            {targetLabel(item)}
-                          </TableCell>
-                          <TableCell className="py-3 text-xs text-muted-foreground max-w-sm leading-relaxed">{item.reason}</TableCell>
-                          <TableCell className="py-3 text-right">
-                            <div className="flex justify-end gap-1.5">
-                              <Button
-                                size="icon"
-                                variant="outline"
-                                className="h-7 w-7 text-green-500 hover:bg-green-50"
-                                onClick={() => void handleResolve(item.id, 'approve')}
-                              >
-                                <CheckIcon className="size-3.5" />
-                              </Button>
-                              <Button
-                                size="icon"
-                                variant="outline"
-                                className="h-7 w-7 text-destructive hover:bg-destructive-foreground/10"
-                                onClick={() => void handleResolve(item.id, 'reject')}
-                              >
-                                <XIcon className="size-3.5" />
-                              </Button>
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-              ) : !running ? (
-                <div className="text-center py-12 border border-dashed rounded-xl bg-muted/5 flex flex-col items-center justify-center gap-2">
-                  <HelpCircleIcon className="size-8 text-muted-foreground/50" />
-                  <p className="text-sm font-semibold">无待处理治理建议</p>
-                  <p className="text-xs text-muted-foreground max-w-xs leading-relaxed">
-                    当前没有待处理的合并、重分类或删除建议。可以点击顶部的“启动系统自检”来扫描最新指标。
-                  </p>
-                </div>
-              ) : null}
-            </TabsContent>
-          </Tabs>
-
-          {/* 进度/流日志大面板 (公用) */}
-          {(running || streamLog.length > 0) && (
-            <div className="flex flex-col gap-3 mt-6 border-t pt-5">
-              <div className="flex items-center justify-between gap-4 text-xs font-medium">
-                <span className="flex items-center gap-1.5 text-primary">
-                  {running ? <Loader2 className="size-3.5 animate-spin" /> : <CheckCircle2Icon className="size-3.5" />}
-                  <span>{taskState === 'running' ? '任务执行中...' : taskState === 'paused' ? '任务已暂停' : taskState === 'stopped' ? '任务已停止' : taskState === 'error' ? '任务异常' : '任务已结束'}</span>
-                </span>
-                {streamProgress && (
-                  <span className="font-mono text-muted-foreground">
-                    进度: {Math.round(streamProgress.progress * 100)}% · 已处理总计 {cumulativeProcessed || streamProgress.processed}/{streamProgress.total}
-                    {streamType === 'extract' ? ` · 写入 ${cumulativeTagged} · 失败 ${cumulativeErrors}` : ''}
-                  </span>
-                )}
-              </div>
-
-              {streamProgress && (
-                <div className="h-2 w-full bg-muted rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-primary rounded-full transition-all duration-300"
-                    style={{ width: `${Math.round(streamProgress.progress * 100)}%` }}
-                  />
-                </div>
-              )}
-
-              <ScrollArea className="h-44 w-full rounded-lg border bg-black/5 p-4 mt-1 font-mono text-[10px] text-muted-foreground leading-relaxed">
-                <div className="flex flex-col gap-1">
-                  {streamLog.map((log, idx) => (
-                    <div key={idx} className="whitespace-pre-wrap break-all">
-                      {log}
-                    </div>
-                  ))}
-                </div>
-              </ScrollArea>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+  return <div data-slot="maintain-workbench" className="flex flex-col gap-6">
+    <div className="grid gap-4 md:grid-cols-4">
+      <Card><CardHeader className="pb-2"><CardDescription>系统总 Tag 数</CardDescription><CardTitle className="font-mono text-2xl">{Number(quality?.total_tags ?? 0).toLocaleString('zh-CN')}</CardTitle></CardHeader></Card>
+      <Card><CardHeader className="pb-2"><CardDescription>记忆标签覆盖率</CardDescription><CardTitle className="font-mono text-2xl">{coverage}</CardTitle></CardHeader></Card>
+      <Card><CardHeader className="pb-2"><CardDescription>待审核治理建议</CardDescription><CardTitle className="font-mono text-2xl text-amber-500">{pendingCount}</CardTitle></CardHeader></Card>
+      <Card><CardHeader className="pb-2"><CardDescription>可提取无标签记忆</CardDescription><CardTitle className="font-mono text-2xl">{extractableCount.toLocaleString('zh-CN')}</CardTitle><CardDescription>短文本跳过 {skippedShortCount.toLocaleString('zh-CN')}{orphanRefs ? ` · 孤儿关联 ${orphanRefs.toLocaleString('zh-CN')}` : ''}</CardDescription></CardHeader></Card>
     </div>
-  )
+
+    <Card>
+      <CardHeader><CardTitle>标签维护工作台</CardTitle><CardDescription>标签补提取和质量审计只创建当前 durable job，不执行任意 token rebuild；建议处理沿用后端作用域与写入门禁。</CardDescription></CardHeader>
+      <CardContent className="flex flex-col gap-5">
+        <Tabs value={activeTab} onValueChange={setActiveTab}>
+          <TabsList><TabsTrigger value="extract">批量标签提取</TabsTrigger><TabsTrigger value="audit">质量审计与建议审核</TabsTrigger></TabsList>
+          <TabsContent value="extract" className="mt-5 flex flex-col gap-4">
+            <TagExtractionConfigPanel
+              title="维护中心 Tag 提取配置"
+              description="每次只提交一个有界 durable batch；后端固定 missing_only，避免改写已有标签。"
+              onOptionsChange={handleTagOptionsChange}
+              disabled={running}
+              showSkipShort
+            />
+            <div className="rounded-xl border bg-muted/10 p-5">
+              <h3 className="text-sm font-semibold">无标签记忆补提取</h3>
+              <p className="mt-1 text-xs text-muted-foreground">当前可提取 {extractableCount.toLocaleString('zh-CN')} 条。任务进入后台队列后可刷新或离开页面，进度不会丢失。</p>
+              <div className="mt-5 grid max-w-2xl gap-4 md:grid-cols-2">
+                <Field><FieldLabel>本批处理上限</FieldLabel><Input type="number" min={1} max={50} value={tagBatchSize} disabled={running} onChange={(event) => setTagBatchSize(Math.max(1, Math.min(50, Number(event.target.value) || 1)))} /></Field>
+                <Field><FieldLabel>跳过短文本阈值</FieldLabel><Input type="number" min={0} max={1000} value={skipShortMinLength} disabled={running} onChange={(event) => setSkipShortMinLength(Math.max(0, Number(event.target.value) || 0))} /></Field>
+              </div>
+              <Button className="mt-4" size="sm" disabled={running || extractableCount === 0} onClick={() => void handleStartExtract()}>{running && jobType === 'extract' ? <Loader2Icon className="animate-spin" /> : <PlayIcon />}提交标签提取任务</Button>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="audit" className="mt-5 flex flex-col gap-5">
+            <div className="rounded-xl border bg-muted/10 p-5">
+              <h3 className="text-sm font-semibold">生成质量审计建议</h3>
+              <p className="mt-1 text-xs text-muted-foreground">扫描结果只生成待审核建议；最终处理仍由当前安全审核 API 和后端门禁决定。</p>
+              <div className="mt-5 flex flex-wrap items-end gap-4">
+                <Field className="min-w-52"><FieldLabel>审计策略</FieldLabel><select value={auditStrategy} disabled={running} onChange={(event) => setAuditStrategy(event.target.value as TagAuditStrategy)} className="h-9 w-full rounded-md border bg-background px-3 text-sm"><option value="mixed">混合采样</option><option value="low_quality">低质量优先</option><option value="high_freq">高频标签优先</option></select></Field>
+                <Field className="w-32"><FieldLabel>扫描数量</FieldLabel><Input type="number" min={10} max={2000} value={auditCount} disabled={running} onChange={(event) => setAuditCount(Math.max(10, Math.min(2000, Number(event.target.value) || 10)))} /></Field>
+                <Button size="sm" disabled={running} onClick={() => void handleStartAudit()}>{running && jobType === 'audit' ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />}启动质量审计</Button>
+                {suggestions.length ? <Button size="sm" variant="outline" onClick={() => void handleBatchReject()}><XIcon />全部拒绝</Button> : null}
+              </div>
+            </div>
+
+            {suggestions.length ? <div className="overflow-auto rounded-xl border"><Table><TableHeader><TableRow><TableHead>治理类型</TableHead><TableHead>源标签</TableHead><TableHead>目标对象</TableHead><TableHead>建议原因</TableHead><TableHead className="text-right">审核</TableHead></TableRow></TableHeader><TableBody>{suggestions.map((item) => <TableRow key={item.id}><TableCell><Badge variant={item.action === 'delete' ? 'destructive' : 'secondary'}>{item.action === 'merge' ? '合并' : item.action === 'retype' ? '重分类' : '删除'}</Badge></TableCell><TableCell>{sourceTagLabel(item)}</TableCell><TableCell>{targetLabel(item)}</TableCell><TableCell className="max-w-md text-sm text-muted-foreground">{item.reason}</TableCell><TableCell><div className="flex justify-end gap-2"><Button size="icon-sm" variant="outline" title="批准建议（仍受后端作用域门禁约束）" onClick={() => void handleResolve(item.id, 'approve')}><CheckIcon /></Button><Button size="icon-sm" variant="outline" title="拒绝建议" onClick={() => void handleResolve(item.id, 'reject')}><XIcon /></Button></div></TableCell></TableRow>)}</TableBody></Table></div> : <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed py-12 text-center"><HelpCircleIcon className="size-8 text-muted-foreground" /><p className="font-medium">当前没有待审核建议</p><p className="text-xs text-muted-foreground">可启动质量审计生成新的治理建议。</p></div>}
+          </TabsContent>
+        </Tabs>
+
+        {(submitting || job) ? <div className="flex flex-col gap-3 border-t pt-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm font-medium">{running ? <Loader2Icon className="size-4 animate-spin text-primary" /> : job?.status === 'succeeded' ? <CheckCircle2Icon className="size-4 text-primary" /> : <AlertCircleIcon className="size-4 text-destructive" />}<span>{jobType === 'extract' ? '标签提取' : '质量审计'} · {submitting ? '正在创建任务' : statusLabel(job?.status)}</span></div>
+            {job ? <div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => exposeJobInUrl(job.run_id, true)}><HistoryIcon />在任务历史查看</Button>{activeJobStatuses.has(job.status) ? <Button size="sm" variant="destructive" onClick={() => void handleCancelJob()}><SquareIcon />请求取消</Button> : null}</div> : null}
+          </div>
+          {job ? <><div className="flex justify-between gap-3 text-xs text-muted-foreground"><span>已处理 {progress.processed}{progress.total ? ` / ${progress.total}` : ''}</span><span>{Math.round(progress.ratio * 100)}%{jobType === 'extract' ? ` · 写入 ${progress.tagged} · 失败 ${progress.errors}` : ''}</span></div><div className="h-2 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary transition-all" style={{ width: `${Math.round(progress.ratio * 100)}%` }} /></div></> : null}
+          <ScrollArea className="h-40 rounded-lg border bg-muted/40 p-3 font-mono text-xs text-muted-foreground">{jobLogs.length ? jobLogs.map((log, index) => <div key={`${log.at}-${log.event}-${index}`}>{formatLog(log)}</div>) : <div>等待后台任务日志与 checkpoint...</div>}</ScrollArea>
+          {job ? <details className="rounded-md border p-3 text-xs text-muted-foreground"><summary className="cursor-pointer font-medium text-foreground">技术详情</summary><dl className="mt-2 grid gap-1 font-mono"><div>job_id: {job.run_id}</div><div>request_id: {job.request_id}</div>{job.error_code ? <div>error_code: {job.error_code}</div> : null}{job.error_message ? <div>error_message: {job.error_message}</div> : null}</dl></details> : null}
+        </div> : null}
+      </CardContent>
+    </Card>
+  </div>
 }

@@ -1,4 +1,5 @@
 import { fetchJson } from './client'
+import type { ObjectRefDescriptor, PageResponse } from '@/components/shared/types'
 
 export type LearningCandidateType =
   | 'worldview_internalization'
@@ -37,13 +38,7 @@ export interface LearningListQuery {
   until?: number
 }
 
-export interface LearningListPayload<T> {
-  items: T[]
-  total: number
-  limit: number
-  offset: number
-  has_more: boolean
-}
+export type LearningListPayload<T> = PageResponse<T>
 
 export interface LearningSourceItem {
   id: number
@@ -80,6 +75,10 @@ export interface LearningPromotionItem {
   error_message?: string | null
   retryable?: boolean
   metadata?: Record<string, unknown>
+  target_link?: {
+    path: string
+    object_ref: ObjectRefDescriptor
+  } | null
   [key: string]: unknown
 }
 
@@ -104,31 +103,15 @@ export interface LearningCandidateItem {
   target_ids?: Array<number | string>
   failures?: Array<{ id?: number; code?: string | null; message?: string | null; retryable?: boolean }>
   operations?: Array<Record<string, unknown>>
+  legacy_unlinked?: boolean
+  quarantined?: boolean
+  garbled?: boolean
+  promotion_blocked?: boolean
+  promotion_block_reasons?: string[]
   [key: string]: unknown
 }
 
-export interface ApprovedFewShotExample {
-  id?: number | string
-  content?: string
-  score?: number
-  traits?: string[]
-  status?: string
-  bot_id?: string
-  created_at?: number | string
-  approved_at?: number | string
-  [key: string]: unknown
-}
-
-export interface LearningFewShotPayload {
-  items?: LearningCandidateItem[]
-  candidates?: LearningCandidateItem[]
-  approved_examples?: ApprovedFewShotExample[]
-  total: number
-  limit: number
-  offset: number
-  has_more: boolean
-  [key: string]: unknown
-}
+export type LearningFewShotPayload = LearningListPayload<LearningCandidateItem>
 
 export interface LearningExperiencesPayload {
   worldview_internalization?: LearningCandidateItem[]
@@ -149,6 +132,7 @@ export interface DedicatedReviewStatus {
   target_id?: number | string | null
   status?: string
   deep_link?: string | null
+  object_ref?: ObjectRefDescriptor | null
   error?: string | null
   metadata?: Record<string, unknown>
   promotion?: LearningPromotionItem | null
@@ -156,7 +140,13 @@ export interface DedicatedReviewStatus {
 }
 
 export interface LearningActionResponse {
-  ok?: boolean
+  ok: boolean
+  operation: {
+    kind: string
+    status: string
+    id?: string
+  }
+  revision: number | string | null
   item?: {
     candidate?: LearningCandidateItem
     promotions?: LearningPromotionItem[]

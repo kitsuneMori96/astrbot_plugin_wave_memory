@@ -3,18 +3,22 @@
 // ═══════════════════════════════════════════════════════════
 
 const TYPE_COLORS = {
-    person:'#f472b6', topic:'#60a5fa', event:'#34d399',
+    bot:'#f8fafc', person:'#f472b6', topic:'#60a5fa', event:'#34d399',
     emotion:'#fbbf24', entity:'#fb923c', keyword:'#94a3b8',
     fact:'#a78bfa', location:'#2dd4bf', time:'#e879f9',
     memory:'#6366f1', source:'#ffd700', belief:'#c084fc',
-    concern:'#38bdf8', jargon:'#fb7185', community:'#22d3ee',
+    concern:'#38bdf8', jargon:'#fb7185', mood:'#f59e0b',
+    timeline:'#2dd4bf', relationship_event:'#f43f5e', few_shot:'#818cf8',
+    trait:'#a3e635', book_lore:'#d8b4fe', community:'#22d3ee',
 };
 const TYPE_LABELS = {
-    person:'人物', topic:'话题', event:'事件',
+    bot:'Bot', person:'人物', topic:'话题', event:'事件',
     emotion:'情绪', entity:'实体', keyword:'关键词',
     fact:'事实', location:'地点', time:'时间',
     memory:'记忆', source:'查询源', belief:'信念',
-    concern:'关切', jargon:'黑话', community:'社区',
+    concern:'关切', jargon:'群内表达', mood:'Soul 情绪',
+    timeline:'Soul 时间线', relationship_event:'关系事件', few_shot:'Few-shot',
+    trait:'风格特征', book_lore:'BookLore', community:'知识簇',
 };
 
 let scene = null;
@@ -44,7 +48,10 @@ let hoveredEdge = null;
 let hoveredNeighbors = new Set();
 let selectedFact = null;
 let selectedFactEntity = null;
+let _kgFullNodes = [];
 let _kgFullEdges = null;
+let _kgLayerCounts = {};
+let _kgWarnings = [];
 let layoutMode = 'semantic';
 let labelDensity = 'focus';
 let cameraPreset = 'overview';
@@ -1164,7 +1171,7 @@ function appendGraphData(newNodes, newEdges) {
 function initLegend() {
     const legend = document.getElementById('legend');
     if (!legend) return;
-    const types = ['person','topic','event','emotion','entity','keyword','fact','memory','belief','concern','jargon'];
+    const types = ['bot','person','topic','event','entity','keyword','memory','belief','concern','jargon','mood','timeline','relationship_event','few_shot','trait','book_lore','community'];
     legend.innerHTML = types.map(t => `
         <button class="legend-pill flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10px] cursor-pointer border border-transparent"
                 data-type="${t}" style="background:${TYPE_COLORS[t]}15; color:${TYPE_COLORS[t]}; --pill-glow:${TYPE_COLORS[t]}40">
@@ -1200,11 +1207,26 @@ async function loadGalaxy() {
         });
         const layerParam = layers.length ? layers.join(',') : 'facts';
         const minConf = parseFloat(document.getElementById('cfg-min-confidence')?.value || '0.0');
-        const res = await fetch(`/api/kg/full?layers=${encodeURIComponent(layerParam)}&min_confidence=${minConf}`);
+        const memoryLimit = parseInt(document.getElementById('cfg-memory-limit')?.value || '150');
+        const similarityK = parseInt(document.getElementById('cfg-similarity-k')?.value || '3');
+        const similarityThreshold = parseFloat(document.getElementById('cfg-similarity-threshold')?.value || '0.65');
+        const query = new URLSearchParams({
+            layers: layerParam,
+            min_confidence: String(minConf),
+            memory_limit: String(memoryLimit),
+            similarity_k: String(similarityK),
+            similarity_threshold: String(similarityThreshold),
+        });
+        const res = await fetch(`/api/kg/full?${query.toString()}`);
         const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error?.code || `HTTP ${res.status}`);
+        _kgFullNodes = data.nodes || [];
         _kgFullEdges = data.edges || [];
-        showLoading(`已加载 ${_kgFullEdges.length} 关系连线，投射 WebGL 星空...`);
-        if (!kgConfigLoaded) loadKgConfig();
+        _kgLayerCounts = data.layer_counts || {};
+        _kgWarnings = data.warnings || [];
+        renderEventWarnings(_kgWarnings.map(item => ({ stage: item.layer || 'graph', reason: item.reason || 'unavailable' })));
+        showLoading(`已加载 ${_kgFullNodes.length} 节点 / ${_kgFullEdges.length} 连线，投射 WebGL 星空...`);
+        if (!kgConfigLoaded) await loadKgConfig();
         applyKgConfig();
     } catch(e) {
         console.error('Load KG failed:', e);
@@ -1220,61 +1242,58 @@ async function loadGalaxy() {
 
 function applyKgConfig() {
     if (!_kgFullEdges) { loadGalaxy(); return; }
-    const maxNodes = parseInt(document.getElementById('cfg-max-nodes')?.value || '200');
+    const maxNodes = parseInt(document.getElementById('cfg-max-nodes')?.value || '300');
     const minWeight = parseFloat(document.getElementById('cfg-min-weight')?.value || '0');
     const days = parseInt(document.getElementById('cfg-days')?.value || '0');
     const cutoff = days > 0 ? (Date.now()/1000 - days * 86400) : 0;
+    const selectedLayers = new Set(Array.from(document.querySelectorAll('#cfg-layers input[type=checkbox]:checked')).map(cb => cb.dataset.layer));
 
-    let filtered = [..._kgFullEdges];
-    if (minWeight > 0) filtered = filtered.filter(e => e.layer !== 'facts' || e.w >= minWeight);
-    if (cutoff > 0) filtered = filtered.filter(e => e.layer !== 'facts' || e.ts >= cutoff);
-    
-    // 图谱配置过滤 pills 联动自愈
-    if (typeof selectedRelTypes !== 'undefined' && selectedRelTypes.size > 0) {
-        filtered = filtered.filter(e => e.layer !== 'facts' || selectedRelTypes.has(e.l));
+    let filtered = [..._kgFullEdges].filter(e => !selectedLayers.size || selectedLayers.has(normalizeEdgeLayer(e.layer)) || selectedLayers.has(e.layer));
+    if (minWeight > 0) filtered = filtered.filter(e => Number(e.w ?? e.weight ?? 0) >= minWeight);
+    if (cutoff > 0) filtered = filtered.filter(e => !Number(e.ts || 0) || Number(e.ts) >= cutoff);
+    if (typeof selectedRelTypes !== 'undefined' && typeof availableRelTypes !== 'undefined' && availableRelTypes.size > 0) {
+        filtered = filtered.filter(e => {
+            const label = e.l || e.label;
+            return !availableRelTypes.has(label) || selectedRelTypes.has(label);
+        });
     }
     if (typeof selectedNodeTypes !== 'undefined' && selectedNodeTypes.size > 0) {
-        filtered = filtered.filter(e => e.layer !== 'facts' || selectedNodeTypes.has(e.st) || selectedNodeTypes.has(e.tt));
+        filtered = filtered.filter(e => selectedNodeTypes.has(normalizeNodeType({type:e.st})) || selectedNodeTypes.has(normalizeNodeType({type:e.tt})));
     }
 
-    filtered.sort((a, b) => (b.w || 0) - (a.w || 0));
-    const maxEdges = maxNodes * 2.5;
-    filtered = filtered.slice(0, maxEdges);
+    filtered.sort((a, b) => Number(b.w ?? b.weight ?? 0) - Number(a.w ?? a.weight ?? 0));
+    filtered = filtered.slice(0, Math.ceil(maxNodes * 3));
 
-    const nodeDeg = {};
-    const nodeType = {};
-    const nodeCommunity = {}; // 社区聚类
-    
-    for (const e of filtered) {
-        nodeDeg[e.s] = (nodeDeg[e.s]||0) + 1;
-        nodeDeg[e.t] = (nodeDeg[e.t]||0) + 1;
-        nodeType[e.s] = nodeType[e.s] || e.st;
-        nodeType[e.t] = nodeType[e.t] || e.tt;
-        if (e.sc !== undefined) nodeCommunity[e.s] = e.sc;
-        if (e.tc !== undefined) nodeCommunity[e.t] = e.tc;
+    const explicitById = new Map((_kgFullNodes || []).map(node => [String(node.id), node]));
+    const degree = new Map();
+    for (const edge of filtered) {
+        const source = String(edge.s ?? edge.source);
+        const target = String(edge.t ?? edge.target);
+        degree.set(source, (degree.get(source) || 0) + 1);
+        degree.set(target, (degree.get(target) || 0) + 1);
+        if (!explicitById.has(source)) explicitById.set(source, {id:source, name:source, type:edge.st || 'entity', layer:edge.layer});
+        if (!explicitById.has(target)) explicitById.set(target, {id:target, name:target, type:edge.tt || 'entity', layer:edge.layer});
     }
 
-    let sortedNodes = Object.entries(nodeDeg).sort((a,b) => b[1]-a[1]);
-    if (sortedNodes.length > maxNodes) sortedNodes = sortedNodes.slice(0, maxNodes);
-    const topSet = new Set(sortedNodes.map(x => x[0]));
-
-    const nodes = sortedNodes.map(([name, deg]) => ({ 
-        id: name, 
-        name, 
-        type: nodeType[name] || 'entity', 
-        degree: deg, 
-        layer: 'facts',
-        community: nodeCommunity[name] // 社区 cluster 空值保护
-    }));
-    
+    let candidates = Array.from(explicitById.values()).filter(node => {
+        const layer = normalizeEdgeLayer(node.layer || 'facts');
+        const type = normalizeNodeType(node);
+        return (!selectedLayers.size || selectedLayers.has(layer) || degree.has(String(node.id)))
+            && (!selectedNodeTypes.size || selectedNodeTypes.has(type));
+    });
+    candidates.sort((a,b) => (degree.get(String(b.id)) || b.degree || b.weight || 0) - (degree.get(String(a.id)) || a.degree || a.weight || 0));
+    candidates = candidates.slice(0, maxNodes);
+    const topSet = new Set(candidates.map(node => String(node.id)));
+    const nodes = candidates.map(node => ({...node, id:String(node.id), degree:degree.get(String(node.id)) || node.degree || 0}));
     const edges = filtered
-        .filter(e => topSet.has(e.s) && topSet.has(e.t))
-        .map(e => ({ ...e, id: e.id, source: e.s, target: e.t, label: e.l, weight: e.w, layer: normalizeEdgeLayer(e.layer), kind: e.kind, editable: e.editable }));
+        .filter(e => topSet.has(String(e.s ?? e.source)) && topSet.has(String(e.t ?? e.target)))
+        .map(e => ({ ...e, source:String(e.s ?? e.source), target:String(e.t ?? e.target), label:e.l || e.label, weight:e.w ?? e.weight, layer:normalizeEdgeLayer(e.layer), editable:false, read_only:true }));
 
     renderGraph(nodes, edges, { layout: 'galaxy' });
     updateRuntimeConfigStatus();
     const status = document.getElementById('cfg-status');
-    if (status) status.textContent = `显示 ${nodes.length} 实体 / ${edges.length} 关系（总 ${_kgFullEdges.length} 条）`;
+    const layerSummary = Object.entries(_kgLayerCounts || {}).map(([layer, count]) => `${layer}:${count?.nodes ?? 0}/${count?.edges ?? 0}`).join(' · ');
+    if (status) status.textContent = `显示 ${nodes.length} 节点 / ${edges.length} 连线（后端总 ${_kgFullNodes.length}/${_kgFullEdges.length}）${layerSummary ? ` · ${layerSummary}` : ''}`;
 }
 
 // ─── Query ───
@@ -1690,81 +1709,6 @@ function hideRelationDetail() {
     else panel.classList.add('hidden');
 }
 
-function editSelectedRelation() {
-    const record = relationState.selected;
-    if (!record) return;
-    if (record.raw.kind === 'fact') {
-        selectedFact = { id: record.raw.fact_id, subject: getNodeRecord(record.source)?.label || record.source, predicate: record.label, object: getNodeRecord(record.target)?.label || record.target, confidence: record.raw.confidence ?? record.weight };
-        editEntity();
-        return;
-    }
-    const dialog = document.getElementById('relation-edit-dialog');
-    if (!dialog) return;
-    document.getElementById('edit-relation-label').value = record.label || '';
-    document.getElementById('edit-relation-weight').value = record.weight || 1;
-    document.getElementById('edit-relation-confidence').value = record.raw.confidence ?? 0.8;
-    dialog.classList.remove('hidden');
-    if (typeof gsap !== 'undefined') gsap.fromTo(dialog.querySelector('.glass'), { scale: 0.92, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.25, ease: 'back.out(1.4)' });
-}
-
-function closeRelationEdit() {
-    const dialog = document.getElementById('relation-edit-dialog');
-    if (!dialog) return;
-    if (typeof gsap !== 'undefined') gsap.to(dialog.querySelector('.glass'), { scale: 0.92, opacity: 0, duration: 0.18, onComplete: () => dialog.classList.add('hidden') });
-    else dialog.classList.add('hidden');
-}
-
-async function saveRelationEdit() {
-    const record = relationState.selected;
-    if (!record || record.raw.kind !== 'tag_relation') return;
-    const relationId = record.raw.relation_id;
-    const relation_type = document.getElementById('edit-relation-label').value.trim();
-    const weight = parseFloat(document.getElementById('edit-relation-weight').value) || 1;
-    const confidence = parseFloat(document.getElementById('edit-relation-confidence').value) || 0.8;
-    if (!relation_type) { alert('关系类型不能为空'); return; }
-    try {
-        const r = await fetch(`/api/kg/tag-relations/${relationId}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ relation_type, weight, confidence }) });
-        const d = await r.json();
-        if (!d.ok) { alert('保存失败: ' + (d.error || '未知错误')); return; }
-        replaceEdgeKey(record, relation_type);
-        record.weight = weight;
-        record.raw.weight = weight;
-        record.raw.w = weight;
-        record.raw.confidence = confidence;
-        closeRelationEdit();
-        showRelationDetail(record);
-        rebuildEdgeObjects();
-        createImportantEdgeLabels();
-        applyVisibility();
-        _kgFullEdges = null;
-    } catch(e) {
-        alert('网络错误，保存失败');
-    }
-}
-
-async function deleteSelectedRelation() {
-    const record = relationState.selected;
-    if (!record || !record.raw.editable) return;
-    const label = `${getNodeRecord(record.source)?.label || record.source} → ${record.label} → ${getNodeRecord(record.target)?.label || record.target}`;
-    if (!confirm(`确认删除关系？\n${label}`)) return;
-    const url = record.raw.kind === 'fact' ? `/api/kg/facts/${record.raw.fact_id}` : `/api/kg/tag-relations/${record.raw.relation_id}`;
-    try {
-        const r = await fetch(url, { method: 'DELETE' });
-        const d = await r.json();
-        if (!d.ok) { alert('删除失败: ' + (d.error || '未知错误')); return; }
-        graphState.edges.delete(record.key);
-        removeEdgeFromAdjacency(record);
-        hideRelationDetail();
-        selectedEdge = null;
-        relationState.selected = null;
-        _kgFullEdges = null;
-        rebuildEdgeObjects();
-        createImportantEdgeLabels();
-        applyVisibility();
-    } catch(e) {
-        alert('网络错误，删除失败');
-    }
-}
 
 function createContextActionRing(nodeId) {
     const ring = document.getElementById('node-action-ring');
@@ -1859,6 +1803,16 @@ async function selectNodeById(nodeId) {
     applyVisibility();
 }
 
+function buildProjectionMetadataHtml(rec) {
+    const hidden = new Set(['id','name','label','type','degree','layer','read_only','x','y','z','vector']);
+    const entries = Object.entries(rec.raw || {}).filter(([key, value]) => !hidden.has(key) && value !== null && value !== undefined && value !== '' && !(Array.isArray(value) && !value.length));
+    if (!entries.length) return '<p class="text-slate-600 text-[10px]">该节点没有额外投影元数据。</p>';
+    return `<div class="space-y-1.5">${entries.slice(0, 18).map(([key, value]) => {
+        const rendered = typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
+        return `<div class="rounded-lg border border-white/5 bg-white/[.025] px-2.5 py-2"><div class="text-[9px] uppercase tracking-wide text-slate-600">${escapeHtml(key)}</div><div class="mt-0.5 whitespace-pre-wrap break-words text-[10px] leading-relaxed text-slate-300">${escapeHtml(rendered.slice(0, 1200))}</div></div>`;
+    }).join('')}</div>`;
+}
+
 async function showDetail(nodeId) {
     const rec = getNodeRecord(nodeId);
     if (!rec) return;
@@ -1880,18 +1834,19 @@ async function showDetail(nodeId) {
 
     const memList = document.getElementById('detail-memory-list');
     const entityName = rec.label || '';
-    if (entityName) {
+    const entityTypes = new Set(['entity','person','topic','keyword','event','location']);
+    if (entityName && entityTypes.has(rec.type)) {
         selectedFactEntity = nodeId;
-        memList.innerHTML = '<p class="text-slate-600 text-[10px]">加载知识...</p>';
+        memList.innerHTML = '<p class="text-slate-600 text-[10px]">加载同域关联知识...</p>';
         try {
             const r = await fetch(`/api/kg/entity/${encodeURIComponent(entityName)}?limit=12`);
             const d = await r.json();
-            memList.innerHTML = buildEntityKnowledgeHtml(d);
+            memList.innerHTML = r.ok ? buildEntityKnowledgeHtml(d) : buildProjectionMetadataHtml(rec);
         } catch(e) {
-            memList.innerHTML = '<p class="text-red-400/60 text-[10px]">加载失败</p>';
+            memList.innerHTML = buildProjectionMetadataHtml(rec);
         }
     } else {
-        memList.innerHTML = '<p class="text-slate-600 text-[10px]">-</p>';
+        memList.innerHTML = buildProjectionMetadataHtml(rec);
     }
 
     panel.classList.remove('hidden');
@@ -1906,8 +1861,8 @@ function buildEntityKnowledgeHtml(d) {
         html += `<div class="mb-3 p-3 rounded-xl border border-purple-500/20 bg-purple-500/[.04]"><div class="flex items-center gap-2 mb-2"><div class="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold" style="background:${p.affection_color || affColor}20; color:${p.affection_color || affColor}; border:2px solid ${p.affection_color || affColor}">${escapeHtml((p.name||'?')[0])}</div><div><div class="text-white text-xs font-semibold">${escapeHtml(p.name)}</div><div class="text-slate-500 text-[9px]">QQ ${escapeHtml(p.qq_id)} · ${escapeHtml(p.msg_count)} 条消息</div></div><div class="ml-auto text-right"><div class="text-[10px] font-mono" style="color:${p.affection_color || affColor}">好感 ${escapeHtml(p.affection)}</div></div></div>${p.aliases?.length ? `<div class="text-[9px] text-slate-500 mb-1.5">别名: ${p.aliases.map(escapeHtml).join(' / ')}</div>` : ''}${p.personality_tags?.length ? `<div class="flex flex-wrap gap-1">${p.personality_tags.slice(0,8).map(t => `<span class="px-1.5 py-0.5 rounded text-[9px] bg-purple-500/10 text-purple-300 border border-purple-500/20">${escapeHtml(t)}</span>`).join('')}</div>` : ''}</div>`;
     }
     if (d.facts && d.facts.length) {
-        html += '<p class="text-slate-500 text-[9px] uppercase tracking-wider mb-1.5">事实 (点击卡片选择后可进行斩断或修正)</p>';
-        html += d.facts.slice(0, 6).map(f => `<div class="fact-item px-2 py-1.5 rounded bg-white/[.02] text-[10px] text-slate-400 mb-1 border border-transparent hover:border-purple-500/30 cursor-pointer transition" data-id="${escapeHtml(f.id)}" data-sub="${escapeHtml(f.subject)}" data-pred="${escapeHtml(f.predicate)}" data-obj="${escapeHtml(f.object)}" data-conf="${escapeHtml(f.confidence)}" onclick="selectFact(this)"><span class="text-purple-300">${escapeHtml(f.subject)}</span> <span class="text-slate-600">→${escapeHtml(f.predicate)}→</span> <span class="text-blue-300">${escapeHtml(f.object)}</span>${f.confidence ? `<span class="text-[9px] text-slate-600 ml-1 font-mono">(${Math.round(f.confidence*100)}%)</span>` : ''}</div>`).join('');
+        html += '<p class="text-slate-500 text-[9px] uppercase tracking-wider mb-1.5">正式 Scoped Facts · 只读</p>';
+        html += d.facts.slice(0, 6).map(f => `<div class="px-2 py-1.5 rounded bg-white/[.02] text-[10px] text-slate-400 mb-1 border border-white/5"><span class="text-purple-300">${escapeHtml(f.subject)}</span> <span class="text-slate-600">→${escapeHtml(f.predicate)}→</span> <span class="text-blue-300">${escapeHtml(f.object)}</span>${f.confidence ? `<span class="text-[9px] text-slate-600 ml-1 font-mono">(${Math.round(f.confidence*100)}%)</span>` : ''}</div>`).join('');
     }
     if (d.relations && d.relations.length) {
         html += '<p class="text-slate-500 text-[9px] uppercase tracking-wider mb-1.5 mt-2">关系</p>';
@@ -1933,103 +1888,8 @@ function hideDetail() {
     }
 }
 
-// ─── 事实选择、斩断与弹窗编辑 ───
-function selectFact(el) {
-    document.querySelectorAll('.fact-item').forEach(item => {
-        item.style.borderColor = 'transparent';
-        item.style.boxShadow = 'none';
-        item.style.background = 'rgba(255, 255, 255, 0.02)';
-    });
-    el.style.borderColor = 'rgba(139, 92, 246, 0.7)';
-    el.style.boxShadow = '0 0 10px rgba(139, 92, 246, 0.35)';
-    el.style.background = 'rgba(139, 92, 246, 0.06)';
-    selectedFact = { id: el.dataset.id, subject: el.dataset.sub, predicate: el.dataset.pred, object: el.dataset.obj, confidence: el.dataset.conf };
-}
 
-async function severFactRelation() {
-    if (!selectedFact) {
-        alert('请先在上方的事实列表中，点击选择要斩断的那条事实。');
-        return;
-    }
-    if (!confirm(`确认要斩断并彻底物理删除这一事实关联吗？\n【${selectedFact.subject} → ${selectedFact.predicate} → ${selectedFact.object}】\n此操作不可逆！`)) return;
-    const btn = document.getElementById('btn-sever-fact');
-    const oldText = btn.textContent;
-    btn.textContent = '斩断中...';
-    btn.disabled = true;
-    try {
-        const r = await fetch(`/api/kg/facts/${selectedFact.id}`, { method: 'DELETE' });
-        const d = await r.json();
-        if (d.ok) {
-            _kgFullEdges = null;
-            selectedFact = null;
-            alert('✓ 事实已成功物理斩断！该认知已从灵魂中抹去。');
-            if (selectedNode) await showDetail(selectedNode);
-            if (currentView === 'galaxy') await loadGalaxy();
-        } else alert('✗ 斩断失败: ' + (d.error || '未知错误'));
-    } catch(e) {
-        alert('✗ 网络错误，斩断失败');
-    } finally {
-        btn.textContent = oldText;
-        btn.disabled = false;
-    }
-}
 
-function editEntity() {
-    const dialog = document.getElementById('fact-edit-dialog');
-    const inputSub = document.getElementById('edit-fact-subject');
-    const inputPred = document.getElementById('edit-fact-predicate');
-    const inputObj = document.getElementById('edit-fact-object');
-    const inputConf = document.getElementById('edit-fact-confidence');
-    if (selectedFact) {
-        inputSub.value = selectedFact.subject || '';
-        inputPred.value = selectedFact.predicate || '';
-        inputObj.value = selectedFact.object || '';
-        inputConf.value = selectedFact.confidence || 0.8;
-    } else {
-        const rec = selectedNode ? getNodeRecord(selectedNode) : null;
-        inputSub.value = rec?.label || '';
-        inputPred.value = '';
-        inputObj.value = '';
-        inputConf.value = 0.8;
-    }
-    dialog.classList.remove('hidden');
-    if (typeof gsap !== 'undefined') gsap.fromTo(dialog.querySelector('.glass'), { scale: 0.9, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.35, ease: 'back.out(1.5)' });
-}
-
-function closeFactEdit() {
-    const dialog = document.getElementById('fact-edit-dialog');
-    if (typeof gsap !== 'undefined') gsap.to(dialog.querySelector('.glass'), { scale: 0.9, opacity: 0, duration: 0.2, ease: 'power2.in', onComplete: () => dialog.classList.add('hidden') });
-    else dialog.classList.add('hidden');
-}
-
-async function saveFactEdit() {
-    const subj = document.getElementById('edit-fact-subject').value.trim();
-    const pred = document.getElementById('edit-fact-predicate').value.trim();
-    const obj = document.getElementById('edit-fact-object').value.trim();
-    const conf = parseFloat(document.getElementById('edit-fact-confidence').value) || 0.8;
-    if (!subj || !pred || !obj) {
-        alert('请填写完整的三元组内容');
-        return;
-    }
-    try {
-        let r;
-        if (selectedFact) {
-            r = await fetch(`/api/kg/facts/${selectedFact.id}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ subject: subj, predicate: pred, object: obj, confidence: conf }) });
-        } else {
-            r = await fetch('/api/kg/add-fact', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ subject: subj, predicate: pred, object: obj, confidence: conf }) });
-        }
-        const d = await r.json();
-        if (d.ok) {
-            _kgFullEdges = null;
-            closeFactEdit();
-            selectedFact = null;
-            if (selectedNode) await showDetail(selectedNode);
-            if (currentView === 'galaxy') await loadGalaxy();
-        } else alert('保存失败: ' + (d.error || '未知错误'));
-    } catch(e) {
-        alert('网络错误，保存失败');
-    }
-}
 
 // ─── Utils ───
 function updateStats() {

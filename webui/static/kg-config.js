@@ -1,5 +1,6 @@
 // ─── KG Config Panel ───
 let kgConfigLoaded = false;
+let availableRelTypes = new Set();
 let selectedRelTypes = new Set();
 let selectedNodeTypes = new Set();
 
@@ -18,6 +19,30 @@ async function loadKgConfig() {
     try {
         const r = await fetch('/api/kg/config');
         const d = await r.json();
+        if (!r.ok || d.error) throw new Error(d.error?.code || `HTTP ${r.status}`);
+
+        const supportedLayers = new Map((d.supported_layers || []).map(item => [item.id, item]));
+        document.querySelectorAll('#cfg-layers input[data-layer]').forEach(input => {
+            const info = supportedLayers.get(input.dataset.layer);
+            const count = document.querySelector(`[data-layer-count="${input.dataset.layer}"]`);
+            if (count) count.textContent = info ? `(${info.count ?? '—'})` : '(—)';
+            input.disabled = Boolean(info && info.available === false);
+            input.closest('label')?.classList.toggle('opacity-40', input.disabled);
+        });
+        const defaults = d.defaults || {};
+        for (const [id, key] of [
+            ['cfg-memory-limit', 'memory_limit'], ['cfg-similarity-k', 'similarity_k'],
+            ['cfg-similarity-threshold', 'similarity_threshold'],
+        ]) {
+            const input = document.getElementById(id);
+            if (input && defaults[key] !== undefined) input.value = defaults[key];
+        }
+        if (Array.isArray(defaults.layers)) {
+            const selected = new Set(defaults.layers);
+            document.querySelectorAll('#cfg-layers input[data-layer]').forEach(input => {
+                if (!input.disabled) input.checked = selected.has(input.dataset.layer);
+            });
+        }
         
         // 标准化节点类型白名单
         const nodeTypes = d.node_types || ['person', 'topic', 'event', 'emotion', 'entity', 'keyword', 'fact', 'location', 'time', 'memory', 'source', 'belief', 'concern', 'jargon', 'community'];
@@ -32,6 +57,7 @@ async function loadKgConfig() {
 
         // 关系类型 pills
         const relTypes = d.relation_types || [];
+        availableRelTypes = new Set(relTypes);
         selectedRelTypes = new Set(relTypes); // 默认全选
         const relDiv = document.getElementById('cfg-rel-types');
         if (relDiv) {

@@ -1,4 +1,4 @@
-import { Navigate, Outlet, Route, Routes } from 'react-router-dom'
+import { Navigate, Outlet, Route, Routes, useLocation } from 'react-router-dom'
 
 import { appRoutes, defaultRoute } from '@/app/routes'
 import { PageHeader } from '@/components/layout/PageHeader'
@@ -6,6 +6,16 @@ import { WaveSidebar } from '@/components/layout/WaveSidebar'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
 import { Toaster } from '@/components/ui/sonner'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+
+function RenamedPath({ to }: { to: string }) {
+  const location = useLocation()
+  return <Navigate replace to={{ pathname: to, search: location.search }} />
+}
+
+function NotFoundPage() {
+  return <main className="mx-auto w-full max-w-2xl p-6"><Card><CardHeader><CardTitle>页面不存在</CardTitle><CardDescription>该地址已废弃或从未存在，不会猜测 Scope 或把旧裸 ID 转换成新链接。</CardDescription></CardHeader><CardContent>请从当前规范导航重新选择真实 Bot、会话和对象。</CardContent></Card></main>
+}
 
 export function AppShell() {
   return (
@@ -33,8 +43,13 @@ export function AppRoutes() {
           const Element = route.element
           return <Route key={route.path} path={route.path} element={<Element />} />
         })}
+        <Route path="/injection" element={<RenamedPath to="/observatory" />} />
+        <Route path="/maintain" element={<RenamedPath to="/maintenance" />} />
+        <Route path="/learning-center" element={<RenamedPath to="/learning" />} />
+        <Route path="/knowledge/fewshot" element={<RenamedPath to="/knowledge/style-examples" />} />
+        <Route path="/login" element={<RenamedPath to={defaultRoute} />} />
       </Route>
-      <Route path="*" element={<Navigate replace to={defaultRoute} />} />
+      <Route path="*" element={<NotFoundPage />} />
     </Routes>
   )
 }

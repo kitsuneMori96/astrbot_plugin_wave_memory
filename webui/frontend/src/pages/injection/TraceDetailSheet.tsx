@@ -1,7 +1,8 @@
-import { Link } from 'react-router-dom'
 import { AlertTriangleIcon, ArrowRightIcon } from 'lucide-react'
+import { Link } from 'react-router-dom'
 
 import type { TraceDetailPayload } from '@/api/injection'
+import { ObjectDeepLink, TracePayloadViewer, type ObjectRefDescriptor } from '@/components/shared'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -9,121 +10,150 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 
-function JsonBlock({ value }: { value: unknown }) {
-  const jsonStr = typeof value === 'string' ? value : JSON.stringify(value ?? {}, null, 2)
-  const display = jsonStr.length > 50000 ? `${jsonStr.slice(0, 50000)}\n\n// [警告：载荷过大，已为渲染性能截断]` : jsonStr
-
-  return (
-    <pre className="max-h-64 overflow-auto rounded-lg border bg-muted/50 p-3 font-mono text-xs leading-relaxed text-muted-foreground whitespace-pre overflow-x-auto">
-      {display}
-    </pre>
-  )
-}
-
-function channelStatusLabel(status: unknown): string {
-  const value = String(status ?? 'unknown')
-  if (value === 'ok') return '正常'
-  if (value === 'error') return '错误'
-  if (value === 'timeout') return '超时'
-  if (value === 'empty') return '空'
-  if (value === 'disabled') return '已关闭'
-  if (value === 'unknown') return '未知'
-  return value
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
 }
 
 function asRecords(value: unknown): Array<Record<string, unknown>> {
-  return Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => item !== null && typeof item === 'object' && !Array.isArray(item)) : []
+  return Array.isArray(value)
+    ? value.map((item) => asRecord(item)).filter((item): item is Record<string, unknown> => item !== null)
+    : []
 }
 
-function fieldText(item: Record<string, unknown>, key: string, fallback = '-'): string {
-  const value = item[key]
-  return value === undefined || value === null || value === '' ? fallback : String(value)
+function textValue(value: unknown, fallback = '未记录'): string {
+  if (value === undefined || value === null || value === '') return fallback
+  if (typeof value === 'boolean') return value ? '是' : '否'
+  if (Array.isArray(value)) return value.length ? value.map((item) => typeof item === 'object' ? compactObject(item) : String(item)).join('、') : fallback
+  if (typeof value === 'object') return compactObject(value)
+  return String(value)
 }
 
-function boolFlagLabel(value: unknown): string {
-  return value === true ? 'true' : value === false ? 'false' : '-'
+function compactObject(value: unknown): string {
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
 }
 
 function channelName(channel: Record<string, unknown>): string {
-  return String(channel.channel ?? channel.name ?? channel.key ?? 'unknown')
+  return textValue(channel.channel ?? channel.name ?? channel.key, 'unknown')
 }
 
-// v4.5 对象跳转契约：
-// memory item -> /memories?id=...
-// belief -> /beliefs?id=...
-// jargon -> /jargon?id=...
-// fewshot -> /blackbox/fewshot?id=...
-// book_lore -> /blackbox/book-lore?id=...
-// facts -> /blackbox/facts?id=...
-function managementRouteForChannel(channel: string, item?: Record<string, unknown>): string | null {
-  const id = String(item?.id ?? item?.memory_id ?? item?.belief_id ?? item?.fact_id ?? item?.example_id ?? item?.entity_id ?? '')
-  const query = id ? `?id=${encodeURIComponent(id)}` : ''
-
-  if (channel === 'memory' || channel === 'timeline' || channel === 'persona' || channel === 'affinity') return `/memories${query}`
-  if (channel === 'belief') return `/beliefs${query}`
-  if (channel === 'jargon') return `/jargon${query}`
-  if (channel === 'fewshot') return `/blackbox/fewshot${query}`
-  if (channel === 'book_lore') return `/blackbox/book-lore${query}`
-  if (channel === 'facts') return `/blackbox/facts${query}`
-  if (channel === 'fts5') return '/blackbox/indexes'
-  return null
-}
-
-function jargonHitItems(detail: TraceDetailPayload): Array<Record<string, unknown>> {
-  return asRecords(detail.channels).flatMap((channel) => {
-    const name = channelName(channel)
-    if (name !== 'jargon') {
-      return []
-    }
-    return asRecords(channel.hit_items)
-  })
-}
-
-function filteredItems(detail: TraceDetailPayload): Array<Record<string, unknown>> {
-  return asRecords(detail.channels).flatMap((channel) => {
-    const name = channelName(channel)
-    return asRecords(channel.filtered_items).map((item) => ({ ...item, channel_name: name }))
-  })
-}
-
-function hitItemsByChannel(detail: TraceDetailPayload): Array<{ channel: string; item: Record<string, unknown>; route: string | null }> {
-  const channelHits = asRecords(detail.channels).flatMap((channel) => {
-    const name = channelName(channel)
-    return asRecords(channel.hit_items).map((item) => ({ channel: name, item, route: managementRouteForChannel(name, item) }))
-  })
-
-  if (channelHits.length) {
-    return channelHits
+function channelStatusLabel(status: unknown): string {
+  const value = String(status ?? '')
+  const labels: Record<string, string> = {
+    ok: '正常',
+    error: '错误',
+    timeout: '超时',
+    empty: '无命中',
+    disabled: '已关闭',
+    skipped: '已跳过',
+    filtered: '已过滤',
   }
+  return labels[value] ?? (value || '未知')
+}
 
-  return asRecords(detail.hits).map((item) => {
-    const name = String(item.channel ?? item.source_channel ?? item.type ?? 'memory')
-    return { channel: name, item, route: managementRouteForChannel(name, item) }
+function channelVariant(status: unknown): 'secondary' | 'destructive' | 'outline' {
+  const value = String(status ?? '')
+  if (value.includes('error') || value.includes('timeout')) return 'destructive'
+  if (value === 'ok') return 'secondary'
+  return 'outline'
+}
+
+function detailHits(detail: TraceDetailPayload): Array<Record<string, unknown>> {
+  const direct = asRecords(detail.hits)
+  const nested = asRecords(detail.channels).flatMap((channel) => asRecords(channel.hit_items).map((item) => ({ ...item, channel_name: channelName(channel) })))
+  return nested.length ? nested : direct
+}
+
+function detailFiltered(detail: TraceDetailPayload): Array<Record<string, unknown>> {
+  const direct = asRecords(detail.filtered ?? detail.filtered_items)
+  const nested = asRecords(detail.channels).flatMap((channel) => asRecords(channel.filtered_items).map((item) => ({ ...item, channel_name: channelName(channel) })))
+  return [...direct, ...nested]
+}
+
+function normalizeMessages(value: unknown): string[] {
+  if (value === undefined || value === null || value === '') return []
+  if (Array.isArray(value)) return value.flatMap(normalizeMessages)
+  const record = asRecord(value)
+  if (record) return [textValue(record.message ?? record.error ?? record.code ?? record)]
+  return [String(value)]
+}
+
+function objectLinks(detail: TraceDetailPayload): Array<{ label: string; path: string; ref: ObjectRefDescriptor }> {
+  return asRecords(detail.object_refs).flatMap((item) => {
+    const nestedRef = asRecord(item.object_ref)
+    const ref = typeof item.ref === 'string' ? item.ref : typeof nestedRef?.ref === 'string' ? nestedRef.ref : ''
+    const path = typeof item.path === 'string' ? item.path : ''
+    if (!ref || !path) return []
+    return [{
+      label: textValue(item.label ?? item.kind, '打开命中对象'),
+      path,
+      ref: {
+        ref,
+        kind: textValue(item.kind ?? nestedRef?.kind, ''),
+        scope_key: typeof item.scope_key === 'string' ? item.scope_key : typeof nestedRef?.scope_key === 'string' ? nestedRef.scope_key : undefined,
+        version: typeof item.version === 'number' ? item.version : typeof nestedRef?.version === 'number' ? nestedRef.version : undefined,
+      },
+    }]
   })
 }
 
-function warningsAndErrors(detail: TraceDetailPayload): Record<string, unknown> {
-  const channelErrors = asRecords(detail.channels)
-    .filter((channel) => channel.error || String(channel.status ?? '').includes('error') || String(channel.status ?? '').includes('timeout'))
-    .map((channel) => ({ channel: channelName(channel), status: channel.status, error: channel.error ?? channel.message }))
-
-  return {
-    errors: detail.errors ?? detail.error ?? [],
-    warnings: detail.warnings ?? [],
-    channel_errors: channelErrors,
-  }
+function DetailGrid({ value, preferredKeys }: { value: unknown; preferredKeys?: string[] }) {
+  const record = asRecord(value)
+  if (!record || Object.keys(record).length === 0) return <p className="text-sm text-muted-foreground">未记录。</p>
+  const keys = preferredKeys?.length
+    ? [...preferredKeys.filter((key) => key in record), ...Object.keys(record).filter((key) => !preferredKeys.includes(key))]
+    : Object.keys(record)
+  return (
+    <dl className="grid gap-3 text-sm sm:grid-cols-2">
+      {keys.map((key) => (
+        <div key={key} className="min-w-0 rounded-md border bg-muted/20 p-3">
+          <dt className="text-xs font-medium text-muted-foreground">{key}</dt>
+          <dd className="mt-1 whitespace-pre-wrap break-words">{textValue(record[key])}</dd>
+        </div>
+      ))}
+    </dl>
+  )
 }
 
 function Section({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="gap-1">
         <CardTitle className="text-sm font-semibold">{title}</CardTitle>
-        {description ? <CardDescription className="text-xs">{description}</CardDescription> : null}
+        {description ? <CardDescription>{description}</CardDescription> : null}
       </CardHeader>
       <CardContent>{children}</CardContent>
     </Card>
+  )
+}
+
+function ItemCards({ items, kind }: { items: Array<Record<string, unknown>>; kind: 'hit' | 'filtered' }) {
+  if (!items.length) return <p className="text-sm text-muted-foreground">暂无{kind === 'hit' ? '命中' : '过滤'}项。</p>
+  return (
+    <div className="grid gap-3 lg:grid-cols-2">
+      {items.map((item, index) => {
+        const channel = textValue(item.channel_name ?? item.channel ?? item.source_channel ?? item.type, '未记录通道')
+        const title = textValue(item.title ?? item.name ?? item.word ?? item.content ?? item.preview, `${kind === 'hit' ? '命中' : '过滤'}项 ${index + 1}`)
+        const reason = item.reason ?? item.filter_reason ?? item.skip_reason
+        return (
+          <div key={`${channel}-${String(item.id ?? index)}-${index}`} className="min-w-0 rounded-lg border bg-card p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="secondary">{channel}</Badge>
+              {reason ? <Badge variant="outline">{textValue(reason)}</Badge> : null}
+            </div>
+            <p className="mt-2 whitespace-pre-wrap break-words text-sm">{title}</p>
+            <dl className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
+              {['id', 'score', 'tokens', 'source', 'scope', 'matched_by'].filter((key) => item[key] !== undefined).map((key) => <div key={key}><dt className="inline text-muted-foreground">{key}：</dt><dd className="inline break-words">{textValue(item[key])}</dd></div>)}
+            </dl>
+          </div>
+        )
+      })}
+    </div>
   )
 }
 
@@ -140,179 +170,71 @@ export function TraceDetailSheet({
   loading: boolean
   error: string
 }) {
-  const finalText = String(detail?.final_text ?? detail?.final_injection_text ?? '')
-  const jargonItems = detail ? jargonHitItems(detail) : []
-  const filteredItemList = detail ? filteredItems(detail) : []
-  const manageableHits = detail ? hitItemsByChannel(detail) : []
+  const channels = detail ? asRecords(detail.channels) : []
+  const hits = detail ? detailHits(detail) : []
+  const filtered = detail ? detailFiltered(detail) : []
+  const links = detail ? objectLinks(detail) : []
+  const warnings = detail ? normalizeMessages(detail.warnings) : []
+  const errors = detail ? [detail.error, detail.errors, ...channels.filter((channel) => channel.error).map((channel) => `${channelName(channel)}: ${textValue(channel.error)}`)].flatMap(normalizeMessages) : []
+  const feedback = detail ? asRecords(detail.feedback) : []
+  const finalText = textValue(detail?.final_text ?? detail?.final_injection_text, '')
+  const rawPayload = typeof detail?.raw_payload === 'string' ? detail.raw_payload : undefined
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className="flex w-full flex-col gap-0 pr-0 sm:max-w-3xl sm:pr-2">
+      <SheetContent data-slot="trace-detail-sheet" className="flex w-full flex-col gap-0 pr-0 sm:max-w-4xl sm:pr-2">
         <SheetHeader className="shrink-0 border-b pb-4 pr-6">
-          <SheetTitle className="text-lg">Trace 详情</SheetTitle>
-          <SheetDescription className="text-xs">{detail?.trace_id ? `trace_id: ${detail.trace_id}` : '请求、预算、通道、命中与反馈'}</SheetDescription>
+          <SheetTitle>Trace 详情</SheetTitle>
+          <SheetDescription>{detail?.trace_id ? `trace_id: ${detail.trace_id}` : '按需读取请求、预算、通道、命中、过滤、错误、最终文本与反馈。'}</SheetDescription>
         </SheetHeader>
         <ScrollArea className="flex-1 pr-6">
           <div className="flex flex-col gap-4 py-6">
             {loading ? (
-              <>
-                <Skeleton className="h-28 w-full" />
-                <Skeleton className="h-48 w-full" />
-              </>
+              <><Skeleton className="h-28 w-full" /><Skeleton className="h-64 w-full" /><Skeleton className="h-48 w-full" /></>
             ) : error ? (
-              <Alert variant="destructive">
-                <AlertTriangleIcon />
-                <AlertTitle>详情加载失败</AlertTitle>
-                <AlertDescription>{error}</AlertDescription>
-              </Alert>
+              <Alert variant="destructive"><AlertTriangleIcon /><AlertTitle>详情加载失败</AlertTitle><AlertDescription>{error}。引用不存在、作用域不匹配或版本失效时不会改用裸 ID 或默认 Bot 猜测。</AlertDescription></Alert>
             ) : detail ? (
               <>
-                <Alert>
-                  <AlertTriangleIcon />
-                  <AlertTitle>观测和验证，不承载对象本体管理</AlertTitle>
-                  <AlertDescription>本页用于定位注入链路；需要修改对象时，请跳转到对应管理页处理后再回到观测台验证。</AlertDescription>
-                </Alert>
+                <Alert><AlertTitle>观测与解释边界</AlertTitle><AlertDescription>以下结构化分区用于解释注入链路；对象跳转只使用服务端签发的 opaque ObjectRef。完整载荷仅作为末尾的辅助核对内容。</AlertDescription></Alert>
 
-                <Section title="请求上下文">
-                  <JsonBlock value={detail.request ?? detail.context ?? {}} />
+                <Section title="请求上下文" description="只展示 trace 实际记录的请求与作用域；legacy 缺失字段保持未记录。">
+                  <DetailGrid value={detail.request ?? detail.context} preferredKeys={['bot_profile_id', 'bot_id', 'session_id', 'group_id', 'sender_id', 'scope', 'chat_type', 'message']} />
                 </Section>
-                <Section title="预算">
-                  <JsonBlock value={detail.budget ?? {}} />
+
+                <Section title="预算" description="Token、字符、通道预算和截断信息均来自详情载荷。">
+                  <DetailGrid value={detail.budget} preferredKeys={['total_tokens', 'token_budget', 'used_tokens', 'remaining_tokens', 'max_chars', 'truncated']} />
                 </Section>
-                <Section title="通道瀑布" description="通道状态、耗时、token 与错误信息">
-                  <div className="flex flex-col gap-3">
-                    {asRecords(detail.channels).length === 0 ? (
-                      <p className="py-2 text-xs text-muted-foreground">暂无通道明细。</p>
-                    ) : (
-                      asRecords(detail.channels).map((channel, index) => {
-                        const name = channelName(channel)
-                        const route = managementRouteForChannel(name)
-                        return (
-                          <div key={`${index}-${name}`} className="flex flex-col gap-3 rounded-lg border bg-card p-3">
-                            <div className="flex items-center justify-between gap-3">
-                              <span className="text-sm font-semibold text-foreground">{name}</span>
-                              <Badge variant={String(channel.status ?? '').includes('error') || String(channel.status ?? '').includes('timeout') ? 'destructive' : 'secondary'}>
-                                {channelStatusLabel(channel.status)}
-                              </Badge>
-                            </div>
-                            {route ? (
-                              <Button asChild variant="outline" size="sm" className="w-fit">
-                                <Link to={route}>
-                                  去管理页
-                                  <ArrowRightIcon data-icon="inline-end" />
-                                </Link>
-                              </Button>
-                            ) : null}
-                            <JsonBlock value={channel} />
-                          </div>
-                        )
-                      })
-                    )}
-                  </div>
+
+                <Section title="通道瀑布" description="按通道查看状态、耗时、Token、命中/过滤数量和错误。">
+                  {channels.length ? <div className="flex flex-col gap-3">{channels.map((channel, index) => {
+                    const name = channelName(channel)
+                    const status = channel.status
+                    return <div key={`${name}-${index}`} className="rounded-lg border bg-card p-3"><div className="flex flex-wrap items-center justify-between gap-2"><div className="flex items-center gap-2"><span className="font-semibold">{name}</span><Badge variant={channelVariant(status)}>{channelStatusLabel(status)}</Badge></div><span className="text-xs text-muted-foreground">{textValue(channel.latency_ms ?? channel.duration_ms)} ms · {textValue(channel.tokens ?? channel.token_count)} tokens</span></div><dl className="mt-3 grid gap-2 text-xs sm:grid-cols-3"><div><dt className="text-muted-foreground">命中</dt><dd>{textValue(channel.hit_count ?? channel.hits_count ?? asRecords(channel.hit_items).length, '0')}</dd></div><div><dt className="text-muted-foreground">过滤</dt><dd>{textValue(channel.filtered_count ?? asRecords(channel.filtered_items).length, '0')}</dd></div><div><dt className="text-muted-foreground">错误</dt><dd className={channel.error ? 'text-destructive' : ''}>{textValue(channel.error, '无')}</dd></div></dl></div>
+                  })}</div> : <p className="text-sm text-muted-foreground">暂无通道明细。</p>}
                 </Section>
-                <Section title="黑话来源" description="jargon channel 命中的词条来源、层级和 reference-only 边界">
-                  {jargonItems.length === 0 ? (
-                    <p className="py-2 text-xs text-muted-foreground">暂无 jargon 命中。</p>
-                  ) : (
-                    <div className="flex flex-col gap-2">
-                      {jargonItems.map((item, index) => (
-                        <div key={`${fieldText(item, 'word')}-${index}`} className="flex flex-col gap-2 rounded-lg border bg-card p-3">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="text-sm font-medium text-foreground">{fieldText(item, 'word')}</span>
-                            <Badge variant="secondary">{fieldText(item, 'source')}</Badge>
-                            <Badge variant="outline">source_layer: {fieldText(item, 'source_layer')}</Badge>
-                            <Badge variant="outline">reference_only: {boolFlagLabel(item.reference_only)}</Badge>
-                            <Badge variant="outline">runtime_match: {boolFlagLabel(item.runtime_match)}</Badge>
-                            <Badge variant="outline">matched_by: {fieldText(item, 'matched_by')}</Badge>
-                          </div>
-                          <p className="text-xs text-muted-foreground">{fieldText(item, 'meaning', fieldText(item, 'preview'))}</p>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </Section>
-                <Section title="命中项" description="可跳转对象会显示管理入口；不可跳转对象保留原始 JSON 便于排查">
-                  {manageableHits.length === 0 ? (
-                    <JsonBlock value={detail.hits ?? []} />
-                  ) : (
-                    <div className="flex flex-col gap-2">
-                      {manageableHits.map(({ channel, item, route }, index) => (
-                        <div key={`${channel}-${index}`} className="flex flex-col gap-2 rounded-lg border bg-card p-3">
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <Badge variant="secondary">{channel}</Badge>
-                            {route ? (
-                              <Button asChild variant="outline" size="sm">
-                                <Link to={route}>
-                                  打开对象管理
-                                  <ArrowRightIcon data-icon="inline-end" />
-                                </Link>
-                              </Button>
-                            ) : null}
-                          </div>
-                          <JsonBlock value={item} />
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </Section>
-                <Section title="过滤项" description="跳过原因：filtered_items 中记录的过滤通道、原因和预览">
-                  {filteredItemList.length === 0 ? (
-                    <p className="py-2 text-xs text-muted-foreground">暂无过滤项。</p>
-                  ) : (
-                    <div className="flex flex-col gap-2">
-                      {filteredItemList.map((item, index) => (
-                        <div key={`${fieldText(item, 'channel_name')}-${fieldText(item, 'reason')}-${index}`} className="flex flex-col gap-2 rounded-lg border bg-card p-3">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <Badge variant="secondary">{fieldText(item, 'channel_name')}</Badge>
-                            <Badge variant="outline">filter_channel: {fieldText(item, 'filter_channel', fieldText(item, 'channel_name'))}</Badge>
-                            <Badge variant="outline">reason: {fieldText(item, 'reason')}</Badge>
-                          </div>
-                          <p className="text-xs text-muted-foreground">{fieldText(item, 'preview')}</p>
-                          <JsonBlock value={item} />
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </Section>
+
+                <Section title="命中项" description="展示可解释字段；正式对象入口另由服务端 ObjectRef 提供。"><ItemCards items={hits} kind="hit" /></Section>
+                {links.length ? <Section title="正式对象入口" description="仅跟随服务端签发的 ObjectRef，不使用裸 ID 构造路由。"><div className="flex flex-wrap gap-2">{links.map((item) => <ObjectDeepLink key={`${item.path}:${item.ref.ref}`} to={item.path} objectRef={item.ref}>{item.label}</ObjectDeepLink>)}</div></Section> : null}
+                <Section title="过滤项" description="展示过滤通道、原因和可用预览，不补造缺失原因。"><ItemCards items={filtered} kind="filtered" /></Section>
+
                 <Section title="最终注入文本">
-                  {finalText ? (
-                    <pre className="max-h-96 overflow-auto rounded-lg border bg-muted/50 p-3 font-mono text-xs leading-relaxed text-foreground whitespace-pre-wrap break-all">
-                      {finalText}
-                    </pre>
-                  ) : (
-                    <p className="text-sm text-muted-foreground">暂无最终文本。</p>
-                  )}
+                  {finalText ? <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-lg border bg-muted/30 p-3 text-sm leading-relaxed">{finalText}</pre> : <p className="text-sm text-muted-foreground">暂无最终文本。</p>}
                 </Section>
-                <Section title="错误/警告">
-                  <JsonBlock value={warningsAndErrors(detail)} />
+
+                <Section title="错误与警告">
+                  {!errors.length && !warnings.length ? <p className="text-sm text-muted-foreground">未记录错误或警告。</p> : <div className="grid gap-3 md:grid-cols-2"><div><p className="mb-2 text-sm font-medium">错误</p>{errors.length ? <ul className="list-disc space-y-1 pl-5 text-sm text-destructive">{errors.map((message, index) => <li key={`${message}-${index}`}>{message}</li>)}</ul> : <p className="text-sm text-muted-foreground">无</p>}</div><div><p className="mb-2 text-sm font-medium">警告</p>{warnings.length ? <ul className="list-disc space-y-1 pl-5 text-sm">{warnings.map((message, index) => <li key={`${message}-${index}`}>{message}</li>)}</ul> : <p className="text-sm text-muted-foreground">无</p>}</div></div>}
                 </Section>
-                <Section title="反馈与修正入口" description="反馈记录保留在注入观测台；候选提交、审核和晋升历史统一进入学习中心">
-                  <div className="flex flex-wrap gap-2">
-                    <Button asChild variant="outline" size="sm">
-                      <Link to="/learning-center">
-                        查看学习中心候选
-                        <ArrowRightIcon data-icon="inline-end" />
-                      </Link>
-                    </Button>
-                    <Button asChild variant="outline" size="sm">
-                      <Link to="/channels">
-                        调整通道配置
-                        <ArrowRightIcon data-icon="inline-end" />
-                      </Link>
-                    </Button>
-                    <Button asChild variant="outline" size="sm">
-                      <Link to="/dashboard">
-                        返回总览复核
-                        <ArrowRightIcon data-icon="inline-end" />
-                      </Link>
-                    </Button>
-                  </div>
-                  <JsonBlock value={detail.feedback ?? []} />
+
+                <Section title="反馈" description="反馈只读展示；学习候选、审核和晋升在学习中心处理。">
+                  {feedback.length ? <div className="overflow-auto rounded-lg border"><Table><TableHeader><TableRow><TableHead>反馈</TableHead><TableHead>记忆</TableHead><TableHead>原因</TableHead><TableHead>时间</TableHead></TableRow></TableHeader><TableBody>{feedback.map((item, index) => <TableRow key={`${String(item.id ?? index)}-${index}`}><TableCell><Badge variant="secondary">{textValue(item.feedback)}</Badge></TableCell><TableCell className="font-mono text-xs">{textValue(item.memory_id)}</TableCell><TableCell className="max-w-md whitespace-pre-wrap">{textValue(item.reason ?? item.content)}</TableCell><TableCell>{textValue(item.created_at ?? item.timestamp)}</TableCell></TableRow>)}</TableBody></Table></div> : <p className="text-sm text-muted-foreground">暂无反馈。</p>}
+                  <div className="mt-4 flex flex-wrap gap-2"><Button asChild variant="outline" size="sm"><Link to="/learning">查看学习过程<ArrowRightIcon data-icon="inline-end" aria-hidden="true" /></Link></Button><Button asChild variant="outline" size="sm"><Link to="/channels">调整通道配置<ArrowRightIcon data-icon="inline-end" aria-hidden="true" /></Link></Button></div>
+                </Section>
+
+                <Section title="完整载荷（辅助核对）" description="结构化分区是主要阅读入口；复制与下载仍保留服务端完整内容。">
+                  <TracePayloadViewer payload={detail} rawPayload={rawPayload} downloadName={`trace-${detail.trace_id ?? 'unknown'}.json`} maxHeightClassName="h-80" />
                 </Section>
               </>
-            ) : (
-              <p className="py-6 text-center text-sm text-muted-foreground">请选择一条 trace。</p>
-            )}
+            ) : <p className="py-6 text-center text-sm text-muted-foreground">请选择一条 Trace。</p>}
           </div>
         </ScrollArea>
       </SheetContent>

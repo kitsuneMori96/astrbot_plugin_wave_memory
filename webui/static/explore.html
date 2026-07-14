@@ -172,20 +172,45 @@
         <div class="nebula-orb orb-3"></div>
     </div>
     <div id="grid-overlay"></div>
+    <div id="scope-gate" class="fixed inset-0 z-[60] hidden items-center justify-center bg-nebula-900/95 p-6">
+        <form onsubmit="applyExploreScope(event)" class="glass glass-accent w-full max-w-xl rounded-2xl p-6 space-y-4">
+            <div>
+                <h1 class="text-lg font-semibold text-white">选择神经云图 Scope</h1>
+                <p class="mt-1 text-xs text-slate-400">Explore 是只读视图，必须显式提供完整 RuntimeScope；不会猜测默认 Bot 或群。</p>
+            </div>
+            <div class="grid gap-3 md:grid-cols-3">
+                <label class="text-[10px] text-slate-400">BotProfile.db_id
+                    <input id="scope-bot-id" required class="mt-1 w-full rounded-md border border-white/10 bg-nebula-700 px-3 py-2 text-xs text-white" placeholder="bot-alpha">
+                </label>
+                <label class="text-[10px] text-slate-400">Canonical session_id
+                    <input id="scope-session-id" required class="mt-1 w-full rounded-md border border-white/10 bg-nebula-700 px-3 py-2 text-xs text-white" placeholder="qq:group:123">
+                </label>
+                <label class="text-[10px] text-slate-400">visibility
+                    <select id="scope-visibility" class="mt-1 w-full rounded-md border border-white/10 bg-nebula-700 px-3 py-2 text-xs text-white">
+                        <option value="group">group</option>
+                    </select>
+                </label>
+            </div>
+            <div class="flex items-center justify-between gap-3">
+                <span class="text-[10px] text-emerald-300">只读 · RuntimeScope 多图层投影 / HNSW 同域近邻</span>
+                <button type="submit" class="rounded-lg bg-purple-600 px-4 py-2 text-xs font-medium text-white hover:bg-purple-500">打开 Scope</button>
+            </div>
+        </form>
+    </div>
     <div id="galaxy-container"></div>
     <div id="node-tooltip" class="node-tooltip"></div>
     <div id="node-action-ring" class="hidden">
         <div class="relative w-40 h-40">
             <button onclick="expandNode()" class="absolute left-1/2 top-0 -translate-x-1/2 px-2 py-1 rounded-full bg-purple-500/20 border border-purple-400/30 text-purple-200 text-[10px] hover:bg-purple-500/30">展开</button>
             <button onclick="loadTimeline()" class="absolute right-0 top-1/2 -translate-y-1/2 px-2 py-1 rounded-full bg-blue-500/20 border border-blue-400/30 text-blue-200 text-[10px] hover:bg-blue-500/30">时间线</button>
-            <button onclick="editEntity()" class="absolute left-1/2 bottom-0 -translate-x-1/2 px-2 py-1 rounded-full bg-amber-500/20 border border-amber-400/30 text-amber-200 text-[10px] hover:bg-amber-500/30">修正</button>
+            <span class="absolute left-1/2 bottom-0 -translate-x-1/2 px-2 py-1 rounded-full bg-emerald-500/10 border border-emerald-400/20 text-emerald-200 text-[10px]">只读</span>
             <button onclick="applyCameraPreset('selected')" class="absolute left-0 top-1/2 -translate-y-1/2 px-2 py-1 rounded-full bg-white/10 border border-white/15 text-slate-200 text-[10px] hover:bg-white/15">聚焦</button>
         </div>
     </div>
 
     <!-- Top Bar -->
     <div class="fixed top-0 inset-x-0 z-30 topbar flex items-center gap-3 px-5 py-2.5">
-        <a href="/#/blackbox" class="text-slate-400 text-xs px-3 py-1.5 rounded-md border border-white/5 hover:text-white hover:border-glow-dim transition">← 管理面板</a>
+        <a href="/#/knowledge" class="text-slate-400 text-xs px-3 py-1.5 rounded-md border border-white/5 hover:text-white hover:border-glow-dim transition">← 知识中心</a>
         <button onclick="toggleKgConfig()" class="text-slate-400 text-xs px-3 py-1.5 rounded-md border border-white/5 hover:text-white hover:border-glow-dim transition">⚙ 配置</button>
         <span class="brand-text font-semibold text-sm">⚡ 知识图谱</span>
         <div class="ml-auto flex gap-1" id="view-tabs">
@@ -256,13 +281,26 @@
             </div>
             <div>
                 <label class="text-[10px] text-slate-500 block mb-2">数据图层（勾选加载到图谱）</label>
-                <div class="space-y-1.5" id="cfg-layers">
-                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" checked data-layer="facts" class="accent-purple-500"> <span class="text-[10px] text-slate-300">事实关系</span> <span class="text-[9px] text-slate-600">facts+tag_relations</span></label>
-                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" data-layer="beliefs" class="accent-purple-500"> <span class="text-[10px] text-slate-300">信念</span> <span class="text-[9px] text-slate-600">bot 的判断/认知</span></label>
-                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" data-layer="concerns" class="accent-purple-500"> <span class="text-[10px] text-slate-300">关切</span> <span class="text-[9px] text-slate-600">bot 当前关注焦点</span></label>
-                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" data-layer="jargon" class="accent-purple-500"> <span class="text-[10px] text-slate-300">黑话</span> <span class="text-[9px] text-slate-600">群内暗语/梗</span></label>
-                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" data-layer="affinity" class="accent-purple-500"> <span class="text-[10px] text-slate-300">好感度</span> <span class="text-[9px] text-slate-600">bot→人物 好感关系</span></label>
-                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" data-layer="communities" class="accent-purple-500"> <span class="text-[10px] text-slate-300">社区</span> <span class="text-[9px] text-slate-600">tag 共现聚类</span></label>
+                <div class="grid grid-cols-2 gap-1.5" id="cfg-layers">
+                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" checked data-layer="facts" class="accent-purple-500"> <span class="text-[10px] text-slate-300">事实关系 <b data-layer-count="facts" class="text-slate-600 font-normal"></b></span></label>
+                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" checked data-layer="memories" class="accent-purple-500"> <span class="text-[10px] text-slate-300">记忆/HNSW <b data-layer-count="memories" class="text-slate-600 font-normal"></b></span></label>
+                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" data-layer="beliefs" class="accent-purple-500"> <span class="text-[10px] text-slate-300">信念 <b data-layer-count="beliefs" class="text-slate-600 font-normal"></b></span></label>
+                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" data-layer="jargon" class="accent-purple-500"> <span class="text-[10px] text-slate-300">群内表达 <b data-layer-count="jargon" class="text-slate-600 font-normal"></b></span></label>
+                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" data-layer="concerns" class="accent-purple-500"> <span class="text-[10px] text-slate-300">关切 <b data-layer-count="concerns" class="text-slate-600 font-normal"></b></span></label>
+                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" data-layer="mood" class="accent-purple-500"> <span class="text-[10px] text-slate-300">情绪 <b data-layer-count="mood" class="text-slate-600 font-normal"></b></span></label>
+                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" data-layer="timeline" class="accent-purple-500"> <span class="text-[10px] text-slate-300">Soul 时间线 <b data-layer-count="timeline" class="text-slate-600 font-normal"></b></span></label>
+                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" data-layer="affinity" class="accent-purple-500"> <span class="text-[10px] text-slate-300">人物关系 <b data-layer-count="affinity" class="text-slate-600 font-normal"></b></span></label>
+                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" data-layer="few_shot" class="accent-purple-500"> <span class="text-[10px] text-slate-300">Few-shot <b data-layer-count="few_shot" class="text-slate-600 font-normal"></b></span></label>
+                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" data-layer="book_lore" class="accent-purple-500"> <span class="text-[10px] text-slate-300">BookLore <b data-layer-count="book_lore" class="text-slate-600 font-normal"></b></span></label>
+                    <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" data-layer="communities" class="accent-purple-500"> <span class="text-[10px] text-slate-300">标签簇 <b data-layer-count="communities" class="text-slate-600 font-normal"></b></span></label>
+                </div>
+                <div class="rounded-lg border border-indigo-400/10 bg-indigo-400/[.035] p-2.5 space-y-2">
+                    <div class="text-[9px] text-indigo-200/80">HNSW 同域近邻（使用 canonical memory vector；跨 Scope 结果会被后端丢弃）</div>
+                    <div class="grid grid-cols-3 gap-2">
+                        <label class="text-[9px] text-slate-500">记忆上限<input id="cfg-memory-limit" type="number" min="10" max="500" value="150" class="mt-1 w-full px-2 py-1 bg-nebula-700 border border-white/10 rounded text-slate-300"></label>
+                        <label class="text-[9px] text-slate-500">每点近邻<input id="cfg-similarity-k" type="number" min="1" max="10" value="3" class="mt-1 w-full px-2 py-1 bg-nebula-700 border border-white/10 rounded text-slate-300"></label>
+                        <label class="text-[9px] text-slate-500">相似阈值<input id="cfg-similarity-threshold" type="number" min="0" max="1" step="0.05" value="0.65" class="mt-1 w-full px-2 py-1 bg-nebula-700 border border-white/10 rounded text-slate-300"></label>
+                    </div>
                 </div>
             </div>
             <div>
@@ -373,8 +411,7 @@
             <div class="flex gap-2 mt-4 flex-wrap">
                 <button id="btn-expand" onclick="expandNode()" class="px-3 py-1.5 bg-glow-purple/10 border border-glow-dim rounded-lg text-purple-300 text-[11px] hover:bg-glow-purple/20 transition">展开社区</button>
                 <button id="btn-timeline" onclick="loadTimeline()" class="px-3 py-1.5 bg-blue-500/10 border border-blue-500/20 rounded-lg text-blue-300 text-[11px] hover:bg-blue-500/20 transition">📅 时间线</button>
-                <button onclick="editEntity()" class="px-3 py-1.5 bg-amber-500/10 border border-amber-500/20 rounded-lg text-amber-300 text-[11px] hover:bg-amber-500/20 transition">✏️ 修正</button>
-                <button id="btn-sever-fact" onclick="severFactRelation()" class="px-3 py-1.5 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-[11px] hover:bg-red-500/20 transition">🗑 斩断关联</button>
+                <span class="px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/20 rounded-lg text-emerald-300 text-[11px]">只读投影</span>
             </div>
         </div>
     </div>
@@ -391,8 +428,7 @@
             </div>
             <div id="relation-body" class="space-y-2.5 max-h-[52vh] overflow-y-auto"></div>
             <div class="flex gap-2 mt-4 flex-wrap">
-                <button id="btn-edit-relation" onclick="editSelectedRelation()" class="px-3 py-1.5 bg-amber-500/10 border border-amber-500/20 rounded-lg text-amber-300 text-[11px] hover:bg-amber-500/20 transition">✏️ 编辑关系</button>
-                <button id="btn-delete-relation" onclick="deleteSelectedRelation()" class="px-3 py-1.5 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-[11px] hover:bg-red-500/20 transition">🗑 删除关系</button>
+                <span class="px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/20 rounded-lg text-emerald-300 text-[11px]">只读关系</span>
             </div>
         </div>
     </div>
@@ -430,7 +466,7 @@
         <div class="flex justify-between"><span>🖱️ 单击星体</span><span class="text-slate-300 font-mono">选中聚焦/激活气泡</span></div>
         <div class="flex justify-between"><span>🚀 双击星体</span><span class="text-slate-300 font-mono">异步展开关联脉络</span></div>
         <div class="flex justify-between"><span>🔍 滚轮/双指</span><span class="text-slate-300 font-mono">星系无级视野缩放</span></div>
-        <div class="flex justify-between"><span>🛠️ 点击线段</span><span class="text-slate-300 font-mono">透视/删除关系边</span></div>
+        <div class="flex justify-between"><span>🧭 点击线段</span><span class="text-slate-300 font-mono">透视只读关系与证据</span></div>
         <div class="flex justify-between"><span>📌 拖拽星空</span><span class="text-slate-300 font-mono">3D 轨道任意平移旋转</span></div>
     </div>
 
@@ -443,66 +479,70 @@
         <p id="loading-text" class="text-slate-400 text-sm">加载中...</p>
     </div>
 
-    <!-- 编辑 tag_relation 弹窗 -->
-    <div id="relation-edit-dialog" class="fixed inset-0 z-50 hidden items-center justify-center" style="background:rgba(0,0,0,0.6); backdrop-filter:blur(3px)">
-        <div class="glass glass-accent rounded-2xl w-full max-w-md mx-4 overflow-hidden">
-            <div class="px-5 py-4 border-b border-white/5 flex items-center justify-between">
-                <h3 class="text-sm font-semibold text-white">编辑关系边</h3>
-                <button onclick="closeRelationEdit()" class="text-slate-400 hover:text-white">✕</button>
-            </div>
-            <div class="px-5 py-4 space-y-3.5 text-xs">
-                <div>
-                    <label class="text-slate-500 block mb-1">关系类型 / Predicate</label>
-                    <input type="text" id="edit-relation-label" class="w-full px-3 py-2 bg-nebula-700 border border-white/10 rounded-md text-slate-200 outline-none focus:border-glow-purple">
-                </div>
-                <div>
-                    <label class="text-slate-500 block mb-1">权重 Weight</label>
-                    <input type="number" step="0.1" min="0" id="edit-relation-weight" class="w-full px-3 py-2 bg-nebula-700 border border-white/10 rounded-md text-slate-200 outline-none focus:border-glow-purple">
-                </div>
-                <div>
-                    <label class="text-slate-500 block mb-1">置信度 Confidence 0-1</label>
-                    <input type="number" step="0.1" min="0" max="1" id="edit-relation-confidence" class="w-full px-3 py-2 bg-nebula-700 border border-white/10 rounded-md text-slate-200 outline-none focus:border-glow-purple">
-                </div>
-            </div>
-            <div class="px-5 py-4 border-t border-white/5 flex justify-end gap-2">
-                <button onclick="closeRelationEdit()" class="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-400 text-[11px] transition">取消</button>
-                <button onclick="saveRelationEdit()" class="px-4 py-1.5 rounded-lg bg-glow-purple/80 hover:bg-glow-purple text-white text-[11px] font-medium transition">保存关系</button>
-            </div>
-        </div>
-    </div>
+<script>
+function currentExploreScope() {
+    const params = new URLSearchParams(window.location.search);
+    const botId = (params.get('bot_id') || '').trim();
+    const sessionId = (params.get('session_id') || '').trim();
+    const visibility = (params.get('visibility') || '').trim();
+    if (!botId || !sessionId || visibility !== 'group') return null;
+    return { bot_id: botId, session_id: sessionId, visibility };
+}
 
-    <!-- 修正事实三元组弹窗 -->
-    <div id="fact-edit-dialog" class="fixed inset-0 z-50 hidden items-center justify-center" style="background:rgba(0,0,0,0.6); backdrop-filter:blur(3px)">
-        <div class="glass glass-accent rounded-2xl w-full max-w-md mx-4 overflow-hidden">
-            <div class="px-5 py-4 border-b border-white/5 flex items-center justify-between">
-                <h3 class="text-sm font-semibold text-white">修正事实三元组</h3>
-                <button onclick="closeFactEdit()" class="text-slate-400 hover:text-white">✕</button>
-            </div>
-            <div class="px-5 py-4 space-y-3.5 text-xs">
-                <div>
-                    <label class="text-slate-500 block mb-1">主键实体 (Subject)</label>
-                    <input type="text" id="edit-fact-subject" class="w-full px-3 py-2 bg-nebula-700 border border-white/10 rounded-md text-slate-200 outline-none focus:border-glow-purple">
-                </div>
-                <div>
-                    <label class="text-slate-500 block mb-1">关系谓词 (Predicate)</label>
-                    <input type="text" id="edit-fact-predicate" class="w-full px-3 py-2 bg-nebula-700 border border-white/10 rounded-md text-slate-200 outline-none focus:border-glow-purple">
-                </div>
-                <div>
-                    <label class="text-slate-500 block mb-1">客体实体 (Object)</label>
-                    <input type="text" id="edit-fact-object" class="w-full px-3 py-2 bg-nebula-700 border border-white/10 rounded-md text-slate-200 outline-none focus:border-glow-purple">
-                </div>
-                <div>
-                    <label class="text-slate-500 block mb-1">置信度 (Confidence 0-1)</label>
-                    <input type="number" step="0.1" min="0" max="1" id="edit-fact-confidence" class="w-full px-3 py-2 bg-nebula-700 border border-white/10 rounded-md text-slate-200 outline-none focus:border-glow-purple">
-                </div>
-            </div>
-            <div class="px-5 py-4 border-t border-white/5 flex justify-end gap-2">
-                <button onclick="closeFactEdit()" class="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-400 text-[11px] transition">取消</button>
-                <button onclick="saveFactEdit()" class="px-4 py-1.5 rounded-lg bg-glow-purple/80 hover:bg-glow-purple text-white text-[11px] font-medium transition">保存修正</button>
-            </div>
-        </div>
-    </div>
+function applyExploreScope(event) {
+    event.preventDefault();
+    const params = new URLSearchParams(window.location.search);
+    params.set('bot_id', document.getElementById('scope-bot-id').value.trim());
+    params.set('session_id', document.getElementById('scope-session-id').value.trim());
+    params.set('visibility', document.getElementById('scope-visibility').value);
+    window.location.search = params.toString();
+}
 
+function installScopedApiFetch() {
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = function scopedExploreFetch(input, init) {
+        const rawUrl = typeof input === 'string' ? input : input.url;
+        const url = new URL(rawUrl, window.location.origin);
+        if (url.pathname.startsWith('/api/kg') || url.pathname.startsWith('/api/explore') || url.pathname.startsWith('/api/')) {
+            const scope = currentExploreScope();
+            if (!scope) {
+                return Promise.resolve(new Response(JSON.stringify({ error: { code: 'scope_required' } }), {
+                    status: 400,
+                    headers: { 'Content-Type': 'application/json' },
+                }));
+            }
+            Object.entries(scope).forEach(([key, value]) => url.searchParams.set(key, value));
+            input = url.pathname + url.search + url.hash;
+
+            // 自动传递来自主应用的单点 Token
+            const token = new URLSearchParams(window.location.search).get('token') || localStorage.getItem('wave_token');
+            if (token) {
+                init = init || {};
+                init.headers = init.headers || {};
+                if (Array.isArray(init.headers)) {
+                    init.headers.push(['Authorization', `Bearer ${token}`]);
+                } else if (init.headers instanceof Headers) {
+                    init.headers.set('Authorization', `Bearer ${token}`);
+                } else {
+                    init.headers['Authorization'] = `Bearer ${token}`;
+                }
+            }
+        }
+        return nativeFetch(input, init);
+    };
+}
+
+installScopedApiFetch();
+const initialExploreScope = currentExploreScope();
+if (!initialExploreScope) {
+    document.getElementById('scope-gate').classList.remove('hidden');
+    document.getElementById('scope-gate').classList.add('flex');
+} else {
+    document.getElementById('scope-bot-id').value = initialExploreScope.bot_id;
+    document.getElementById('scope-session-id').value = initialExploreScope.session_id;
+    document.getElementById('scope-visibility').value = initialExploreScope.visibility;
+}
+</script>
 <script src="/static/kg.js?v=3.0.0-3d"></script>
 <script src="/static/kg-config.js"></script>
 <script>

@@ -1,14 +1,58 @@
 import { fetchJson } from './client'
+import type { EvidenceRef, ObjectRefDescriptor, PageResponse } from '@/components/shared/types'
 
-export interface ConcernItem {
+export interface SoulScopeSelection {
+  bot_id: string
+  session_id: string
+  visibility: 'group'
+}
+
+export interface SoulRecord {
+  id: string
+  summary: string
+  revision: number | string | null
+  policy_version: string | null
+  evidence: EvidenceRef[]
+  object_ref: ObjectRefDescriptor | null
+}
+
+export interface SoulStatePayload {
+  scope: SoulScopeSelection & { kind: 'SoulScope'; platform_id: string; conversation_id: string }
+  source: { health: 'healthy' | 'empty' | 'unavailable' | 'error'; reason_code: string | null }
+  mood: {
+    value: string | null
+    state: 'known' | 'unknown'
+    components: Record<string, number> | null
+    policy_version: string | null
+    revision: number | string | null
+    evidence: EvidenceRef[]
+  }
+  concerns: PageResponse<SoulRecord>
+  timeline: PageResponse<SoulRecord>
+  relationship: {
+    affinity: number | null
+    state: 'known' | 'unknown'
+    revision: number | string | null
+    evidence: EvidenceRef[]
+    people_ref: ObjectRefDescriptor | null
+  }
+  capabilities: {
+    mutate: { available: boolean; reason_code: string | null }
+    runtime_refresh: { available: boolean; reason_code: string | null }
+  }
+  runtime_refresh: { status: string; operation: unknown; reason_code: string | null }
+}
+
+export interface LegacyConcernItem {
   id: number
   topic: string
   intensity: number
   bot_id?: string
+  created_at?: number
   last_triggered?: number
 }
 
-export interface TimeAnchorItem {
+export interface LegacyTimelineItem {
   id: number
   event_summary: string
   emotional_weight: number
@@ -16,78 +60,57 @@ export interface TimeAnchorItem {
   bot_id?: string
 }
 
-export interface MoodItem {
+export interface LegacyMoodItem {
   id: number
   type: string
   intensity: number
   description: string
   timestamp: number
   is_active: boolean
-  group_id?: string
+  valence?: number
+  arousal?: number
   bot_id?: string
 }
 
-export function listConcerns(botId?: string): Promise<{ items: ConcernItem[] }> {
-  return fetchJson<{ items: ConcernItem[] }>(`/api/concerns${botId ? `?bot_id=${botId}` : ''}`)
+export interface LegacySoulCollection<T> {
+  status: 'available' | 'unavailable'
+  items: T[]
+  reason?: string
 }
 
-export function createConcern(payload: Partial<ConcernItem>): Promise<{ ok: boolean; id: number }> {
-  return fetchJson<{ ok: boolean; id: number }>('/api/concerns', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  })
+export interface LegacySoulSnapshot {
+  readonly: true
+  scope_status: 'legacy-not-session-scoped'
+  concerns: LegacySoulCollection<LegacyConcernItem>
+  timeline: LegacySoulCollection<LegacyTimelineItem>
+  moods: LegacySoulCollection<LegacyMoodItem>
 }
 
-export function updateConcern(id: number, payload: Partial<ConcernItem>): Promise<{ ok: boolean }> {
-  return fetchJson<{ ok: boolean }>(`/api/concerns/${id}`, {
-    method: 'PUT',
-    body: JSON.stringify(payload),
-  })
+function scopeQuery(scope: SoulScopeSelection, extra: Record<string, string> = {}): string {
+  return new URLSearchParams({ bot_id: scope.bot_id, session_id: scope.session_id, visibility: scope.visibility, ...extra }).toString()
 }
 
-export function deleteConcern(id: number): Promise<{ ok: boolean }> {
-  return fetchJson<{ ok: boolean }>(`/api/concerns/${id}`, {
-    method: 'DELETE',
-  })
+export function getSoulState(scope: SoulScopeSelection, limit: 25 | 50 | 100, offset: number): Promise<SoulStatePayload> {
+  return fetchJson<SoulStatePayload>(`/api/soul/state?${scopeQuery(scope, { limit: String(limit), offset: String(offset) })}`)
 }
 
-export function listTimeAnchors(botId?: string): Promise<{ items: TimeAnchorItem[] }> {
-  return fetchJson<{ items: TimeAnchorItem[] }>(`/api/time-anchors${botId ? `?bot_id=${botId}` : ''}`)
+async function legacyCollection<T>(request: Promise<{ items: T[] }>): Promise<LegacySoulCollection<T>> {
+  try {
+    const payload = await request
+    return { status: 'available', items: payload.items ?? [] }
+  } catch (reason) {
+    return { status: 'unavailable', items: [], reason: reason instanceof Error ? reason.message : 'legacy_read_unavailable' }
+  }
 }
 
-export function createTimeAnchor(payload: Partial<TimeAnchorItem>): Promise<{ ok: boolean; id: number }> {
-  return fetchJson<{ ok: boolean; id: number }>('/api/time-anchors', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  })
-}
-
-export function updateTimeAnchor(id: number, payload: Partial<TimeAnchorItem>): Promise<{ ok: boolean }> {
-  return fetchJson<{ ok: boolean }>(`/api/time-anchors/${id}`, {
-    method: 'PUT',
-    body: JSON.stringify(payload),
-  })
-}
-
-export function deleteTimeAnchor(id: number): Promise<{ ok: boolean }> {
-  return fetchJson<{ ok: boolean }>(`/api/time-anchors/${id}`, {
-    method: 'DELETE',
-  })
-}
-
-export function listMoods(groupId?: string): Promise<{ items: MoodItem[] }> {
-  return fetchJson<{ items: MoodItem[] }>(`/api/mood/trajectory${groupId ? `?group_id=${groupId}` : ''}`)
-}
-
-export function updateMood(id: number, payload: Partial<MoodItem>): Promise<{ ok: boolean }> {
-  return fetchJson<{ ok: boolean }>(`/api/mood/${id}`, {
-    method: 'PUT',
-    body: JSON.stringify(payload),
-  })
-}
-
-export function deleteMood(id: number): Promise<{ ok: boolean }> {
-  return fetchJson<{ ok: boolean }>(`/api/mood/${id}`, {
-    method: 'DELETE',
-  })
+export async function getLegacySoulSnapshot(scope: SoulScopeSelection): Promise<LegacySoulSnapshot> {
+  const concerns = legacyCollection(fetchJson<{ items: LegacyConcernItem[] }>(`/api/concerns?${scopeQuery(scope, { limit: '50' })}`))
+  const timeline = legacyCollection(fetchJson<{ items: LegacyTimelineItem[] }>(`/api/time-anchors?${scopeQuery(scope, { limit: '50' })}`))
+  const moods = legacyCollection(
+    fetchJson<{ items: Array<LegacyMoodItem & { desc?: string; ts?: number }> }>(`/api/mood/trajectory?${scopeQuery(scope, { limit: '100' })}`).then((payload) => ({
+      items: payload.items.map((item) => ({ ...item, description: item.description ?? item.desc ?? '', timestamp: item.timestamp ?? item.ts ?? 0 })),
+    })),
+  )
+  const [concernResult, timelineResult, moodResult] = await Promise.all([concerns, timeline, moods])
+  return { readonly: true, scope_status: 'legacy-not-session-scoped', concerns: concernResult, timeline: timelineResult, moods: moodResult }
 }

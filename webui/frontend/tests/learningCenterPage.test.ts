@@ -23,32 +23,32 @@ test('学习中心 API client 覆盖六区域和安全变更端点', () => {
 })
 
 test('学习中心是候选唯一前端入口，旧 Agent 反馈页不可导航', () => {
-  assert.match(routesSource, /path: '\/learning-center'/)
+  assert.match(routesSource, /path: '\/learning'/)
   assert.match(routesSource, /LearningCenterPage/)
-  assert.match(sidebarSource, /'\/learning-center'/)
+  assert.match(sidebarSource, /appRoutes\.filter\(\(route\) => route\.group === group\.id\)/)
   assert.doesNotMatch(routesSource, /agent-feedback|AgentFeedbackPage|learning-objects|LearningObjectsPage/)
   assert.doesNotMatch(sidebarSource, /agent-feedback|learning-objects/)
-  assert.match(traceSource, /to="\/learning-center"/)
+  assert.match(traceSource, /to="\/learning"/)
   assert.doesNotMatch(traceSource, /to="\/agent-feedback"/)
 })
 
-test('页面保持类型隔离、证据字段和专属审核深链', () => {
-  for (const label of ['来源', '任务', '候选', 'FewShot', '经历/内化', '晋升历史']) {
+test('页面保持过程类型隔离、证据字段和正式对象深链', () => {
+  for (const label of ['来源', '任务', '候选', 'FewShot', '经历 / 内化', '晋升']) {
     assert.match(pageSource, new RegExp(label.replace('/', '\\/')))
   }
-  assert.match(pageSource, /candidate_type === 'few_shot_style'/)
-  assert.match(pageSource, /review_status === 'approved'/)
-  assert.match(pageSource, /非书中真实经历/)
-  for (const evidenceField of ['chapter_reference', 'original_quote', 'participants', 'knowledge_perspective']) {
+  assert.match(pageSource, /candidate_type: 'few_shot_style'/)
+  assert.match(pageSource, /review_status/)
+  assert.match(pageSource, /非亲历/)
+  for (const evidenceField of ['corpus', '章节', '原文', '参与者', '视角']) {
     assert.match(pageSource, new RegExp(evidenceField))
   }
-  assert.match(pageSource, /deep_link/)
-  assert.match(pageSource, /retryable_failed/)
+  assert.match(pageSource, /target_link/)
+  assert.match(pageSource, /retryable/)
   assert.match(pageSource, /安全重试/)
 })
 
-test('页面成功提示只根据 API 返回状态渲染', () => {
-  assert.match(pageSource, /promotion_status === 'succeeded'/)
-  assert.match(pageSource, /promotion_status === 'running' \|\| item\?\.promotion_status === 'queued'/)
-  assert.match(pageSource, /以 API 状态确认结果/)
+test('页面成功提示只根据 API operation 状态渲染', () => {
+  assert.match(pageSource, /result\.operation\.status/)
+  assert.match(pageSource, /promotion_status/)
+  assert.match(pageSource, /以 API 状态确认结果|晋升操作：/)
 })

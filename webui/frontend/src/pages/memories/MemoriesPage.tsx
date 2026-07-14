@@ -1,1013 +1,501 @@
-import { useCallback, useEffect, useState, useTransition, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import {
-  AlertCircleIcon,
-  CheckCircle2Icon,
-  ChevronLeftIcon,
-  ChevronRightIcon,
-  FileEditIcon,
-  Loader2Icon,
-  RefreshCwIcon,
-  SaveIcon,
-  SearchIcon,
-  TagIcon,
-  Trash2Icon,
-  Undo2Icon,
-} from 'lucide-react'
+import { AlertCircleIcon, CheckCircle2Icon, FileEditIcon, Loader2Icon, RefreshCwIcon, SaveIcon, SearchIcon, TagIcon, Trash2Icon, Undo2Icon } from 'lucide-react'
 import { toast } from 'sonner'
 
 import {
+  addMemoryTag,
+  batchDeleteMemories,
   deleteMemory,
+  deleteMemoryTag,
   getMemoryDetail,
+  getSimilarMemories,
+  listLegacyMemories,
   listMemories,
   listSenders,
+  memoryBatchStreamUrl,
   reEmbedMemory,
   runPostStream,
   updateMemory,
-  batchDeleteMemories,
-  getSimilarMemories,
-  addMemoryTag,
-  deleteMemoryTag,
-  type MemoryItem,
+  type LegacyMemoriesResponse,
   type MemoryDetail,
+  type MemoryItem,
+  type MemoryRefInput,
+  type MemoryScope,
   type SenderItem,
+  type SimilarMemoryItem,
   type StreamProgress,
 } from '@/api/memories'
+import { getScopeOptions, scopeOptionsFor } from '@/api/options'
 import { type TagExecutionOptions, type TagWritePolicy } from '@/api/tags'
 import { TagExtractionConfigPanel } from '@/components/tag/TagExtractionConfigPanel'
+import { PaginationControls, QueryState, ScopeSelect, type ObjectRefState } from '@/components/shared'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Field, FieldDescription, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
-import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
+import { useCanonicalScopeDefault, usePaginationSearchParams } from '@/hooks/use-pagination-search-params'
 
-const tagBadgeClass = (type: string): string => {
-  const base = 'badge border font-normal text-[10px]'
-  switch (type) {
-    case 'person':
-      return `${base} bg-pink-500/10 text-pink-500 border-pink-500/20`
-    case 'topic':
-      return `${base} bg-blue-500/10 text-blue-500 border-blue-500/20`
-    case 'entity':
-      return `${base} bg-red-500/10 text-red-500 border-red-500/20`
-    case 'event':
-      return `${base} bg-emerald-500/10 text-emerald-500 border-emerald-500/20`
-    case 'emotion':
-      return `${base} bg-amber-500/10 text-amber-500 border-amber-500/20`
-    case 'fact':
-      return `${base} bg-indigo-500/10 text-indigo-500 border-indigo-500/20`
-    default:
-      return `${base} bg-muted text-muted-foreground border-border/50`
-  }
+const SOURCES = ['live', 'chat', 'noise', 'core', 'identity_quarantine', 'evolution', 'bzz_experience', 'experience', 'lore', 'book_lore', 'oni_lore', 'bot_reply', 'fewshot']
+
+const DEEP_LINK_LABELS: Record<Exclude<ObjectRefState, 'ready'>, string> = {
+  'not-found': '对象不存在、引用无效或 revision 已变化；不会使用裸 ID 回退定位。',
+  'scope-mismatch': '对象引用与当前 Bot / 会话 Scope 不匹配。',
+  'version-stale': '对象版本已更新，请从最新列表重新打开。',
+}
+
+interface ConfirmAction {
+  title: string
+  description: string
+  label: string
+  destructive?: boolean
+  run: () => Promise<void> | void
+}
+
+function deepLinkFailureState(reason: unknown): ObjectRefState {
+  const payload = reason instanceof Error && 'payload' in reason ? (reason as Error & { payload?: unknown }).payload : undefined
+  const code = typeof payload === 'object' && payload !== null && 'error' in payload ? (payload as { error?: { code?: unknown } }).error?.code : undefined
+  if (code === 'scope_mismatch') return 'scope-mismatch'
+  if (code === 'version_stale') return 'version-stale'
+  return 'not-found'
 }
 
 function formatTime(seconds: unknown): string {
-  const s = Number(seconds)
-  if (!Number.isFinite(s) || s <= 0) return '-'
-  return new Date(s * 1000).toLocaleString('zh-CN')
+  const value = Number(seconds)
+  return Number.isFinite(value) && value > 0 ? new Date(value * 1000).toLocaleString('zh-CN') : '未记录'
+}
+
+function tagBadgeClass(type = 'keyword'): string {
+  const colors: Record<string, string> = {
+    person: 'border-pink-500/20 bg-pink-500/10 text-pink-500',
+    topic: 'border-blue-500/20 bg-blue-500/10 text-blue-500',
+    entity: 'border-red-500/20 bg-red-500/10 text-red-500',
+    event: 'border-emerald-500/20 bg-emerald-500/10 text-emerald-500',
+    emotion: 'border-amber-500/20 bg-amber-500/10 text-amber-500',
+  }
+  return `border font-normal text-[10px] ${colors[type] ?? 'border-border/50 bg-muted text-muted-foreground'}`
 }
 
 export function MemoriesPage() {
-  const [isPendingQuery, startQueryTransition] = useTransition()
-  const [searchParams] = useSearchParams()
-  const initialOpenHandledRef = useRef(false)
-  
-  // 1. 过滤检索状态
-  const [search, setSearch] = useState(() => searchParams.get('search') ?? '')
-  const [source, setSource] = useState('')
-  const [sender, setSender] = useState('')
-  const [hasTags, setHasTags] = useState('')
-  const [hasVector, setHasVector] = useState(() => searchParams.get('has_vector') ?? '')
-  const [configDialogOpen, setConfigDialogOpen] = useState(false)
-  
+  const pagination = usePaginationSearchParams()
+  const [params, setParams] = useSearchParams()
+  const botId = params.get('bot_id') ?? ''
+  const sessionId = params.get('session_id') ?? ''
+  const visibility = params.get('visibility') ?? 'group'
+  const objectRef = params.get('ref') ?? ''
+  const objectId = params.get('object_id') ?? ''
+  const search = params.get('search') ?? ''
+  const source = params.get('source') ?? ''
+  const sender = params.get('sender') ?? ''
+  const hasTags = params.get('has_tags') ?? ''
+  const hasVector = params.get('has_vector') ?? ''
+  useCanonicalScopeDefault({ botId, sessionId, setFilters: pagination.setFilters })
+  const scope = useMemo<MemoryScope | null>(() => botId && sessionId && visibility === 'group' ? { bot_id: botId, session_id: sessionId, visibility: 'group' } : null, [botId, sessionId, visibility])
+
+  const [searchDraft, setSearchDraft] = useState(search)
+  const [payload, setPayload] = useState<Awaited<ReturnType<typeof listMemories>> | null>(null)
+  const [status, setStatus] = useState<'loading' | 'success' | 'empty' | 'unknown' | 'error'>('empty')
+  const [error, setError] = useState<unknown>()
   const [senders, setSenders] = useState<SenderItem[]>([])
-  const [memories, setMemories] = useState<MemoryItem[]>([])
-  const [total, setTotal] = useState<number | null>(null)
-  const [hasMore, setHasMore] = useState(false)
-  const [page, setPage] = useState(1)
-  const size = 30
+  const [selectedRefs, setSelectedRefs] = useState<string[]>([])
+  const [legacyPayload, setLegacyPayload] = useState<LegacyMemoriesResponse | null>(null)
+  const [legacyOffset, setLegacyOffset] = useState(0)
+  const [legacyLoading, setLegacyLoading] = useState(true)
 
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-
-  // 2. 复选多选管理器
-  const [selectedIds, setSelectedIds] = useState<number[]>([])
-
-  // 3. 详情抽屉 Sheet 状态
   const [detailOpen, setDetailOpen] = useState(false)
-  const [detailId, setDetailId] = useState<number | null>(null)
   const [detail, setDetail] = useState<MemoryDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
-  const [detailSaving, setDetailSaving] = useState(false)
-  const [detailError, setDetailError] = useState('')
-  const [historyStack, setHistoryStack] = useState<number[]>([])
+  const [deepLinkStatus, setDeepLinkStatus] = useState<'loading' | ObjectRefState | null>(null)
+  const [content, setContent] = useState('')
+  const [importance, setImportance] = useState(0)
+  const [saving, setSaving] = useState(false)
   const [similarLoading, setSimilarLoading] = useState(false)
-  const [similarItems, setSimilarItems] = useState<any[]>([])
+  const [similarItems, setSimilarItems] = useState<SimilarMemoryItem[]>([])
   const [newTagName, setNewTagName] = useState('')
+  const resolvedRef = useRef('')
 
-  // 4. SSE 异步流进度模态弹窗状态
+  const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null)
+  const [confirmRunning, setConfirmRunning] = useState(false)
+  const [configOpen, setConfigOpen] = useState(false)
   const [streamOpen, setStreamOpen] = useState(false)
-  const [streamTitle, setStreamOpenTitle] = useState('')
+  const [streamTitle, setStreamTitle] = useState('')
   const [streamProgress, setStreamProgress] = useState<StreamProgress | null>(null)
   const [streamLog, setStreamLog] = useState<string[]>([])
   const [streamRunning, setStreamRunning] = useState(false)
   const [tagBatchSize, setTagBatchSize] = useState(20)
   const [tagWritePolicy, setTagWritePolicy] = useState<TagWritePolicy>('missing_only')
 
-  const handleTagOptionsChange = useCallback((options: Required<TagExecutionOptions>) => {
-    setTagBatchSize(options.tag_batch_size)
-    setTagWritePolicy(options.tag_write_policy)
-  }, [])
+  useEffect(() => setSearchDraft(search), [search])
 
-  // 加载数据列表
-  async function loadData(nextPage = page) {
-    setLoading(true)
-    setError('')
+  const loadBots = useCallback(async () => scopeOptionsFor(await getScopeOptions(), ['bot']), [])
+  const loadSessions = useCallback(async () => {
+    const options = scopeOptionsFor(await getScopeOptions(), ['session'])
+    return botId ? options.filter((option) => option.description?.startsWith(`${botId} ·`)) : options
+  }, [botId])
+
+  const load = useCallback(async () => {
+    if (!scope) {
+      setPayload(null)
+      setSelectedRefs([])
+      setStatus('empty')
+      return
+    }
+    setStatus('loading')
+    setError(undefined)
     try {
-      const payload = await listMemories({
-        page: nextPage,
-        size,
-        source: source === 'all' ? '' : source,
-        sender: sender === 'all' ? '' : sender,
-        has_tags: hasTags === 'all' ? '' : hasTags,
-        has_vector: hasVector === 'all' ? '' : hasVector,
-        search,
-      })
-      
-      setMemories(payload.items ?? [])
-      setTotal(payload.total)
-      setHasMore(payload.has_more)
-      setPage(nextPage)
-      
-      // 重置勾选
-      setSelectedIds([])
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '记忆列表加载失败')
-      setMemories([])
-    } finally {
-      setLoading(false)
+      const next = await listMemories({ ...scope, limit: pagination.limit, offset: pagination.offset, search: search || undefined, source: source || undefined, sender: sender || undefined, has_tags: hasTags || undefined, has_vector: hasVector || undefined })
+      setPayload(next)
+      setSelectedRefs([])
+      setStatus(next.items.length ? 'success' : next.page.total_status === 'unavailable' ? 'unknown' : 'empty')
+    } catch (reason) {
+      setPayload(null)
+      setError(reason)
+      setStatus('error')
     }
-  }
+  }, [hasTags, hasVector, pagination.limit, pagination.offset, scope, search, sender, source])
 
-  // 加载发送者下拉框
-  async function loadSendersList() {
-    try {
-      const res = await listSenders()
-      setSenders(res.senders ?? [])
-    } catch {
-      // 容错：允许发送者加载失败而不崩溃
-    }
-  }
-
+  useEffect(() => { void load() }, [load])
   useEffect(() => {
-    void loadSendersList()
-  }, [])
-
+    let cancelled = false
+    setLegacyLoading(true)
+    listLegacyMemories({ limit: 25, offset: legacyOffset, search: search || undefined, source: source || undefined })
+      .then((result) => { if (!cancelled) setLegacyPayload(result) })
+      .catch(() => { if (!cancelled) setLegacyPayload(null) })
+      .finally(() => { if (!cancelled) setLegacyLoading(false) })
+    return () => { cancelled = true }
+  }, [legacyOffset, search, source])
   useEffect(() => {
-    void loadData(1)
-    // oxlint-disable-next-line react-hooks/exhaustive-deps
-  }, [source, sender, hasTags, hasVector])
+    if (!scope) { setSenders([]); return }
+    let cancelled = false
+    listSenders(scope).then((result) => { if (!cancelled) setSenders(result.senders) }).catch(() => { if (!cancelled) setSenders([]) })
+    return () => { cancelled = true }
+  }, [scope])
 
-  // 执行搜索
-  function handleSearchSubmit(e?: React.FormEvent) {
-    if (e) e.preventDefault()
-    startQueryTransition(() => {
-      void loadData(1)
-    })
-  }
-
-  // 重置过滤
-  function handleResetFilters() {
-    setSearch('')
-    setSource('')
-    setSender('')
-    setHasTags('')
-    setHasVector('')
-    startQueryTransition(() => {
-      void loadData(1)
-    })
-  }
-
-  // 全选/反选
-  function handleToggleSelectAll(checked: boolean) {
-    if (checked) {
-      setSelectedIds(memories.map((m) => m.id))
-    } else {
-      setSelectedIds([])
-    }
-  }
-
-  function handleRowCheckChange(id: number, checked: boolean) {
-    if (checked) {
-      setSelectedIds((prev) => [...prev, id])
-    } else {
-      setSelectedIds((prev) => prev.filter((item) => item !== id))
-    }
-  }
-
-  // 查看详情（支持无限级向量穿透和历史返回）
-  async function handleOpenDetail(id: number, pushHistory = true) {
-    if (pushHistory && detailId && detailId !== id) {
-      setHistoryStack((prev) => [...prev, detailId])
-    }
+  const hydrateDetail = useCallback(async (detailUrl: string) => {
     setDetailOpen(true)
-    setDetailId(id)
     setDetail(null)
     setDetailLoading(true)
-    setDetailError('')
-    setSimilarItems([])
     setSimilarLoading(true)
-    
+    setSimilarItems([])
     try {
-      const res = await getMemoryDetail(id)
-      setDetail(res)
-      
-      // 异步懒加载相似向量推荐 (C-HNSW ≤15ms)
+      const result = await getMemoryDetail(detailUrl)
+      resolvedRef.current = result.item.ref
+      setDetail(result.item)
+      setContent(result.item.content)
+      setImportance(Number(result.item.importance ?? 0))
+      setDeepLinkStatus('ready')
       try {
-        const simRes = await getSimilarMemories(id)
-        setSimilarItems(simRes.items ?? [])
+        const similar = await getSimilarMemories(result.item)
+        setSimilarItems(similar.items ?? [])
       } catch {
-        // 允许相似列表加载失败而不卡死核心详情
+        setSimilarItems([])
       }
-    } catch (err) {
-      setDetailError(err instanceof Error ? err.message : '加载详情失败')
+      return result.item
     } finally {
       setDetailLoading(false)
       setSimilarLoading(false)
     }
-  }
-
-  // 返回详情的上一级
-  function handleBackDetail() {
-    if (historyStack.length === 0) return
-    const prevId = historyStack[historyStack.length - 1]
-    setHistoryStack((prev) => prev.slice(0, -1))
-    void handleOpenDetail(prevId, false)
-  }
-
-  // 物理删除单个标签关联
-  async function handleRemoveTag(tagName: string) {
-    if (!detailId || !detail) return
-    try {
-      await deleteMemoryTag(detailId, tagName)
-      toast.success(`成功移除了标签 "${tagName}"`)
-      setDetail({
-        ...detail,
-        tags: (detail.tags ?? []).filter((t) => t.name !== tagName)
-      })
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '标签移除失败')
-    }
-  }
-
-  // 回车极速新增标签
-  async function handleAddTag(e: React.FormEvent) {
-    e.preventDefault()
-    if (!detailId || !detail) return
-    const name = newTagName.trim()
-    if (!name) return
-
-    if ((detail.tags ?? []).some((t) => t.name.toLowerCase() === name.toLowerCase())) {
-      toast.warning('标签已关联，无需重复添加')
-      return
-    }
-
-    try {
-      await addMemoryTag(detailId, name)
-      toast.success(`成功关联了标签 "${name}"`)
-      setDetail({
-        ...detail,
-        tags: [...(detail.tags ?? []), { name, type: 'custom' }]
-      })
-      setNewTagName('')
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '添加标签失败')
-    }
-  }
+  }, [])
 
   useEffect(() => {
-    const openId = Number(searchParams.get('open'))
-    if (!initialOpenHandledRef.current && Number.isFinite(openId) && openId > 0) {
-      initialOpenHandledRef.current = true
-      void handleOpenDetail(openId)
-    }
-    // oxlint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams])
-
-  // 保存单条详情编辑
-  async function handleSaveDetail() {
-    if (!detailId || !detail) return
-    setDetailSaving(true)
-    try {
-      await updateMemory(detailId, detail.content, detail.importance ?? 0.5)
-      toast.success('记忆内容与重要度更新成功')
-      
-      // 更新列表行上的内容缓存
-      setMemories((prev) =>
-        prev.map((m) => {
-          if (m.id === detailId) {
-            return { ...m, content: detail.content }
-          }
-          return m
-        })
-      )
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '保存失败')
-    } finally {
-      setDetailSaving(false)
-    }
-  }
-
-  // 单条重新向量特征计算
-  async function handleReEmbedSingle(id: number) {
-    setDetailSaving(true)
-    try {
-      const res = await reEmbedMemory(id)
-      if (res.ok) {
-        toast.success('重新向量化成功')
-        if (detail) {
-          setDetail({ ...detail, has_vector: true })
-        }
-        setMemories((prev) =>
-          prev.map((m) => {
-            if (m.id === id) {
-              return { ...m, has_vector: true }
-            }
-            return m
-          })
-        )
-      } else {
-        throw new Error(res.error ?? '计算失败')
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '操作失败')
-    } finally {
-      setDetailSaving(false)
-    }
-  }
-
-  // 单条删除
-  async function handleDeleteSingle(id: number) {
-    if (!confirm(`确定要永久物理删除记忆 #${id} 吗？`)) return
-    try {
-      await deleteMemory(id)
-      toast.success(`已删除记忆 #${id}`)
+    if (!objectRef) { setDeepLinkStatus(null); return }
+    if (resolvedRef.current === objectRef) return
+    if (!scope) { setDetail(null); setDeepLinkStatus('scope-mismatch'); return }
+    if (objectId && !/^\d+$/.test(objectId)) { setDetail(null); setDeepLinkStatus('not-found'); return }
+    const query = new URLSearchParams({ ref: objectRef, ...scope })
+    const endpoint = objectId ? `/api/memories/${objectId}?${query.toString()}` : `/api/memories/resolve?${query.toString()}`
+    let cancelled = false
+    setDeepLinkStatus('loading')
+    hydrateDetail(endpoint).catch((reason) => {
+      if (cancelled) return
+      setDetail(null)
       setDetailOpen(false)
-      setMemories((prev) => prev.filter((m) => m.id !== id))
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '删除失败')
-    }
-  }
+      setDeepLinkStatus(deepLinkFailureState(reason))
+    })
+    return () => { cancelled = true }
+  }, [hydrateDetail, objectId, objectRef, scope])
 
-  // 批量物理删除
-  async function handleBatchDelete() {
-    const count = selectedIds.length
-    if (!count) return
-    if (!confirm(`⚠️ 警告：确定要永久物理擦除这 ${count} 条记忆吗？这会导致相关的关联标签被清理，不可逆！`)) return
-    
-    setLoading(true)
+  async function open(item: MemoryItem) {
     try {
-      await batchDeleteMemories(selectedIds)
-      toast.success(`成功批量物理删除了 ${count} 条记忆`)
-      setSelectedIds([])
-      await loadData(page)
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '批量删除失败')
-      setLoading(false)
+      const result = await hydrateDetail(item.detail_url)
+      setParams((current) => {
+        const next = new URLSearchParams(current)
+        next.set('ref', result.ref)
+        next.set('object_id', String(result.id))
+        next.set('bot_id', result.bot_id)
+        next.set('session_id', result.session_id)
+        next.set('visibility', result.visibility)
+        return next
+      })
+    } catch (reason) {
+      setDeepLinkStatus(deepLinkFailureState(reason))
+      toast.error(reason instanceof Error ? reason.message : '记忆详情加载失败')
     }
   }
 
-  // 批量重新向量化计算 (SSE 流)
-  function handleBatchReEmbed() {
-    const count = selectedIds.length
-    if (!count) {
-      toast.warning('请先勾选要重新向量化的记忆')
-      return
-    }
-    if (streamRunning) return
-    setStreamRunning(true)
-    
-    setStreamLog([])
-    setStreamProgress(null)
-    setStreamOpenTitle('批量重新向量特征计算')
-    setStreamOpen(true)
-    
-    setStreamLog((prev) => [...prev, `[INIT] 开始对选中的 ${count} 条记忆进行向量重刷...`])
-    
-    void runPostStream('/api/memories/batch/re-embed', selectedIds, (state) => {
-      setStreamProgress(state)
-      if (state.processed !== undefined) {
-        const logLine = `[PROGRESS] 进度: ${Math.round(state.progress * 100)}% | 已处理: ${state.processed}/${state.total} | 失败: ${state.errors ?? 0}`
-        setStreamLog((prev) => {
-          // 只保留最后50条，避免极多进度时卡死DOM
-          const next = [...prev, logLine]
-          return next.slice(-50)
-        })
-      }
-      if (state.done) {
-        setStreamLog((prev) => [...prev, `[SUCCESS] 重新计算特征完毕。成功: ${Number(state.processed) - Number(state.errors)}, 失败: ${state.errors}`])
-        toast.success('批量特征计算已全部完成')
-        setSelectedIds([])
-        void loadData(page)
-      }
-      if (state.error) {
-        setStreamLog((prev) => [...prev, `[ERROR] 流式异常中断: ${state.error}`])
-        toast.error(`流式异常: ${state.error}`)
-      }
-    }).catch((err) => {
-      const msg = err instanceof Error ? err.message : '连接错误'
-      setStreamLog((prev) => [...prev, `[CRITICAL_FAIL] 传输通道不可用: ${msg}`])
-      toast.error(`传输失败: ${msg}`)
-    }).finally(() => {
-      setStreamRunning(false)
+  function closeDetail() {
+    setDetailOpen(false)
+    setDetail(null)
+    setSimilarItems([])
+    resolvedRef.current = ''
+    setParams((current) => {
+      const next = new URLSearchParams(current)
+      next.delete('ref')
+      next.delete('object_id')
+      return next
     })
   }
 
-  // 批量提取标签 (SSE 流)
-  function handleBatchExtractTags() {
-    const count = selectedIds.length
-    if (!count) {
-      toast.warning('请先勾选要提取 Tag 的记忆')
-      return
-    }
-    if (streamRunning) return
-    setStreamRunning(true)
-    
-    setStreamLog([])
-    setStreamProgress(null)
-    setStreamOpenTitle('批量 LLM 标签提取（Tag Extraction）')
-    setStreamOpen(true)
-    
-    setStreamLog((prev) => [...prev, `[INIT] 开始对选中的 ${count} 条记忆异步触发 LLM Tag 提取分析；tag_batch_size=${tagBatchSize}，tag_write_policy=${tagWritePolicy}...`])
-    
-    void runPostStream('/api/memories/batch/extract-tags', selectedIds, (state) => {
-      setStreamProgress(state)
-      if (state.processed !== undefined) {
-        const logLine = `[PROGRESS] 分析中: ${Math.round(state.progress * 100)}% | 已分析: ${state.processed}/${state.total} | 写入: ${state.tagged ?? 0} | 失败: ${state.errors ?? 0}`
-        setStreamLog((prev) => {
-          const next = [...prev, logLine]
-          return next.slice(-50)
-        })
-      }
-      if (state.done) {
-        setStreamLog((prev) => [...prev, `[SUCCESS] 标签处理提取完毕！`])
-        toast.success('批量标签分析提取已全部完成')
-        setSelectedIds([])
-        void loadData(page)
-      }
-      if (state.error) {
-        setStreamLog((prev) => [...prev, `[ERROR] 标签分析中断: ${state.error}`])
-        toast.error(`分析中断: ${state.error}`)
-      }
-    }, {
-      payload: {
-        extract_tags: true,
-        tag_batch_size: tagBatchSize,
-        tag_write_policy: tagWritePolicy,
-      },
-    }).catch((err) => {
-      const msg = err instanceof Error ? err.message : '连接错误'
-      setStreamLog((prev) => [...prev, `[CRITICAL_FAIL] 无法分析: ${msg}`])
-      toast.error(`分析失败: ${msg}`)
-    }).finally(() => {
-      setStreamRunning(false)
-    })
+  function submitSearch(event: FormEvent) {
+    event.preventDefault()
+    pagination.setFilters({ search: searchDraft || null })
   }
 
-  const isAllSelected = memories.length > 0 && selectedIds.length === memories.length
+  function resetFilters() {
+    setSearchDraft('')
+    pagination.setFilters({ search: null, source: null, sender: null, has_tags: null, has_vector: null })
+  }
+
+  function selectedItems(): MemoryItem[] {
+    const selected = new Set(selectedRefs)
+    return payload?.items.filter((item) => selected.has(item.ref)) ?? []
+  }
+
+  function toggleAll(checked: boolean) {
+    setSelectedRefs(checked ? (payload?.items.map((item) => item.ref) ?? []) : [])
+  }
+
+  function toggleRow(ref: string, checked: boolean) {
+    setSelectedRefs((current) => checked ? [...current, ref] : current.filter((value) => value !== ref))
+  }
+
+  async function saveDetail() {
+    if (!detail) return
+    setSaving(true)
+    try {
+      const result = await updateMemory(detail.mutation_url, content, importance)
+      if (!result.ok || result.operation.status !== 'succeeded' || !result.item) throw new Error('服务端未确认更新成功')
+      const next = result.item
+      resolvedRef.current = next.ref
+      setDetail(next)
+      setContent(next.content)
+      setParams((current) => {
+        const paramsNext = new URLSearchParams(current)
+        paramsNext.set('ref', next.ref)
+        paramsNext.set('object_id', String(next.id))
+        return paramsNext
+      })
+      toast.success('记忆已按当前 Scope 更新')
+      await load()
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : '更新失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function removeDetail() {
+    if (!detail) return
+    setSaving(true)
+    try {
+      const result = await deleteMemory(detail.mutation_url)
+      if (!result.ok || result.operation.status !== 'succeeded') throw new Error('服务端未确认删除成功')
+      toast.success('记忆已删除')
+      closeDetail()
+      await load()
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : '删除失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function reEmbedDetail() {
+    if (!detail) return
+    setSaving(true)
+    try {
+      const result = await reEmbedMemory(detail)
+      if (!result.ok) throw new Error(result.error ?? '服务端未确认向量化成功')
+      setDetail({ ...detail, has_vector: true })
+      toast.success('重新向量化已完成')
+      await load()
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : '重新向量化失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function addTag(event: FormEvent) {
+    event.preventDefault()
+    if (!detail) return
+    const name = newTagName.trim()
+    if (!name) return
+    if ((detail.tags ?? []).some((tag) => tag.name.toLowerCase() === name.toLowerCase())) { toast.warning('该标签已关联'); return }
+    try {
+      await addMemoryTag(detail, name)
+      setDetail({ ...detail, tags: [...(detail.tags ?? []), { name, type: 'custom' }] })
+      setNewTagName('')
+      toast.success(`已关联标签“${name}”`)
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : '标签关联失败')
+    }
+  }
+
+  async function removeTag(name: string) {
+    if (!detail) return
+    try {
+      await deleteMemoryTag(detail, name)
+      setDetail({ ...detail, tags: (detail.tags ?? []).filter((tag) => tag.name !== name) })
+      toast.success(`已移除标签“${name}”`)
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : '标签移除失败')
+    }
+  }
+
+  async function batchDelete() {
+    if (!scope) return
+    const refs: MemoryRefInput[] = selectedItems().map((item) => ({ id: item.id, ref: item.ref }))
+    const result = await batchDeleteMemories(scope, refs)
+    if (!result.ok) throw new Error('服务端未确认批量删除成功')
+    toast.success(`已删除 ${result.deleted} 条记忆`)
+    await load()
+  }
+
+  function startStream(action: 're-embed' | 'extract-tags') {
+    if (!scope || streamRunning) return
+    const refs: MemoryRefInput[] = selectedItems().map((item) => ({ id: item.id, ref: item.ref }))
+    if (!refs.length) return
+    setStreamTitle(action === 're-embed' ? '批量重新向量化' : '批量提取 Tag')
+    setStreamProgress(null)
+    setStreamLog([`[INIT] 已提交 ${refs.length} 个当前 Scope 的 ObjectRef。`])
+    setStreamOpen(true)
+    setStreamRunning(true)
+    void runPostStream(memoryBatchStreamUrl(action, scope), refs, (state) => {
+      setStreamProgress(state)
+      setStreamLog((current) => [...current, `[PROGRESS] ${Math.round((state.progress ?? 0) * 100)}% · ${state.processed ?? 0}/${state.total} · 失败 ${state.errors ?? 0}`].slice(-50))
+      if (state.done) {
+        setStreamLog((current) => [...current, '[SUCCESS] 批量任务完成。'])
+        setSelectedRefs([])
+        void load()
+      }
+    }, action === 'extract-tags' ? { payload: { extract_tags: true, tag_batch_size: tagBatchSize, tag_write_policy: tagWritePolicy } } : undefined).catch((reason) => {
+      const message = reason instanceof Error ? reason.message : '批量任务失败'
+      setStreamLog((current) => [...current, `[ERROR] ${message}`])
+      toast.error(message)
+    }).finally(() => setStreamRunning(false))
+  }
+
+  async function executeConfirm() {
+    if (!confirmAction) return
+    setConfirmRunning(true)
+    try {
+      await confirmAction.run()
+      setConfirmAction(null)
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : '操作失败')
+    } finally {
+      setConfirmRunning(false)
+    }
+  }
+
+  const items = payload?.items ?? []
+  const allSelected = items.length > 0 && selectedRefs.length === items.length
+  const totalDescription = payload?.page.total_status === 'exact' && payload.page.total !== null
+    ? `当前 Scope 共 ${payload.page.total.toLocaleString()} 条`
+    : items.length ? `当前页 ${items.length} 条；服务端未提供总数` : '等待选择 Scope'
 
   return (
-    <div className="flex flex-col gap-6">
-      {/* ─── 过滤器卡片 ─── */}
+    <div data-slot="memories-page" className="flex flex-col gap-5">
       <Card>
-        <CardHeader className="py-4 shrink-0">
+        <CardHeader className="py-4">
           <CardTitle>记忆管理器</CardTitle>
-          <CardDescription>
-            直接管理 WaveMemory 引擎中的长期记忆（总容量 17 万条）。支持条件检索、在线编辑内容与权重分，以及批量重新特征计算与标签提取。
-          </CardDescription>
+          <CardDescription>保留紧凑检索与管理能力；所有读取和变更均绑定真实 Bot、canonical session 与服务端签发 ObjectRef，不会从裸 ID 补默认 Scope。</CardDescription>
         </CardHeader>
         <CardContent className="pt-0">
-          <form className="flex flex-col gap-4" onSubmit={handleSearchSubmit}>
-            <FieldGroup className="grid gap-4 md:grid-cols-5">
-              <Field>
-                <FieldLabel htmlFor="mem-search">关键词</FieldLabel>
-                <Input
-                  id="mem-search"
-                  placeholder="搜索记忆内容..."
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                />
-              </Field>
-              <Field>
-                <FieldLabel>记忆来源</FieldLabel>
-                <Select value={source || 'all'} onValueChange={(val) => setSource(val === 'all' ? '' : val)}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="全部来源" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">全部来源</SelectItem>
-                    <SelectItem value="live">live（群聊长期记忆）</SelectItem>
-                    <SelectItem value="chat">chat（群聊/私聊）</SelectItem>
-                    <SelectItem value="noise">noise（日常琐碎）</SelectItem>
-                    <SelectItem value="core">core（核心记忆）</SelectItem>
-                    <SelectItem value="identity_quarantine">identity_quarantine（身份隔离）</SelectItem>
-                    <SelectItem value="evolution">evolution（性格进化）</SelectItem>
-                    <SelectItem value="bzz_experience">bzz_experience（第一人称经历）</SelectItem>
-                    <SelectItem value="experience">experience（经历）</SelectItem>
-                    <SelectItem value="lore">lore（背景知识）</SelectItem>
-                    <SelectItem value="book_lore">book_lore（小说世界观）</SelectItem>
-                    <SelectItem value="oni_lore">oni_lore（缺氧策略知识）</SelectItem>
-                    <SelectItem value="bot_reply">bot_reply（Bot 回复素材）</SelectItem>
-                    <SelectItem value="fewshot">fewshot（风格范例）</SelectItem>
-                  </SelectContent>
-                </Select>
-              </Field>
-              <Field>
-                <FieldLabel>发送人</FieldLabel>
-                <Select value={sender || 'all'} onValueChange={(val) => setSender(val === 'all' ? '' : val)}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="全部发送人" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">全部发送人</SelectItem>
-                    {senders.map((s) => (
-                      <SelectItem key={s.name} value={s.name}>
-                        {s.name} ({s.count})
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </Field>
-              <Field>
-                <FieldLabel>Tag 状态</FieldLabel>
-                <Select value={hasTags || 'all'} onValueChange={(val) => setHasTags(val === 'all' ? '' : val)}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="全部状态" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">全部</SelectItem>
-                    <SelectItem value="yes">有标签</SelectItem>
-                    <SelectItem value="no">无标签</SelectItem>
-                  </SelectContent>
-                </Select>
-              </Field>
-              <Field>
-                <FieldLabel>特征向量</FieldLabel>
-                <Select value={hasVector || 'all'} onValueChange={(val) => setHasVector(val === 'all' ? '' : val)}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="全部状态" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">全部</SelectItem>
-                    <SelectItem value="yes">有向量</SelectItem>
-                    <SelectItem value="no">无向量</SelectItem>
-                  </SelectContent>
-                </Select>
-              </Field>
-            </FieldGroup>
-
-            <div className="flex flex-wrap items-center gap-2">
-              <Button disabled={loading || isPendingQuery} type="submit">
-                {isPendingQuery ? <Loader2Icon className="animate-spin" data-icon="inline-start" /> : <SearchIcon data-icon="inline-start" />}
-                搜索记忆
-              </Button>
-              <Button disabled={loading} variant="outline" type="button" onClick={handleResetFilters}>
-                <Undo2Icon data-icon="inline-start" />
-                重置
-              </Button>
+          <form className="flex flex-col gap-3" onSubmit={submitSearch}>
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-7">
+              <ScopeSelect value={botId || undefined} loadOptions={loadBots} label="Bot" onValueChange={(value) => pagination.setFilters({ bot_id: value, session_id: null })} />
+              <ScopeSelect value={sessionId || undefined} loadOptions={loadSessions} label="群 / 会话" disabled={!botId} onValueChange={(value) => pagination.setFilters({ session_id: value })} />
+              <Field><FieldLabel htmlFor="memory-search">关键词</FieldLabel><Input id="memory-search" placeholder="搜索记忆内容" value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)} /></Field>
+              <Field><FieldLabel>来源</FieldLabel><Select value={source || 'all'} onValueChange={(value) => pagination.setFilters({ source: value === 'all' ? null : value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部来源</SelectItem>{SOURCES.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select></Field>
+              <Field><FieldLabel>发送者</FieldLabel><Select value={sender || 'all'} onValueChange={(value) => pagination.setFilters({ sender: value === 'all' ? null : value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部发送者</SelectItem>{senders.map((item) => <SelectItem key={item.name} value={item.name}>{item.name} ({item.count})</SelectItem>)}</SelectContent></Select></Field>
+              <Field><FieldLabel>Tag</FieldLabel><Select value={hasTags || 'all'} onValueChange={(value) => pagination.setFilters({ has_tags: value === 'all' ? null : value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部</SelectItem><SelectItem value="true">有标签</SelectItem><SelectItem value="false">无标签</SelectItem></SelectContent></Select></Field>
+              <Field><FieldLabel>向量</FieldLabel><Select value={hasVector || 'all'} onValueChange={(value) => pagination.setFilters({ has_vector: value === 'all' ? null : value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部</SelectItem><SelectItem value="true">有向量</SelectItem><SelectItem value="false">无向量</SelectItem></SelectContent></Select></Field>
             </div>
+            <div className="flex flex-wrap gap-2"><Button type="submit" disabled={!scope || status === 'loading'}><SearchIcon data-icon="inline-start" />搜索</Button><Button type="button" variant="outline" onClick={resetFilters}><Undo2Icon data-icon="inline-start" />重置筛选</Button></div>
           </form>
         </CardContent>
       </Card>
 
-      {error ? (
-        <Alert variant="destructive">
-          <AlertCircleIcon />
-          <AlertTitle>记忆列表加载失败</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      ) : null}
+      {deepLinkStatus && deepLinkStatus !== 'ready' ? <Alert variant={deepLinkStatus === 'loading' ? 'default' : 'destructive'}><AlertTitle>{deepLinkStatus === 'loading' ? '正在校验对象深链' : '无法打开深链记忆'}</AlertTitle><AlertDescription>{deepLinkStatus === 'loading' ? '正在验证 ObjectRef、当前 Scope 与 canonical revision。' : DEEP_LINK_LABELS[deepLinkStatus]}</AlertDescription></Alert> : null}
 
-      {/* ─── 批量控制条（有选中时出现） ─── */}
-      {selectedIds.length > 0 ? (
-        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-primary bg-primary/5 p-3.5 animate-in slide-in-from-top duration-200">
-          <Badge variant="secondary" className="bg-primary/10 text-primary hover:bg-primary/10 border-primary/20">
-            已勾选 {selectedIds.length} 条记忆
-          </Badge>
-          <Button variant="destructive" size="sm" onClick={() => void handleBatchDelete()}>
-            <Trash2Icon data-icon="inline-start" />
-            一键物理删除
-          </Button>
-          <Button disabled={streamRunning || selectedIds.length === 0} variant="outline" size="sm" className="border-primary/20 hover:bg-primary/5" onClick={handleBatchReEmbed}>
-            <RefreshCwIcon data-icon="inline-start" />
-            {streamRunning ? '处理中' : '批量重新向量特征计算'}
-          </Button>
-          <Button disabled={streamRunning || selectedIds.length === 0} variant="outline" size="sm" className="border-primary/20 hover:bg-primary/5" onClick={handleBatchExtractTags}>
-            <TagIcon data-icon="inline-start" />
-            {streamRunning ? '处理中' : '批量提取 Tag'}
-          </Button>
+      {selectedRefs.length ? <div className="flex flex-wrap items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 p-3"><Badge variant="secondary">已选 {selectedRefs.length} 条</Badge><Button size="sm" variant="destructive" onClick={() => setConfirmAction({ title: '永久删除所选记忆？', description: `将删除 ${selectedRefs.length} 条当前 Scope 记忆及其标签关联，操作不可撤销。`, label: '确认批量删除', destructive: true, run: batchDelete })}><Trash2Icon data-icon="inline-start" />批量删除</Button><Button size="sm" variant="outline" disabled={streamRunning} onClick={() => setConfirmAction({ title: '批量重新向量化？', description: `将重算 ${selectedRefs.length} 条记忆的向量并触发索引修复。`, label: '确认执行', run: () => startStream('re-embed') })}><RefreshCwIcon data-icon="inline-start" />批量 re-embed</Button><Button size="sm" variant="outline" disabled={streamRunning} onClick={() => setConfirmAction({ title: '批量提取 Tag？', description: `将按当前策略处理 ${selectedRefs.length} 条记忆；append/replace 可能改变已有标签。`, label: '确认执行', run: () => startStream('extract-tags') })}><TagIcon data-icon="inline-start" />批量提取 Tag</Button><Button size="sm" variant="outline" onClick={() => setConfigOpen(true)}>提取配置</Button><Button size="sm" variant="ghost" className="ml-auto" onClick={() => setSelectedRefs([])}>取消选择</Button></div> : null}
 
-          {/* 齿轮配置选项 */}
-          <Button variant="outline" size="sm" className="border-primary/20" onClick={() => setConfigDialogOpen(true)} title="批量提取 Tag 参数配置">
-            <RefreshCwIcon className="size-3.5" />
-            提取配置 ⚙️
-          </Button>
-
-          <Button variant="ghost" size="sm" className="ml-auto" onClick={() => setSelectedIds([])}>
-            取消选择
-          </Button>
-        </div>
-      ) : null}
-
-      {/* 批量提取 Tag 参数配置 Dialog */}
-      <Dialog open={configDialogOpen} onOpenChange={setConfigDialogOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Tag 提取参数配置 ⚙️</DialogTitle>
-            <DialogDescription>配置对手动选中的记忆进行批量 Tag 提取分析时的 LLM 提供商、维度及合并更新策略。</DialogDescription>
-          </DialogHeader>
-          <div className="py-4">
-            <TagExtractionConfigPanel
-              title="LLM 运行配置"
-              description="默认 missing_only 只处理无 Tag 记忆，append/replace 仅作用于本次勾选范围。"
-              onOptionsChange={(opts) => {
-                handleTagOptionsChange(opts)
-              }}
-              disabled={streamRunning}
-            />
-          </div>
-          <div className="flex justify-end border-t pt-3">
-            <Button size="sm" onClick={() => setConfigDialogOpen(false)}>
-              确定并保存
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      {/* ─── 记忆数据主表 ─── */}
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between gap-4 py-4 shrink-0">
-          <div className="flex flex-col gap-1">
-            <CardTitle>记忆条目列表</CardTitle>
-            <CardDescription>
-              {total !== null ? `无筛选累计记录数：${total.toLocaleString()} 条` : `${memories.length} 条过滤匹配结果`}
-            </CardDescription>
-          </div>
-        </CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between gap-4 py-4"><div><CardTitle>记忆条目</CardTitle><CardDescription>{totalDescription}</CardDescription></div></CardHeader>
         <CardContent className="pt-0">
-          {loading ? (
-            <div className="flex flex-col gap-3">
-              <Skeleton className="h-10 w-full" />
-              <Skeleton className="h-10 w-full" />
-              <Skeleton className="h-10 w-full" />
-            </div>
-          ) : memories.length === 0 ? (
-            <p className="text-sm text-muted-foreground p-6 text-center">暂无符合条件的记忆条目。</p>
-          ) : (
+          <QueryState status={status} error={error} onRetry={() => void load()} title={!scope ? '请选择真实 Bot 与会话' : undefined} description={!scope ? '记忆管理不接受默认 Bot、私聊或伪群作用域。' : payload?.page.reason_code ?? undefined}>
             <div className="overflow-auto rounded-lg border">
               <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="w-10">
-                      <input
-                        type="checkbox"
-                        checked={isAllSelected}
-                        onChange={(e) => handleToggleSelectAll(e.target.checked)}
-                      />
-                    </TableHead>
-                    <TableHead className="w-16">ID</TableHead>
-                    <TableHead>内容</TableHead>
-                    <TableHead className="w-24">发送者</TableHead>
-                    <TableHead className="w-44">来源</TableHead>
-                    <TableHead className="w-36">关联标签 (Tags)</TableHead>
-                    <TableHead className="w-16 text-center">特征向量</TableHead>
-                    <TableHead className="w-32">创建时间</TableHead>
-                    <TableHead className="w-20 text-right">操作</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {memories.map((m) => {
-                    const hasV = m.has_vector
-                    const isRowChecked = selectedIds.includes(m.id)
-                    return (
-                      <TableRow key={m.id} className={isRowChecked ? 'bg-primary/5 hover:bg-primary/5' : ''}>
-                        <TableCell>
-                          <input
-                            type="checkbox"
-                            checked={isRowChecked}
-                            onChange={(e) => handleRowCheckChange(m.id, e.target.checked)}
-                          />
-                        </TableCell>
-                        <TableCell className="font-mono text-xs text-muted-foreground">#{m.id}</TableCell>
-                        <TableCell className="max-w-md truncate font-normal cursor-pointer hover:text-primary transition-colors" onClick={() => void handleOpenDetail(m.id)}>
-                          {m.content}
-                        </TableCell>
-                        <TableCell className="max-w-28 truncate text-muted-foreground">{m.sender_name || '-'}</TableCell>
-                        <TableCell>
-                          <Badge variant="secondary" className="w-fit font-mono text-[10px] uppercase">
-                            {m.source || '—'}
-                          </Badge>
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex flex-wrap gap-1">
-                            {(m.tags ?? []).slice(0, 2).map((t, idx) => (
-                              <Badge key={`${t.name}-${idx}`} className={tagBadgeClass(t.type || 'keyword')}>
-                                {t.name}
-                              </Badge>
-                            ))}
-                            {(m.tags ?? []).length > 2 ? (
-                              <Badge variant="outline" className="font-mono text-[9px]">
-                                +{(m.tags ?? []).length - 2}
-                              </Badge>
-                            ) : null}
-                          </div>
-                        </TableCell>
-                        <TableCell className="text-center">
-                          <span className={hasV ? 'text-emerald-500 font-bold' : 'text-destructive font-bold'}>
-                            {hasV ? '●' : '○'}
-                          </span>
-                        </TableCell>
-                        <TableCell className="text-muted-foreground font-mono text-xs whitespace-nowrap">
-                          {formatTime(m.timestamp)}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <div className="flex justify-end gap-1.5">
-                            <Button variant="ghost" className="size-7 p-0" onClick={() => void handleOpenDetail(m.id)} title="查看详情">
-                              <FileEditIcon className="size-3.5" />
-                            </Button>
-                            <Button variant="ghost" className="size-7 p-0 text-destructive hover:text-destructive hover:bg-destructive/10" onClick={() => void handleDeleteSingle(m.id)} title="物理删除">
-                              <Trash2Icon className="size-3.5" />
-                            </Button>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    )
-                  })}
-                </TableBody>
+                <TableHeader><TableRow><TableHead className="w-10"><input aria-label="选择当前页全部记忆" type="checkbox" checked={allSelected} onChange={(event) => toggleAll(event.target.checked)} /></TableHead><TableHead className="w-16">ID</TableHead><TableHead>内容</TableHead><TableHead>发送者</TableHead><TableHead>来源</TableHead><TableHead>Tags</TableHead><TableHead className="text-center">向量</TableHead><TableHead>时间</TableHead><TableHead className="text-right">操作</TableHead></TableRow></TableHeader>
+                <TableBody>{items.map((item) => <TableRow key={item.ref} className={selectedRefs.includes(item.ref) ? 'bg-primary/5' : undefined}><TableCell><input aria-label={`选择记忆 ${item.id}`} type="checkbox" checked={selectedRefs.includes(item.ref)} onChange={(event) => toggleRow(item.ref, event.target.checked)} /></TableCell><TableCell className="font-mono text-xs text-muted-foreground">#{item.id}</TableCell><TableCell className="max-w-md cursor-pointer truncate hover:text-primary" onClick={() => void open(item)}>{item.content}</TableCell><TableCell className="max-w-32 truncate text-muted-foreground">{item.sender_name ?? item.sender_id ?? '未记录'}</TableCell><TableCell><Badge variant="secondary" className="font-mono text-[10px]">{item.source ?? '未记录'}</Badge></TableCell><TableCell><div className="flex flex-wrap gap-1">{item.tags?.length ? item.tags.slice(0, 2).map((tag, index) => <Badge key={`${tag.name}-${index}`} className={tagBadgeClass(tag.type)}>{tag.name}</Badge>) : <span className="text-xs text-muted-foreground">—</span>}</div></TableCell><TableCell className={item.has_vector ? 'text-center font-bold text-emerald-500' : 'text-center font-bold text-destructive'}>{item.has_vector ? '●' : '○'}</TableCell><TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">{formatTime(item.timestamp)}</TableCell><TableCell className="text-right"><Button variant="ghost" size="icon-sm" title="打开详情" onClick={() => void open(item)}><FileEditIcon /></Button></TableCell></TableRow>)}</TableBody>
               </Table>
             </div>
-          )}
-
-          {/* ─── 分页器 ─── */}
-          {memories.length > 0 ? (
-            <div className="mt-4 flex items-center justify-center gap-4">
-              <Button disabled={loading || page <= 1} variant="outline" size="sm" onClick={() => void loadData(page - 1)}>
-                <ChevronLeftIcon className="size-4" />
-                上一页
-              </Button>
-              <span className="font-mono text-xs text-muted-foreground">
-                第 {page} 页
-              </span>
-              <Button disabled={loading || !hasMore} variant="outline" size="sm" onClick={() => void loadData(page + 1)}>
-                下一页
-                <ChevronRightIcon className="size-4" />
-              </Button>
-            </div>
-          ) : null}
+          </QueryState>
+          {payload ? <PaginationControls className="mt-4" page={payload.page} disabled={status === 'loading'} onOffsetChange={pagination.setOffset} onLimitChange={pagination.setLimit} /> : null}
         </CardContent>
       </Card>
 
-      {/* ─── 详情 Sheet 弹窗 ─── */}
-      <Sheet open={detailOpen} onOpenChange={(open) => {
-        setDetailOpen(open)
-        if (!open) {
-          setHistoryStack([])
-        }
-      }}>
-        <SheetContent className="w-full gap-0 sm:max-w-2xl flex flex-col pr-0 sm:pr-2">
-          <SheetHeader className="pb-4 border-b shrink-0 pr-6">
-            <SheetTitle>记忆明细</SheetTitle>
-            <SheetDescription>
-              {detailId ? `记忆 ID：#${detailId} | 直接在线编辑内容或调整算法召回比重重要度。` : '载入中…'}
-            </SheetDescription>
-          </SheetHeader>
-
-          <ScrollArea className="flex-1 pr-6">
-            <div className="flex flex-col gap-4 py-6">
-              {detailLoading ? (
-                <div className="flex flex-col gap-4">
-                  <Skeleton className="h-32 w-full" />
-                  <Skeleton className="h-24 w-full" />
-                </div>
-              ) : detailError ? (
-                <Alert variant="destructive">
-                  <AlertCircleIcon />
-                  <AlertTitle>详情加载失败</AlertTitle>
-                  <AlertDescription>{detailError}</AlertDescription>
-                </Alert>
-              ) : detail ? (
-                <>
-                  <Field>
-                    <FieldLabel>内容编辑 (content)</FieldLabel>
-                    <Textarea
-                      className="min-h-[140px] text-xs leading-relaxed"
-                      value={detail.content}
-                      onChange={(e) => setDetail({ ...detail, content: e.target.value })}
-                    />
-                    <FieldDescription>直接改写后，检索匹配时将使用最新改写内容进行向量计算。</FieldDescription>
-                  </Field>
-
-                  <div className="grid gap-3 sm:grid-cols-2 text-xs border rounded-lg p-3 bg-muted/20">
-                    <div><span className="text-muted-foreground font-medium">发送人：</span>{detail.sender_name || detail.sender_id || '-'}</div>
-                    <div><span className="text-muted-foreground font-medium">会话/群 ID：</span>{detail.group_id || '-'}</div>
-                    <div><span className="text-muted-foreground font-medium">重要度系数：</span>
-                      <Input
-                        type="number"
-                        className="w-20 inline-block h-8 py-0.5 px-2 ml-1 text-xs"
-                        step="0.01"
-                        min="0"
-                        max="1"
-                        value={detail.importance ?? 0.5}
-                        onChange={(e) => setDetail({ ...detail, importance: Number(e.target.value) || 0 })}
-                      />
-                    </div>
-                    <div><span className="text-muted-foreground font-medium">特征向量：</span>
-                      <Badge variant={detail.has_vector ? 'secondary' : 'destructive'} className="text-[10px]">
-                        {detail.has_vector ? '✓ 已入库' : '✗ 缺失'}
-                      </Badge>
-                    </div>
-                    <div><span className="text-muted-foreground font-medium">创建时间：</span>{formatTime(detail.timestamp)}</div>
-                    <div><span className="text-muted-foreground font-medium">被调次数：</span>{detail.access_count ?? 0}</div>
-                  </div>
-
-                  {/* 回退上一级按钮（当有穿透历史时显现） */}
-                  {historyStack.length > 0 ? (
-                    <Button variant="outline" size="sm" className="w-fit" onClick={handleBackDetail}>
-                      <Undo2Icon className="size-3.5" />
-                      返回上一层记忆 (#{historyStack[historyStack.length - 1]})
-                    </Button>
-                  ) : null}
-
-                  {/* 100% 双向标签交互 */}
-                  <Field>
-                    <FieldLabel>关联标签 (Tags)</FieldLabel>
-                    <div className="flex flex-col gap-3 rounded-lg border bg-muted/10 p-3">
-                      <div className="flex flex-wrap gap-1.5 min-h-8 items-center">
-                        {(detail.tags ?? []).length === 0 ? (
-                          <span className="text-xs text-muted-foreground">暂无关联标签。</span>
-                        ) : (
-                          (detail.tags ?? []).map((t, idx) => (
-                            <Badge key={`${t.name}-${idx}`} className={`${tagBadgeClass(t.type || 'keyword')} pr-1 flex items-center gap-1`}>
-                              <span>{t.name}</span>
-                              <button
-                                type="button"
-                                className="hover:bg-foreground/20 rounded-full size-3 flex items-center justify-center font-bold text-[8px] transition-colors"
-                                onClick={() => void handleRemoveTag(t.name)}
-                                title="从当前记忆物理移除该标签关联"
-                              >
-                                ✕
-                              </button>
-                            </Badge>
-                          ))
-                        )}
-                      </div>
-                      
-                      {/* 轻量回车新增标签框 */}
-                      <form onSubmit={handleAddTag} className="flex gap-2">
-                        <Input
-                          placeholder="+ 回车新增自定义标签..."
-                          className="h-8 text-xs max-w-xs"
-                          value={newTagName}
-                          onChange={(e) => setNewTagName(e.target.value)}
-                        />
-                        <Button type="submit" size="sm" className="h-8 text-xs">
-                          关联
-                        </Button>
-                      </form>
-                    </div>
-                  </Field>
-
-                  {/* 100% 真实 C-HNSW 向量相似记忆诊断推荐 */}
-                  <Card className="border border-primary/20 bg-primary/5">
-                    <CardHeader className="py-3 shrink-0">
-                      <div className="flex items-center gap-2">
-                        <span className="text-primary font-bold">✨</span>
-                        <CardTitle className="text-sm">HNSW 相似记忆碰撞 (Similar Memories)</CardTitle>
-                      </div>
-                      <CardDescription className="text-xs">
-                        基于底层 C-HNSW 向量空间在 15ms 内匹配出的前 3 条最相似记录，点击行可无缝折叠穿透查看。
-                      </CardDescription>
-                    </CardHeader>
-                    <CardContent className="pt-0 flex flex-col gap-2">
-                      {similarLoading ? (
-                        <div className="flex items-center gap-2 py-4 justify-center">
-                          <Loader2Icon className="animate-spin text-primary size-4" />
-                          <span className="text-xs text-muted-foreground font-mono">HNSW 极速计算中...</span>
-                        </div>
-                      ) : similarItems.length === 0 ? (
-                        <p className="text-xs text-muted-foreground text-center py-4">未找到该条记忆的高相似碰撞记录（可能未进行特征计算）。</p>
-                      ) : (
-                        <div className="flex flex-col gap-2">
-                          {similarItems.map((item) => (
-                            <div
-                              key={item.id}
-                              onClick={() => void handleOpenDetail(item.id)}
-                              className="group flex flex-col gap-1 rounded-lg border border-border/40 p-2.5 bg-muted/20 hover:bg-muted/40 cursor-pointer transition-all hover:border-primary/20"
-                            >
-                              <div className="flex items-center justify-between text-[10px] font-mono">
-                                <span className="text-muted-foreground">#{item.id}</span>
-                                <div className="flex items-center gap-1.5">
-                                  <Badge variant="secondary" className="text-[8px] px-1 uppercase py-0 leading-none h-4">
-                                    {item.source || 'chat'}
-                                  </Badge>
-                                  <span className="text-primary font-bold">
-                                    相似度 {item.similarity}%
-                                  </span>
-                                </div>
-                              </div>
-                              <p className="text-xs leading-relaxed text-foreground/80 group-hover:text-primary transition-colors line-clamp-2">
-                                {item.content}
-                              </p>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </CardContent>
-                  </Card>
-
-                  <div className="flex flex-wrap gap-2 border-t pt-4">
-                    <Button disabled={detailSaving} onClick={() => void handleSaveDetail()}>
-                      {detailSaving ? <Loader2Icon className="animate-spin" data-icon="inline-start" /> : <SaveIcon data-icon="inline-start" />}
-                      保存修改
-                    </Button>
-                    <Button disabled={detailSaving} variant="outline" onClick={() => void handleReEmbedSingle(detail.id)}>
-                      重新向量特征计算
-                    </Button>
-                    <Button disabled={detailSaving} variant="destructive" className="ml-auto" onClick={() => void handleDeleteSingle(detail.id)}>
-                      🗑 物理删除
-                    </Button>
-                  </div>
-                </>
-              ) : null}
+      <Card className="border-amber-500/10 bg-amber-500/[0.02]">
+        <CardHeader className="py-4">
+          <div className="flex items-center gap-2">
+            <Badge variant="outline" className="border-amber-500/20 text-amber-600 bg-amber-500/5">只读审计</Badge>
+            <CardTitle className="text-base">Legacy 历史记忆</CardTitle>
+          </div>
+          <CardDescription>这里保留尚未投影到 canonical RuntimeScope 的历史记忆。它们没有足够证据绑定当前 Bot / 群，因此不会混入上方正式列表，不参与实时召回。</CardDescription>
+        </CardHeader>
+        <CardContent className="pt-0">
+          <Alert className="mb-4 border-amber-500/15 bg-amber-500/[0.02] text-amber-700 dark:text-amber-500"><AlertCircleIcon className="size-4 text-amber-600" /><AlertTitle>未归属数据，不是当前群记忆</AlertTitle><AlertDescription className="text-xs">{legacyPayload ? `共 ${(legacyPayload.page.total ?? 0).toLocaleString('zh-CN')} 条历史记录待审计。` : legacyLoading ? '正在读取历史审计清单。' : 'Legacy 审计接口暂不可用。'} 仅当 metadata_json.runtime_scope 等证据能唯一确定作用域时，后端才会将记录投影到正式区。</AlertDescription></Alert>
+          {legacyPayload?.items.length ? <>
+            <div className="overflow-auto rounded-lg border bg-background">
+              <Table><TableHeader><TableRow><TableHead className="w-20">Legacy ID</TableHead><TableHead>内容</TableHead><TableHead>发送者</TableHead><TableHead>来源</TableHead><TableHead>时间</TableHead></TableRow></TableHeader><TableBody>{legacyPayload.items.map((item) => <TableRow key={item.id}><TableCell className="font-mono text-xs text-muted-foreground">#{item.id}</TableCell><TableCell className="max-w-xl"><p className="line-clamp-2">{item.content}</p></TableCell><TableCell className="text-muted-foreground text-xs">{item.sender_name ?? item.sender_id ?? '未记录'}</TableCell><TableCell><Badge variant="outline" className="font-mono text-[10px]">{item.source ?? '未记录'}</Badge></TableCell><TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">{formatTime(item.timestamp)}</TableCell></TableRow>)}</TableBody></Table>
             </div>
-          </ScrollArea>
+            <div className="mt-3 flex items-center justify-between text-sm text-muted-foreground"><span>第 {legacyOffset + 1}-{Math.min(legacyOffset + 25, (legacyPayload.page.total ?? 0))} 条</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={legacyLoading || legacyOffset === 0} onClick={() => setLegacyOffset(Math.max(0, legacyOffset - 25))}>上一页</Button><Button size="sm" variant="outline" disabled={legacyLoading || legacyOffset + 25 >= (legacyPayload.page.total ?? 0)} onClick={() => setLegacyOffset(legacyOffset + 25)}>下一页</Button></div></div>
+          </> : !legacyLoading ? <p className="text-xs text-muted-foreground py-4 text-center">没有未归属的 Legacy 记忆。</p> : null}
+        </CardContent>
+      </Card>
+
+      <Sheet open={detailOpen} onOpenChange={(openValue) => { if (!openValue) closeDetail() }}>
+        <SheetContent className="w-full gap-0 sm:max-w-2xl">
+          <SheetHeader className="border-b pr-12"><SheetTitle>记忆明细</SheetTitle><SheetDescription>{detail ? `${detail.bot_id} · ${detail.session_id} · revision ${detail.version}` : '正在按 ObjectRef 读取'}</SheetDescription></SheetHeader>
+          <ScrollArea className="flex-1"><div className="flex flex-col gap-5 p-4">
+            {detailLoading ? <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2Icon className="animate-spin" />正在加载详情与相似记忆</div> : detail ? <>
+              <Field><FieldLabel htmlFor="memory-content">内容</FieldLabel><Textarea id="memory-content" className="min-h-36" value={content} onChange={(event) => setContent(event.target.value)} /><FieldDescription>保存会推进 revision，并回读新的 ObjectRef。</FieldDescription></Field>
+              <div className="grid gap-3 rounded-lg border bg-muted/20 p-3 text-xs sm:grid-cols-2"><div><span className="text-muted-foreground">发送者：</span>{detail.sender_name ?? detail.sender_id}</div><div><span className="text-muted-foreground">来源：</span>{detail.source ?? '未记录'}</div><div><span className="text-muted-foreground">重要度：</span><Input type="number" min="0" max="1" step="0.01" className="ml-2 inline-flex h-8 w-24" value={importance} onChange={(event) => setImportance(Number(event.target.value))} /></div><div><span className="text-muted-foreground">向量：</span><Badge variant={detail.has_vector ? 'secondary' : 'destructive'}>{detail.has_vector ? '已入库' : '缺失'}</Badge></div><div><span className="text-muted-foreground">创建时间：</span>{formatTime(detail.timestamp)}</div><div><span className="text-muted-foreground">访问次数：</span>{detail.access_count ?? '未记录'}</div></div>
+              <Field><FieldLabel>关联标签 (Tags)</FieldLabel><div className="flex flex-col gap-3 rounded-lg border bg-muted/10 p-3">{detail.tags === undefined ? <Alert><AlertCircleIcon /><AlertTitle>已有标签清单 unavailable</AlertTitle><AlertDescription>当前 scoped 详情契约未返回已有标签；这里不会伪装为空。仍可安全新增标签，本次页面已确认的标签会显示在下方。</AlertDescription></Alert> : null}<div className="flex min-h-7 flex-wrap gap-1.5">{(detail.tags ?? []).map((tag, index) => <Badge key={`${tag.name}-${index}`} className={`${tagBadgeClass(tag.type)} flex items-center gap-1 pr-1`}>{tag.name}<button type="button" className="rounded px-1 hover:bg-foreground/10" aria-label={`移除标签 ${tag.name}`} onClick={() => setConfirmAction({ title: `移除标签“${tag.name}”？`, description: '仅移除当前 ObjectRef 与该标签的关联，不删除标签字典项。', label: '确认移除', destructive: true, run: () => removeTag(tag.name) })}>×</button></Badge>)}</div><form className="flex gap-2" onSubmit={addTag}><Input className="h-8 max-w-xs text-xs" placeholder="输入自定义标签" value={newTagName} onChange={(event) => setNewTagName(event.target.value)} /><Button type="submit" size="sm">关联</Button></form></div></Field>
+              <Card className="border-primary/20 bg-primary/5"><CardHeader className="py-3"><CardTitle className="text-sm">相似记忆</CardTitle><CardDescription>由当前 ObjectRef 对应向量查询；结果未签发新 ObjectRef，因此仅只读展示，不使用裸 ID 穿透。</CardDescription></CardHeader><CardContent className="flex flex-col gap-2 pt-0">{similarLoading ? <div className="flex items-center gap-2 text-xs text-muted-foreground"><Loader2Icon className="animate-spin" />计算中</div> : similarItems.length ? similarItems.map((item) => <div key={item.id} className="rounded-lg border bg-background/50 p-2.5"><div className="flex justify-between gap-2 text-[10px] font-mono text-muted-foreground"><span>#{item.id} · {item.source || '未记录'}</span><span className="font-semibold text-primary">相似度 {item.similarity}%</span></div><p className="mt-1 line-clamp-2 text-xs leading-relaxed">{item.content}</p></div>) : <p className="py-3 text-center text-xs text-muted-foreground">未找到相似记录，或当前记忆没有可用向量。</p>}</CardContent></Card>
+              <div className="flex flex-wrap gap-2 border-t pt-4"><Button disabled={saving} onClick={() => void saveDetail()}>{saving ? <Loader2Icon className="animate-spin" /> : <SaveIcon />}保存并回读 revision</Button><Button disabled={saving} variant="outline" onClick={() => setConfirmAction({ title: '重新向量化当前记忆？', description: '将重算向量并触发索引修复，不修改正文 revision。', label: '确认 re-embed', run: reEmbedDetail })}><RefreshCwIcon />re-embed</Button><Button disabled={saving} variant="destructive" className="ml-auto" onClick={() => setConfirmAction({ title: `永久删除记忆 #${detail.id}？`, description: '将按当前 ObjectRef 删除记忆，操作不可撤销。', label: '确认删除', destructive: true, run: removeDetail })}><Trash2Icon />删除当前 ObjectRef</Button></div>
+            </> : <Alert variant="destructive"><AlertTitle>详情 unavailable</AlertTitle><AlertDescription>无法读取当前 ObjectRef。</AlertDescription></Alert>}
+          </div></ScrollArea>
         </SheetContent>
       </Sheet>
 
-      {/* ─── SSE 批量控制台弹窗 ─── */}
-      <Dialog open={streamOpen} onOpenChange={setStreamOpen}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>{streamTitle}</DialogTitle>
-            <DialogDescription>正在流式推送批量进程，不要关闭本弹窗。完毕后将自动载入最新数据。</DialogDescription>
-          </DialogHeader>
+      <Dialog open={Boolean(confirmAction)} onOpenChange={(openValue) => { if (!openValue && !confirmRunning) setConfirmAction(null) }}><DialogContent><DialogHeader><DialogTitle>{confirmAction?.title}</DialogTitle><DialogDescription>{confirmAction?.description}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" disabled={confirmRunning} onClick={() => setConfirmAction(null)}>取消</Button><Button variant={confirmAction?.destructive ? 'destructive' : 'default'} disabled={confirmRunning} onClick={() => void executeConfirm()}>{confirmRunning ? <Loader2Icon className="animate-spin" /> : null}{confirmAction?.label}</Button></DialogFooter></DialogContent></Dialog>
 
-          <div className="flex flex-col gap-4 py-4">
-            {streamProgress ? (
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-muted-foreground">
-                    进度：{Math.round(streamProgress.progress * 100)}%
-                  </span>
-                  <span className="font-mono">
-                    已处理 {streamProgress.processed ?? 0}/{streamProgress.total}（失败：{streamProgress.errors ?? 0}）
-                  </span>
-                </div>
-                <div className="w-full h-2 rounded-full overflow-hidden bg-muted">
-                  <div className="h-full rounded-full bg-primary transition-all duration-300" style={{ width: `${streamProgress.progress * 100}%` }} />
-                </div>
-              </div>
-            ) : (
-              <div className="flex items-center justify-center gap-2 py-4">
-                <Loader2Icon className="animate-spin text-primary size-5" />
-                <span className="text-xs text-muted-foreground">正在与后台进程握手连接，请稍后...</span>
-              </div>
-            )}
+      <Dialog open={configOpen} onOpenChange={setConfigOpen}><DialogContent className="sm:max-w-md"><DialogHeader><DialogTitle>Tag 提取参数</DialogTitle><DialogDescription>配置仅用于当前勾选的 scoped ObjectRef。</DialogDescription></DialogHeader><TagExtractionConfigPanel title="LLM 运行配置" description="missing_only 最安全；append/replace 会在执行前再次确认。" disabled={streamRunning} onOptionsChange={(options: Required<TagExecutionOptions>) => { setTagBatchSize(options.tag_batch_size); setTagWritePolicy(options.tag_write_policy) }} /><DialogFooter><Button onClick={() => setConfigOpen(false)}>保存配置</Button></DialogFooter></DialogContent></Dialog>
 
-            <div className="flex flex-col gap-1.5">
-              <span className="text-xs font-semibold text-foreground">实时执行控制台：</span>
-              <ScrollArea className="h-44 rounded-lg border bg-muted/60 p-3 font-mono text-[10px] text-muted-foreground leading-relaxed">
-                {streamLog.length === 0 ? (
-                  <div className="text-muted-foreground">等待日志信号...</div>
-                ) : (
-                  streamLog.map((line, idx) => (
-                    <div key={idx} className={line.includes('[CRITICAL_FAIL]') || line.includes('[ERROR]') ? 'text-destructive' : line.includes('[SUCCESS]') ? 'text-emerald-500' : ''}>
-                      {line}
-                    </div>
-                  ))
-                )}
-              </ScrollArea>
-            </div>
-
-            {streamProgress?.done ? (
-              <Alert className="bg-emerald-500/10 border-emerald-500/20 text-emerald-500">
-                <CheckCircle2Icon className="size-4" />
-                <AlertTitle>处理完毕</AlertTitle>
-                <AlertDescription>批量流进程已 100% 成功执行完毕，您可以安全关闭弹窗。</AlertDescription>
-              </Alert>
-            ) : null}
-          </div>
-        </DialogContent>
-      </Dialog>
+      <Dialog open={streamOpen} onOpenChange={setStreamOpen}><DialogContent className="sm:max-w-lg"><DialogHeader><DialogTitle>{streamTitle}</DialogTitle><DialogDescription>批量任务只提交当前 Scope 的服务端签发 ObjectRef。</DialogDescription></DialogHeader><div className="flex flex-col gap-4">{streamProgress ? <div><div className="mb-1 flex justify-between text-xs"><span>{Math.round(streamProgress.progress * 100)}%</span><span>{streamProgress.processed ?? 0}/{streamProgress.total} · 失败 {streamProgress.errors ?? 0}</span></div><div className="h-2 overflow-hidden rounded-full bg-muted"><div className="h-full bg-primary transition-all" style={{ width: `${streamProgress.progress * 100}%` }} /></div></div> : <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2Icon className="animate-spin" />正在连接批量任务</div>}<ScrollArea className="h-40 rounded-lg border bg-muted/40 p-3 font-mono text-[10px]">{streamLog.map((line, index) => <div key={`${index}-${line}`} className={line.includes('[ERROR]') ? 'text-destructive' : line.includes('[SUCCESS]') ? 'text-emerald-500' : undefined}>{line}</div>)}</ScrollArea>{streamProgress?.done ? <Alert className="border-emerald-500/20 bg-emerald-500/10"><CheckCircle2Icon /><AlertTitle>处理完成</AlertTitle></Alert> : null}</div></DialogContent></Dialog>
     </div>
   )
 }
+
 export default MemoriesPage

@@ -7,30 +7,44 @@ export interface ProviderPayload {
   [key: string]: unknown
 }
 
-export interface ConfigItem {
+export type ConfigApplyMode = 'hot' | 'restart' | 'next_run' | 'unknown'
+
+export interface ConfigValueState {
+  default: unknown
+  saved: unknown
+  saved_present?: boolean
+  effective: unknown
+  value: unknown
+  source: string
+  effective_source: string
+  apply_mode: ConfigApplyMode
+  effective_since?: string | number | null
+  restart_required: boolean
+  restart_requirement: 'required' | 'not_required'
+  error?: string | null
+}
+
+export interface ConfigItem extends ConfigValueState {
   key: string
   type: string
   description: string
   hint: string
-  default: unknown
-  value: unknown
   special: string
 }
 
-export interface ConfigGroup {
+export interface ConfigGroup extends Partial<ConfigValueState> {
   key: string
   kind: 'object' | 'scalar'
   type?: string
   description: string
   hint: string
-  default?: unknown
-  value?: unknown
   special?: string
   items?: ConfigItem[]
 }
 
 export interface ConfigSchemaPayload {
   groups: ConfigGroup[]
+  warnings?: Array<{ key: string; message: string }>
 }
 
 export interface HotParam {
@@ -41,6 +55,15 @@ export interface HotParam {
   default: number
   current: number
   description: string
+  saved?: number | null
+  effective?: number | null
+  source?: string
+  effective_source?: string
+  apply_mode?: ConfigApplyMode
+  effective_since?: string | number | null
+  restart_required?: boolean
+  restart_requirement?: 'required' | 'not_required'
+  error?: string | null
 }
 
 export interface HotConfigPayload {
@@ -69,15 +92,28 @@ export interface FullConfigSavePayload {
 
 export interface FullConfigResponse {
   ok: boolean
+  saved?: boolean
   changed: string[]
+  changed_fields?: string[]
   message: string
+  errors?: string[]
   error?: string
+  restart_required?: boolean
+  restart_fields?: string[]
+  apply_modes?: { hot: string[]; restart: string[]; next_run: string[] }
+  effective_since?: Record<string, string | number | null>
+  schema?: ConfigSchemaPayload
 }
 
 export interface HotConfigSaveResponse {
   ok: boolean
   updated: string[]
+  saved?: string[]
+  runtime_only?: string[]
   errors: string[]
+  warnings?: string[]
+  message?: string
+  params?: HotParam[]
 }
 
 export function getConfigSchema(): Promise<ConfigSchemaPayload> {

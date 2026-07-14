@@ -1,6 +1,5 @@
-import { useEffect, useState } from 'react'
-import { AlertTriangleIcon, CheckCircle2Icon, ExternalLinkIcon, Loader2Icon, RefreshCwIcon, RotateCcwIcon } from 'lucide-react'
-import { Link } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { AlertTriangleIcon, CheckCircle2Icon, Loader2Icon, PlayIcon, RefreshCwIcon, RotateCcwIcon } from 'lucide-react'
 import { toast } from 'sonner'
 
 import {
@@ -15,7 +14,6 @@ import {
   retryLearningPromotion,
   reviewLearningCandidate,
   runLearningJob,
-  type ApprovedFewShotExample,
   type DedicatedReviewStatus,
   type LearningCandidateItem,
   type LearningExperiencesPayload,
@@ -24,7 +22,8 @@ import {
   type LearningPromotionItem,
   type LearningSourceItem,
 } from '@/api/learningCenter'
-import { getSystemStatus, type RegistryBotItem } from '@/api/system'
+import { getScopeOptions, scopeOptionsFor } from '@/api/options'
+import { ObjectDeepLink, PaginationControls, QueryState, ScopeSelect } from '@/components/shared'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -33,33 +32,35 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { usePaginationSearchParams } from '@/hooks/use-pagination-search-params'
 
-const fallbackBots: RegistryBotItem[] = [
-  { db_id: 'yushu', name: '羽书', qq_id: '', aliases: [] },
-  { db_id: 'baizz', name: '白真真', qq_id: '', aliases: [] },
-]
+type QueryStatus = 'loading' | 'success' | 'empty' | 'error'
+type AsyncState<T> = { status: QueryStatus; data: T | null; error?: unknown }
+const loadingState = <T,>(): AsyncState<T> => ({ status: 'loading', data: null })
 
 const candidateTypeOptions = [
   ['all', '全部类型'],
   ['worldview_internalization', '世界观内化'],
   ['book_experience_episode', '书中经历'],
+  ['interaction_experience', '互动经历'],
   ['few_shot_style', 'FewShot 风格'],
   ['fact', '事实'],
   ['relationship', '关系'],
-  ['jargon_candidate', '黑话'],
-  ['belief_candidate', '信念'],
-]
+  ['book_lore', '书设知识'],
+  ['jargon_candidate', '术语候选'],
+  ['belief_candidate', '信念候选'],
+] as const
 
 const reviewStatusOptions = [
   ['all', '全部审核状态'],
   ['pending', '待审核'],
   ['approved', '已批准'],
   ['rejected', '已拒绝'],
+  ['ignored', '已忽略'],
   ['delegated', '专属审核'],
-]
+] as const
 
 const promotionStatusOptions = [
   ['all', '全部晋升状态'],
@@ -68,19 +69,25 @@ const promotionStatusOptions = [
   ['succeeded', '已成功'],
   ['retryable_failed', '可重试失败'],
   ['terminal_failed', '终态失败'],
-]
+  ['waiting_dedicated_review', '等待专属审核'],
+  ['partial', '部分成功'],
+  ['mixed', '混合状态'],
+] as const
 
-interface LearningCenterData {
-  sources: LearningListPayload<LearningSourceItem>
-  jobs: LearningListPayload<LearningJobItem>
-  candidates: LearningListPayload<LearningCandidateItem>
-  promotions: LearningListPayload<LearningPromotionItem>
-  fewShot: Awaited<ReturnType<typeof getLearningFewShot>>
-  experiences: LearningExperiencesPayload
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
 }
 
 function textValue(value: unknown, fallback = '—'): string {
-  return value === undefined || value === null || value === '' ? fallback : String(value)
+  if (value === undefined || value === null || value === '') return fallback
+  if (typeof value === 'boolean') return value ? '是' : '否'
+  if (Array.isArray(value)) return value.length ? value.map((item) => typeof item === 'object' ? compactObject(item) : String(item)).join('、') : fallback
+  if (typeof value === 'object') return compactObject(value)
+  return String(value)
+}
+
+function compactObject(value: unknown): string {
+  try { return JSON.stringify(value) } catch { return String(value) }
 }
 
 function formatTime(value: unknown): string {
@@ -92,436 +99,168 @@ function formatTime(value: unknown): string {
 function statusLabel(status: unknown): string {
   const value = String(status ?? 'unknown')
   const labels: Record<string, string> = {
-    pending: '待审核',
-    approved: '已批准',
-    rejected: '已拒绝',
-    delegated: '专属审核中',
-    queued: '排队中',
-    running: '处理中',
-    succeeded: '已成功',
-    retryable_failed: '失败（可重试）',
-    terminal_failed: '失败（不可重试）',
-    waiting_dedicated_review: '等待专属审核',
-    partial: '部分成功',
-    mixed: '混合状态',
-    skipped: '已跳过',
-    unknown: '未知',
+    pending: '待审核', approved: '已批准', rejected: '已拒绝', ignored: '已忽略', delegated: '专属审核中',
+    queued: '排队中', running: '处理中', committed: '已提交', succeeded: '已成功',
+    retryable_failed: '失败（可重试）', terminal_failed: '失败（不可重试）', waiting_dedicated_review: '等待专属审核',
+    partial: '部分成功', mixed: '混合状态', skipped: '已跳过', unknown: '未知',
   }
   return labels[value] ?? value
 }
 
 function statusVariant(status: unknown): 'default' | 'secondary' | 'destructive' | 'outline' {
   const value = String(status ?? '')
-  if (value === 'succeeded' || value === 'approved') return 'default'
+  if (value === 'succeeded' || value === 'approved' || value === 'committed') return 'default'
   if (value.includes('failed') || value === 'rejected') return 'destructive'
-  if (value === 'running' || value === 'queued' || value === 'pending' || value === 'delegated') return 'secondary'
+  if (['running', 'queued', 'pending', 'delegated'].includes(value)) return 'secondary'
   return 'outline'
-}
-
-function candidateTypeLabel(type: unknown): string {
-  const found = candidateTypeOptions.find(([value]) => value === String(type))
-  return found?.[1] ?? textValue(type, '未知类型')
-}
-
-function jsonText(value: unknown): string {
-  if (value === undefined || value === null) return '—'
-  if (typeof value === 'string') return value
-  try {
-    return JSON.stringify(value, null, 2)
-  } catch {
-    return String(value)
-  }
-}
-
-function PaginationControls({
-  offset,
-  limit,
-  total,
-  loading,
-  onChange,
-}: {
-  offset: number
-  limit: number
-  total: number
-  loading: boolean
-  onChange: (offset: number) => void
-}) {
-  const page = Math.floor(offset / limit) + 1
-  const totalPages = Math.max(1, Math.ceil(total / limit))
-  return (
-    <div className="flex items-center justify-between gap-3 border-t pt-3 text-xs text-muted-foreground">
-      <span>第 {page} / {totalPages} 页 · 共 {total} 条</span>
-      <div className="flex gap-2">
-        <Button size="sm" variant="outline" disabled={loading || offset <= 0} onClick={() => onChange(Math.max(0, offset - limit))}>上一页</Button>
-        <Button size="sm" variant="outline" disabled={loading || offset + limit >= total} onClick={() => onChange(offset + limit)}>下一页</Button>
-      </div>
-    </div>
-  )
 }
 
 function StatusBadge({ status }: { status: unknown }) {
   return <Badge variant={statusVariant(status)}>{statusLabel(status)}</Badge>
 }
 
-function SummaryCard({ title, value, description }: { title: string; value: unknown; description?: string }) {
-  return (
-    <Card>
-      <CardHeader className="gap-1 pb-3">
-        <CardDescription>{title}</CardDescription>
-        <CardTitle className="text-2xl font-mono">{textValue(value, '0')}</CardTitle>
-        {description ? <CardDescription className="text-[11px]">{description}</CardDescription> : null}
-      </CardHeader>
-    </Card>
-  )
+function candidateTypeLabel(type: unknown): string {
+  return candidateTypeOptions.find(([value]) => value === String(type))?.[1] ?? textValue(type, '未知类型')
+}
+
+function totalText<T>(payload: LearningListPayload<T> | null): string {
+  if (!payload) return '—'
+  return payload.page.total_status === 'exact' && payload.page.total !== null ? String(payload.page.total) : '不可用'
+}
+
+function SummaryCard({ title, value, description }: { title: string; value: string; description?: string }) {
+  return <Card><CardHeader className="gap-1 pb-3"><CardDescription>{title}</CardDescription><CardTitle className="font-mono text-2xl">{value}</CardTitle>{description ? <CardDescription className="text-xs">{description}</CardDescription> : null}</CardHeader></Card>
 }
 
 function EmptyState({ children }: { children: string }) {
   return <p className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">{children}</p>
 }
 
-function SourcesPanel({
-  sources,
-  jobs,
-  botId,
-  loading,
-  onRunJob,
-}: {
-  sources: LearningListPayload<LearningSourceItem>
-  jobs: LearningListPayload<LearningJobItem>
-  botId: string
-  loading: boolean
-  onRunJob: (job: LearningJobItem) => void
-}) {
-  return (
-    <div className="grid gap-5 xl:grid-cols-2">
-      <Card>
-        <CardHeader>
-          <CardTitle>来源</CardTitle>
-          <CardDescription>按 BotProfile.db_id 查看学习输入来源及游标，不以 QQ 号代替 target ID。</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {sources.items.length === 0 ? <EmptyState>当前 Bot 暂无来源。</EmptyState> : (
-            <div className="overflow-auto rounded-lg border">
-              <Table>
-                <TableHeader><TableRow><TableHead>名称</TableHead><TableHead>类型</TableHead><TableHead>状态</TableHead><TableHead>游标</TableHead></TableRow></TableHeader>
-                <TableBody>
-                  {sources.items.map((source) => (
-                    <TableRow key={source.id}>
-                      <TableCell className="font-medium">{textValue(source.name)}</TableCell>
-                      <TableCell className="font-mono text-xs">{textValue(source.source_type)}</TableCell>
-                      <TableCell><StatusBadge status={source.enabled ? 'approved' : 'rejected'} /></TableCell>
-                      <TableCell className="max-w-[240px] truncate font-mono text-xs" title={jsonText(source.cursor)}>{jsonText(source.cursor)}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          )}
-          <p className="mt-3 text-[11px] text-muted-foreground">当前作用域：<span className="font-mono">{botId}</span></p>
-        </CardContent>
-      </Card>
-      <Card>
-        <CardHeader>
-          <CardTitle>任务</CardTitle>
-          <CardDescription>任务返回的 queued/running/skipped 状态直接来自 API；启动后不会提前显示成功。</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {jobs.items.length === 0 ? <EmptyState>当前 Bot 暂无任务。</EmptyState> : (
-            <div className="overflow-auto rounded-lg border">
-              <Table>
-                <TableHeader><TableRow><TableHead>任务</TableHead><TableHead>候选类型</TableHead><TableHead>启用</TableHead><TableHead className="text-right">操作</TableHead></TableRow></TableHeader>
-                <TableBody>
-                  {jobs.items.map((job) => (
-                    <TableRow key={job.id}>
-                      <TableCell><div className="font-medium">{textValue(job.name)}</div><div className="font-mono text-[10px] text-muted-foreground">job #{job.id}</div></TableCell>
-                      <TableCell><Badge variant="outline">{candidateTypeLabel(job.candidate_type)}</Badge></TableCell>
-                      <TableCell><StatusBadge status={job.enabled ? 'approved' : 'rejected'} /></TableCell>
-                      <TableCell className="text-right"><Button size="sm" variant="outline" disabled={loading || !job.enabled} onClick={() => onRunJob(job)}><RefreshCwIcon data-icon="inline-start" />运行</Button></TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-    </div>
-  )
+function DetailGrid({ value, keys }: { value: unknown; keys?: Array<[string, string]> }) {
+  const record = asRecord(value)
+  if (!record || Object.keys(record).length === 0) return <p className="text-sm text-muted-foreground">未记录。</p>
+  const entries = keys?.length
+    ? [...keys.filter(([, key]) => key in record).map(([label, key]) => [label, record[key]] as const), ...Object.entries(record).filter(([key]) => !keys.some(([, preferred]) => preferred === key))]
+    : Object.entries(record)
+  return <dl className="grid gap-2 text-xs sm:grid-cols-2">{entries.map(([label, value], index) => <div key={`${label}-${index}`} className="min-w-0 rounded-md border bg-muted/20 p-2"><dt className="text-muted-foreground">{label}</dt><dd className="mt-1 whitespace-pre-wrap break-words">{textValue(value)}</dd></div>)}</dl>
 }
 
-function CandidateFilters({
-  candidateType,
-  reviewStatus,
-  promotionStatus,
-  source,
-  onCandidateTypeChange,
-  onReviewStatusChange,
-  onPromotionStatusChange,
-  onSourceChange,
-}: {
-  candidateType: string
-  reviewStatus: string
-  promotionStatus: string
-  source: string
-  onCandidateTypeChange: (value: string) => void
-  onReviewStatusChange: (value: string) => void
-  onPromotionStatusChange: (value: string) => void
-  onSourceChange: (value: string) => void
-}) {
-  return (
-    <FieldGroup className="grid gap-3 md:grid-cols-4">
-      <Field><FieldLabel>候选类型</FieldLabel><Select value={candidateType} onValueChange={onCandidateTypeChange}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{candidateTypeOptions.map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select></Field>
-      <Field><FieldLabel>审核状态</FieldLabel><Select value={reviewStatus} onValueChange={onReviewStatusChange}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{reviewStatusOptions.map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select></Field>
-      <Field><FieldLabel>晋升状态</FieldLabel><Select value={promotionStatus} onValueChange={onPromotionStatusChange}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{promotionStatusOptions.map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select></Field>
-      <Field><FieldLabel>来源名称/类型</FieldLabel><Input value={source} placeholder="按 source 筛选" onChange={(event) => onSourceChange(event.target.value)} /></Field>
-    </FieldGroup>
-  )
+function SourceTable({ payload }: { payload: LearningListPayload<LearningSourceItem> }) {
+  if (!payload.items.length) return <EmptyState>当前 Bot 暂无来源。</EmptyState>
+  return <div className="overflow-auto rounded-lg border"><Table><TableHeader><TableRow><TableHead>名称</TableHead><TableHead>类型</TableHead><TableHead>状态</TableHead><TableHead>游标</TableHead><TableHead>配置摘要</TableHead></TableRow></TableHeader><TableBody>{payload.items.map((source) => <TableRow key={source.id}><TableCell><div className="font-medium">{textValue(source.name)}</div><div className="font-mono text-xs text-muted-foreground">source #{source.id}</div></TableCell><TableCell className="font-mono text-xs">{textValue(source.source_type)}</TableCell><TableCell><StatusBadge status={source.enabled === false ? 'rejected' : 'approved'} /></TableCell><TableCell className="max-w-64 truncate font-mono text-xs" title={textValue(source.cursor)}>{textValue(source.cursor)}</TableCell><TableCell className="max-w-64 truncate text-xs" title={textValue(source.config)}>{textValue(source.config)}</TableCell></TableRow>)}</TableBody></Table></div>
 }
 
-function CandidatesPanel({
-  payload,
-  loading,
-  candidateType,
-  reviewStatus,
-  promotionStatus,
-  source,
-  onCandidateTypeChange,
-  onReviewStatusChange,
-  onPromotionStatusChange,
-  onSourceChange,
-  onOffsetChange,
-  onOpen,
-  onReview,
-}: {
-  payload: LearningListPayload<LearningCandidateItem>
-  loading: boolean
-  candidateType: string
-  reviewStatus: string
-  promotionStatus: string
-  source: string
-  onCandidateTypeChange: (value: string) => void
-  onReviewStatusChange: (value: string) => void
-  onPromotionStatusChange: (value: string) => void
-  onSourceChange: (value: string) => void
-  onOffsetChange: (offset: number) => void
-  onOpen: (candidate: LearningCandidateItem) => void
-  onReview: (candidate: LearningCandidateItem, action: 'approve' | 'reject') => void
-}) {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>候选</CardTitle>
-        <CardDescription>候选详情、证据和晋升状态均以 API 返回为准；点击行查看审核操作与错误详情。</CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-4">
-        <CandidateFilters
-          candidateType={candidateType}
-          reviewStatus={reviewStatus}
-          promotionStatus={promotionStatus}
-          source={source}
-          onCandidateTypeChange={onCandidateTypeChange}
-          onReviewStatusChange={onReviewStatusChange}
-          onPromotionStatusChange={onPromotionStatusChange}
-          onSourceChange={onSourceChange}
-        />
-        {payload.items.length === 0 ? <EmptyState>暂无符合筛选条件的候选。</EmptyState> : (
-          <div className="overflow-auto rounded-lg border">
-            <Table>
-              <TableHeader><TableRow><TableHead>ID</TableHead><TableHead>类型/内容</TableHead><TableHead>审核状态</TableHead><TableHead>晋升状态</TableHead><TableHead>目标 ID</TableHead><TableHead className="text-right">审核</TableHead></TableRow></TableHeader>
-              <TableBody>
-                {payload.items.map((candidate) => {
-                  const promotionStatusValue = candidate.promotion_status
-                  const canReview = candidate.review_status === 'pending'
-                  return (
-                    <TableRow key={candidate.id} className="cursor-pointer" onClick={() => onOpen(candidate)}>
-                      <TableCell className="font-mono text-xs">#{candidate.id}</TableCell>
-                      <TableCell className="max-w-[300px]">
-                        <div className="flex flex-wrap gap-1"><Badge variant="outline">{candidateTypeLabel(candidate.candidate_type)}</Badge><span className="font-medium truncate">{textValue(candidate.content, candidate.reason)}</span></div>
-                      </TableCell>
-                      <TableCell><StatusBadge status={candidate.review_status} /></TableCell>
-                      <TableCell><StatusBadge status={promotionStatusValue} /></TableCell>
-                      <TableCell className="font-mono text-xs">{candidate.target_ids?.length ? candidate.target_ids.join(', ') : '—'}</TableCell>
-                      <TableCell className="text-right" onClick={(event) => event.stopPropagation()}>
-                        {canReview ? <div className="flex justify-end gap-1"><Button size="xs" disabled={loading} onClick={() => onReview(candidate, 'approve')}>批准</Button><Button size="xs" variant="destructive" disabled={loading} onClick={() => onReview(candidate, 'reject')}>拒绝</Button></div> : <Button size="xs" variant="ghost" onClick={() => onOpen(candidate)}>详情</Button>}
-                      </TableCell>
-                    </TableRow>
-                  )
-                })}
-              </TableBody>
-            </Table>
-          </div>
-        )}
-        <PaginationControls offset={payload.offset} limit={payload.limit} total={payload.total} loading={loading} onChange={onOffsetChange} />
-      </CardContent>
-    </Card>
-  )
+function JobTable({ payload, actionLoading, onRun }: { payload: LearningListPayload<LearningJobItem>; actionLoading: string; onRun: (item: LearningJobItem) => void }) {
+  if (!payload.items.length) return <EmptyState>当前 Bot 暂无任务。</EmptyState>
+  return <div className="overflow-auto rounded-lg border"><Table><TableHeader><TableRow><TableHead>任务</TableHead><TableHead>来源</TableHead><TableHead>候选类型</TableHead><TableHead>状态</TableHead><TableHead>调度 / 策略</TableHead><TableHead className="text-right">操作</TableHead></TableRow></TableHeader><TableBody>{payload.items.map((job) => <TableRow key={job.id}><TableCell><div className="font-medium">{textValue(job.name)}</div><div className="font-mono text-xs text-muted-foreground">job #{job.id}</div></TableCell><TableCell className="font-mono text-xs">{textValue(job.source_id)}</TableCell><TableCell><Badge variant="outline">{candidateTypeLabel(job.candidate_type)}</Badge></TableCell><TableCell><StatusBadge status={job.enabled === false ? 'rejected' : 'approved'} /></TableCell><TableCell className="max-w-72 text-xs"><div className="truncate" title={textValue(job.schedule)}>调度：{textValue(job.schedule)}</div><div className="truncate text-muted-foreground" title={textValue(job.policy)}>策略：{textValue(job.policy)}</div></TableCell><TableCell className="text-right"><Button size="sm" variant="outline" disabled={Boolean(actionLoading) || job.enabled === false} onClick={() => onRun(job)}>{actionLoading === `job:${job.id}` ? <Loader2Icon className="animate-spin" /> : <PlayIcon data-icon="inline-start" />}运行</Button></TableCell></TableRow>)}</TableBody></Table></div>
 }
 
-function FewShotPanel({ payload }: { payload: LearningCenterData['fewShot'] }) {
-  const approvedExamples = (payload.approved_examples ?? []).filter((example) => example.status === 'approved')
-  const approvedCandidates = (payload.items ?? []).filter((candidate) => candidate.candidate_type === 'few_shot_style' && candidate.review_status === 'approved')
-  return (
-    <Card>
-      <CardHeader><CardTitle>FewShot</CardTitle><CardDescription>仅展示 <code>few_shot_style</code> 且已批准的样例，不混入其他学习结果或待审核记录。</CardDescription></CardHeader>
-      <CardContent className="flex flex-col gap-4">
-        {approvedExamples.length === 0 && approvedCandidates.length === 0 ? <EmptyState>暂无已批准 FewShot 样例。</EmptyState> : (
-          <div className="grid gap-3 lg:grid-cols-2">
-            {approvedExamples.map((example, index) => <FewShotCard key={String(example.id ?? `example-${index}`)} example={example} />)}
-            {approvedCandidates.map((candidate) => <Card key={`candidate-${candidate.id}`} className="bg-muted/10"><CardHeader className="pb-2"><div className="flex items-center justify-between gap-2"><CardTitle className="text-sm">学习中心候选 #{candidate.id}</CardTitle><StatusBadge status="approved" /></div></CardHeader><CardContent><p className="whitespace-pre-wrap text-sm">{textValue(candidate.content)}</p></CardContent></Card>)}
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  )
+function CandidateFilters({ candidateType, reviewStatus, promotionStatus, source, onChange }: { candidateType: string; reviewStatus: string; promotionStatus: string; source: string; onChange: (values: Record<string, string | null>) => void }) {
+  return <FieldGroup className="grid gap-3 md:grid-cols-2 xl:grid-cols-4"><Field><FieldLabel>候选类型</FieldLabel><Select value={candidateType || 'all'} onValueChange={(value) => onChange({ candidate_type: value === 'all' ? null : value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{candidateTypeOptions.map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select></Field><Field><FieldLabel>审核状态</FieldLabel><Select value={reviewStatus || 'all'} onValueChange={(value) => onChange({ review_status: value === 'all' ? null : value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{reviewStatusOptions.map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select></Field><Field><FieldLabel>晋升状态</FieldLabel><Select value={promotionStatus || 'all'} onValueChange={(value) => onChange({ promotion_status: value === 'all' ? null : value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{promotionStatusOptions.map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select></Field><Field><FieldLabel htmlFor="learning-source-filter">来源名称 / 类型</FieldLabel><Input id="learning-source-filter" value={source} onChange={(event) => onChange({ source: event.target.value || null })} placeholder="按 API source 筛选" /></Field></FieldGroup>
 }
 
-function FewShotCard({ example }: { example: ApprovedFewShotExample }) {
-  return <Card className="bg-muted/10"><CardHeader className="pb-2"><div className="flex items-center justify-between gap-2"><CardTitle className="text-sm">批准样例 #{textValue(example.id)}</CardTitle><StatusBadge status="approved" /></div><CardDescription>Bot：{textValue(example.bot_id)} · 分数：{textValue(example.score)}</CardDescription></CardHeader><CardContent className="flex flex-col gap-2"><p className="whitespace-pre-wrap text-sm">{textValue(example.content)}</p><div className="flex flex-wrap gap-1">{(example.traits ?? []).map((trait) => <Badge key={trait} variant="outline">{trait}</Badge>)}</div></CardContent></Card>
+function CandidateTable({ payload, actionLoading, onOpen, onReview }: { payload: LearningListPayload<LearningCandidateItem>; actionLoading: string; onOpen: (item: LearningCandidateItem) => void; onReview: (item: LearningCandidateItem, action: 'approve' | 'reject') => void }) {
+  if (!payload.items.length) return <EmptyState>暂无符合筛选条件的候选。</EmptyState>
+  return <div className="overflow-auto rounded-lg border"><Table><TableHeader><TableRow><TableHead>ID</TableHead><TableHead>类型 / 内容</TableHead><TableHead>来源 / 任务</TableHead><TableHead>审核</TableHead><TableHead>晋升</TableHead><TableHead>质量边界</TableHead><TableHead>目标</TableHead><TableHead className="text-right">操作</TableHead></TableRow></TableHeader><TableBody>{payload.items.map((candidate) => {
+    const blocked = Boolean(candidate.promotion_blocked || candidate.legacy_unlinked || candidate.quarantined || candidate.garbled)
+    const pending = candidate.review_status === 'pending'
+    return <TableRow key={candidate.id} className="cursor-pointer" onClick={() => onOpen(candidate)}><TableCell className="font-mono text-xs">#{candidate.id}</TableCell><TableCell className="max-w-80"><Badge variant="outline">{candidateTypeLabel(candidate.candidate_type)}</Badge><p className="mt-1 line-clamp-2 whitespace-pre-wrap">{textValue(candidate.content, textValue(candidate.reason))}</p></TableCell><TableCell className="text-xs"><div>{candidate.source ? textValue(candidate.source.name ?? candidate.source.source_type) : `source #${textValue(candidate.source_id)}`}</div><div className="text-muted-foreground">{candidate.task ? textValue(candidate.task.name) : `job #${textValue(candidate.job_id)}`}</div></TableCell><TableCell><StatusBadge status={candidate.review_status} /></TableCell><TableCell><StatusBadge status={candidate.promotion_status} /></TableCell><TableCell>{blocked ? <div className="flex flex-wrap gap-1">{candidate.promotion_block_reasons?.map((reason) => <Badge key={reason} variant="destructive">{reason}</Badge>) ?? <Badge variant="destructive">只读</Badge>}</div> : <Badge variant="outline">可审核</Badge>}</TableCell><TableCell className="font-mono text-xs">{candidate.target_ids?.length ? candidate.target_ids.join(', ') : '—'}</TableCell><TableCell className="text-right" onClick={(event) => event.stopPropagation()}>{pending ? <div className="flex justify-end gap-1"><Button size="xs" disabled={Boolean(actionLoading) || blocked} onClick={() => onReview(candidate, 'approve')}>批准</Button><Button size="xs" variant="destructive" disabled={Boolean(actionLoading)} onClick={() => onReview(candidate, 'reject')}>拒绝</Button></div> : <Button size="xs" variant="ghost" onClick={() => onOpen(candidate)}>详情</Button>}</TableCell></TableRow>
+  })}</TableBody></Table></div>
+}
+
+function CandidateCards({ payload, onOpen }: { payload: LearningListPayload<LearningCandidateItem>; onOpen: (item: LearningCandidateItem) => void }) {
+  if (!payload.items.length) return <EmptyState>暂无 FewShot 学习过程记录。</EmptyState>
+  return <div className="grid gap-3 lg:grid-cols-2">{payload.items.map((candidate) => <Card key={candidate.id} className="bg-muted/10"><CardHeader className="pb-2"><div className="flex flex-wrap items-center justify-between gap-2"><CardTitle className="text-sm">FewShot 候选 #{candidate.id}</CardTitle><div className="flex gap-1"><StatusBadge status={candidate.review_status} /><StatusBadge status={candidate.promotion_status} /></div></div><CardDescription>仅展示 few_shot_style 的候选、审核与晋升过程，不冒充正式样例。</CardDescription></CardHeader><CardContent className="flex flex-col gap-3"><p className="whitespace-pre-wrap text-sm">{textValue(candidate.content)}</p><Button className="w-fit" size="sm" variant="outline" onClick={() => onOpen(candidate)}>查看结构化详情</Button></CardContent></Card>)}</div>
 }
 
 function ExperienceItem({ item, label }: { item: Record<string, unknown>; label: string }) {
-  return <Card className="bg-muted/10"><CardHeader className="pb-2"><div className="flex items-center justify-between gap-2"><CardTitle className="text-sm">{label}</CardTitle><Badge variant="outline">{textValue(item.id ?? item.created_at)}</Badge></div></CardHeader><CardContent className="text-sm"><p className="whitespace-pre-wrap leading-relaxed">{textValue(item.content ?? item.summary ?? item.event_summary ?? item.description)}</p><p className="mt-2 text-xs text-muted-foreground">时间：{formatTime(item.created_at ?? item.timestamp ?? item.updated_at)}</p></CardContent></Card>
+  return <Card className="bg-muted/10"><CardHeader className="pb-2"><div className="flex items-center justify-between gap-2"><CardTitle className="text-sm">{label}</CardTitle><Badge variant="outline">{textValue(item.id ?? item.created_at)}</Badge></div></CardHeader><CardContent><p className="whitespace-pre-wrap text-sm leading-relaxed">{textValue(item.content ?? item.summary ?? item.event_summary ?? item.description)}</p><dl className="mt-3 grid gap-2 text-xs sm:grid-cols-2"><div><dt className="text-muted-foreground">时间</dt><dd>{formatTime(item.created_at ?? item.timestamp ?? item.updated_at)}</dd></div>{item.source !== undefined ? <div><dt className="text-muted-foreground">来源</dt><dd>{textValue(item.source)}</dd></div> : null}</dl></CardContent></Card>
+}
+
+function BookExperienceCard({ item }: { item: LearningCandidateItem }) {
+  const evidence = asRecord(item.evidence) ?? {}
+  const fields: Array<[string, string]> = [['语料库 / 书版本', 'corpus'], ['章节', 'chapter_reference'], ['原文', 'original_quote'], ['参与者', 'participants'], ['目标角色', 'target_role'], ['知情视角', 'knowledge_perspective']]
+  return <Card className="bg-muted/10"><CardHeader className="pb-2"><div className="flex items-center justify-between gap-2"><CardTitle className="text-sm">书中经历候选 #{item.id}</CardTitle><StatusBadge status={item.review_status} /></div></CardHeader><CardContent className="flex flex-col gap-3"><p className="whitespace-pre-wrap text-sm">{textValue(item.content)}</p><DetailGrid value={evidence} keys={fields} /></CardContent></Card>
 }
 
 function ExperiencesPanel({ payload }: { payload: LearningExperiencesPayload }) {
   const worldview = payload.worldview_internalization ?? []
   const book = payload.book_experience_episodes ?? []
   const interaction = payload.interaction_experiences ?? []
-  const legacyEvolution = payload.legacy_history?.evolution ?? []
-  const legacyExperience = payload.legacy_history?.experience ?? []
-  return (
-    <div className="flex flex-col gap-5">
-      <Card className="border-amber-500/20 bg-amber-500/5"><CardHeader><CardTitle>经历 / 内化</CardTitle><CardDescription>按语义隔离世界观内化、书中经历、互动经历与 legacy 历史，不将内化内容伪装成真实经历。</CardDescription></CardHeader></Card>
-      <Card>
-        <CardHeader><CardTitle>世界观内化</CardTitle><CardDescription>候选类型：worldview_internalization</CardDescription></CardHeader>
-        <CardContent className="flex flex-col gap-3"><Alert><AlertTriangleIcon /><AlertTitle>非书中真实经历</AlertTitle><AlertDescription>这些条目是世界观/书设知识的内化，不代表 Bot 在书中亲身经历过。</AlertDescription></Alert>{worldview.length === 0 ? <EmptyState>暂无世界观内化。</EmptyState> : <div className="grid gap-3 lg:grid-cols-2">{worldview.map((item) => <ExperienceItem key={item.id} item={item} label="世界观内化（非书中真实经历）" />)}</div>}</CardContent>
-      </Card>
-      <Card>
-        <CardHeader><CardTitle>书中经历</CardTitle><CardDescription>候选类型：book_experience_episode；只接受带完整证据的经历候选。</CardDescription></CardHeader>
-        <CardContent className="flex flex-col gap-3">{book.length === 0 ? <EmptyState>暂无书中经历。</EmptyState> : <div className="grid gap-3 lg:grid-cols-2">{book.map((item) => <BookExperienceCard key={item.id} item={item} />)}</div>}</CardContent>
-      </Card>
-      <div className="grid gap-5 xl:grid-cols-2">
-        <Card><CardHeader><CardTitle>互动经历</CardTitle><CardDescription>来自真实互动链路的 experience_episodes。</CardDescription></CardHeader><CardContent className="flex flex-col gap-3">{interaction.length === 0 ? <EmptyState>暂无互动经历。</EmptyState> : interaction.map((item, index) => <ExperienceItem key={String(item.id ?? index)} item={item} label="互动经历" />)}</CardContent></Card>
-        <Card><CardHeader><CardTitle>legacy 历史经历</CardTitle><CardDescription>只读兼容投影：已生效历史与旧经历分开显示。</CardDescription></CardHeader><CardContent className="flex flex-col gap-3">{legacyEvolution.length === 0 && legacyExperience.length === 0 ? <EmptyState>暂无 legacy 历史。</EmptyState> : <><p className="text-xs font-semibold text-muted-foreground">legacy evolution / 已生效历史</p>{legacyEvolution.map((item, index) => <ExperienceItem key={`evolution-${String(item.id ?? index)}`} item={item} label="legacy 已生效历史" />)}<p className="pt-2 text-xs font-semibold text-muted-foreground">legacy experience / 历史经历</p>{legacyExperience.map((item, index) => <ExperienceItem key={`experience-${String(item.id ?? index)}`} item={item} label="legacy 历史经历" />)}</>}</CardContent></Card>
-      </div>
-    </div>
-  )
+  const evolution = payload.legacy_history?.evolution ?? []
+  const legacyExperiences = payload.legacy_history?.experience ?? []
+  return <div className="flex flex-col gap-5"><Card className="border-amber-500/20 bg-amber-500/5"><CardHeader><CardTitle>经历 / 内化</CardTitle><CardDescription>世界观内化、书中经历、互动经历和 legacy 历史严格分区；“内化”是非亲历知识，不伪装成 Bot 真实经历。</CardDescription></CardHeader></Card><Card><CardHeader><CardTitle>世界观内化</CardTitle><CardDescription>候选类型 worldview_internalization；非亲历。</CardDescription></CardHeader><CardContent className="flex flex-col gap-3"><Alert><AlertTriangleIcon /><AlertTitle>非亲历</AlertTitle><AlertDescription>这些条目是世界观或书设知识的内化，不表示 Bot 在书中亲身经历过。</AlertDescription></Alert>{worldview.length ? <div className="grid gap-3 lg:grid-cols-2">{worldview.map((item) => <ExperienceItem key={item.id} item={item} label="世界观内化（非亲历）" />)}</div> : <EmptyState>暂无世界观内化。</EmptyState>}</CardContent></Card><Card><CardHeader><CardTitle>书中经历</CardTitle><CardDescription>结构化保留 corpus、章节、原文、参与者、目标角色与视角证据；缺失字段不会在前端补造。</CardDescription></CardHeader><CardContent>{book.length ? <div className="grid gap-3 lg:grid-cols-2">{book.map((item) => <BookExperienceCard key={item.id} item={item} />)}</div> : <EmptyState>暂无书中经历。</EmptyState>}</CardContent></Card><div className="grid gap-5 xl:grid-cols-2"><Card><CardHeader><CardTitle>互动经历</CardTitle><CardDescription>仅展示真实会话投影返回的互动锚点。</CardDescription></CardHeader><CardContent className="flex flex-col gap-3">{interaction.length ? interaction.map((item, index) => <ExperienceItem key={String(item.id ?? index)} item={item} label="互动经历" />) : <EmptyState>暂无互动经历。</EmptyState>}</CardContent></Card><Card><CardHeader><CardTitle>Legacy 历史</CardTitle><CardDescription>只读兼容投影；已生效历史和旧经历分开显示，不自动晋升。</CardDescription></CardHeader><CardContent className="flex flex-col gap-3">{!evolution.length && !legacyExperiences.length ? <EmptyState>暂无 legacy 历史。</EmptyState> : <><p className="text-xs font-semibold text-muted-foreground">已生效历史</p>{evolution.map((item, index) => <ExperienceItem key={`evolution-${String(item.id ?? index)}`} item={item} label="Legacy 已生效历史" />)}<p className="pt-2 text-xs font-semibold text-muted-foreground">历史经历</p>{legacyExperiences.map((item, index) => <ExperienceItem key={`experience-${String(item.id ?? index)}`} item={item} label="Legacy 历史经历" />)}</>}</CardContent></Card></div></div>
 }
 
-function BookExperienceCard({ item }: { item: LearningCandidateItem }) {
-  const evidence = item.evidence && !Array.isArray(item.evidence) ? item.evidence : {}
-  const evidenceFields: Array<[string, string]> = [
-    ['语料库/书版本', 'corpus'],
-    ['章节引用', 'chapter_reference'],
-    ['原文引用', 'original_quote'],
-    ['参与者', 'participants'],
-    ['目标 Bot 角色', 'target_role'],
-    ['知情视角', 'knowledge_perspective'],
-  ]
-  return <Card className="bg-muted/10"><CardHeader className="pb-2"><div className="flex items-center justify-between gap-2"><CardTitle className="text-sm">书中经历候选 #{item.id}</CardTitle><StatusBadge status={item.review_status} /></div></CardHeader><CardContent className="flex flex-col gap-3"><p className="whitespace-pre-wrap text-sm">{textValue(item.content)}</p><div className="grid gap-2 rounded-lg border bg-background/50 p-3 text-xs md:grid-cols-2">{evidenceFields.map(([label, key]) => <div key={key} className={key === 'original_quote' ? 'md:col-span-2' : ''}><span className="text-muted-foreground">{label}：</span><span className="whitespace-pre-wrap">{jsonText(evidence[key])}</span></div>)}</div></CardContent></Card>
+function PromotionsTable({ payload, actionLoading, onRetry }: { payload: LearningListPayload<LearningPromotionItem>; actionLoading: string; onRetry: (item: LearningPromotionItem) => void }) {
+  if (!payload.items.length) return <EmptyState>暂无晋升记录。</EmptyState>
+  return <div className="overflow-auto rounded-lg border"><Table><TableHeader><TableRow><TableHead>ID</TableHead><TableHead>候选 / 目标</TableHead><TableHead>状态</TableHead><TableHead>Target ID</TableHead><TableHead>错误详情</TableHead><TableHead>正式对象</TableHead><TableHead className="text-right">操作</TableHead></TableRow></TableHeader><TableBody>{payload.items.map((promotion) => {
+    const retryable = promotion.promotion_status === 'retryable_failed' && promotion.retryable === true
+    return <TableRow key={promotion.id}><TableCell className="font-mono text-xs">#{promotion.id}</TableCell><TableCell><div>{candidateTypeLabel(promotion.candidate_type)}</div><div className="text-xs text-muted-foreground">candidate #{textValue(promotion.candidate_id)} · {textValue(promotion.target_kind)}</div></TableCell><TableCell><StatusBadge status={promotion.promotion_status} /></TableCell><TableCell className="font-mono text-xs">{textValue(promotion.target_id)}</TableCell><TableCell className="max-w-72 text-xs text-destructive">{promotion.error_code || promotion.error_message ? `${textValue(promotion.error_code)} · ${textValue(promotion.error_message)}` : '—'}</TableCell><TableCell>{promotion.target_link ? <ObjectDeepLink to={promotion.target_link.path} objectRef={promotion.target_link.object_ref}>打开正式对象</ObjectDeepLink> : <span className="text-xs text-muted-foreground">无服务端 ObjectRef</span>}</TableCell><TableCell className="text-right">{retryable ? <Button size="sm" variant="outline" disabled={Boolean(actionLoading)} onClick={() => onRetry(promotion)}>{actionLoading === `promotion:${promotion.id}` ? <Loader2Icon className="animate-spin" /> : <RotateCcwIcon data-icon="inline-start" />}安全重试</Button> : '—'}</TableCell></TableRow>
+  })}</TableBody></Table></div>
 }
 
-function PromotionsPanel({
-  payload,
-  loading,
-  onOffsetChange,
-  onRetry,
-}: {
-  payload: LearningListPayload<LearningPromotionItem>
-  loading: boolean
-  onOffsetChange: (offset: number) => void
-  onRetry: (promotion: LearningPromotionItem) => void
-}) {
-  return <Card><CardHeader><CardTitle>晋升历史</CardTitle><CardDescription>显示目标 ID、API 返回的状态和错误详情；只有 retryable_failed 才显示安全重试。</CardDescription></CardHeader><CardContent className="flex flex-col gap-4">{payload.items.length === 0 ? <EmptyState>暂无晋升记录。</EmptyState> : <div className="overflow-auto rounded-lg border"><Table><TableHeader><TableRow><TableHead>ID</TableHead><TableHead>候选/目标</TableHead><TableHead>状态</TableHead><TableHead>target ID</TableHead><TableHead>错误详情</TableHead><TableHead className="text-right">操作</TableHead></TableRow></TableHeader><TableBody>{payload.items.map((promotion) => { const retryable = promotion.promotion_status === 'retryable_failed' || promotion.retryable === true; return <TableRow key={promotion.id}><TableCell className="font-mono text-xs">#{promotion.id}</TableCell><TableCell><div>{candidateTypeLabel(promotion.candidate_type)}</div><div className="text-xs text-muted-foreground">candidate #{textValue(promotion.candidate_id)}</div></TableCell><TableCell><StatusBadge status={promotion.promotion_status} /></TableCell><TableCell className="font-mono text-xs">{textValue(promotion.target_id)}</TableCell><TableCell className="max-w-[280px] text-xs text-destructive"><span title={textValue(promotion.error_message)}>{textValue(promotion.error_code)}{promotion.error_message ? ` · ${promotion.error_message}` : ''}</span></TableCell><TableCell className="text-right">{retryable ? <Button size="sm" variant="outline" disabled={loading} onClick={() => onRetry(promotion)}><RotateCcwIcon data-icon="inline-start" />安全重试</Button> : <span className="text-xs text-muted-foreground">—</span>}</TableCell></TableRow> })}</TableBody></Table></div>}<PaginationControls offset={payload.offset} limit={payload.limit} total={payload.total} loading={loading} onChange={onOffsetChange} /></CardContent></Card>
-}
-
-function CandidateDetail({
-  candidate,
-  dedicated,
-  dedicatedError,
-  actionLoading,
-  onReview,
-  onRetry,
-}: {
-  candidate: LearningCandidateItem
-  dedicated: DedicatedReviewStatus | null
-  dedicatedError: string
-  actionLoading: boolean
-  onReview: (action: 'approve' | 'reject') => void
-  onRetry: (promotion: LearningPromotionItem) => void
-}) {
-  const evidence = candidate.evidence
-  const canReview = candidate.review_status === 'pending'
-  const retryablePromotions = (candidate.promotions ?? []).filter((promotion) => promotion.promotion_status === 'retryable_failed' || promotion.retryable === true)
-  const isDedicated = candidate.candidate_type === 'jargon_candidate' || candidate.candidate_type === 'belief_candidate'
-  return <div className="flex flex-col gap-4 overflow-auto"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">#{candidate.id}</Badge><Badge variant="outline">{candidateTypeLabel(candidate.candidate_type)}</Badge><StatusBadge status={candidate.review_status} /><StatusBadge status={candidate.promotion_status} /></div><p className="whitespace-pre-wrap rounded-lg border bg-muted/20 p-3 text-sm">{textValue(candidate.content, candidate.reason)}</p><div className="grid gap-2 text-xs md:grid-cols-2"><div>Bot ID：<span className="font-mono">{candidate.bot_id}</span></div><div>来源 fingerprint：<span className="font-mono">{textValue(candidate.source_fingerprint)}</span></div><div>审核者：{textValue(candidate.reviewer)}</div><div>审核时间：{formatTime(candidate.reviewed_at)}</div><div className="md:col-span-2">目标 ID：<span className="font-mono">{candidate.target_ids?.length ? candidate.target_ids.join(', ') : '—'}</span></div></div><Card><CardHeader className="pb-2"><CardTitle className="text-sm">证据</CardTitle><CardDescription>原始证据只读展示，不在前端补造章节、原文或参与者。</CardDescription></CardHeader><CardContent><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted/30 p-3 text-xs">{jsonText(evidence)}</pre></CardContent></Card>{candidate.candidate_type === 'worldview_internalization' ? <Alert><AlertTriangleIcon /><AlertTitle>非书中真实经历</AlertTitle><AlertDescription>世界观内化仅是知识内化，不代表真实经历。</AlertDescription></Alert> : null}{isDedicated ? <Card><CardHeader className="pb-2"><CardTitle className="text-sm">专属审核</CardTitle><CardDescription>黑话/信念只能委派给原有专属审核，学习中心不会绕过专属服务直接生效。</CardDescription></CardHeader><CardContent className="flex flex-col gap-2 text-xs">{dedicatedError ? <Alert variant="destructive"><AlertTitle>专属审核状态不可用</AlertTitle><AlertDescription>{dedicatedError}</AlertDescription></Alert> : dedicated ? <><div className="flex flex-wrap items-center gap-2"><StatusBadge status={dedicated.status} /><span>target ID：<span className="font-mono">{textValue(dedicated.target_id)}</span></span></div>{dedicated.deep_link ? <DeepLink href={dedicated.deep_link} label="打开专属审核深链" /> : <span className="text-muted-foreground">暂无专属审核深链</span>}{dedicated.error ? <p className="text-destructive">错误：{dedicated.error}</p> : null}</> : <span className="text-muted-foreground">正在读取专属审核同步状态…</span>}</CardContent></Card> : null}<Card><CardHeader className="pb-2"><CardTitle className="text-sm">操作历史与晋升</CardTitle></CardHeader><CardContent className="flex flex-col gap-2">{(candidate.operations ?? []).length === 0 ? <span className="text-xs text-muted-foreground">暂无操作历史。</span> : candidate.operations?.map((operation, index) => <div key={`${String(operation.id ?? operation.kind)}-${index}`} className="rounded border p-2 text-xs"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{textValue(operation.kind)}</Badge><StatusBadge status={operation.status} />{operation.target_id !== undefined ? <span className="font-mono">target: {textValue(operation.target_id)}</span> : null}</div>{operation.error_message ? <p className="mt-1 text-destructive">{textValue(operation.error_code)} · {textValue(operation.error_message)}</p> : null}</div>)}</CardContent></Card>{candidate.failures?.length ? <Alert variant="destructive"><AlertTitle>晋升错误详情</AlertTitle><AlertDescription><div className="flex flex-col gap-1">{candidate.failures.map((failure, index) => <div key={`${failure.id ?? index}`}>{textValue(failure.code)} · {textValue(failure.message)} {failure.retryable ? '(可重试)' : '(不可重试)'}</div>)}</div></AlertDescription></Alert> : null}<div className="flex flex-wrap justify-end gap-2 border-t pt-3">{canReview ? <><Button disabled={actionLoading} onClick={() => onReview('approve')}><CheckCircle2Icon data-icon="inline-start" />批准</Button><Button variant="destructive" disabled={actionLoading} onClick={() => onReview('reject')}>拒绝</Button></> : null}{retryablePromotions.map((promotion) => <Button key={promotion.id} variant="outline" disabled={actionLoading} onClick={() => onRetry(promotion)}><RotateCcwIcon data-icon="inline-start" />安全重试 #{promotion.id}</Button>)}</div></div>
-}
-
-function DeepLink({ href, label }: { href: string; label: string }) {
-  if (href.startsWith('/')) return <Link className="inline-flex items-center gap-1 text-primary underline underline-offset-2" to={href}>{label}<ExternalLinkIcon className="size-3" /></Link>
-  return <a className="inline-flex items-center gap-1 text-primary underline underline-offset-2" href={href} target="_blank" rel="noreferrer">{label}<ExternalLinkIcon className="size-3" /></a>
+function CandidateDetail({ candidate, dedicated, dedicatedError, actionLoading, onReview, onRetry }: { candidate: LearningCandidateItem; dedicated: DedicatedReviewStatus | null; dedicatedError: string; actionLoading: string; onReview: (action: 'approve' | 'reject' | 'ignore') => void; onRetry: (item: LearningPromotionItem) => void }) {
+  const blocked = Boolean(candidate.promotion_blocked || candidate.legacy_unlinked || candidate.quarantined || candidate.garbled)
+  const pending = candidate.review_status === 'pending'
+  const dedicatedType = candidate.candidate_type === 'jargon_candidate' || candidate.candidate_type === 'belief_candidate'
+  const retryable = (candidate.promotions ?? []).filter((item) => item.promotion_status === 'retryable_failed' && item.retryable === true)
+  return <div className="flex flex-col gap-4 overflow-auto"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">#{candidate.id}</Badge><Badge variant="outline">{candidateTypeLabel(candidate.candidate_type)}</Badge><StatusBadge status={candidate.review_status} /><StatusBadge status={candidate.promotion_status} />{blocked ? <Badge variant="destructive">只读 / 不可晋升</Badge> : null}</div><p className="whitespace-pre-wrap rounded-lg border bg-muted/20 p-3 text-sm">{textValue(candidate.content, textValue(candidate.reason))}</p><DetailGrid value={{ bot_id: candidate.bot_id, source_fingerprint: candidate.source_fingerprint, source_id: candidate.source_id, job_id: candidate.job_id, reviewer: candidate.reviewer, reviewed_at: formatTime(candidate.reviewed_at), review_note: candidate.review_note, target_ids: candidate.target_ids }} keys={[["Bot ID", 'bot_id'], ['来源 fingerprint', 'source_fingerprint'], ['来源 ID', 'source_id'], ['任务 ID', 'job_id'], ['审核者', 'reviewer'], ['审核时间', 'reviewed_at'], ['审核备注', 'review_note'], ['目标 ID', 'target_ids']]} /><Card><CardHeader className="pb-2"><CardTitle className="text-sm">证据</CardTitle><CardDescription>只读结构化展示 API 返回证据，不补造章节、原文或参与者。</CardDescription></CardHeader><CardContent><DetailGrid value={candidate.evidence} /></CardContent></Card>{candidate.source ? <Card><CardHeader className="pb-2"><CardTitle className="text-sm">来源</CardTitle></CardHeader><CardContent><DetailGrid value={candidate.source} keys={[["名称", 'name'], ['类型', 'source_type'], ['状态', 'enabled'], ['游标', 'cursor']]} /></CardContent></Card> : null}{candidate.task ? <Card><CardHeader className="pb-2"><CardTitle className="text-sm">来源任务</CardTitle></CardHeader><CardContent><DetailGrid value={candidate.task} keys={[["名称", 'name'], ['候选类型', 'candidate_type'], ['启用', 'enabled'], ['调度', 'schedule'], ['策略', 'policy']]} /></CardContent></Card> : null}{candidate.candidate_type === 'worldview_internalization' ? <Alert><AlertTriangleIcon /><AlertTitle>非亲历</AlertTitle><AlertDescription>世界观内化仅代表知识内化，不代表真实经历。</AlertDescription></Alert> : null}{blocked ? <Alert variant="destructive"><AlertTitle>不可晋升</AlertTitle><AlertDescription>{candidate.promotion_block_reasons?.join('、') || '服务端标记为 legacy 未链接、隔离或乱码。批准操作已禁用。'}</AlertDescription></Alert> : null}{dedicatedType ? <Card><CardHeader className="pb-2"><CardTitle className="text-sm">专属审核</CardTitle><CardDescription>术语与信念候选委派给既有专属审核；学习中心不会绕过专属服务直接生效。</CardDescription></CardHeader><CardContent>{dedicatedError ? <Alert variant="destructive"><AlertTitle>专属审核状态不可用</AlertTitle><AlertDescription>{dedicatedError}</AlertDescription></Alert> : dedicated ? <div className="flex flex-col gap-3"><div className="flex flex-wrap items-center gap-2"><StatusBadge status={dedicated.status} /><span className="font-mono text-xs">target {textValue(dedicated.target_id)}</span></div>{dedicated.deep_link && dedicated.object_ref ? <ObjectDeepLink to={dedicated.deep_link} objectRef={dedicated.object_ref}>打开专属审核对象</ObjectDeepLink> : <span className="text-sm text-muted-foreground">无服务端签发的 ObjectRef，不使用裸 ID 跳转。</span>}{dedicated.error ? <p className="text-sm text-destructive">{dedicated.error}</p> : null}</div> : <p className="text-sm text-muted-foreground">正在读取专属审核状态…</p>}</CardContent></Card> : null}<Card><CardHeader className="pb-2"><CardTitle className="text-sm">操作历史与晋升</CardTitle></CardHeader><CardContent className="flex flex-col gap-2">{candidate.operations?.length ? candidate.operations.map((operation, index) => <div key={`${String(operation.id ?? operation.kind)}-${index}`} className="rounded-md border p-2 text-xs"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{textValue(operation.kind)}</Badge><StatusBadge status={operation.status} />{operation.target_id !== undefined ? <span className="font-mono">target {textValue(operation.target_id)}</span> : null}</div>{operation.error_message ? <p className="mt-1 text-destructive">{textValue(operation.error_code)} · {textValue(operation.error_message)}</p> : null}</div>) : <p className="text-sm text-muted-foreground">暂无操作历史。</p>}{candidate.promotions?.map((promotion) => promotion.target_link ? <ObjectDeepLink key={promotion.id} to={promotion.target_link.path} objectRef={promotion.target_link.object_ref}>打开晋升对象 #{promotion.id}</ObjectDeepLink> : null)}</CardContent></Card>{candidate.failures?.length ? <Alert variant="destructive"><AlertTitle>晋升错误详情</AlertTitle><AlertDescription><ul className="list-disc pl-5">{candidate.failures.map((failure, index) => <li key={failure.id ?? index}>{textValue(failure.code)} · {textValue(failure.message)}{failure.retryable ? '（可重试）' : '（不可重试）'}</li>)}</ul></AlertDescription></Alert> : null}<div className="flex flex-wrap justify-end gap-2 border-t pt-3">{pending ? <><Button disabled={Boolean(actionLoading) || blocked} onClick={() => onReview('approve')}><CheckCircle2Icon data-icon="inline-start" />批准</Button><Button variant="destructive" disabled={Boolean(actionLoading)} onClick={() => onReview('reject')}>拒绝</Button><Button variant="secondary" disabled={Boolean(actionLoading)} onClick={() => onReview('ignore')}>忽略</Button></> : null}{retryable.map((promotion) => <Button key={promotion.id} variant="outline" disabled={Boolean(actionLoading)} onClick={() => onRetry(promotion)}><RotateCcwIcon data-icon="inline-start" />安全重试 #{promotion.id}</Button>)}</div></div>
 }
 
 export function LearningCenterPage() {
-  const [bots, setBots] = useState<RegistryBotItem[]>(fallbackBots)
-  const [botId, setBotId] = useState('')
-  const [data, setData] = useState<LearningCenterData | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
-  const [activeSection, setActiveSection] = useState('sources')
-  const [candidateOffset, setCandidateOffset] = useState(0)
-  const [promotionOffset, setPromotionOffset] = useState(0)
-  const [candidateType, setCandidateType] = useState('all')
-  const [reviewStatus, setReviewStatus] = useState('all')
-  const [promotionStatus, setPromotionStatus] = useState('all')
-  const [source, setSource] = useState('')
+  const pagination = usePaginationSearchParams()
+  const searchParams = pagination.searchParams
+  const botId = searchParams.get('bot_id') ?? ''
+  const tab = searchParams.get('tab') ?? 'sources'
+  const candidateType = searchParams.get('candidate_type') ?? ''
+  const reviewStatus = searchParams.get('review_status') ?? ''
+  const promotionStatus = searchParams.get('promotion_status') ?? ''
+  const sourceFilter = searchParams.get('source') ?? ''
+
+  const [sources, setSources] = useState<AsyncState<LearningListPayload<LearningSourceItem>>>(loadingState)
+  const [jobs, setJobs] = useState<AsyncState<LearningListPayload<LearningJobItem>>>(loadingState)
+  const [candidates, setCandidates] = useState<AsyncState<LearningListPayload<LearningCandidateItem>>>(loadingState)
+  const [fewShot, setFewShot] = useState<AsyncState<LearningListPayload<LearningCandidateItem>>>(loadingState)
+  const [experiences, setExperiences] = useState<AsyncState<LearningExperiencesPayload>>(loadingState)
+  const [promotions, setPromotions] = useState<AsyncState<LearningListPayload<LearningPromotionItem>>>(loadingState)
   const [selectedCandidate, setSelectedCandidate] = useState<LearningCandidateItem | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [dedicated, setDedicated] = useState<DedicatedReviewStatus | null>(null)
   const [dedicatedError, setDedicatedError] = useState('')
-  const [actionLoading, setActionLoading] = useState(false)
+  const [actionLoading, setActionLoading] = useState('')
 
-  useEffect(() => {
-    let alive = true
-    getSystemStatus().then((payload) => {
-      if (!alive) return
-      const availableBots = payload.registry_bots?.length ? payload.registry_bots : fallbackBots
-      setBots(availableBots)
-      setBotId((current) => current || availableBots[0].db_id)
-    }).catch(() => {
-      if (alive) setBotId((current) => current || fallbackBots[0].db_id)
-    })
-    return () => { alive = false }
+  const loadBots = useCallback(async () => scopeOptionsFor(await getScopeOptions(), ['bot']), [])
+  const pageOffset = useCallback((section: string) => tab === section ? pagination.offset : 0, [pagination.offset, tab])
+  const baseQuery = useMemo(() => ({ bot_id: botId, limit: pagination.limit }), [botId, pagination.limit])
+
+  const loadOne = useCallback(async <T,>(setter: React.Dispatch<React.SetStateAction<AsyncState<T>>>, request: () => Promise<T>, hasItems?: (value: T) => boolean) => {
+    setter(loadingState())
+    try {
+      const value = await request()
+      setter({ status: hasItems && !hasItems(value) ? 'empty' : 'success', data: value })
+    } catch (error) { setter({ status: 'error', data: null, error }) }
   }, [])
 
-  async function loadData(requestedBotId = botId) {
-    if (!requestedBotId) return
-    setLoading(true)
-    setError('')
-    try {
-      const query = { bot_id: requestedBotId, limit: 20 }
-      const [sources, jobs, candidates, promotions, fewShot, experiences] = await Promise.all([
-        listLearningSources(query),
-        listLearningJobs(query),
-        listLearningCandidates({ ...query, ...(candidateType !== 'all' ? { candidate_type: candidateType } : {}), ...(reviewStatus !== 'all' ? { review_status: reviewStatus } : {}), ...(promotionStatus !== 'all' ? { promotion_status: promotionStatus } : {}), ...(source.trim() ? { source: source.trim() } : {}), offset: candidateOffset }),
-        listLearningPromotions({ ...query, ...(promotionStatus !== 'all' ? { promotion_status: promotionStatus } : {}), offset: promotionOffset }),
-        getLearningFewShot({ ...query, offset: 0 }),
-        getLearningExperiences({ ...query, offset: 0 }),
-      ])
-      setData({ sources, jobs, candidates, promotions, fewShot, experiences })
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '学习中心数据加载失败')
-    } finally {
-      setLoading(false)
+  const loadAll = useCallback(async () => {
+    if (!botId) {
+      const empty = { status: 'empty', data: null } as const
+      setSources(empty); setJobs(empty); setCandidates(empty); setFewShot(empty); setExperiences(empty); setPromotions(empty)
+      return
     }
-  }
+    await Promise.allSettled([
+      loadOne(setSources, () => listLearningSources({ ...baseQuery, offset: pageOffset('sources') }), (value) => value.items.length > 0),
+      loadOne(setJobs, () => listLearningJobs({ ...baseQuery, offset: pageOffset('jobs') }), (value) => value.items.length > 0),
+      loadOne(setCandidates, () => listLearningCandidates({ ...baseQuery, offset: pageOffset('candidates'), ...(candidateType ? { candidate_type: candidateType } : {}), ...(reviewStatus ? { review_status: reviewStatus } : {}), ...(promotionStatus ? { promotion_status: promotionStatus } : {}), ...(sourceFilter.trim() ? { source: sourceFilter.trim() } : {}) }), (value) => value.items.length > 0),
+      loadOne(setFewShot, () => getLearningFewShot({ ...baseQuery, offset: pageOffset('fewshot'), candidate_type: 'few_shot_style' }), (value) => value.items.length > 0),
+      loadOne(setExperiences, () => getLearningExperiences({ ...baseQuery, offset: pageOffset('experiences') }), (value) => Boolean(value.worldview_internalization?.length || value.book_experience_episodes?.length || value.interaction_experiences?.length || value.legacy_history?.evolution?.length || value.legacy_history?.experience?.length)),
+      loadOne(setPromotions, () => listLearningPromotions({ ...baseQuery, offset: pageOffset('promotions'), ...(promotionStatus ? { promotion_status: promotionStatus } : {}) }), (value) => value.items.length > 0),
+    ])
+  }, [baseQuery, botId, candidateType, loadOne, pageOffset, promotionStatus, reviewStatus, sourceFilter])
 
-  useEffect(() => {
-    if (botId) void loadData(botId)
-    // oxlint-disable-next-line react-hooks/exhaustive-deps
-  }, [botId, candidateOffset, promotionOffset, candidateType, reviewStatus, promotionStatus, source])
+  useEffect(() => { void loadAll() }, [loadAll])
 
-  async function handleOpenCandidate(candidate: LearningCandidateItem) {
+  async function openCandidate(candidate: LearningCandidateItem) {
     setSelectedCandidate(candidate)
     setDetailLoading(true)
     setDedicated(null)
@@ -530,72 +269,53 @@ export function LearningCenterPage() {
       const detail = await getLearningCandidate(candidate.id, botId)
       setSelectedCandidate(detail.item)
       if (detail.item.candidate_type === 'jargon_candidate' || detail.item.candidate_type === 'belief_candidate') {
-        try {
-          const dedicatedPayload = await getDedicatedReviewStatus(candidate.id, botId)
-          setDedicated(dedicatedPayload.item)
-        } catch (err) {
-          setDedicatedError(err instanceof Error ? err.message : '专属审核状态读取失败')
-        }
+        try { setDedicated((await getDedicatedReviewStatus(candidate.id, botId)).item) }
+        catch (reason) { setDedicatedError(reason instanceof Error ? reason.message : '专属审核状态读取失败') }
       }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '候选详情读取失败')
-    } finally {
-      setDetailLoading(false)
-    }
+    } catch (reason) { toast.error(reason instanceof Error ? reason.message : '候选详情读取失败') }
+    finally { setDetailLoading(false) }
   }
 
-  async function handleReview(candidate: LearningCandidateItem, action: 'approve' | 'reject') {
-    setActionLoading(true)
+  async function review(candidate: LearningCandidateItem, action: 'approve' | 'reject' | 'ignore') {
+    setActionLoading(`candidate:${candidate.id}`)
     try {
-      const result = await reviewLearningCandidate(candidate.id, botId, action, { idempotencyKey: `learning-review-${botId}-${candidate.id}-${action}` })
-      await loadData(botId)
-      const reviewedCandidateValue = result.item && 'candidate' in result.item ? result.item.candidate : undefined
-      const reviewedCandidate = reviewedCandidateValue && typeof reviewedCandidateValue === 'object' ? reviewedCandidateValue as LearningCandidateItem : undefined
-      if (reviewedCandidate?.review_status === 'delegated') toast.info('已委派专属审核，最终状态以专属审核 API 为准。')
-      else if (reviewedCandidate?.review_status === 'approved') toast.info('审核状态已由 API 更新；晋升仍以晋升状态为准。')
-      else toast.info('审核请求已返回，请以 API 状态确认结果。')
-      setSelectedCandidate(reviewedCandidate ?? null)
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '审核请求失败')
-    } finally {
-      setActionLoading(false)
-    }
+      const result = await reviewLearningCandidate(candidate.id, botId, action, { idempotencyKey: `learning-review:${botId}:${candidate.id}:${action}` })
+      if (!result.ok || !['committed', 'succeeded'].includes(result.operation.status)) throw new Error(`服务端未确认审核提交：${result.operation.status}`)
+      toast.success(`审核操作：${result.operation.status}；后续晋升以 API 状态确认结果`)
+      const nextCandidateValue = result.item && 'candidate' in result.item ? result.item.candidate : undefined
+      const nextCandidate = asRecord(nextCandidateValue) ? nextCandidateValue as LearningCandidateItem : undefined
+      if (nextCandidate) setSelectedCandidate(nextCandidate)
+      else if (selectedCandidate?.id === candidate.id) setSelectedCandidate(null)
+      await loadAll()
+    } catch (reason) { toast.error(reason instanceof Error ? reason.message : '审核失败') }
+    finally { setActionLoading('') }
   }
 
-  async function handleRetry(promotion: LearningPromotionItem) {
-    setActionLoading(true)
+  async function runJob(item: LearningJobItem) {
+    setActionLoading(`job:${item.id}`)
     try {
-      const result = await retryLearningPromotion(promotion.id, botId, `learning-retry-${botId}-${promotion.id}`)
-      await loadData(botId)
-      const item = result.item && !('candidate' in result.item) ? result.item as LearningPromotionItem : undefined
-      if (item?.promotion_status === 'succeeded') toast.success('重试结果已由 API 确认为成功。')
-      else if (item?.promotion_status === 'running' || item?.promotion_status === 'queued') toast.info(`重试已提交，当前状态：${statusLabel(item.promotion_status)}`)
-      else toast.info('重试请求已返回，请以 API 状态确认结果。')
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '安全重试失败')
-    } finally {
-      setActionLoading(false)
-    }
+      const result = await runLearningJob(item.id, botId, `learning-job:${botId}:${item.id}`)
+      if (!result.ok || !['queued', 'running', 'succeeded', 'committed'].includes(result.operation.status)) throw new Error(`任务未被服务端接受：${result.operation.status}`)
+      toast.success(`任务 API 状态：${result.operation.status}`)
+      await loadAll()
+    } catch (reason) { toast.error(reason instanceof Error ? reason.message : '任务启动失败') }
+    finally { setActionLoading('') }
   }
 
-  async function handleRunJob(job: LearningJobItem) {
-    setActionLoading(true)
+  async function retry(item: LearningPromotionItem) {
+    setActionLoading(`promotion:${item.id}`)
     try {
-      const result = await runLearningJob(job.id, botId, `learning-run-${botId}-${job.id}`)
-      await loadData(botId)
-      const item = result.item && !('candidate' in result.item) ? result.item as Record<string, unknown> : undefined
-      toast.info(`任务 API 状态：${statusLabel(item?.status)}`)
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '任务运行失败')
-    } finally {
-      setActionLoading(false)
-    }
+      const result = await retryLearningPromotion(item.id, botId, `learning-promotion:${botId}:${item.id}`)
+      if (!result.ok) throw new Error('晋升重试未被服务端接受')
+      toast.success(`晋升操作：${result.operation.status}`)
+      await loadAll()
+      if (selectedCandidate) await openCandidate(selectedCandidate)
+    } catch (reason) { toast.error(reason instanceof Error ? reason.message : '晋升重试失败') }
+    finally { setActionLoading('') }
   }
 
-  const candidatePayload = data?.candidates ?? { items: [], total: 0, limit: 20, offset: candidateOffset, has_more: false }
-  const promotionPayload = data?.promotions ?? { items: [], total: 0, limit: 20, offset: promotionOffset, has_more: false }
+  const pageForTab = tab === 'sources' ? sources.data?.page : tab === 'jobs' ? jobs.data?.page : tab === 'candidates' ? candidates.data?.page : tab === 'fewshot' ? fewShot.data?.page : tab === 'promotions' ? promotions.data?.page : null
+  const botPrompt = !botId ? '请选择真实 Bot' : undefined
 
-  return <div className="flex flex-col gap-6"><div className="flex flex-wrap items-start justify-between gap-4"><div><h1 className="text-xl font-bold tracking-tight">通用学习中心</h1><p className="text-sm text-muted-foreground">统一查看学习来源、候选审核、FewShot、经历内化与晋升历史。</p></div><div className="flex items-center gap-2"><label className="text-xs text-muted-foreground" htmlFor="learning-bot">Bot</label><Select value={botId || undefined} onValueChange={(value) => { setCandidateOffset(0); setPromotionOffset(0); setBotId(value) }}><SelectTrigger id="learning-bot" className="w-44"><SelectValue placeholder="选择 BotProfile.db_id" /></SelectTrigger><SelectContent>{bots.map((bot) => <SelectItem key={bot.db_id} value={bot.db_id}>{bot.name} ({bot.db_id})</SelectItem>)}</SelectContent></Select><Button variant="outline" size="icon-sm" disabled={loading} onClick={() => void loadData()} title="刷新学习中心"><RefreshCwIcon className={loading ? 'animate-spin' : ''} /></Button></div></div><div className="grid gap-3 md:grid-cols-4"><SummaryCard title="来源" value={data?.sources.total} /><SummaryCard title="任务" value={data?.jobs.total} /><SummaryCard title="候选" value={data?.candidates.total} description="当前筛选" /><SummaryCard title="晋升历史" value={data?.promotions.total} description="当前 Bot 作用域" /></div>{error ? <Alert variant="destructive"><AlertTriangleIcon /><AlertTitle>学习中心加载失败</AlertTitle><AlertDescription className="flex flex-wrap items-center gap-3"><span>{error}</span><Button size="sm" variant="outline" onClick={() => void loadData()}>重试加载</Button></AlertDescription></Alert> : null}{loading && !data ? <Skeleton className="h-96 w-full" /> : <Tabs value={activeSection} onValueChange={setActiveSection}><TabsList className="grid h-auto w-full grid-cols-2 gap-1 sm:grid-cols-3 lg:grid-cols-6"><TabsTrigger value="sources">来源</TabsTrigger><TabsTrigger value="jobs">任务</TabsTrigger><TabsTrigger value="candidates">候选</TabsTrigger><TabsTrigger value="fewshot">FewShot</TabsTrigger><TabsTrigger value="experiences">经历/内化</TabsTrigger><TabsTrigger value="promotions">晋升历史</TabsTrigger></TabsList><TabsContent value="sources"><SourcesPanel sources={data?.sources ?? { items: [], total: 0, limit: 20, offset: 0, has_more: false }} jobs={data?.jobs ?? { items: [], total: 0, limit: 20, offset: 0, has_more: false }} botId={botId} loading={actionLoading} onRunJob={(job) => void handleRunJob(job)} /></TabsContent><TabsContent value="jobs"><SourcesPanel sources={data?.sources ?? { items: [], total: 0, limit: 20, offset: 0, has_more: false }} jobs={data?.jobs ?? { items: [], total: 0, limit: 20, offset: 0, has_more: false }} botId={botId} loading={actionLoading} onRunJob={(job) => void handleRunJob(job)} /></TabsContent><TabsContent value="candidates"><CandidatesPanel payload={candidatePayload} loading={loading || actionLoading} candidateType={candidateType} reviewStatus={reviewStatus} promotionStatus={promotionStatus} source={source} onCandidateTypeChange={(value) => { setCandidateOffset(0); setCandidateType(value) }} onReviewStatusChange={(value) => { setCandidateOffset(0); setReviewStatus(value) }} onPromotionStatusChange={(value) => { setCandidateOffset(0); setPromotionStatus(value) }} onSourceChange={(value) => { setCandidateOffset(0); setSource(value) }} onOffsetChange={setCandidateOffset} onOpen={(candidate) => void handleOpenCandidate(candidate)} onReview={(candidate, action) => void handleReview(candidate, action)} /></TabsContent><TabsContent value="fewshot"><FewShotPanel payload={data?.fewShot ?? { approved_examples: [], items: [], total: 0, limit: 20, offset: 0, has_more: false }} /></TabsContent><TabsContent value="experiences"><ExperiencesPanel payload={data?.experiences ?? { worldview_internalization: [], book_experience_episodes: [], interaction_experiences: [], legacy_history: { evolution: [], experience: [] } }} /></TabsContent><TabsContent value="promotions"><PromotionsPanel payload={promotionPayload} loading={loading || actionLoading} onOffsetChange={setPromotionOffset} onRetry={(promotion) => void handleRetry(promotion)} /></TabsContent></Tabs>}{selectedCandidate ? <Dialog open onOpenChange={(open) => { if (!open) setSelectedCandidate(null) }}><DialogContent className="flex max-h-[88vh] flex-col sm:max-w-3xl"><DialogHeader><DialogTitle>候选详情与审核</DialogTitle><DialogDescription>{detailLoading ? '正在读取 API 详情…' : '证据、目标 ID、状态和错误均来自当前 Bot 的 API 响应。'}</DialogDescription></DialogHeader>{detailLoading ? <div className="flex items-center justify-center py-12 text-muted-foreground"><Loader2Icon className="mr-2 animate-spin" />读取详情</div> : <CandidateDetail candidate={selectedCandidate} dedicated={dedicated} dedicatedError={dedicatedError} actionLoading={actionLoading} onReview={(action) => void handleReview(selectedCandidate, action)} onRetry={(promotion) => void handleRetry(promotion)} />}</DialogContent></Dialog> : null}</div>
+  return <div data-slot="learning-center-page" className="flex flex-col gap-6"><div className="flex flex-wrap items-start justify-between gap-4"><div><h1 className="text-xl font-bold tracking-tight">通用学习中心</h1><p className="text-sm text-muted-foreground">统一查看学习统计、来源任务、候选审核、FewShot 过程、经历内化与晋升历史。</p></div><div className="flex min-w-72 items-end gap-2"><ScopeSelect className="flex-1" value={botId || undefined} loadOptions={loadBots} label="Bot" placeholder="选择真实 BotProfile.db_id" onValueChange={(value) => pagination.setFilters({ bot_id: value })} /><Button type="button" size="icon-sm" variant="outline" disabled={!botId} onClick={() => void loadAll()} title="刷新学习中心"><RefreshCwIcon className={sources.status === 'loading' ? 'animate-spin' : ''} /></Button></div></div><div className="grid gap-3 md:grid-cols-4"><SummaryCard title="来源" value={totalText(sources.data)} /><SummaryCard title="任务" value={totalText(jobs.data)} /><SummaryCard title="候选" value={totalText(candidates.data)} description="当前候选筛选" /><SummaryCard title="晋升历史" value={totalText(promotions.data)} description="当前 Bot 作用域" /></div><Tabs value={tab} onValueChange={(value) => pagination.setFilters({ tab: value })}><TabsList className="grid h-auto w-full grid-cols-2 gap-1 sm:grid-cols-3 lg:grid-cols-6"><TabsTrigger value="sources">来源</TabsTrigger><TabsTrigger value="jobs">任务</TabsTrigger><TabsTrigger value="candidates">候选</TabsTrigger><TabsTrigger value="fewshot">FewShot</TabsTrigger><TabsTrigger value="experiences">经历 / 内化</TabsTrigger><TabsTrigger value="promotions">晋升</TabsTrigger></TabsList><TabsContent value="sources"><Card><CardHeader><CardTitle>学习来源</CardTitle><CardDescription>按 BotProfile.db_id 展示真实输入来源与游标；不以 QQ 号或默认 Bot 代替作用域。</CardDescription></CardHeader><CardContent><QueryState status={sources.status} error={sources.error} title={botPrompt} onRetry={() => void loadAll()}>{sources.data ? <SourceTable payload={sources.data} /> : null}</QueryState></CardContent></Card></TabsContent><TabsContent value="jobs"><Card><CardHeader><CardTitle>来源任务</CardTitle><CardDescription>任务状态来自 API；运行操作只调用幂等任务端点，不提前显示成功。</CardDescription></CardHeader><CardContent><QueryState status={jobs.status} error={jobs.error} title={botPrompt} onRetry={() => void loadAll()}>{jobs.data ? <JobTable payload={jobs.data} actionLoading={actionLoading} onRun={(item) => void runJob(item)} /> : null}</QueryState></CardContent></Card></TabsContent><TabsContent value="candidates"><Card><CardHeader><CardTitle>候选</CardTitle><CardDescription>筛选写入 URL；点击行读取当前 Bot 下的结构化详情、证据、操作和晋升状态。</CardDescription></CardHeader><CardContent className="flex flex-col gap-4"><CandidateFilters candidateType={candidateType} reviewStatus={reviewStatus} promotionStatus={promotionStatus} source={sourceFilter} onChange={(values) => pagination.setFilters(values)} /><QueryState status={candidates.status} error={candidates.error} title={botPrompt} onRetry={() => void loadAll()}>{candidates.data ? <CandidateTable payload={candidates.data} actionLoading={actionLoading} onOpen={(item) => void openCandidate(item)} onReview={(item, action) => void review(item, action)} /> : null}</QueryState></CardContent></Card></TabsContent><TabsContent value="fewshot"><Card><CardHeader><CardTitle>FewShot 学习过程</CardTitle><CardDescription>只展示 few_shot_style 候选、审核与晋升过程；正式对象通过服务端 ObjectRef 进入管理页。</CardDescription></CardHeader><CardContent><QueryState status={fewShot.status} error={fewShot.error} title={botPrompt ?? 'FewShot 学习过程当前真实为空'} onRetry={() => void loadAll()}>{fewShot.data ? <CandidateCards payload={fewShot.data} onOpen={(item) => void openCandidate(item)} /> : null}</QueryState></CardContent></Card></TabsContent><TabsContent value="experiences"><QueryState status={experiences.status} error={experiences.error} title={botPrompt} onRetry={() => void loadAll()}>{experiences.data ? <ExperiencesPanel payload={experiences.data} /> : null}</QueryState></TabsContent><TabsContent value="promotions"><Card><CardHeader><CardTitle>晋升历史</CardTitle><CardDescription>显示 target、API 状态、错误和正式对象引用；仅 retryable_failed 允许幂等安全重试。</CardDescription></CardHeader><CardContent><QueryState status={promotions.status} error={promotions.error} title={botPrompt} onRetry={() => void loadAll()}>{promotions.data ? <PromotionsTable payload={promotions.data} actionLoading={actionLoading} onRetry={(item) => void retry(item)} /> : null}</QueryState></CardContent></Card></TabsContent></Tabs>{pageForTab ? <PaginationControls page={pageForTab} onOffsetChange={pagination.setOffset} onLimitChange={pagination.setLimit} disabled={[sources.status, jobs.status, candidates.status, fewShot.status, promotions.status].includes('loading')} /> : null}{selectedCandidate ? <Dialog open onOpenChange={(open) => { if (!open) setSelectedCandidate(null) }}><DialogContent className="flex max-h-[90vh] flex-col sm:max-w-3xl"><DialogHeader><DialogTitle>候选结构化详情</DialogTitle><DialogDescription>{detailLoading ? '正在读取当前 Bot 作用域下的详情…' : '证据、目标、状态、ObjectRef 和错误均来自新 API。'}</DialogDescription></DialogHeader>{detailLoading ? <div className="flex items-center justify-center py-12 text-muted-foreground"><Loader2Icon className="mr-2 animate-spin" />读取详情</div> : <CandidateDetail candidate={selectedCandidate} dedicated={dedicated} dedicatedError={dedicatedError} actionLoading={actionLoading} onReview={(action) => void review(selectedCandidate, action)} onRetry={(item) => void retry(item)} />}</DialogContent></Dialog> : null}</div>
 }
-
-export default LearningCenterPage

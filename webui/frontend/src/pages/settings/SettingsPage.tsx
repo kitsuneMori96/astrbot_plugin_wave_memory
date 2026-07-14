@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AlertCircleIcon, Loader2Icon, SaveIcon, Undo2Icon } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -8,10 +8,13 @@ import {
   listProviders,
   saveFullConfig,
   saveHotConfig,
+  type ConfigApplyMode,
   type ConfigGroup,
+  type ConfigItem,
   type HotParam,
   type ProviderPayload,
 } from '@/api/config'
+import { FieldValueState, QueryState, type ApplyMode } from '@/components/shared'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -19,505 +22,249 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Field, FieldDescription, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
+function cloneGroups(groups: ConfigGroup[]): ConfigGroup[] {
+  return typeof structuredClone === 'function'
+    ? structuredClone(groups)
+    : groups.map((group) => ({ ...group, items: group.items?.map((item) => ({ ...item })) }))
+}
+
+function cloneHotParams(params: HotParam[]): HotParam[] {
+  return params.map((param) => ({ ...param }))
+}
+
+function applyMode(mode?: ConfigApplyMode): ApplyMode {
+  return mode === 'next_run' ? 'next-run' : (mode ?? 'unknown')
+}
+
+function pathState(item: ConfigItem | ConfigGroup) {
+  return {
+    defaultValue: item.default,
+    savedValue: item.saved,
+    effectiveValue: item.effective,
+    applyMode: applyMode(item.apply_mode),
+    effectiveSince: item.effective_since,
+  }
+}
+
+function changedPayload(current: ConfigGroup[], original: ConfigGroup[]): Record<string, unknown> {
+  const payload: Record<string, unknown> = {}
+  for (const group of current) {
+    const previous = original.find((item) => item.key === group.key)
+    if (group.kind === 'object') {
+      const changed: Record<string, unknown> = {}
+      for (const item of group.items ?? []) {
+        const oldItem = previous?.items?.find((candidate) => candidate.key === item.key)
+        if (!oldItem || !Object.is(item.value, oldItem.value)) changed[item.key] = item.value
+      }
+      if (Object.keys(changed).length) payload[group.key] = changed
+    } else if (!previous || !Object.is(group.value, previous.value)) {
+      payload[group.key] = group.value
+    }
+  }
+  return payload
+}
+
 export function SettingsPage() {
-  const [activeTab, setActiveTab] = useState('full')
-  
-  // 全量配置状态
+  const [activeTab, setActiveTab] = useState('static')
   const [schemaGroups, setSchemaGroups] = useState<ConfigGroup[]>([])
-  const [originalSchemaGroups, setOriginalSchemaGroups] = useState<ConfigGroup[]>([])
-  const [providers, setProviders] = useState<ProviderPayload[]>([])
-  const [openGroups, setOpenGroups] = useState<string[]>([])
-  const [schemaSearch, setSchemaSearch] = useState('')
-  
-  // 热参配置状态
+  const [originalGroups, setOriginalGroups] = useState<ConfigGroup[]>([])
   const [hotParams, setHotParams] = useState<HotParam[]>([])
   const [originalHotParams, setOriginalHotParams] = useState<HotParam[]>([])
-
+  const [providers, setProviders] = useState<ProviderPayload[]>([])
+  const [warnings, setWarnings] = useState<Array<{ key: string; message: string }>>([])
+  const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
+  const [error, setError] = useState<unknown>(null)
 
-  // 多维度 Dirty 检测
-  const isSchemaDirty = JSON.stringify(schemaGroups) !== JSON.stringify(originalSchemaGroups)
-  const isHotDirty = JSON.stringify(hotParams) !== JSON.stringify(originalHotParams)
-  const isDirty = isSchemaDirty || isHotDirty
-
-  async function loadData() {
+  const loadData = useCallback(async () => {
     setLoading(true)
-    setError('')
+    setError(null)
     try {
-      const [schemaData, hotData, providersData] = await Promise.all([
-        getConfigSchema(),
-        getHotConfig(),
-        listProviders(),
-      ])
-      
-      setSchemaGroups(schemaData.groups ?? [])
-      setOriginalSchemaGroups(JSON.parse(JSON.stringify(schemaData.groups ?? [])))
-      setHotParams(hotData.params ?? [])
-      setOriginalHotParams(JSON.parse(JSON.stringify(hotData.params ?? [])))
-      setProviders(providersData.providers ?? [])
-      
-      // 默认展开第一个分组
-      if ((schemaData.groups ?? []).length > 0) {
-        setOpenGroups([schemaData.groups[0].key])
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '配置数据加载失败')
+      const [schema, hot, providerData] = await Promise.all([getConfigSchema(), getHotConfig(), listProviders()])
+      setSchemaGroups(schema.groups ?? [])
+      setOriginalGroups(cloneGroups(schema.groups ?? []))
+      setWarnings(schema.warnings ?? [])
+      setHotParams(cloneHotParams(hot.params ?? []))
+      setOriginalHotParams(cloneHotParams(hot.params ?? []))
+      setProviders(providerData.providers ?? [])
+    } catch (nextError) {
+      setError(nextError)
     } finally {
       setLoading(false)
     }
-  }
-
-  useEffect(() => {
-    void loadData()
   }, [])
 
-  // 离开页面保护
+  useEffect(() => { void loadData() }, [loadData])
+
+  const fullPayload = useMemo(() => changedPayload(schemaGroups, originalGroups), [schemaGroups, originalGroups])
+  const dirtyHot = useMemo(() => hotParams.filter((item) => {
+    const old = originalHotParams.find((candidate) => candidate.key === item.key)
+    return !old || !Object.is(old.current, item.current)
+  }), [hotParams, originalHotParams])
+  const isDirty = Object.keys(fullPayload).length > 0 || dirtyHot.length > 0
+
   useEffect(() => {
     if (!isDirty) return
-    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      e.preventDefault()
-      e.returnValue = '您当前有未保存的配置修改，确定离开吗？'
-    }
-    window.addEventListener('beforeunload', handleBeforeUnload)
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
+    const beforeUnload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = '' }
+    window.addEventListener('beforeunload', beforeUnload)
+    return () => window.removeEventListener('beforeunload', beforeUnload)
   }, [isDirty])
 
-  // 全量配置折叠展开控制
-  function toggleGroup(key: string) {
-    setOpenGroups((prev) =>
-      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
-    )
+  function updateScalar(groupKey: string, value: unknown) {
+    setSchemaGroups((groups) => groups.map((group) => group.key === groupKey ? { ...group, value } : group))
   }
 
-  // 快捷更新全量标量值
-  function updateScalarValue(groupKey: string, nextValue: unknown) {
-    setSchemaGroups((prev) =>
-      prev.map((g) => {
-        if (g.key === groupKey) {
-          return { ...g, value: nextValue }
-        }
-        return g
-      })
-    )
+  function updateItem(groupKey: string, itemKey: string, value: unknown) {
+    setSchemaGroups((groups) => groups.map((group) => group.key === groupKey
+      ? { ...group, items: group.items?.map((item) => item.key === itemKey ? { ...item, value } : item) }
+      : group))
   }
 
-  // 快捷更新全量对象子项值
-  function updateObjectItemValue(groupKey: string, itemKey: string, nextValue: unknown) {
-    setSchemaGroups((prev) =>
-      prev.map((g) => {
-        if (g.key === groupKey) {
-          const nextItems = (g.items ?? []).map((it) => {
-            if (it.key === itemKey) {
-              return { ...it, value: nextValue }
-            }
-            return it
-          })
-          return { ...g, items: nextItems }
-        }
-        return g
-      })
-    )
-  }
-
-  // 更新热更新参数
-  function updateHotValue(key: string, nextValue: number) {
-    setHotParams((prev) =>
-      prev.map((p) => {
-        if (p.key === key) {
-          return { ...p, current: nextValue }
-        }
-        return p
-      })
-    )
-  }
-
-  // 保存全量普通配置
-  async function handleSaveFull() {
+  async function saveSchema() {
     setSaving(true)
     try {
-      const payload: Record<string, unknown> = {}
-      schemaGroups.forEach((g) => {
-        if (g.kind === 'object') {
-          const obj: Record<string, unknown> = {}
-          ;(g.items ?? []).forEach((it) => {
-            obj[it.key] = it.value
-          })
-          payload[g.key] = obj
-        } else {
-          payload[g.key] = g.value
-        }
-      })
-
-      const res = await saveFullConfig(payload)
-      if (res.ok) {
-        toast.success(res.message ?? '配置保存成功，部分选项需重启后生效')
-        setOriginalSchemaGroups(JSON.parse(JSON.stringify(schemaGroups)))
-      } else {
-        throw new Error(res.error ?? '保存失败')
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '配置保存失败')
+      const response = await saveFullConfig(fullPayload)
+      if (!response.ok) throw new Error(response.errors?.join('；') || response.error || '配置保存失败')
+      toast.success(response.message || '配置已保存；运行时是否生效以回读值为准。')
+      const schema = response.schema ?? await getConfigSchema()
+      setSchemaGroups(cloneGroups(schema.groups ?? []))
+      setOriginalGroups(cloneGroups(schema.groups ?? []))
+      setWarnings(schema.warnings ?? [])
+    } catch (nextError) {
+      toast.error(nextError instanceof Error ? nextError.message : '配置保存失败')
     } finally {
       setSaving(false)
     }
   }
 
-  // 保存实时热参
-  async function handleSaveHot() {
+  async function saveHot() {
     setSaving(true)
     try {
-      const payload: Record<string, unknown> = {}
-      hotParams.forEach((p) => {
-        payload[p.key] = p.current
-      })
-
-      const res = await saveHotConfig(payload)
-      if (res.ok) {
-        toast.success('热更新参数已实时生效，并已持久化保存')
-        setOriginalHotParams(JSON.parse(JSON.stringify(hotParams)))
-      } else {
-        const errMsg = res.errors?.join('；') || '应用热更新配置失败'
-        throw new Error(errMsg)
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '热更新保存失败')
+      const payload = Object.fromEntries(dirtyHot.map((item) => [item.key, item.current]))
+      const response = await saveHotConfig(payload)
+      if (!response.ok) throw new Error(response.errors.join('；') || '热参数应用失败')
+      toast.success(response.message || '热参数已应用；持久化状态以字段回读为准。')
+      if (response.warnings?.length) toast.warning(response.warnings.join('；'))
+      const nextParams = response.params ?? (await getHotConfig()).params ?? []
+      setHotParams(cloneHotParams(nextParams))
+      setOriginalHotParams(cloneHotParams(nextParams))
+    } catch (nextError) {
+      toast.error(nextError instanceof Error ? nextError.message : '热参数应用失败')
     } finally {
       setSaving(false)
     }
   }
 
-  // 恢复单项全量配置到默认值
-  function handleResetItemDefault(groupKey: string, itemKey?: string) {
-    if (itemKey) {
-      const orig = originalSchemaGroups.find((g) => g.key === groupKey)
-      const origItem = orig?.items?.find((it) => it.key === itemKey)
-      if (origItem) {
-        updateObjectItemValue(groupKey, itemKey, origItem.default)
-        toast.success(`已重置 ${itemKey} 为默认值`)
-      }
-    } else {
-      const orig = originalSchemaGroups.find((g) => g.key === groupKey)
-      if (orig) {
-        updateScalarValue(groupKey, orig.default)
-        toast.success(`已重置为默认值`)
-      }
-    }
-  }
-
-  // 过滤后的配置分组
-  const filteredGroups = schemaGroups.filter((g) => {
-    if (!schemaSearch) return true
-    const search = schemaSearch.toLowerCase()
-    const matchesGroup =
-      g.key.toLowerCase().includes(search) ||
-      g.description.toLowerCase().includes(search) ||
-      g.hint.toLowerCase().includes(search)
-    
-    if (matchesGroup) return true
-
-    if (g.kind === 'object' && g.items) {
-      return g.items.some(
-        (it) =>
-          it.key.toLowerCase().includes(search) ||
-          it.description.toLowerCase().includes(search) ||
-          it.hint.toLowerCase().includes(search)
+  function editor(group: ConfigGroup, item?: ConfigItem) {
+    const value = item ? item.value : group.value
+    const type = item?.type ?? group.type
+    const special = item?.special ?? group.special
+    const setValue = (next: unknown) => item ? updateItem(group.key, item.key, next) : updateScalar(group.key, next)
+    if (type === 'bool') return <Switch checked={value === true} onCheckedChange={setValue} aria-label={`修改 ${item?.description ?? group.description}`} />
+    if (special === 'select_provider') {
+      return (
+        <Select value={String(value ?? '')} onValueChange={setValue}>
+          <SelectTrigger><SelectValue placeholder="未配置" /></SelectTrigger>
+          <SelectContent>
+            {providers.map((provider) => <SelectItem key={provider.id} value={provider.id}>{provider.id} ({provider.model})</SelectItem>)}
+          </SelectContent>
+        </Select>
       )
     }
-    return false
-  })
-
-  if (loading) {
-    return (
-      <div className="flex flex-col gap-6">
-        <Skeleton className="h-12 w-full" />
-        <Skeleton className="h-96 w-full" />
-      </div>
-    )
+    const numeric = type === 'int' || type === 'float'
+    return <Input type={numeric ? 'number' : 'text'} step={type === 'float' ? 'any' : undefined} value={value == null ? '' : String(value)} onChange={(event) => setValue(numeric && event.target.value !== '' ? Number(event.target.value) : event.target.value)} />
   }
 
-  if (error) {
-    return (
-      <Alert variant="destructive">
-        <AlertCircleIcon />
-        <AlertTitle>配置加载失败</AlertTitle>
-        <AlertDescription>{error}</AlertDescription>
-      </Alert>
-    )
-  }
+  const visibleGroups = useMemo(() => {
+    const term = search.trim().toLowerCase()
+    return schemaGroups.map((group) => {
+      const groupMatches = !term || `${group.key} ${group.description} ${group.hint}`.toLowerCase().includes(term)
+      const mode = activeTab === 'restart' ? 'restart' : activeTab === 'static' ? 'next_run' : null
+      if (group.kind === 'object') {
+        const items = (group.items ?? []).filter((item) => {
+          const textMatches = groupMatches || `${item.key} ${item.description} ${item.hint}`.toLowerCase().includes(term)
+          return textMatches && (!mode || item.apply_mode === mode)
+        })
+        return items.length ? { ...group, items } : null
+      }
+      return groupMatches && (!mode || group.apply_mode === mode) ? group : null
+    }).filter((group): group is ConfigGroup => group !== null)
+  }, [activeTab, schemaGroups, search])
 
+  const queryStatus = loading ? 'loading' : error ? 'error' : 'success'
   return (
-    <div className="flex flex-col gap-6">
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between gap-4 py-4 shrink-0">
-          <div className="flex flex-col gap-1">
-            <CardTitle>系统配置</CardTitle>
-            <CardDescription>
-              配置整个 WaveMemory 引擎的各项核心行为，包含实时热更新调参和静态参数全量管理。
-            </CardDescription>
-          </div>
-          {isDirty ? (
-            <Badge variant="secondary" className="animate-pulse bg-amber-500/10 text-amber-500 border-amber-500/20">
-              有未保存的修改
-            </Badge>
-          ) : null}
-        </CardHeader>
-      </Card>
+    <QueryState status={queryStatus} error={error} onRetry={() => void loadData()} title="配置加载失败" loadingRows={6}>
+      <div className="flex flex-col gap-6">
+        <Card>
+          <CardHeader>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div><CardTitle>系统配置</CardTitle><CardDescription className="mt-2">分别展示默认值、已保存值和当前生效值；保存成功不代表运行时已经生效。</CardDescription></div>
+              {isDirty ? <Badge variant="secondary">有未保存修改</Badge> : null}
+            </div>
+          </CardHeader>
+        </Card>
 
-      <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList className="grid w-full grid-cols-2 max-w-md shrink-0">
-          <TabsTrigger value="full">全量配置表单</TabsTrigger>
-          <TabsTrigger value="hot">⚡ 实时热调参</TabsTrigger>
-        </TabsList>
+        {warnings.length ? (
+          <Alert><AlertCircleIcon /><AlertTitle>旧配置兼容诊断</AlertTitle><AlertDescription><ul className="list-disc space-y-1 pl-5">{warnings.map((item) => <li key={item.key}><span className="font-mono">{item.key}</span>：{item.message}</li>)}</ul></AlertDescription></Alert>
+        ) : null}
 
-        {/* ═══ Tab 1: 全量普通配置 ═══ */}
-        <TabsContent value="full" className="mt-4 flex flex-col gap-4">
-          <Card>
-            <CardContent className="pt-6 flex flex-col gap-4">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <Input
-                  className="max-w-xs"
-                  placeholder="搜索配置项..."
-                  value={schemaSearch}
-                  onChange={(e) => setSchemaSearch(e.target.value)}
-                />
-                <div className="flex items-center gap-2">
-                  <Button disabled={saving} variant="outline" onClick={() => void loadData()}>
-                    <Undo2Icon data-icon="inline-start" />
-                    重置修改
-                  </Button>
-                  <Button disabled={saving || !isSchemaDirty} onClick={() => void handleSaveFull()}>
-                    {saving ? <Loader2Icon className="animate-spin" data-icon="inline-start" /> : <SaveIcon data-icon="inline-start" />}
-                    保存全量配置
-                  </Button>
-                </div>
-              </div>
+        <Tabs value={activeTab} onValueChange={setActiveTab}>
+          <TabsList className="grid h-auto w-full grid-cols-2 gap-1 sm:grid-cols-4">
+            <TabsTrigger value="static">静态/下次运行</TabsTrigger>
+            <TabsTrigger value="hot">实时热参数</TabsTrigger>
+            <TabsTrigger value="restart">需重启参数</TabsTrigger>
+            <TabsTrigger value="advanced">全部高级设置</TabsTrigger>
+          </TabsList>
 
-              {filteredGroups.length === 0 ? (
-                <p className="text-sm text-muted-foreground p-6 text-center">未匹配到任何配置项。</p>
-              ) : (
-                <div className="flex flex-col gap-3">
-                  {filteredGroups.map((g) => {
-                    const isOpen = openGroups.includes(g.key)
-                    return (
-                      <div key={g.key} className="rounded-lg border border-border/50 bg-card overflow-hidden">
-                        <button
-                          className="flex w-full items-center justify-between p-4 text-left hover:bg-muted/30 transition-all"
-                          onClick={() => toggleGroup(g.key)}
-                        >
-                          <div className="flex flex-col gap-1 min-w-0">
-                            <span className="text-sm font-semibold text-foreground flex items-center gap-2">
-                              {g.description}
-                              <span className="font-mono text-xs font-normal text-muted-foreground">({g.key})</span>
-                            </span>
-                            {g.hint ? <span className="text-xs text-muted-foreground truncate">{g.hint}</span> : null}
-                          </div>
-                          <Badge variant="outline" className="font-mono text-[10px]">
-                            {g.kind === 'object' ? `${g.items?.length ?? 0} 项` : '标量'}
-                          </Badge>
-                        </button>
+          <TabsContent value="hot" className="mt-4">
+            <Card>
+              <CardHeader><CardTitle>实时热参数</CardTitle><CardDescription>只有服务端回读的 effective 才表示当前进程实际使用；无持久化映射时会明确提示。</CardDescription></CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => void loadData()} disabled={saving}><Undo2Icon />放弃修改</Button><Button onClick={() => void saveHot()} disabled={saving || !dirtyHot.length}>{saving ? <Loader2Icon className="animate-spin" /> : <SaveIcon />}应用热参数</Button></div>
+                {hotParams.map((param) => (
+                  <div key={param.key} className="grid gap-4 rounded-lg border p-4 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,1fr)]">
+                    <Field><FieldLabel>{param.description}</FieldLabel><Input type="number" min={param.min} max={param.max} step={param.type === 'int' ? 1 : 0.01} value={param.current} onChange={(event) => setHotParams((items) => items.map((item) => item.key === param.key ? { ...item, current: Number(event.target.value) } : item))} /><FieldDescription>{param.key}；范围 {param.min}–{param.max}。{param.error ?? ''}</FieldDescription></Field>
+                    <FieldValueState label={param.key} defaultValue={param.default} savedValue={param.saved} effectiveValue={param.effective} applyMode="hot" effectiveSince={param.effective_since} />
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          </TabsContent>
 
-                        {isOpen ? (
-                          <div className="border-t border-border/50 p-4 bg-muted/10">
-                            {g.kind === 'object' ? (
-                              <div className="grid gap-4 sm:grid-cols-2">
-                                {(g.items ?? []).map((it) => (
-                                  <div key={it.key} className={it.type === 'bool' ? 'sm:col-span-2' : ''}>
-                                    {it.type === 'bool' ? (
-                                      <div className="flex items-start justify-between gap-4 rounded-lg border p-3 bg-background">
-                                        <div className="flex flex-col gap-1">
-                                          <span className="text-xs font-medium text-foreground">{it.description}</span>
-                                          {it.hint ? <span className="text-[11px] text-muted-foreground">{it.hint}</span> : null}
-                                          <span className="font-mono text-[10px] text-muted-foreground">键：{it.key} | 默认：{String(it.default)}</span>
-                                        </div>
-                                        <div className="flex items-center gap-2 shrink-0">
-                                          <Button variant="ghost" className="size-6 p-0 text-muted-foreground hover:text-foreground" onClick={() => handleResetItemDefault(g.key, it.key)} title="恢复默认">
-                                            <Undo2Icon className="size-3" />
-                                          </Button>
-                                          <Switch checked={Boolean(it.value)} onCheckedChange={(checked) => updateObjectItemValue(g.key, it.key, checked)} />
-                                        </div>
-                                      </div>
-                                    ) : it.special === 'select_provider' ? (
-                                      <Field>
-                                        <div className="flex items-center justify-between gap-3 mb-1">
-                                          <FieldLabel>{it.description}</FieldLabel>
-                                          <Button variant="ghost" className="size-6 p-0 text-muted-foreground hover:text-foreground" onClick={() => handleResetItemDefault(g.key, it.key)} title="恢复默认">
-                                            <Undo2Icon className="size-3" />
-                                          </Button>
-                                        </div>
-                                        <Select value={String(it.value ?? '')} onValueChange={(val) => updateObjectItemValue(g.key, it.key, val)}>
-                                          <SelectTrigger>
-                                            <SelectValue placeholder="未配置（留空禁用）" />
-                                          </SelectTrigger>
-                                          <SelectContent>
-                                            <SelectItem value="">禁用 / 留空</SelectItem>
-                                            {providers.map((p) => (
-                                              <SelectItem key={p.id} value={p.id}>{p.id} ({p.model})</SelectItem>
-                                            ))}
-                                          </SelectContent>
-                                        </Select>
-                                        {it.hint ? <FieldDescription>{it.hint}</FieldDescription> : null}
-                                        <div className="font-mono text-[9px] text-muted-foreground mt-1">键：{it.key} | 默认：{String(it.default ?? '空')}</div>
-                                      </Field>
-                                    ) : (
-                                      <Field>
-                                        <div className="flex items-center justify-between gap-3 mb-1">
-                                          <FieldLabel>{it.description}</FieldLabel>
-                                          <Button variant="ghost" className="size-6 p-0 text-muted-foreground hover:text-foreground" onClick={() => handleResetItemDefault(g.key, it.key)} title="恢复默认">
-                                            <Undo2Icon className="size-3" />
-                                          </Button>
-                                        </div>
-                                        <Input
-                                          type={it.type === 'int' ? 'number' : 'text'}
-                                          value={it.value === null || it.value === undefined ? '' : String(it.value)}
-                                          onChange={(e) => updateObjectItemValue(g.key, it.key, it.type === 'int' ? (Number(e.target.value) || 0) : e.target.value)}
-                                        />
-                                        {it.hint ? <FieldDescription>{it.hint}</FieldDescription> : null}
-                                        <div className="font-mono text-[9px] text-muted-foreground mt-1">键：{it.key} | 默认：{String(it.default ?? '空')}</div>
-                                      </Field>
-                                    )}
-                                  </div>
-                                ))}
-                              </div>
-                            ) : (
-                              // 标量项
-                              <div className="max-w-md">
-                                {g.type === 'bool' ? (
-                                  <div className="flex items-start justify-between gap-4 rounded-lg border p-3 bg-background">
-                                    <div className="flex flex-col gap-1">
-                                      <span className="text-xs font-medium text-foreground">{g.description}</span>
-                                      {g.hint ? <span className="text-[11px] text-muted-foreground">{g.hint}</span> : null}
-                                      <span className="font-mono text-[10px] text-muted-foreground">键：{g.key} | 默认：{String(g.default)}</span>
-                                    </div>
-                                    <div className="flex items-center gap-2 shrink-0">
-                                      <Button variant="ghost" className="size-6 p-0 text-muted-foreground hover:text-foreground" onClick={() => handleResetItemDefault(g.key)} title="恢复默认">
-                                        <Undo2Icon className="size-3" />
-                                      </Button>
-                                      <Switch checked={Boolean(g.value)} onCheckedChange={(checked) => updateScalarValue(g.key, checked)} />
-                                    </div>
-                                  </div>
-                                ) : g.special === 'select_provider' ? (
-                                  <Field>
-                                    <div className="flex items-center justify-between gap-3 mb-1">
-                                      <FieldLabel>{g.description}</FieldLabel>
-                                      <Button variant="ghost" className="size-6 p-0 text-muted-foreground hover:text-foreground" onClick={() => handleResetItemDefault(g.key)} title="恢复默认">
-                                        <Undo2Icon className="size-3" />
-                                      </Button>
-                                    </div>
-                                    <Select value={String(g.value ?? '')} onValueChange={(val) => updateScalarValue(g.key, val)}>
-                                      <SelectTrigger>
-                                        <SelectValue placeholder="未配置（留空禁用）" />
-                                      </SelectTrigger>
-                                      <SelectContent>
-                                        <SelectItem value="">禁用 / 留空</SelectItem>
-                                        {providers.map((p) => (
-                                          <SelectItem key={p.id} value={p.id}>{p.id} ({p.model})</SelectItem>
-                                        ))}
-                                      </SelectContent>
-                                    </Select>
-                                    {g.hint ? <FieldDescription>{g.hint}</FieldDescription> : null}
-                                    <div className="font-mono text-[9px] text-muted-foreground mt-1">键：{g.key} | 默认：{String(g.default ?? '空')}</div>
-                                  </Field>
-                                ) : (
-                                  <Field>
-                                    <div className="flex items-center justify-between gap-3 mb-1">
-                                      <FieldLabel>{g.description}</FieldLabel>
-                                      <Button variant="ghost" className="size-6 p-0 text-muted-foreground hover:text-foreground" onClick={() => handleResetItemDefault(g.key)} title="恢复默认">
-                                        <Undo2Icon className="size-3" />
-                                      </Button>
-                                    </div>
-                                    <Input
-                                      type={g.type === 'int' ? 'number' : 'text'}
-                                      value={g.value === null || g.value === undefined ? '' : String(g.value)}
-                                      onChange={(e) => updateScalarValue(g.key, g.type === 'int' ? (Number(e.target.value) || 0) : e.target.value)}
-                                    />
-                                    {g.hint ? <FieldDescription>{g.hint}</FieldDescription> : null}
-                                    <div className="font-mono text-[9px] text-muted-foreground mt-1">键：{g.key} | 默认：{String(g.default ?? '空')}</div>
-                                  </Field>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        ) : null}
+          {(['static', 'restart', 'advanced'] as const).map((tab) => (
+            <TabsContent key={tab} value={tab} className="mt-4 space-y-4">
+              <Card>
+                <CardContent className="flex flex-wrap items-center justify-between gap-3 pt-6">
+                  <Input className="max-w-md" placeholder="搜索配置键、名称或说明" value={search} onChange={(event) => setSearch(event.target.value)} />
+                  <div className="flex gap-2"><Button variant="outline" onClick={() => void loadData()} disabled={saving}><Undo2Icon />放弃修改</Button><Button onClick={() => void saveSchema()} disabled={saving || !Object.keys(fullPayload).length}>{saving ? <Loader2Icon className="animate-spin" /> : <SaveIcon />}保存配置</Button></div>
+                </CardContent>
+              </Card>
+              {!visibleGroups.length ? <QueryState status="empty" title="没有匹配的配置项" description="请调整搜索词或切换配置分类。" /> : visibleGroups.map((group) => (
+                <Card key={group.key}>
+                  <CardHeader><CardTitle>{group.description}</CardTitle><CardDescription>{group.hint || group.key}</CardDescription></CardHeader>
+                  <CardContent className="space-y-5">
+                    {group.kind === 'object' ? (group.items ?? []).map((item) => (
+                      <div key={item.key} className="grid gap-4 rounded-lg border p-4 xl:grid-cols-[minmax(16rem,0.8fr)_minmax(0,1.2fr)]">
+                        <Field><div className="flex items-center justify-between gap-3"><FieldLabel>{item.description}</FieldLabel><div className="flex gap-1.5">{item.restart_required ? <Badge variant="secondary">需要重启</Badge> : null}{item.apply_mode === 'hot' ? <button type="button" onClick={() => setActiveTab('hot')} className="inline-flex items-center rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-xs font-semibold text-emerald-600 transition-colors hover:bg-emerald-500/20">⚡ 可实时热应用</button> : null}</div></div>{editor(group, item)}<FieldDescription>{item.hint}<br />键：<span className="font-mono">{group.key}.{item.key}</span>；来源：{item.source}；有效来源：{item.effective_source}。{item.error ? ` 诊断：${item.error}` : ''}</FieldDescription></Field>
+                        <FieldValueState label={item.description} {...pathState(item)} />
                       </div>
-                    )
-                  })}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        {/* ═══ Tab 2: 实时热调参 ═══ */}
-        <TabsContent value="hot" className="mt-4 flex flex-col gap-4">
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between gap-4 py-4 shrink-0">
-              <div className="flex flex-col gap-1">
-                <CardTitle>⚡ 实时更新调参</CardTitle>
-                <CardDescription>
-                  此处的滑块参数直接在内存中控制引擎算法细节，保存后实时在聊天中生效，无需重启容器！
-                </CardDescription>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <Button disabled={saving} variant="outline" onClick={() => void loadData()}>
-                  <Undo2Icon data-icon="inline-start" />
-                  放弃修改
-                </Button>
-                <Button disabled={saving || !isHotDirty} onClick={() => void handleSaveHot()}>
-                  {saving ? <Loader2Icon className="animate-spin" data-icon="inline-start" /> : <SaveIcon data-icon="inline-start" />}
-                  应用热参
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent className="pt-6">
-              {hotParams.length === 0 ? (
-                <p className="text-sm text-muted-foreground p-6 text-center">暂无可调参选项。</p>
-              ) : (
-                <div className="grid gap-6 sm:grid-cols-2">
-                  {hotParams.map((p) => {
-                    const step = p.type === 'int' ? 1 : 0.01
-                    return (
-                      <div key={p.key} className="rounded-lg border p-4 bg-muted/10 flex flex-col justify-between gap-3">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="flex flex-col gap-1">
-                            <span className="text-sm font-semibold text-foreground">{p.description}</span>
-                            <span className="font-mono text-[10px] text-muted-foreground">{p.key}</span>
-                          </div>
-                          <Badge variant="secondary" className="font-mono text-xs text-primary shrink-0">
-                            {p.current?.toFixed?.(p.type === 'int' ? 0 : 3) ?? p.current}
-                          </Badge>
-                        </div>
-
-                        <div className="flex flex-col gap-1.5 mt-2">
-                          <input
-                            type="range"
-                            min={p.min}
-                            max={p.max}
-                            step={step}
-                            value={p.current}
-                            onChange={(e) => updateHotValue(p.key, Number(e.target.value))}
-                            className="w-full h-1.5 rounded-full appearance-none cursor-pointer bg-muted accent-primary hover:accent-primary/80 transition-all"
-                          />
-                          <div className="flex justify-between text-[10px] text-muted-foreground font-mono">
-                            <span>{p.min}</span>
-                            <span className="opacity-50">默认值：{p.default}</span>
-                            <span>{p.max}</span>
-                          </div>
-                        </div>
+                    )) : (
+                      <div className="grid gap-4 xl:grid-cols-[minmax(16rem,0.8fr)_minmax(0,1.2fr)]">
+                        <Field><div className="flex items-center justify-between gap-3"><FieldLabel>{group.description}</FieldLabel><div className="flex gap-1.5">{group.restart_required ? <Badge variant="secondary">需要重启</Badge> : null}{group.apply_mode === 'hot' ? <button type="button" onClick={() => setActiveTab('hot')} className="inline-flex items-center rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-xs font-semibold text-emerald-600 transition-colors hover:bg-emerald-500/20">⚡ 可实时热应用</button> : null}</div></div>{editor(group)}<FieldDescription>键：<span className="font-mono">{group.key}</span>；来源：{group.source}；有效来源：{group.effective_source}。{group.error ? ` 诊断：${group.error}` : ''}</FieldDescription></Field>
+                        <FieldValueState label={group.description} {...pathState(group)} />
                       </div>
-                    )
-                  })}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-      </Tabs>
-    </div>
+                    )}
+                  </CardContent>
+                </Card>
+              ))}
+            </TabsContent>
+          ))}
+        </Tabs>
+      </div>
+    </QueryState>
   )
 }

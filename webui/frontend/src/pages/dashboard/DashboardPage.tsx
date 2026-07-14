@@ -109,15 +109,15 @@ function moduleLabel(key: unknown): string {
 function moduleRoute(key: unknown): string | undefined {
   const value = String(key ?? '')
   const routes: Record<string, string> = {
-    lore_tokens: '/blackbox/book-lore',
-    book_lore_tokens: '/blackbox/book-lore',
+    lore_tokens: '/knowledge/book-lore',
+    book_lore_tokens: '/knowledge/book-lore',
     exp_memories_tokens: '/channels',
     timeline_tokens: '/channels',
-    relation_memories_tokens: '/blackbox/people',
-    fewshot_tokens: '/blackbox/fewshot',
+    relation_memories_tokens: '/people',
+    fewshot_tokens: '/knowledge/style-examples',
     jargon_tokens: '/jargon',
     belief_tokens: '/beliefs',
-    facts_tokens: '/blackbox/facts',
+    facts_tokens: '/knowledge/facts',
   }
   return routes[value]
 }
@@ -132,23 +132,23 @@ function NeedsAttentionCards({ system }: { system?: SystemPayload }) {
     ...(untagged > 0 ? [{
       title: '记忆标签待复核',
       description: `系统检测到有 ${untagged} 条记忆尚未提取任何结构化标签，需进行批量分析处理。`,
-      route: '/maintain',
+      route: '/maintenance',
       badge: '标签待审',
-      statusClass: 'border-l-4 border-l-violet-500/80',
+      statusClass: 'border-l-4 border-l-violet-500/80 shadow-[0_0_15px_rgba(139,92,246,0.03)]',
     }] : []),
     ...(pendingFewShot > 0 ? [{
       title: '风格特征范例待审核',
       description: `风格候选库目前积压了 ${pendingFewShot} 条待审核的 Few-Shot 范例。`,
-      route: '/blackbox/fewshot',
+      route: '/learning?tab=fewshot',
       badge: '风格待审',
-      statusClass: 'border-l-4 border-l-amber-500/80',
+      statusClass: 'border-l-4 border-l-amber-500/80 shadow-[0_0_15px_rgba(245,158,11,0.03)]',
     }] : []),
     ...(hasErrors ? [{
       title: '注入链路错误记录',
       description: '监测到运行时注入链路中包含未处理的严重错误日志，需排查。',
-      route: '/injection',
+      route: '/observatory',
       badge: '故障告警',
-      statusClass: 'border-l-4 border-l-destructive/80',
+      statusClass: 'border-l-4 border-l-red-500/80 shadow-[0_0_15px_rgba(239,68,68,0.03)]',
     }] : []),
   ]
 
@@ -385,6 +385,7 @@ export function DashboardPage() {
   const [error, setError] = useState('')
   const [metricsRange, setMetricsRange] = useState('7d')
   const [metricsLoading, setMetricsLoading] = useState(false)
+  const [metricsError, setMetricsError] = useState('')
 
   // 1. 初始化系统状态、错误日志、通道配置（只执行一次）
   useEffect(() => {
@@ -422,13 +423,17 @@ export function DashboardPage() {
     let alive = true
     async function loadMetrics() {
       setMetricsLoading(true)
+      setMetricsError('')
       try {
         const metrics = await getInjectionMetrics(metricsRange)
         if (alive) {
           setData(prev => ({ ...prev, metrics }))
         }
       } catch (e) {
-        console.error('Failed to load metrics:', e)
+        if (alive) {
+          setData(prev => ({ ...prev, metrics: undefined }))
+          setMetricsError(e instanceof Error ? e.message : '注入指标读取失败')
+        }
       } finally {
         if (alive) {
           setMetricsLoading(false)
@@ -505,6 +510,14 @@ export function DashboardPage() {
 
       {/* 系统待办：高保真状态立线 */}
       <NeedsAttentionCards system={data.system} />
+
+      {metricsError ? (
+        <Alert variant="destructive">
+          <AlertTriangleIcon />
+          <AlertTitle>注入指标加载失败</AlertTitle>
+          <AlertDescription>{metricsError}；未沿用上一时间范围的旧数据。</AlertDescription>
+        </Alert>
+      ) : null}
 
       <div className="grid items-start gap-6 lg:grid-cols-3">
         <InjectionTrendCard

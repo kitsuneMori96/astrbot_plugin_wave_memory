@@ -1,381 +1,340 @@
-import { useCallback, useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   AlertCircleIcon,
   ArrowRightIcon,
   CheckCircle2Icon,
+  DatabaseIcon,
   Loader2Icon,
+  PauseIcon,
+  PlayIcon,
   RefreshCwIcon,
+  SearchCheckIcon,
+  TagsIcon,
 } from 'lucide-react'
 import { toast } from 'sonner'
 
-import { getImportSources, type ImportSourceItem } from '@/api/import'
-import { getFullConfig, type WaveConfigPayload } from '@/api/config'
-import { runPostStream, type StreamProgress } from '@/api/memories'
-import { type TagExecutionOptions, type TagWritePolicy } from '@/api/tags'
-import { TagExtractionConfigPanel } from '@/components/tag/TagExtractionConfigPanel'
+import {
+  getImportSources,
+  preflightImport,
+  startImport,
+  waitForImportJob,
+  type ImportPreflightPayload,
+  type ImportSourceItem,
+} from '@/api/import'
+import {
+  getMaintenanceCheckpoint,
+  getMaintenanceJob,
+  getMaintenanceLogs,
+  type MaintenanceCheckpoint,
+  type MaintenanceJob,
+  type MaintenanceLog,
+} from '@/api/maintenance'
+import { QueryState } from '@/components/shared'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Field, FieldLabel } from '@/components/ui/field'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Field, FieldDescription, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
-import { ScrollArea } from '@/components/ui/scroll-area'
-import { Skeleton } from '@/components/ui/skeleton'
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
 
-const importWizardSteps = ['配置检查', '数据源发现', '导入预览', '执行导入', 'Tag 提取', '结果复核']
+const activeStatuses = new Set(['pending', 'queued', 'running'])
+const maintenancePath = '/' + 'maintenance'
+const wizardSteps = ['配置检查', '数据源发现', '导入预览', '执行导入', 'Tag 提取', '结果复核']
 
-const dryRunPreviewFields = ['数据源', '总条数', '已导入估计', '重复估计', '将写入 source 类型', '是否会 re-embed', '是否同步 Tag']
+function statusLabel(status?: string): string {
+  return ({
+    pending: '等待调度',
+    queued: '排队中',
+    running: '执行中',
+    succeeded: '已成功',
+    failed: '已失败',
+    cancelled: '已取消',
+  } as Record<string, string>)[status ?? ''] ?? '状态未知'
+}
+
+function statusVariant(status?: string): 'default' | 'secondary' | 'destructive' | 'outline' {
+  if (status === 'succeeded') return 'default'
+  if (status === 'failed') return 'destructive'
+  if (activeStatuses.has(status ?? '')) return 'secondary'
+  return 'outline'
+}
+
+function formatTime(value?: number | null): string {
+  return value && Number.isFinite(value) ? new Date(value * 1000).toLocaleString('zh-CN') : '未记录'
+}
+
+function numberFrom(records: Array<Record<string, unknown> | null | undefined>, keys: string[]): number | null {
+  for (const record of records) {
+    if (!record) continue
+    for (const key of keys) {
+      const value = Number(record[key])
+      if (Number.isFinite(value)) return value
+    }
+  }
+  return null
+}
+
+function jobProgress(job: MaintenanceJob | null) {
+  const records = [job?.progress, job?.cursor, job?.result]
+  const processed = numberFrom(records, ['processed', 'imported', 'current']) ?? 0
+  const total = numberFrom(records, ['total', 'total_count', 'selected']) ?? 0
+  const tagged = numberFrom(records, ['tagged', 'tagged_count']) ?? 0
+  const skipped = numberFrom(records, ['skipped', 'duplicates']) ?? 0
+  const errors = numberFrom(records, ['errors', 'failed']) ?? 0
+  const explicit = numberFrom(records, ['progress', 'ratio', 'percent'])
+  const ratio = explicit === null ? (total > 0 ? processed / total : job?.status === 'succeeded' ? 1 : 0) : explicit > 1 ? explicit / 100 : explicit
+  return { processed, total, tagged, skipped, errors, ratio: Math.min(1, Math.max(0, ratio)) }
+}
+
+function logSummary(log: MaintenanceLog): string {
+  const data = log.data && typeof log.data === 'object' ? log.data as Record<string, unknown> : null
+  if (data && typeof data.message === 'string') return data.message
+  if (data && typeof data.status === 'string') return `状态：${statusLabel(data.status)}`
+  return ({ scheduled: '任务已进入后台队列', checkpoint: '后台已更新导入进度', result: '后台已写入最终结果', failure: '后台任务执行失败' } as Record<string, string>)[log.event] ?? log.event
+}
 
 export function ImportPage() {
-  const [config, setConfig] = useState<WaveConfigPayload | null>(null)
+  const [params, setParams] = useSearchParams()
+  const jobId = params.get('job_id') ?? ''
   const [sources, setSources] = useState<ImportSourceItem[]>([])
-
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-
-  // 导入的 SSE 控制状态
-  const [importing, setImporting] = useState(false)
-  const [importLimit, setImportLimit] = useState(2000)
-  const [extractTagsOnImport, setExtractTagsOnImport] = useState(true)
+  const [status, setStatus] = useState<'loading' | 'success' | 'empty' | 'error'>('loading')
+  const [error, setError] = useState<unknown>()
+  const [sourceId, setSourceId] = useState('')
+  const [limit, setLimit] = useState(2000)
+  const [extractTags, setExtractTags] = useState(true)
   const [tagBatchSize, setTagBatchSize] = useState(20)
-  const [tagWritePolicy, setTagWritePolicy] = useState<TagWritePolicy>('missing_only')
-  const [streamProgress, setStreamProgress] = useState<StreamProgress | null>(null)
-  const [streamLog, setStreamLog] = useState<string[]>([])
+  const [preflight, setPreflight] = useState<ImportPreflightPayload | null>(null)
+  const [job, setJob] = useState<MaintenanceJob | null>(null)
+  const [logs, setLogs] = useState<MaintenanceLog[]>([])
+  const [checkpoint, setCheckpoint] = useState<MaintenanceCheckpoint | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [tracking, setTracking] = useState(false)
+  const [pollVersion, setPollVersion] = useState(0)
+  const pollingRef = useRef<AbortController | null>(null)
+  const announcedRef = useRef<string>('')
 
-  async function loadData() {
-    setLoading(true)
-    setError('')
+  const selectedSource = sources.find((source) => source.id === sourceId) ?? null
+  const progress = jobProgress(job)
+
+  const loadSources = useCallback(async () => {
+    setStatus('loading')
+    setError(undefined)
     try {
-      const [configPayload, sourcesPayload] = await Promise.all([
-        getFullConfig(),
-        getImportSources(),
-      ])
-      setConfig(configPayload ?? null)
-      setSources(sourcesPayload.sources ?? [])
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '智能导入数据加载失败')
+      const result = await getImportSources()
+      setSources(result.sources ?? [])
+      setStatus(result.sources.length ? 'success' : 'empty')
+    } catch (reason) {
+      setError(reason)
+      setStatus('error')
+    }
+  }, [])
+
+  useEffect(() => { void loadSources() }, [loadSources])
+
+  useEffect(() => {
+    if (!jobId) return
+    const controller = new AbortController()
+    pollingRef.current = controller
+    setTracking(true)
+
+    const updateAuxiliary = () => {
+      void Promise.all([
+        getMaintenanceLogs(jobId, 100, 0),
+        getMaintenanceCheckpoint(jobId),
+      ]).then(([logPage, state]) => {
+        if (!controller.signal.aborted) {
+          setLogs(logPage.items)
+          setCheckpoint(state)
+        }
+      }).catch(() => undefined)
+    }
+
+    const resume = async () => {
+      try {
+        const initial = (await getMaintenanceJob(jobId, controller.signal)).item
+        if (controller.signal.aborted) return
+        setJob(initial)
+        updateAuxiliary()
+        if (!activeStatuses.has(initial.status)) return initial
+        return await waitForImportJob(jobId, (next) => {
+          setJob(next)
+          updateAuxiliary()
+        }, controller.signal)
+      } catch (reason) {
+        if (!controller.signal.aborted) toast.error(reason instanceof Error ? reason.message : '导入任务恢复失败')
+        return null
+      } finally {
+        if (pollingRef.current === controller) setTracking(false)
+      }
+    }
+
+    void resume().then((completed) => {
+      if (!completed || controller.signal.aborted || announcedRef.current === `${completed.run_id}:${completed.status}`) return
+      announcedRef.current = `${completed.run_id}:${completed.status}`
+      if (completed.status === 'succeeded') toast.success('导入任务已完成，可进行结果复核')
+      else if (completed.status === 'failed') toast.error(completed.error_message || '导入任务失败')
+    })
+
+    return () => controller.abort()
+  }, [jobId, pollVersion])
+
+  function resetPreflight() {
+    setPreflight(null)
+  }
+
+  async function inspect() {
+    if (!sourceId) return
+    setBusy(true)
+    try {
+      const result = await preflightImport(sourceId, {
+        limit,
+        extract_tags: extractTags,
+        tag_batch_size: tagBatchSize,
+        tag_write_policy: 'missing_only',
+      })
+      setPreflight(result)
+      toast.success('真实预检已完成，请核对结构化结果后再创建任务')
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : '导入预检失败')
     } finally {
-      setLoading(false)
+      setBusy(false)
     }
   }
 
-  useEffect(() => {
-    void loadData()
-  }, [])
+  async function start() {
+    if (!preflight) return
+    setBusy(true)
+    try {
+      const accepted = await startImport(sourceId, preflight.preflight_token)
+      setJob({
+        run_id: accepted.job_id,
+        request_id: accepted.request_id,
+        status: accepted.status,
+        kind: 'maintenance.import.run',
+        operation: accepted.operation,
+      })
+      setParams((current) => {
+        const next = new URLSearchParams(current)
+        next.set('job_id', accepted.job_id)
+        return next
+      })
+      toast.info('导入已受理；job_id 已写入 URL，刷新页面可恢复跟踪。')
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : '导入任务创建失败')
+    } finally {
+      setBusy(false)
+    }
+  }
 
-  const handleTagOptionsChange = useCallback((options: Required<TagExecutionOptions>) => {
-    setExtractTagsOnImport(options.extract_tags)
-    setTagBatchSize(options.tag_batch_size)
-    setTagWritePolicy(options.tag_write_policy)
-  }, [])
+  function stopTracking() {
+    pollingRef.current?.abort()
+    setTracking(false)
+    toast.info('仅停止当前页面轮询，服务端任务会继续执行。')
+  }
 
-  // 触发老记忆插件一键排重导入 (SSE)
-  function handleStartImport(sourceItem: ImportSourceItem) {
-    if (importing) return
-    setImporting(true)
-    setStreamProgress(null)
-    setStreamLog([`[INIT] 正在扫描并连接记忆数据源：${sourceItem.name}...`])
-
-    void runPostStream(`/api/import/from-source?source_id=${sourceItem.id}&limit=${importLimit}&extract_tags=${extractTagsOnImport ? '1' : '0'}&tag_batch_size=${tagBatchSize}&tag_write_policy=${tagWritePolicy}`, [], (state) => {
-      setStreamProgress(state)
-      const written = state.processed ?? state.imported
-      if (written !== undefined) {
-        setStreamLog((prev) => [
-          ...prev,
-          `[IMPORT] 正在写入: ${Math.round(state.progress * 100)}% | 已导入: ${written}/${state.total ?? importLimit} | 同步打标: ${state.tagged ?? 0}`,
-        ].slice(-60))
-      }
-      if (state.done) {
-        setStreamLog((prev) => [...prev, '[SUCCESS] 数据源同步去重入库 100% 成功！'])
-        toast.success('数据导入并去重成功')
-        setImporting(false)
-        void loadData()
-      }
-      if (state.error) {
-        setStreamLog((prev) => [...prev, `[ERROR] 同步中断: ${state.error}`])
-        toast.error(`同步失败: ${state.error}`)
-        setImporting(false)
-      }
-    }).then(() => {
-      setImporting(false)
-      void loadData()
-    }).catch((err) => {
-      const msg = err instanceof Error ? err.message : '连接异常'
-      setStreamLog((prev) => [...prev, `[CRITICAL] 写入流异常: ${msg}`])
-      toast.error(`同步异常: ${msg}`)
-      setImporting(false)
+  function clearJob() {
+    pollingRef.current?.abort()
+    setJob(null)
+    setLogs([])
+    setCheckpoint(null)
+    setParams((current) => {
+      const next = new URLSearchParams(current)
+      next.delete('job_id')
+      return next
     })
   }
 
-  if (loading) {
-    return (
-      <div className="flex flex-col gap-6">
-        <Skeleton className="h-16 w-full" />
-        <Skeleton className="h-96 w-full" />
-      </div>
-    )
-  }
-
-  if (error) {
-    return (
-      <Alert variant="destructive">
-        <AlertCircleIcon />
-        <AlertTitle>加载失败</AlertTitle>
-        <AlertDescription>{error}</AlertDescription>
-      </Alert>
-    )
-  }
-
-  const totalSourceCount = sources.reduce((sum, src) => sum + Number(src.count ?? 0), 0)
-  const importedEstimate = sources.reduce((sum, src) => sum + Math.round(Number(src.count ?? 0) * Number(src.imported_pct ?? 0) / 100), 0)
-  const remainingEstimate = sources.reduce((sum, src) => sum + Number(src.remaining ?? 0), 0)
+  const totalSourceCount = sources.reduce((sum, source) => sum + Number(source.count ?? 0), 0)
+  const importedEstimate = sources.reduce((sum, source) => sum + Math.round(Number(source.count ?? 0) * Number(source.imported_pct ?? 0) / 100), 0)
+  const remainingEstimate = sources.reduce((sum, source) => sum + Number(source.remaining ?? 0), 0)
   const duplicateEstimate = Math.max(totalSourceCount - importedEstimate - remainingEstimate, 0)
-  const dryRunPreviewRows = [
-    ['数据源', sources.length ? `${sources.length} 个可扫描来源` : '未发现可扫描来源'],
-    ['总条数', totalSourceCount.toLocaleString()],
-    ['已导入估计', importedEstimate.toLocaleString()],
-    ['重复估计', duplicateEstimate.toLocaleString()],
-    ['将写入 source 类型', 'external_plugin_import'],
-    ['是否会 re-embed', Number(config?.embedding_dimension ?? 0) > 0 ? `会，按 ${Number(config?.embedding_dimension)} 维向量写入` : '等待配置检查'],
-    ['是否同步 Tag', extractTagsOnImport ? `会，按每批 ${tagBatchSize} 条调用同一 Tag LLM` : '否，仅导入并留给维护中心补提取'],
+  const preflightDuplicateEstimate = preflight ? Math.max(preflight.preview.total_count - preflight.preview.estimated_imported - preflight.preview.estimated_remaining, 0) : 0
+  const completedSteps = [
+    Boolean(sourceId),
+    status === 'success',
+    Boolean(preflight),
+    Boolean(job),
+    Boolean(job && (!extractTags || job.status === 'succeeded')),
+    job?.status === 'succeeded',
   ]
 
-  return (
-    <div className="flex flex-col gap-6">
-      <Card>
-        <CardHeader>
-          <CardTitle>智能导入与标签提取</CardTitle>
-          <CardDescription>
-            自动发现外部记忆插件（如 SelfLearning）数据并排重入库；导入时可同步提取 Tag，也可留给标签与维护中心补跑。
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-4">
-          <div className="grid gap-3 md:grid-cols-6">
-            {importWizardSteps.map((step, index) => (
-              <div key={step} className="rounded-lg border bg-muted/20 p-3">
-                <div className="flex items-center justify-between gap-2">
-                  <Badge variant={index < 2 ? 'secondary' : 'outline'}>{index + 1}</Badge>
-                  <span className="text-xs text-muted-foreground">{index < 2 ? '已接入' : '契约'}</span>
-                </div>
-                <p className="mt-3 text-sm font-medium">{step}</p>
-              </div>
-            ))}
-          </div>
-          <Alert>
-            <AlertCircleIcon />
-            <AlertTitle>provider 配置块属于静态配置，需要重启</AlertTitle>
-            <AlertDescription>
-              Embedding Provider、向量维度、Tag 提取分析 LLM 会影响导入和 Tag 提取；智能导入和标签与维护中心共用同一个 Tag 提取分析 LLM，保存后通过 AstrBot 重启让 provider 配置块生效。
-            </AlertDescription>
-          </Alert>
-        </CardContent>
-      </Card>
+  return <div data-slot="import-page" className="flex flex-col gap-6">
+    <Card>
+      <CardHeader><CardTitle>智能导入向导</CardTitle><CardDescription>发现真实外部来源，先进行结构化 preflight，再创建可恢复的 durable import job；HTTP 202/queued 不代表完成。</CardDescription></CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        <div className="grid gap-3 md:grid-cols-6">{wizardSteps.map((step, index) => <div key={step} className={`rounded-lg border p-3 ${completedSteps[index] ? 'border-primary/40 bg-primary/5' : 'bg-muted/20'}`}><div className="flex items-center justify-between gap-2"><Badge variant={completedSteps[index] ? 'default' : 'outline'}>{index + 1}</Badge>{completedSteps[index] ? <CheckCircle2Icon className="size-4 text-primary" /> : null}</div><p className="mt-3 text-sm font-medium">{step}</p></div>)}</div>
+        <Alert><AlertCircleIcon /><AlertTitle>安全执行边界</AlertTitle><AlertDescription>本页不调用旧 SSE 导入或任意 rebuild；preflight token 只由当前预检产生并原样提交，导入进度统一从 durable job 查询。</AlertDescription></Alert>
+      </CardContent>
+    </Card>
 
-      {/* ─── 1. 模型提供商配置 ─── */}
-      <TagExtractionConfigPanel
-        title="智能导入 Tag 提取配置"
-        description="外部导入只对本次新增 memories 同步提取 Tag；Provider、向量维度与维护中心共用同一套静态配置。"
-        config={config}
-        onConfigChange={setConfig}
-        onOptionsChange={handleTagOptionsChange}
-        disabled={importing}
-        showExtractToggle
-      />
+    <Card>
+      <CardHeader><CardTitle className="text-base">1. 数据源与导入策略</CardTitle><CardDescription>选择 discovery 返回且具备 adapter 的真实来源；修改任何选项后需重新预检。</CardDescription></CardHeader>
+      <CardContent className="flex flex-col gap-5">
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+          <QueryState status={status} error={error} onRetry={() => void loadSources()} title="未发现可导入来源" description="当前 discovery 没有返回具备 adapter 的外部记忆源。">
+            <Field className="lg:col-span-2"><FieldLabel>导入来源</FieldLabel><Select value={sourceId} onValueChange={(value) => { setSourceId(value); resetPreflight() }}><SelectTrigger><SelectValue placeholder="选择真实来源" /></SelectTrigger><SelectContent><SelectGroup>{sources.map((source) => <SelectItem key={source.id} value={source.id} disabled={!source.has_adapter}>{source.name} · {source.count.toLocaleString('zh-CN')} 条{source.has_adapter ? '' : '（无 adapter）'}</SelectItem>)}</SelectGroup></SelectContent></Select><FieldDescription>{selectedSource?.description ?? '来源必须来自当前 discovery 结果。'}</FieldDescription></Field>
+          </QueryState>
+          <Field><FieldLabel>最大导入条数</FieldLabel><Input type="number" min={1} max={50000} value={limit} disabled={busy || tracking} onChange={(event) => { setLimit(Math.max(1, Math.min(50000, Number(event.target.value) || 1))); resetPreflight() }} /></Field>
+          <Field><FieldLabel>同步提取 Tag</FieldLabel><div className="flex h-10 items-center justify-between rounded-md border px-3"><span className="text-sm">{extractTags ? '开启' : '关闭'}</span><Switch checked={extractTags} disabled={busy || tracking} onCheckedChange={(value) => { setExtractTags(value); resetPreflight() }} /></div></Field>
+          <Field><FieldLabel>Tag 批大小</FieldLabel><Input type="number" min={1} max={50} value={tagBatchSize} disabled={!extractTags || busy || tracking} onChange={(event) => { setTagBatchSize(Math.max(1, Math.min(50, Number(event.target.value) || 1))); resetPreflight() }} /><FieldDescription>固定使用 missing_only，不覆盖已有 Tag。</FieldDescription></Field>
+          <div className="flex items-end"><Button disabled={!sourceId || busy || tracking} onClick={() => void inspect()}>{busy && !preflight ? <Loader2Icon className="animate-spin" /> : <SearchCheckIcon />}运行真实预检</Button></div>
+        </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm font-semibold">dry-run 预览</CardTitle>
-          <CardDescription>先把导入前的关键数字显式摆出来，避免直接执行后才发现来源、重复或 re-embed 策略不对。</CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-4">
-          <div className="grid gap-3 md:grid-cols-3">
-            {dryRunPreviewRows.map(([label, value]) => (
-              <div key={label} className="rounded-lg border bg-muted/20 p-4">
-                <p className="text-xs text-muted-foreground">{label}</p>
-                <p className="mt-2 text-sm font-semibold">{value}</p>
-              </div>
-            ))}
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {dryRunPreviewFields.map((field) => (
-              <Badge key={field} variant="outline">{field}</Badge>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
+        <div className="grid gap-3 md:grid-cols-4">
+          <div className="rounded-lg border bg-muted/20 p-4"><p className="text-xs text-muted-foreground">发现来源</p><p className="mt-2 text-xl font-semibold">{sources.length}</p></div>
+          <div className="rounded-lg border bg-muted/20 p-4"><p className="text-xs text-muted-foreground">来源总条数</p><p className="mt-2 text-xl font-semibold">{totalSourceCount.toLocaleString('zh-CN')}</p></div>
+          <div className="rounded-lg border bg-muted/20 p-4"><p className="text-xs text-muted-foreground">已导入估计</p><p className="mt-2 text-xl font-semibold">{importedEstimate.toLocaleString('zh-CN')}</p></div>
+          <div className="rounded-lg border bg-muted/20 p-4"><p className="text-xs text-muted-foreground">重复估计</p><p className="mt-2 text-xl font-semibold">{duplicateEstimate.toLocaleString('zh-CN')}</p></div>
+        </div>
+      </CardContent>
+    </Card>
 
-      {/* ─── 2. 外部插件排重一键导入 ─── */}
-      <Card>
-        <CardHeader className="border-b">
-          <CardTitle className="text-sm font-semibold">外部插件一键排重导入</CardTitle>
-          <CardDescription>自动发现其他带有对话语料的普通记忆生态，导入过程在后台异步向量化。</CardDescription>
-          <CardAction>
-            <Button variant="outline" size="icon" onClick={() => void loadData()} title="刷新">
-              <RefreshCwIcon />
-            </Button>
-          </CardAction>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-4 pt-6">
-          <div className="grid gap-4 md:grid-cols-3">
-            <Field>
-              <FieldLabel>单批次导入条数上限</FieldLabel>
-              <Input
-                type="number"
-                min="100"
-                max="50000"
-                value={importLimit}
-                disabled={importing}
-                onChange={(e) => setImportLimit(Number(e.target.value) || 2000)}
-              />
-            </Field>
-            <Field>
-              <FieldLabel>Tag 提取执行策略</FieldLabel>
-              <div className="flex h-10 items-center rounded-md border bg-muted/20 px-3 text-sm">
-                tag_batch_size={tagBatchSize} · tag_write_policy={tagWritePolicy}
-              </div>
-            </Field>
-            <Field className="justify-end rounded-lg border bg-muted/10 px-3 py-2">
-              <label className="flex items-center gap-2 text-sm font-medium">
-                <input
-                  type="checkbox"
-                  checked={extractTagsOnImport}
-                  disabled={importing}
-                  onChange={(e) => setExtractTagsOnImport(e.target.checked)}
-                />
-                <span>同步提取 Tag</span>
-              </label>
-              <p className="text-xs text-muted-foreground">
-                和标签与维护中心共用同一个 Tag 提取分析 LLM；关闭后导入的数据可在维护中心补跑。
-              </p>
-            </Field>
-          </div>
+    {preflight ? <Card>
+      <CardHeader><CardTitle className="text-base">2. 结构化 preflight</CardTitle><CardDescription>预检于 {formatTime(preflight.checked_at)} 完成 · 来源状态：{preflight.source_status === 'available' ? '可用' : '未知'}。请核对后再执行。</CardDescription></CardHeader>
+      <CardContent className="flex flex-col gap-5">
+        <div className="grid gap-3 md:grid-cols-3 lg:grid-cols-4">
+          <div className="rounded-lg border bg-muted/20 p-4"><p className="text-xs text-muted-foreground">数据源</p><p className="mt-2 font-semibold">{preflight.source.name}</p><p className="mt-1 text-xs text-muted-foreground">{preflight.source.description}</p></div>
+          <div className="rounded-lg border bg-muted/20 p-4"><p className="text-xs text-muted-foreground">总条数</p><p className="mt-2 text-xl font-semibold">{preflight.preview.total_count.toLocaleString('zh-CN')}</p></div>
+          <div className="rounded-lg border bg-muted/20 p-4"><p className="text-xs text-muted-foreground">本次上限</p><p className="mt-2 text-xl font-semibold">{preflight.preview.limit.toLocaleString('zh-CN')}</p></div>
+          <div className="rounded-lg border bg-muted/20 p-4"><p className="text-xs text-muted-foreground">预计待导入</p><p className="mt-2 text-xl font-semibold">{preflight.preview.estimated_remaining.toLocaleString('zh-CN')}</p></div>
+          <div className="rounded-lg border bg-muted/20 p-4"><p className="text-xs text-muted-foreground">预计已导入</p><p className="mt-2 text-xl font-semibold">{preflight.preview.estimated_imported.toLocaleString('zh-CN')}</p></div>
+          <div className="rounded-lg border bg-muted/20 p-4"><p className="text-xs text-muted-foreground">重复估计</p><p className="mt-2 text-xl font-semibold">{preflightDuplicateEstimate.toLocaleString('zh-CN')}</p></div>
+          <div className="rounded-lg border bg-muted/20 p-4"><p className="text-xs text-muted-foreground">向量处理</p><p className="mt-2 font-semibold">{preflight.preview.re_embed ? '会重新生成 embedding' : '保留来源向量策略'}</p></div>
+          <div className="rounded-lg border bg-muted/20 p-4"><p className="text-xs text-muted-foreground">Tag 处理</p><p className="mt-2 font-semibold">{preflight.preview.extract_tags ? `同步提取 · 每批 ${tagBatchSize}` : '本次不提取'}</p></div>
+        </div>
+        <div className="flex flex-wrap items-center gap-3"><Button disabled={busy || tracking || Boolean(jobId && activeStatuses.has(job?.status ?? ''))} onClick={() => void start()}>{busy ? <Loader2Icon className="animate-spin" /> : <PlayIcon />}确认创建 Durable Job</Button><p className="text-xs text-muted-foreground">token 不展示、不编辑，且仅用于这次来源与参数完全一致的导入。</p></div>
+      </CardContent>
+    </Card> : null}
 
-          <div className="flex flex-col gap-3">
-            {sources.length === 0 ? (
-              <p className="p-6 text-center text-xs text-muted-foreground">系统当前未扫描到任何其他可用的记忆插件源数据。</p>
-            ) : (
-              sources.map((src) => (
-                <div key={src.id} className="flex flex-col gap-3 rounded-lg border bg-muted/10 p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex min-w-0 flex-col gap-1">
-                      <span className="flex items-center gap-2 truncate text-xs font-semibold text-foreground">
-                        {src.name}
-                        <Badge variant={src.has_adapter ? 'secondary' : 'outline'}>
-                          {src.has_adapter ? '专属适配' : '自动扫描'}
-                        </Badge>
-                      </span>
-                      <span className="truncate text-xs text-muted-foreground">{src.description}</span>
-                    </div>
-                    <div className="flex shrink-0 items-center gap-2">
-                      <span className="font-mono text-xs text-primary">{src.count?.toLocaleString()} 条</span>
-                      <Button disabled={importing} size="xs" onClick={() => handleStartImport(src)}>
-                        导入
-                      </Button>
-                    </div>
-                  </div>
-                  <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
-                    <div className="h-full rounded-full bg-primary" style={{ width: `${src.imported_pct ?? 0}%` }} />
-                  </div>
-                  <div className="flex justify-between gap-3 text-xs text-muted-foreground">
-                    <span>已导入 ~{src.imported_pct ?? 0}%</span>
-                    {src.remaining === 0 ? (
-                      <Badge variant="secondary">均已安全入库</Badge>
-                    ) : (
-                      <span>剩余 {src.remaining?.toLocaleString()} 条未对齐</span>
-                    )}
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </CardContent>
-      </Card>
+    {job ? <Card>
+      <CardHeader><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-base">3. 外部记忆导入任务状态</CardTitle><CardDescription>刷新页面会从 URL 中的 job_id 恢复此任务；服务端执行不依赖页面保持打开。</CardDescription></div><Badge variant={statusVariant(job.status)}>{statusLabel(job.status)}</Badge></div></CardHeader>
+      <CardContent className="flex flex-col gap-5">
+        <div className="flex justify-between gap-3 text-sm"><span>导入进度</span><span>{Math.round(progress.ratio * 100)}% · 已处理 {progress.processed.toLocaleString('zh-CN')}{progress.total ? ` / ${progress.total.toLocaleString('zh-CN')}` : ''}</span></div>
+        <div className="h-2 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary transition-all" style={{ width: `${Math.round(progress.ratio * 100)}%` }} /></div>
+        <div className="grid gap-3 md:grid-cols-4">
+          <div className="rounded-lg border bg-muted/20 p-3"><p className="text-xs text-muted-foreground">已处理</p><p className="mt-1 text-lg font-semibold">{progress.processed.toLocaleString('zh-CN')}</p></div>
+          <div className="rounded-lg border bg-muted/20 p-3"><p className="text-xs text-muted-foreground">已打 Tag</p><p className="mt-1 text-lg font-semibold">{progress.tagged.toLocaleString('zh-CN')}</p></div>
+          <div className="rounded-lg border bg-muted/20 p-3"><p className="text-xs text-muted-foreground">跳过 / 重复</p><p className="mt-1 text-lg font-semibold">{progress.skipped.toLocaleString('zh-CN')}</p></div>
+          <div className="rounded-lg border bg-muted/20 p-3"><p className="text-xs text-muted-foreground">失败</p><p className="mt-1 text-lg font-semibold">{progress.errors.toLocaleString('zh-CN')}</p></div>
+        </div>
+        <div><h3 className="mb-2 text-sm font-semibold">进度与日志</h3><div className="max-h-56 overflow-auto rounded-lg border bg-muted/30 p-3 font-mono text-xs">{logs.length ? logs.map((log, index) => <div key={`${log.at}-${log.event}-${index}`} className={log.level === 'error' ? 'text-destructive' : 'text-muted-foreground'}>[{formatTime(log.at)}] {logSummary(log)}</div>) : <p className="text-muted-foreground">等待后台任务日志与 checkpoint...</p>}</div></div>
+        {job.error_message ? <Alert variant="destructive"><AlertCircleIcon /><AlertTitle>导入失败</AlertTitle><AlertDescription>{job.error_message}</AlertDescription></Alert> : null}
+        <div className="flex flex-wrap items-center justify-between gap-3"><details className="rounded-md border p-3 text-xs text-muted-foreground"><summary className="cursor-pointer font-medium text-foreground">技术详情</summary><div className="mt-2 font-mono">job_id: {job.run_id}<br />request_id: {job.request_id}<br />checkpoint: {typeof checkpoint?.checkpoint?.phase === 'string' ? checkpoint.checkpoint.phase : '未记录'}<br />error_code: {job.error_code ?? '无'}</div></details><div className="flex flex-wrap gap-2">{tracking ? <Button variant="outline" onClick={stopTracking}><PauseIcon />停止页面轮询</Button> : activeStatuses.has(job.status) ? <Button variant="outline" onClick={() => setPollVersion((value) => value + 1)}><RefreshCwIcon />恢复跟踪</Button> : null}<Button variant="ghost" onClick={clearJob}>关闭任务卡片</Button></div></div>
+      </CardContent>
+    </Card> : jobId ? <Card><CardContent className="flex items-center gap-2 py-6 text-sm text-muted-foreground"><Loader2Icon className="animate-spin" />正在通过 URL 中的 job_id 恢复导入任务...</CardContent></Card> : null}
 
-      {/* ─── 3. SSE 控制流实时控制台 ─── */}
-      {importing || streamProgress ? (
-        <Card className="animate-in fade-in duration-200">
-          <CardHeader className="border-b">
-            <CardTitle className="text-xs font-semibold">
-              正在从外部记忆插件一键排重导入...
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-4 pt-6">
-            {streamProgress ? (
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center justify-between gap-3 font-mono text-xs">
-                  <span className="font-semibold text-primary">
-                    进度：{Math.min(100, Math.max(0, Math.round((streamProgress.progress ?? 0) * 100)))}%
-                  </span>
-                  <span>
-                    已写入: {streamProgress.processed ?? streamProgress.imported ?? 0}/{streamProgress.total ?? importLimit} | 打标：{streamProgress.tagged ?? 0} | 失败：{streamProgress.errors ?? 0}
-                  </span>
-                </div>
-                <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
-                  <div className="h-full rounded-full bg-primary transition-all duration-300" style={{ width: `${Math.min(100, Math.max(0, Math.round((streamProgress.progress ?? 0) * 100)))}%` }} />
-                </div>
-              </div>
-            ) : (
-              <div className="flex items-center gap-2 py-2 font-mono text-xs text-muted-foreground">
-                <Loader2Icon className="shrink-0 animate-spin text-primary" />
-                正在与流式后台通道握手，拉取计算日志...
-              </div>
-            )}
-
-
-            <div className="flex flex-col gap-2">
-              <span className="text-xs font-semibold text-foreground">流式执行日志控制台：</span>
-              <ScrollArea className="h-44 rounded-lg border bg-muted/60 p-3 font-mono text-xs leading-relaxed text-muted-foreground">
-                {streamLog.length === 0 ? (
-                  <div className="text-muted-foreground">等待数据块推送...</div>
-                ) : (
-                  streamLog.map((line, idx) => (
-                    <div key={idx} className={line.includes('[CRITICAL]') || line.includes('[ERROR]') ? 'text-destructive' : line.includes('[SUCCESS]') ? 'text-primary' : ''}>
-                      {line}
-                    </div>
-                  ))
-                )}
-              </ScrollArea>
-            </div>
-
-            {streamProgress?.done ? (
-              <Alert>
-                <CheckCircle2Icon />
-                <AlertTitle>处理完毕</AlertTitle>
-                <AlertDescription>当前异步进程已 100% 成功执行完毕。</AlertDescription>
-              </Alert>
-            ) : null}
-          </CardContent>
-        </Card>
-      ) : null}
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm font-semibold">结果复核入口</CardTitle>
-          <CardDescription>导入完成后从三个入口复核数据、Tag 审计和覆盖率变化。</CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-3 md:grid-cols-3">
-          <Button asChild variant="outline" size="lg">
-            <Link to="/memories">
-              去记忆管理器看新导入数据
-              <ArrowRightIcon data-icon="inline-end" />
-            </Link>
-          </Button>
-          <Button asChild variant="outline" size="lg">
-            <Link to="/maintain">
-              去标签与维护中心看 Tag 审计
-              <ArrowRightIcon data-icon="inline-end" />
-            </Link>
-          </Button>
-          <Button asChild variant="outline" size="lg">
-            <Link to="/dashboard">
-              去总览看覆盖率变化
-              <ArrowRightIcon data-icon="inline-end" />
-            </Link>
-          </Button>
-        </CardContent>
-      </Card>
-    </div>
-  )
+    <Card>
+      <CardHeader><CardTitle className="text-base">4. 结果复核</CardTitle><CardDescription>导入完成后分别检查新数据、Tag 审计和系统覆盖率。</CardDescription></CardHeader>
+      <CardContent className="grid gap-3 md:grid-cols-3">
+        <Button asChild variant="outline" size="lg"><Link to="/memories"><DatabaseIcon />查看新导入记忆<ArrowRightIcon /></Link></Button>
+        <Button asChild variant="outline" size="lg"><Link to={`${maintenancePath}?tab=workbench`}><TagsIcon />复核 Tag 与审计<ArrowRightIcon /></Link></Button>
+        <Button asChild variant="outline" size="lg"><Link to="/dashboard"><RefreshCwIcon />查看覆盖率变化<ArrowRightIcon /></Link></Button>
+      </CardContent>
+    </Card>
+  </div>
 }
+
 export default ImportPage

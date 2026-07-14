@@ -91,9 +91,14 @@ export async function fetchJson<T>(path: string, init: ApiRequestInit = {}): Pro
     requestHeaders.set('Authorization', `Bearer ${token}`)
   }
 
-  // 15 秒超时控制器
+  // 无论调用方是否传入 signal，都保留统一超时；外部取消与超时使用
+  // 不同错误文案，避免“停止轮询”被误报成网络超时。
   const controller = new AbortController()
+  let timedOut = false
+  const abortFromCaller = () => controller.abort(signal?.reason)
+  signal?.addEventListener('abort', abortFromCaller, { once: true })
   const timeoutId = setTimeout(() => {
+    timedOut = true
     controller.abort()
   }, 15000)
 
@@ -102,17 +107,16 @@ export async function fetchJson<T>(path: string, init: ApiRequestInit = {}): Pro
       ...fetchInit,
       body,
       headers: requestHeaders,
-      signal: signal || controller.signal,
+      signal: controller.signal,
     })
     const payload = await parseResponse(response)
 
     if (!response.ok) {
       if (response.status === 401) {
         clearStoredToken()
+        // AuthGate 会在原地址上显示登录页；保留 hash，登录后即可返回
+        // 用户正在查看的页面、筛选条件和对象深链。
         authFailureHandler?.()
-        if (typeof window !== 'undefined') {
-          window.location.hash = '#/login'
-        }
       }
       throw createApiError(response, payload)
     }
@@ -120,10 +124,12 @@ export async function fetchJson<T>(path: string, init: ApiRequestInit = {}): Pro
     return payload as T
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('API 请求超时（15 秒上限），请检查网络或服务端响应健康。')
+      if (timedOut) throw new Error('API 请求超时（15 秒上限），请检查网络或服务端响应健康。')
+      throw new Error('请求已取消。')
     }
-    throw error;
+    throw error
   } finally {
     clearTimeout(timeoutId)
+    signal?.removeEventListener('abort', abortFromCaller)
   }
 }
