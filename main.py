@@ -894,6 +894,18 @@ class WaveMemoryPlugin(Star):
             except Exception as e:
                 logger.warning(f"[WaveMemory] v2.1 migration failed (non-fatal): {e}")
 
+        # ─── 一次性数据迁移（v2.2：经历/关系事件/Jargon/信念生命周期）───
+        migration_marker_v22 = Path(self.data_dir) / ".v2_2_migrated"
+        if not migration_marker_v22.exists():
+            try:
+                from .engine.db.migrations.v2_2_experience_rework import run_migration as run_v22
+                db_path = os.path.join(self.data_dir, "wave_memory.db")
+                if run_v22(str(db_path)):
+                    migration_marker_v22.touch()
+                    logger.info("[WaveMemory] v2.2 migration completed, marker created")
+            except Exception as e:
+                logger.warning(f"[WaveMemory] v2.2 migration failed (non-fatal): {e}")
+
         # 启动写入器
         self.writer.start()
 
