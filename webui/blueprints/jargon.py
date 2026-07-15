@@ -360,6 +360,107 @@ def _formal_jargon(item: dict, scope: RuntimeScope, *, evidence_available: bool 
     return result
 
 
+def _fallback_contexts(item: dict) -> list[str]:
+    """读取 scoped 黑话自带的回退上下文，不从 legacy group_id 猜测来源。"""
+    raw = item.get("source_context")
+    if isinstance(raw, list):
+        contexts = raw
+    elif isinstance(raw, str) and raw.strip():
+        parsed = _safe_json_list(raw)
+        contexts = parsed if parsed else [raw.strip()]
+    else:
+        contexts = item.get("contexts") if isinstance(item.get("contexts"), list) else []
+    normalized = []
+    for value in contexts:
+        text = value.get("content") if isinstance(value, dict) else value
+        text = str(text or "").strip()
+        if text:
+            normalized.append(text)
+    return normalized
+
+
+def _scoped_jargon_evidence(container, scope: RuntimeScope, item: dict, *, before: int, after: int) -> dict:
+    """只在同一 RuntimeScope 内还原黑话锚点及前后消息。"""
+    conn = getattr(getattr(container, "db", None), "conn", None)
+    fallback_contexts = _fallback_contexts(item)
+    base_payload = {
+        "ok": True,
+        "jargon": {
+            "id": item.get("id"),
+            "word": item.get("word"),
+            "meaning": item.get("meaning"),
+            "revision": item.get("revision"),
+        },
+        "scope": ScopeCodec.to_dict(scope),
+        "anchor": None,
+        "messages": [],
+        "fallback_contexts": fallback_contexts,
+        "used_fallback": True,
+    }
+    if conn is None or scope.session is None or item.get("source_memory_id") is None:
+        return base_payload
+
+    try:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(memories)").fetchall()}
+        required = {"id", "content", "timestamp", "bot_id", "session_id", "visibility", "resolution_state", "quarantine"}
+        if not required <= columns:
+            return base_payload
+
+        group_column = "group_id" if "group_id" in columns else "session_id"
+        sender_id_column = "sender_id" if "sender_id" in columns else "NULL"
+        sender_name_column = "sender_name" if "sender_name" in columns else "NULL"
+        select_columns = f"id, {group_column}, {sender_id_column}, {sender_name_column}, content, timestamp"
+        scope_where = (
+            "bot_id=? AND session_id=? AND visibility=? "
+            "AND resolution_state='resolved' AND COALESCE(quarantine,0)=0"
+        )
+        scope_params = (scope.bot_id, scope.session.id, scope.visibility)
+        anchor = conn.execute(
+            f"SELECT {select_columns} FROM memories WHERE id=? AND {scope_where} LIMIT 1",
+            (int(item["source_memory_id"]), *scope_params),
+        ).fetchone()
+        if not anchor:
+            return base_payload
+
+        message_filter = " AND memory_type='message'" if "memory_type" in columns else ""
+        anchor_ts = float(anchor[5])
+        before_rows = conn.execute(
+            f"SELECT {select_columns} FROM memories WHERE {scope_where} AND timestamp < ?{message_filter} "
+            "ORDER BY timestamp DESC LIMIT ?",
+            (*scope_params, anchor_ts, before),
+        ).fetchall()
+        after_rows = conn.execute(
+            f"SELECT {select_columns} FROM memories WHERE {scope_where} AND timestamp > ?{message_filter} "
+            "ORDER BY timestamp ASC LIMIT ?",
+            (*scope_params, anchor_ts, after),
+        ).fetchall()
+    except Exception:
+        return base_payload
+
+    def row_to_message(row, role: str) -> dict:
+        return {
+            "id": row[0],
+            "group_id": row[1],
+            "sender_id": row[2],
+            "sender_name": row[3],
+            "content": row[4],
+            "timestamp": row[5],
+            "role": role,
+        }
+
+    anchor_message = row_to_message(anchor, "anchor")
+    return {
+        **base_payload,
+        "anchor": anchor_message,
+        "messages": [
+            *[row_to_message(row, "before") for row in reversed(before_rows)],
+            anchor_message,
+            *[row_to_message(row, "after") for row in after_rows],
+        ],
+        "used_fallback": False,
+    }
+
+
 def _deep_link_error(state: str):
     return jsonify(error_payload("not_found", "Resource not found")), 404
 
@@ -399,6 +500,20 @@ def _resolve_jargon_detail(scope: RuntimeScope, *, locator: int | None = None):
         evidence_available=_memory_evidence_available(container, scope, row.get("source_memory_id")),
     )
     return item, None
+
+
+def _find_scoped_jargon(repo, scope: RuntimeScope, jargon_id: int, *, include_archived: bool = False) -> dict:
+    kwargs = {"limit": 10000}
+    if include_archived:
+        kwargs["include_archived"] = True
+    try:
+        rows = repo.list_scoped_jargon(scope, **kwargs)
+    except TypeError:
+        rows = repo.list_scoped_jargon(scope, limit=10000)
+    current = next((row for row in rows if int(row.get("id", -1)) == int(jargon_id)), None)
+    if current is None:
+        raise LookupError("scoped_object_not_found")
+    return current
 
 
 def _scope_failure(exc: Exception):
@@ -489,13 +604,20 @@ async def list_jargon():
         ]
         payload = page_response(items, total=len(rows), limit=limit, offset=offset)
         payload["scope"] = ScopeCodec.to_dict(scope)
+        service = getattr(container, "jargon_service", None)
+        review_available = callable(getattr(service, "review", None))
+        edit_available = callable(getattr(service, "update_meaning", None))
+        archive_available = callable(getattr(service, "archive", None))
         payload["capabilities"] = {
-            "review": {
-                "available": callable(getattr(getattr(get_container(), "jargon_service", None), "review", None)),
-                "reason_code": None if callable(getattr(getattr(get_container(), "jargon_service", None), "review", None)) else "jargon_review_command_unavailable",
-            },
+            "review": {"available": review_available, "reason_code": None if review_available else "jargon_review_command_unavailable"},
+            "batch_review": {"available": review_available, "reason_code": None if review_available else "jargon_review_command_unavailable"},
+            "edit": {"available": edit_available, "reason_code": None if edit_available else "jargon_update_command_unavailable"},
+            "archive": {"available": archive_available, "reason_code": None if archive_available else "jargon_archive_command_unavailable"},
+            "evidence": {"available": True, "reason_code": None},
             "create": {"available": False, "reason_code": "anchored_jargon_command_unavailable"},
             "delete": {"available": False, "reason_code": "physical_delete_disabled"},
+            "toggle_global": {"available": False, "reason_code": "scoped_global_toggle_unsupported"},
+            "select_all_matching": {"available": False, "reason_code": "server_signed_object_refs_required"},
         }
         return jsonify(payload)
     except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
@@ -526,6 +648,137 @@ async def get_scoped_jargon(jargon_id: int):
         if failure is not None:
             return failure
         return jsonify({"item": item, "resolution": {"state": "ready"}})
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        return _scope_failure(exc)
+
+
+@jargon_bp.route("/<int:jargon_id>/context", methods=["GET"])
+@jargon_bp.route("/<int:jargon_id>/evidence", methods=["GET"])
+@require_auth
+async def get_scoped_jargon_evidence(jargon_id: int):
+    """按 ObjectRef 与完整 RuntimeScope 还原正式黑话证据上下文。"""
+    try:
+        scope = _group_scope_from_query()
+        item, failure = _resolve_jargon_detail(scope, locator=jargon_id)
+        if failure is not None:
+            return failure
+        before = _clamp_int(request.args.get("before"), 15)
+        after = _clamp_int(request.args.get("after"), 15)
+        return jsonify(_scoped_jargon_evidence(get_container(), scope, item, before=before, after=after))
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        return _scope_failure(exc)
+
+
+@jargon_bp.route("/commands/<int:jargon_id>/meaning", methods=["POST"])
+@require_auth
+async def update_scoped_jargon_meaning(jargon_id: int):
+    """按 ObjectRef 更新释义并重新进入待审核。"""
+    body = await request.get_json(silent=True) or {}
+    try:
+        scope = _scope_from_envelope(body)
+        container = get_container()
+        repo = _scoped_repo(container)
+        current = _find_scoped_jargon(repo, scope, jargon_id)
+        _require_object_ref(body, kind="jargon", locator=jargon_id, scope=scope, item=current)
+        service = getattr(container, "jargon_service", None)
+        update = getattr(service, "update_meaning", None)
+        if not callable(update):
+            return _scope_error("jargon_update_command_unavailable", 503)
+        updated = update(scope, jargon_id, body.get("meaning"))
+        item = _formal_jargon(
+            updated,
+            scope,
+            evidence_available=_memory_evidence_available(container, scope, updated.get("source_memory_id")),
+        )
+        return jsonify(mutation_response(
+            operation_kind="jargon.update_meaning",
+            status="succeeded",
+            revision=item["revision"],
+            item=item,
+            include_item=True,
+        ))
+    except LookupError:
+        return _scope_error("scoped_object_not_found", 404)
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        return _scope_failure(exc)
+
+
+@jargon_bp.route("/commands/<int:jargon_id>/archive", methods=["POST"])
+@require_auth
+async def archive_scoped_jargon(jargon_id: int):
+    """按 ObjectRef 归档黑话，不执行物理删除。"""
+    body = await request.get_json(silent=True) or {}
+    try:
+        scope = _scope_from_envelope(body)
+        container = get_container()
+        repo = _scoped_repo(container)
+        current = _find_scoped_jargon(repo, scope, jargon_id)
+        _require_object_ref(body, kind="jargon", locator=jargon_id, scope=scope, item=current)
+        service = getattr(container, "jargon_service", None)
+        archive = getattr(service, "archive", None)
+        if not callable(archive):
+            return _scope_error("jargon_archive_command_unavailable", 503)
+        result = archive(scope, jargon_id)
+        return jsonify(mutation_response(
+            operation_kind="jargon.archive",
+            status="succeeded",
+            revision=None,
+            item={"id": result["id"], "status": result["status"]},
+            include_item=True,
+        ))
+    except LookupError:
+        return _scope_error("scoped_object_not_found", 404)
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        return _scope_failure(exc)
+
+
+@jargon_bp.route("/commands/batch-review", methods=["POST"])
+@require_auth
+async def batch_review_scoped_jargon():
+    """批量审核列表签发的 ObjectRef；先全量校验，再执行领域命令。"""
+    body = await request.get_json(silent=True) or {}
+    try:
+        scope = _scope_from_envelope(body)
+        action = str(body.get("action") or "")
+        entries = body.get("items")
+        if action not in {"approve", "reject"}:
+            raise ValueError("invalid_review_action")
+        if not isinstance(entries, list) or not entries or len(entries) > 100:
+            raise ValueError("invalid_batch_items")
+        container = get_container()
+        repo = _scoped_repo(container)
+        service = getattr(container, "jargon_service", None)
+        review = getattr(service, "review", None)
+        if not callable(review):
+            return _scope_error("jargon_review_command_unavailable", 503)
+
+        validated: list[dict] = []
+        seen: set[int] = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError("invalid_batch_item")
+            jargon_id = int(entry.get("id"))
+            if jargon_id in seen:
+                continue
+            seen.add(jargon_id)
+            current = _find_scoped_jargon(repo, scope, jargon_id)
+            _require_object_ref(entry, kind="jargon", locator=jargon_id, scope=scope, item=current)
+            if action == "approve" and not _memory_evidence_available(container, scope, current.get("source_memory_id")):
+                raise ScopedKnowledgeScopeError("jargon_anchor_unavailable")
+            validated.append(current)
+
+        results = []
+        for current in validated:
+            result = review(scope, int(current["id"]), action)
+            results.append({"id": int(result["id"]), "status": result["status"]})
+        return jsonify({
+            "ok": True,
+            "operation": {"kind": f"jargon.batch.{action}", "status": "succeeded"},
+            "reviewed_count": len(results),
+            "items": results,
+        })
+    except LookupError:
+        return _scope_error("scoped_object_not_found", 404)
     except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
         return _scope_failure(exc)
 

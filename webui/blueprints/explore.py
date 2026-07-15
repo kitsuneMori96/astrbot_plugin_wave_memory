@@ -93,11 +93,18 @@ def _scoped_graph(conn, scope: RuntimeScope, *, min_confidence: float = 0.0) -> 
     params = _scope_params(scope)
     nodes: dict[str, dict] = {}
     edges: list[dict] = []
-    if {"bot_id", "session_id", "visibility"} <= _table_columns(conn, "scoped_facts"):
+    fact_columns = _table_columns(conn, "scoped_facts")
+    if {"bot_id", "session_id", "visibility"} <= fact_columns:
+        status_filter = (
+            "AND status NOT IN ('deleted','superseded')"
+            if "status" in fact_columns
+            else ""
+        )
         rows = conn.execute(
-            """SELECT id, subject, predicate, object, confidence, created_at
+            f"""SELECT id, subject, predicate, object, confidence, created_at
                  FROM scoped_facts
                 WHERE bot_id=? AND session_id=? AND visibility=? AND confidence>=?
+                  {status_filter}
                 ORDER BY updated_at DESC, id DESC LIMIT 2000""",
             (*params, min_confidence),
         ).fetchall()
@@ -114,9 +121,15 @@ def _scoped_graph(conn, scope: RuntimeScope, *, min_confidence: float = 0.0) -> 
                 "read_only": True,
             })
     required_relation = {"bot_id", "session_id", "visibility", "source_tag_id", "target_tag_id"}
-    if required_relation <= _table_columns(conn, "scoped_tag_relations") and required_relation - {"source_tag_id", "target_tag_id"} <= _table_columns(conn, "scoped_tags"):
+    relation_columns = _table_columns(conn, "scoped_tag_relations")
+    if required_relation <= relation_columns and required_relation - {"source_tag_id", "target_tag_id"} <= _table_columns(conn, "scoped_tags"):
+        status_filter = (
+            "AND r.status NOT IN ('deleted','superseded')"
+            if "status" in relation_columns
+            else ""
+        )
         rows = conn.execute(
-            """SELECT r.id, source.name, r.relation_type, target.name, r.weight, r.confidence,
+            f"""SELECT r.id, source.name, r.relation_type, target.name, r.weight, r.confidence,
                       source.tag_type, target.tag_type, r.created_at
                  FROM scoped_tag_relations r
                  JOIN scoped_tags source ON source.id=r.source_tag_id
@@ -124,6 +137,7 @@ def _scoped_graph(conn, scope: RuntimeScope, *, min_confidence: float = 0.0) -> 
                  JOIN scoped_tags target ON target.id=r.target_tag_id
                   AND target.bot_id=r.bot_id AND target.session_id=r.session_id AND target.visibility=r.visibility
                 WHERE r.bot_id=? AND r.session_id=? AND r.visibility=? AND r.confidence>=?
+                  {status_filter}
                 ORDER BY r.updated_at DESC, r.id DESC LIMIT 2000""",
             (*params, min_confidence),
         ).fetchall()

@@ -35,8 +35,9 @@ def _load_pages_module():
 
 class WebUIPagesRoutingTest(unittest.IsolatedAsyncioTestCase):
     def test_react_explore_iframe_targets_registered_standalone_route(self):
-        source = Path("webui/frontend/src/pages/PlaceholderPage.tsx").read_text(encoding="utf-8")
+        source = Path("webui/frontend/src/lib/explore-frame.ts").read_text(encoding="utf-8")
         self.assertIn("`/explore?${query.toString()}`", source)
+        self.assertIn("embed: '1'", source)
         self.assertNotIn("`/explore.html?${query.toString()}`", source)
 
     async def test_index_serves_built_react_app_only(self):

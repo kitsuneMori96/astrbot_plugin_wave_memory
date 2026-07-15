@@ -162,11 +162,16 @@ def _entity_node(graph: GraphProjection, name: Any, node_type: str = "entity", l
 def _project_facts(graph: GraphProjection, conn: Any, min_confidence: float) -> None:
     layer = "facts"
     params = _scope_params(graph.scope)
-    if {"bot_id", "session_id", "visibility", "subject", "predicate", "object"} <= _columns(conn, "scoped_facts"):
-        for row in _rows(conn, """SELECT id, subject, predicate, object, confidence, status,
-                                      source_memory_id, provenance, created_at, updated_at
+    fact_columns = _columns(conn, "scoped_facts")
+    if {"bot_id", "session_id", "visibility", "subject", "predicate", "object"} <= fact_columns:
+        revision_sql = "revision" if "revision" in fact_columns else "1 AS revision"
+        status_filter = "AND status NOT IN ('deleted','superseded')" if "status" in fact_columns else ""
+        for row in _rows(conn, f"""SELECT id, subject, predicate, object, confidence, status,
+                                      source_memory_id, provenance, created_at, updated_at,
+                                      {revision_sql}
                                  FROM scoped_facts
                                 WHERE bot_id=? AND session_id=? AND visibility=? AND confidence>=?
+                                  {status_filter}
                                 ORDER BY updated_at DESC, id DESC LIMIT 2000""", (*params, min_confidence)):
             source_name, target_name = str(row["subject"] or "").strip(), str(row["object"] or "").strip()
             if not source_name or not target_name:
@@ -179,6 +184,7 @@ def _project_facts(graph: GraphProjection, conn: Any, min_confidence: float) -> 
                 ts=float(row.get("updated_at") or row.get("created_at") or 0),
                 source_type="entity", target_type="entity", fact_id=int(row["id"]),
                 source_memory_id=row.get("source_memory_id"), status=row.get("status"),
+                revision=int(row.get("revision") or 1),
                 provenance=_json(row.get("provenance"), {}),
             )
     else:
@@ -189,16 +195,22 @@ def _project_facts(graph: GraphProjection, conn: Any, min_confidence: float) -> 
     if {"id", "bot_id", "session_id", "visibility", "name"} <= tag_columns and {
         "id", "bot_id", "session_id", "visibility", "source_tag_id", "target_tag_id"
     } <= relation_columns:
-        for row in _rows(conn, """SELECT r.id, r.relation_type, r.weight, r.confidence, r.metadata,
+        relation_revision_sql = "r.revision" if "revision" in relation_columns else "1 AS revision"
+        relation_status_sql = "r.status" if "status" in relation_columns else "'active' AS status"
+        relation_valid_until_sql = "r.valid_until" if "valid_until" in relation_columns else "NULL AS valid_until"
+        relation_status_filter = "AND r.status NOT IN ('deleted','superseded')" if "status" in relation_columns else ""
+        for row in _rows(conn, f"""SELECT r.id, r.relation_type, r.weight, r.confidence, r.metadata,
                                       r.created_at, r.updated_at, source.name AS source_name,
                                       target.name AS target_name, source.tag_type AS source_type,
-                                      target.tag_type AS target_type
+                                      target.tag_type AS target_type, {relation_status_sql},
+                                      {relation_valid_until_sql}, {relation_revision_sql}
                                  FROM scoped_tag_relations r
                                  JOIN scoped_tags source ON source.id=r.source_tag_id
                                   AND source.bot_id=r.bot_id AND source.session_id=r.session_id AND source.visibility=r.visibility
                                  JOIN scoped_tags target ON target.id=r.target_tag_id
                                   AND target.bot_id=r.bot_id AND target.session_id=r.session_id AND target.visibility=r.visibility
                                 WHERE r.bot_id=? AND r.session_id=? AND r.visibility=? AND r.confidence>=?
+                                  {relation_status_filter}
                                 ORDER BY r.updated_at DESC, r.id DESC LIMIT 2000""", (*params, min_confidence)):
             source = _entity_node(graph, row["source_name"], row.get("source_type") or "topic", layer)
             target = _entity_node(graph, row["target_name"], row.get("target_type") or "topic", layer)
@@ -209,6 +221,8 @@ def _project_facts(graph: GraphProjection, conn: Any, min_confidence: float) -> 
                 ts=float(row.get("updated_at") or row.get("created_at") or 0),
                 source_type=row.get("source_type") or "topic", target_type=row.get("target_type") or "topic",
                 relation_id=int(row["id"]), metadata=_json(row.get("metadata"), {}),
+                status=row.get("status"), valid_until=row.get("valid_until"),
+                revision=int(row.get("revision") or 1),
             )
 
 
@@ -514,8 +528,9 @@ def _project_communities(graph: GraphProjection, conn: Any) -> None:
         return
     tags = {int(row["id"]): row for row in _rows(conn, """SELECT id, name, tag_type, confidence FROM scoped_tags
                                                                WHERE bot_id=? AND session_id=? AND visibility=?""", params)}
-    relations = _rows(conn, """SELECT source_tag_id, target_tag_id, weight FROM scoped_tag_relations
-                                WHERE bot_id=? AND session_id=? AND visibility=?""", params)
+    relation_filter = "AND status NOT IN ('deleted','superseded')" if "status" in _columns(conn, "scoped_tag_relations") else ""
+    relations = _rows(conn, f"""SELECT source_tag_id, target_tag_id, weight FROM scoped_tag_relations
+                                WHERE bot_id=? AND session_id=? AND visibility=? {relation_filter}""", params)
     parent = {tag_id: tag_id for tag_id in tags}
 
     def root(value: int) -> int:
@@ -593,6 +608,8 @@ def scoped_layer_counts(conn: Any, scope: RuntimeScope) -> dict[str, int | None]
         try:
             if {"bot_id", "session_id", "visibility"} <= columns:
                 extra = " AND resolution_state='resolved' AND COALESCE(quarantine,0)=0" if table == "memories" and "quarantine" in columns else ""
+                if table in {"scoped_facts", "scoped_tag_relations"} and "status" in columns:
+                    extra += " AND status NOT IN ('deleted','superseded')"
                 result[layer] = int(conn.execute(
                     f"SELECT COUNT(*) FROM {table} WHERE bot_id=? AND session_id=? AND visibility=?{extra}", params
                 ).fetchone()[0])

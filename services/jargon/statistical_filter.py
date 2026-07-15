@@ -54,6 +54,8 @@ class JargonStatisticalFilter:
             "timestamp": now,
             "sender_id": sender_id or "",
             "bot_id": scope.bot_id if scope else "",
+            "session_id": scope.session.id if scope and scope.session else "",
+            "visibility": scope.visibility if scope else "",
         }
         group_id = scope.session.conversation_id if scope and scope.session else ""
         for word in self._tokenize(text):
@@ -67,7 +69,7 @@ class JargonStatisticalFilter:
                 self._user_freq[key][word].add(sender_id)
             contexts = self._contexts[key][word]
             if len(contexts) < self._context_keep:
-                contexts.append({"content": text[:300], "timestamp": now, "sender_id": sender_id or ""})
+                contexts.append(dict(source_context))
 
     def get_candidates(self, scope: RuntimeScope | None, min_freq: int = 5, top_k: int = 20) -> List[Dict[str, Any]]:
         key = scope_key(scope)

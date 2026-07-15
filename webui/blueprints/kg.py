@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hmac
 import json
+import sqlite3
 import time
 from collections import OrderedDict, deque
 from urllib.parse import unquote
@@ -14,14 +16,30 @@ from quart import Blueprint, jsonify, request
 from ..container import get_container
 from ..graph_projection import SUPPORTED_LAYERS, build_graph_projection, scoped_layer_counts
 from ..middleware.auth import require_auth
-from .explore import _canonical_memory_store, _scoped_graph, _table_columns
+from .explore import _canonical_memory_store, _table_columns
 
 try:
     from ...domain.scope import RuntimeScope, ScopeCodec, ScopeValidationError, SessionRef
     from ...engine.db.scoped_knowledge_repo import ScopedKnowledgeScopeError
+    from ...services.scoped_knowledge_mutations import (
+        ScopedKnowledgeIdentityConflict,
+        ScopedKnowledgeIdempotencyConflict,
+        ScopedKnowledgeMutationGateway,
+        ScopedKnowledgeMutationTarget,
+        ScopedKnowledgeNotFound,
+        ScopedKnowledgeRevisionConflict,
+    )
 except ImportError:  # pragma: no cover - plugin root may be imported directly
     from domain.scope import RuntimeScope, ScopeCodec, ScopeValidationError, SessionRef
     from engine.db.scoped_knowledge_repo import ScopedKnowledgeScopeError
+    from services.scoped_knowledge_mutations import (
+        ScopedKnowledgeIdentityConflict,
+        ScopedKnowledgeIdempotencyConflict,
+        ScopedKnowledgeMutationGateway,
+        ScopedKnowledgeMutationTarget,
+        ScopedKnowledgeNotFound,
+        ScopedKnowledgeRevisionConflict,
+    )
 
 
 kg_bp = Blueprint("kg", __name__, url_prefix="/api/kg")
@@ -78,6 +96,194 @@ def _scoped_repo(container):
     return repo
 
 
+def _object_ref_registry():
+    try:
+        from quart import current_app
+
+        registry = current_app.extensions.get("wave_api_contract", {}).get("object_refs")
+        if registry is not None:
+            return registry
+    except (ImportError, RuntimeError, AttributeError):
+        pass
+    return getattr(get_container(), "object_refs", None)
+
+
+def _scoped_mutation_gateway(container):
+    configured = getattr(container, "scoped_knowledge_mutations", None)
+    if configured is not None:
+        return configured
+    write_gateway = getattr(container, "write_gateway", None)
+    if write_gateway is None:
+        return None
+    try:
+        return ScopedKnowledgeMutationGateway(write_gateway)
+    except (TypeError, ValueError):
+        return None
+
+
+def _scope_query(scope: RuntimeScope) -> dict:
+    query = {"bot_id": scope.bot_id, "visibility": scope.visibility}
+    if scope.session is not None:
+        query["session_id"] = scope.session.id
+    return query
+
+
+def _object_descriptor(kind: str, locator: int, revision: int, scope: RuntimeScope) -> dict | None:
+    registry = _object_ref_registry()
+    if registry is None:
+        return None
+    ref = registry.issue(kind=kind, locator=int(locator), scope=scope, revision=int(revision))
+    return {
+        "ref": ref,
+        "kind": kind,
+        "locator": int(locator),
+        "scope_key": scope.session.id if scope.session else scope.bot_id,
+        "scope_query": _scope_query(scope),
+        "version": int(revision),
+    }
+
+
+def _mutation_capabilities(kind: str, *, available: bool) -> dict:
+    resource = "facts" if kind == "fact" else "tag-relations"
+    reason = None if available else "scoped_knowledge_mutation_gateway_unavailable"
+    return {
+        "update": {
+            "available": available,
+            "reason_code": reason,
+            "command": f"/api/kg/commands/{resource}/update",
+        },
+        "delete": {
+            "available": available,
+            "reason_code": reason,
+            "command": f"/api/kg/commands/{resource}/delete",
+        },
+    }
+
+
+def _decorate_mutable_item(item: dict, *, kind: str, scope: RuntimeScope) -> dict:
+    result = copy.deepcopy(item)
+    id_field = "id"
+    locator = result.get(id_field)
+    revision = result.get("revision")
+    if locator is None or isinstance(revision, bool) or not isinstance(revision, int):
+        return result
+    descriptor = _object_descriptor(kind, int(locator), int(revision), scope)
+    available = descriptor is not None and _scoped_mutation_gateway(get_container()) is not None
+    result["object_ref"] = descriptor
+    result["capabilities"] = _mutation_capabilities(kind, available=available)
+    result["editable"] = available
+    result["read_only"] = not available
+    return result
+
+
+def _canonical_graph_revisions(
+    scope: RuntimeScope, *, min_confidence: float
+) -> dict[str, dict[int, int]]:
+    conn = _conn()
+    params = _scope_params(scope)
+    result: dict[str, dict[int, int]] = {"fact": {}, "tag_relation": {}}
+    fact_columns = _table_columns(conn, "scoped_facts")
+    if {"id", "bot_id", "session_id", "visibility", "revision"} <= fact_columns:
+        rows = conn.execute(
+            """SELECT id, revision FROM scoped_facts
+                 WHERE bot_id=? AND session_id=? AND visibility=? AND confidence>=?
+                   AND status NOT IN ('deleted','superseded')
+                 ORDER BY updated_at DESC, id DESC LIMIT 2000""",
+            (*params, min_confidence),
+        ).fetchall()
+        result["fact"] = {int(row[0]): int(row[1]) for row in rows}
+    relation_columns = _table_columns(conn, "scoped_tag_relations")
+    if {"id", "bot_id", "session_id", "visibility", "revision"} <= relation_columns:
+        rows = conn.execute(
+            """SELECT id, revision FROM scoped_tag_relations
+                 WHERE bot_id=? AND session_id=? AND visibility=? AND confidence>=?
+                   AND status NOT IN ('deleted','superseded')
+                 ORDER BY updated_at DESC, id DESC LIMIT 2000""",
+            (*params, min_confidence),
+        ).fetchall()
+        result["tag_relation"] = {int(row[0]): int(row[1]) for row in rows}
+    return result
+
+
+def _graph_projection_matches(
+    payload: dict, scope: RuntimeScope, *, min_confidence: float
+) -> bool:
+    actual = _canonical_graph_revisions(scope, min_confidence=min_confidence)
+    projected = {"fact": {}, "tag_relation": {}}
+    for edge in payload.get("edges", []):
+        kind = edge.get("kind")
+        if kind == "fact" and edge.get("fact_id") is not None:
+            projected["fact"][int(edge["fact_id"])] = int(edge.get("revision") or 0)
+        elif kind == "tag_relation" and edge.get("relation_id") is not None:
+            projected["tag_relation"][int(edge["relation_id"])] = int(edge.get("revision") or 0)
+    return projected == actual
+
+
+def _decorate_graph_mutations(
+    payload: dict, scope: RuntimeScope, *, min_confidence: float
+) -> dict:
+    result = copy.deepcopy(payload)
+    actual = _canonical_graph_revisions(scope, min_confidence=min_confidence)
+    gateway_available = _scoped_mutation_gateway(get_container()) is not None
+    decorated_edges = []
+    for edge in result.get("edges", []):
+        kind = edge.get("kind")
+        if kind == "fact":
+            locator = edge.get("fact_id")
+            ref_kind = "fact"
+        elif kind == "tag_relation":
+            locator = edge.get("relation_id")
+            ref_kind = "tag_relation"
+        else:
+            decorated_edges.append(edge)
+            continue
+        revision = edge.get("revision")
+        if locator is None or isinstance(revision, bool) or not isinstance(revision, int):
+            continue
+        if actual[ref_kind].get(int(locator)) != int(revision):
+            continue
+        descriptor = _object_descriptor(ref_kind, int(locator), int(revision), scope)
+        edge["object_ref"] = descriptor
+        available = descriptor is not None and gateway_available
+        edge["capabilities"] = _mutation_capabilities(ref_kind, available=available)
+        edge["editable"] = available
+        edge["read_only"] = not available
+        decorated_edges.append(edge)
+    result["edges"] = decorated_edges
+    result["total"] = len(decorated_edges)
+    return result
+
+
+def _resolve_command_target(body: dict, *, kind: str, scope: RuntimeScope):
+    descriptor = body.get("object_ref") or body.get("ref")
+    ref = descriptor.get("ref") if isinstance(descriptor, dict) else descriptor
+    if not isinstance(ref, str) or not ref:
+        raise ScopedKnowledgeScopeError("object_ref_required")
+    try:
+        revision = int(body.get("revision"))
+    except (TypeError, ValueError) as exc:
+        raise ScopedKnowledgeScopeError("object_ref_revision_required") from exc
+    if revision <= 0:
+        raise ScopedKnowledgeScopeError("object_ref_revision_required")
+    registry = _object_ref_registry()
+    if registry is None:
+        return None, (_scope_error("not_found", 404))
+    binding, _state = registry.resolve_with_state(
+        ref,
+        kind=kind,
+        request_scope=scope,
+    )
+    if binding is None:
+        return None, _scope_error("not_found", 404)
+    if int(binding.revision) != revision:
+        return None, _scope_error("stale_revision", 409)
+    try:
+        locator = int(binding.locator)
+    except (TypeError, ValueError):
+        return None, _scope_error("not_found", 404)
+    return ScopedKnowledgeMutationTarget(kind, locator, revision), None
+
+
 def _group_scope_from_query() -> RuntimeScope:
     required = ("bot_id", "session_id", "visibility")
     values = {field: request.args.get(field) for field in required}
@@ -130,16 +336,21 @@ def _list_scoped_relations_from_conn(conn, scope: RuntimeScope) -> list[dict]:
         return []
     if not {"id", "bot_id", "session_id", "visibility", "name"} <= _table_columns(conn, "scoped_tags"):
         return []
+    columns = _table_columns(conn, "scoped_tag_relations")
+    status_sql = "r.status" if "status" in columns else "'active'"
+    valid_until_sql = "r.valid_until" if "valid_until" in columns else "NULL"
+    revision_sql = "r.revision" if "revision" in columns else "1"
+    status_filter = "AND r.status NOT IN ('deleted','superseded')" if "status" in columns else ""
     rows = conn.execute(
-        """SELECT r.id, r.source_tag_id, r.target_tag_id, r.relation_type, r.weight, r.confidence,
+        f"""SELECT r.id, r.source_tag_id, r.target_tag_id, r.relation_type, r.weight, r.confidence,
                   r.metadata, r.created_at, r.updated_at, source.name, target.name,
-                  source.tag_type, target.tag_type
+                  source.tag_type, target.tag_type, {status_sql}, {valid_until_sql}, {revision_sql}
              FROM scoped_tag_relations r
              JOIN scoped_tags source ON source.id=r.source_tag_id
               AND source.bot_id=r.bot_id AND source.session_id=r.session_id AND source.visibility=r.visibility
              JOIN scoped_tags target ON target.id=r.target_tag_id
               AND target.bot_id=r.bot_id AND target.session_id=r.session_id AND target.visibility=r.visibility
-            WHERE r.bot_id=? AND r.session_id=? AND r.visibility=?
+            WHERE r.bot_id=? AND r.session_id=? AND r.visibility=? {status_filter}
             ORDER BY r.updated_at DESC, r.id DESC""",
         _scope_params(scope),
     ).fetchall()
@@ -150,6 +361,7 @@ def _list_scoped_relations_from_conn(conn, scope: RuntimeScope) -> list[dict]:
             "metadata": _json_loads_safe(row[6], {}), "created_at": row[7],
             "updated_at": row[8], "source": row[9], "target": row[10],
             "source_type": row[11] or "topic", "target_type": row[12] or "topic",
+            "status": row[13], "valid_until": row[14], "revision": int(row[15]),
             "read_only": True,
         }
         for row in rows
@@ -176,7 +388,11 @@ async def list_scoped_facts():
         rows = _scoped_repo(get_container()).list_scoped_facts(
             scope, subject=request.args.get("subject"), limit=10000,
         )
-        payload = _scoped_page([dict(row, read_only=True) for row in rows], page=page, page_size=page_size)
+        payload = _scoped_page(
+            [_decorate_mutable_item(dict(row, read_only=True), kind="fact", scope=scope) for row in rows],
+            page=page,
+            page_size=page_size,
+        )
         payload.update({"scope": ScopeCodec.to_dict(scope), "read_only": True})
         return jsonify(payload)
     except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
@@ -196,7 +412,14 @@ async def list_scoped_relations():
     try:
         scope = _group_scope_from_query()
         page, page_size = _page_from_query()
-        payload = _scoped_page(_list_scoped_relations(scope), page=page, page_size=page_size)
+        payload = _scoped_page(
+            [
+                _decorate_mutable_item(row, kind="tag_relation", scope=scope)
+                for row in _list_scoped_relations(scope)
+            ],
+            page=page,
+            page_size=page_size,
+        )
         payload.update({"scope": ScopeCodec.to_dict(scope), "read_only": True})
         return jsonify(payload)
     except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
@@ -207,6 +430,118 @@ async def list_scoped_relations():
 @require_auth
 async def create_scoped_relation():
     return _read_only_gone()
+
+
+def _command_fields(body: dict, allowed: tuple[str, ...]) -> dict:
+    fields = body.get("patch")
+    if fields is None:
+        fields = body.get("fields")
+    if fields is None:
+        fields = {name: body[name] for name in allowed if name in body}
+    if not isinstance(fields, dict):
+        raise ValueError("patch must be an object")
+    if set(fields) - set(allowed):
+        raise ValueError("unsupported mutation fields")
+    return fields
+
+
+def _command_result_payload(result, scope: RuntimeScope) -> dict:
+    descriptor = None
+    if result.status not in {"deleted", "superseded"}:
+        descriptor = _object_descriptor(
+            result.kind, result.locator, result.revision, scope
+        )
+    return {
+        "ok": True,
+        "operation": {"id": result.operation_id, "status": "committed"},
+        "revision": result.revision,
+        "status": result.status,
+        "object_ref": descriptor,
+        "previous_object_replaced": result.previous_locator is not None,
+    }
+
+
+async def _execute_scoped_command(*, kind: str, action: str):
+    try:
+        body = await request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return _scope_error("invalid_request", 400)
+        scope = _group_scope_from_query()
+        target, error = _resolve_command_target(body, kind=kind, scope=scope)
+        if error is not None:
+            return error
+        gateway = _scoped_mutation_gateway(get_container())
+        if gateway is None:
+            return _scope_error("scoped_knowledge_mutation_gateway_unavailable", 503)
+        idempotency_key = body.get("idempotency_key")
+        if idempotency_key is not None and (
+            not isinstance(idempotency_key, str) or not idempotency_key.strip()
+        ):
+            return _scope_error("invalid_idempotency_key", 400)
+        assert target is not None
+        if kind == "fact" and action == "update":
+            fields = _command_fields(body, (
+                "subject", "predicate", "object", "confidence",
+            ))
+            result = await gateway.update_fact(
+                scope=scope, target=target, fields=fields,
+                idempotency_key=idempotency_key,
+            )
+        elif kind == "fact":
+            result = await gateway.delete_fact(
+                scope=scope, target=target, idempotency_key=idempotency_key,
+            )
+        elif action == "update":
+            fields = _command_fields(body, (
+                "relation_type", "weight", "confidence",
+            ))
+            result = await gateway.update_tag_relation(
+                scope=scope, target=target, fields=fields,
+                idempotency_key=idempotency_key,
+            )
+        else:
+            result = await gateway.delete_tag_relation(
+                scope=scope, target=target, idempotency_key=idempotency_key,
+            )
+        clear_kg_cache()
+        return jsonify(_command_result_payload(result, scope))
+    except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
+        if isinstance(exc, (
+            ScopedKnowledgeIdentityConflict,
+            ScopedKnowledgeIdempotencyConflict,
+            ScopedKnowledgeRevisionConflict,
+        )):
+            code = "stale_revision" if isinstance(exc, ScopedKnowledgeRevisionConflict) else "mutation_conflict"
+            return _scope_error(code, 409)
+        if isinstance(exc, ScopedKnowledgeNotFound):
+            return _scope_error("not_found", 404)
+        return _scope_error("invalid_request", 400)
+    except (RuntimeError, sqlite3.Error):
+        return _scope_error("scoped_knowledge_mutation_gateway_unavailable", 503)
+
+
+@kg_bp.route("/commands/facts/update", methods=["POST"])
+@require_auth
+async def command_update_fact():
+    return await _execute_scoped_command(kind="fact", action="update")
+
+
+@kg_bp.route("/commands/facts/delete", methods=["POST"])
+@require_auth
+async def command_delete_fact():
+    return await _execute_scoped_command(kind="fact", action="delete")
+
+
+@kg_bp.route("/commands/tag-relations/update", methods=["POST"])
+@require_auth
+async def command_update_tag_relation():
+    return await _execute_scoped_command(kind="tag_relation", action="update")
+
+
+@kg_bp.route("/commands/tag-relations/delete", methods=["POST"])
+@require_auth
+async def command_delete_tag_relation():
+    return await _execute_scoped_command(kind="tag_relation", action="delete")
 
 
 @kg_bp.route("/legacy/audit/facts", methods=["GET"])
@@ -263,11 +598,11 @@ def _cache_get(key: tuple) -> dict | None:
         _overview_cache.pop(key, None)
         return None
     _overview_cache.move_to_end(key)
-    return payload
+    return copy.deepcopy(payload)
 
 
 def _cache_put(key: tuple, payload: dict) -> None:
-    _overview_cache[key] = (time.monotonic(), payload)
+    _overview_cache[key] = (time.monotonic(), copy.deepcopy(payload))
     _overview_cache.move_to_end(key)
     while len(_overview_cache) > _GRAPH_CACHE_MAX_ENTRIES:
         _overview_cache.popitem(last=False)
@@ -331,16 +666,18 @@ async def overview():
         scope = _group_scope_from_query()
         min_confidence = float(request.args.get("min_confidence", 0.0))
         max_nodes = max(1, min(1000, int(request.args.get("max_nodes", 150))))
-        graph = _scoped_graph(_conn(), scope, min_confidence=min_confidence)
+        graph = build_full_graph_data(
+            "facts", use_cache=True, min_confidence=min_confidence, scope=scope
+        )
         selected = sorted(graph["nodes"], key=lambda node: node.get("degree", 0), reverse=True)[:max_nodes]
-        names = {node["name"] for node in selected}
-        name_to_id = {node["name"]: index + 1 for index, node in enumerate(selected)}
-        nodes = [dict(node, id=name_to_id[node["name"]]) for node in selected]
+        selected_ids = {node["id"] for node in selected}
+        graph_to_numeric = {node["id"]: index + 1 for index, node in enumerate(selected)}
+        nodes = [dict(node, id=graph_to_numeric[node["id"]]) for node in selected]
         edges = [
-            {"source": name_to_id[edge["source"]], "target": name_to_id[edge["target"]],
-             "label": edge["label"], "weight": edge["weight"], "read_only": True}
+            {"source": graph_to_numeric[edge["s"]], "target": graph_to_numeric[edge["t"]],
+             "label": edge["l"], "weight": edge["weight"], "read_only": True}
             for edge in graph["edges"]
-            if edge["source"] in names and edge["target"] in names
+            if edge["s"] in selected_ids and edge["t"] in selected_ids
         ]
         return jsonify({"nodes": nodes, "edges": edges, "scope": ScopeCodec.to_dict(scope), "read_only": True})
     except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
@@ -374,22 +711,31 @@ async def entity_detail(entity_name: str):
         limit = max(1, min(100, int(request.args.get("limit", 15))))
         conn = _conn()
         facts = []
-        if {"bot_id", "session_id", "visibility"} <= _table_columns(conn, "scoped_facts"):
+        fact_columns = _table_columns(conn, "scoped_facts")
+        if {"bot_id", "session_id", "visibility"} <= fact_columns:
+            revision_sql = "revision" if "revision" in fact_columns else "1"
+            status_filter = "AND status NOT IN ('deleted','superseded')" if "status" in fact_columns else ""
             rows = conn.execute(
-                """SELECT id, subject, predicate, object, confidence, status, source_memory_id, updated_at
+                f"""SELECT id, subject, predicate, object, confidence, status, source_memory_id,
+                            updated_at, {revision_sql}
                      FROM scoped_facts
                     WHERE bot_id=? AND session_id=? AND visibility=? AND (subject=? OR object=?)
+                      {status_filter}
                     ORDER BY updated_at DESC, id DESC LIMIT ?""",
                 (*_scope_params(scope), name, name, limit),
             ).fetchall()
             facts = [
-                {"id": row[0], "subject": row[1], "predicate": row[2], "object": row[3],
-                 "confidence": row[4], "status": row[5], "source_memory_id": row[6],
-                 "revision": max(1, int(float(row[7] or 1) * 1000)), "read_only": True}
+                _decorate_mutable_item(
+                    {"id": row[0], "subject": row[1], "predicate": row[2], "object": row[3],
+                     "confidence": row[4], "status": row[5], "source_memory_id": row[6],
+                     "revision": int(row[8]), "read_only": True},
+                    kind="fact",
+                    scope=scope,
+                )
                 for row in rows
             ]
         relations = [
-            {**row, "type": row["relation_type"]}
+            _decorate_mutable_item({**row, "type": row["relation_type"]}, kind="tag_relation", scope=scope)
             for row in _list_scoped_relations_from_conn(conn, scope)
             if row["source"] == name or row["target"] == name
         ][:limit]
@@ -462,13 +808,17 @@ async def kg_stats():
         conn = _conn()
         params = _scope_params(scope)
         counts = {"facts": 0, "tag_relations": 0, "persons": 0}
-        if {"bot_id", "session_id", "visibility"} <= _table_columns(conn, "scoped_facts"):
+        fact_columns = _table_columns(conn, "scoped_facts")
+        if {"bot_id", "session_id", "visibility"} <= fact_columns:
+            fact_filter = " AND status NOT IN ('deleted','superseded')" if "status" in fact_columns else ""
             counts["facts"] = int(conn.execute(
-                "SELECT COUNT(*) FROM scoped_facts WHERE bot_id=? AND session_id=? AND visibility=?", params
+                f"SELECT COUNT(*) FROM scoped_facts WHERE bot_id=? AND session_id=? AND visibility=?{fact_filter}", params
             ).fetchone()[0])
-        if {"bot_id", "session_id", "visibility"} <= _table_columns(conn, "scoped_tag_relations"):
+        relation_columns = _table_columns(conn, "scoped_tag_relations")
+        if {"bot_id", "session_id", "visibility"} <= relation_columns:
+            relation_filter = " AND status NOT IN ('deleted','superseded')" if "status" in relation_columns else ""
             counts["tag_relations"] = int(conn.execute(
-                "SELECT COUNT(*) FROM scoped_tag_relations WHERE bot_id=? AND session_id=? AND visibility=?", params
+                f"SELECT COUNT(*) FROM scoped_tag_relations WHERE bot_id=? AND session_id=? AND visibility=?{relation_filter}", params
             ).fetchone()[0])
         if _canonical_memory_store(conn):
             counts["persons"] = int(conn.execute(
@@ -540,11 +890,24 @@ async def kg_full():
         }
         # 正式 ConnectionManager 使用 check_same_thread=False；轻量单测连接保留同步执行。
         container = get_container()
-        if getattr(getattr(container, "db", None), "_cm", None) is not None:
+        threaded = getattr(getattr(container, "db", None), "_cm", None) is not None
+        if threaded:
             payload = await asyncio.to_thread(build_full_graph_data, layers, **build_kwargs)
         else:
             payload = build_full_graph_data(layers, **build_kwargs)
-        return jsonify(payload)
+        if "facts" in layers and not _graph_projection_matches(
+            payload, scope, min_confidence=min_confidence
+        ):
+            clear_kg_cache()
+            if threaded:
+                payload = await asyncio.to_thread(build_full_graph_data, layers, **build_kwargs)
+            else:
+                payload = build_full_graph_data(layers, **build_kwargs)
+        return jsonify(
+            _decorate_graph_mutations(
+                payload, scope, min_confidence=min_confidence
+            )
+        )
     except (ScopeValidationError, ScopedKnowledgeScopeError, TypeError, ValueError) as exc:
         return _scope_failure(exc)
 
@@ -558,11 +921,14 @@ async def entity_timeline(entity_name: str):
         limit = max(1, min(100, int(request.args.get("limit", 30))))
         conn = _conn()
         events = []
-        if {"bot_id", "session_id", "visibility"} <= _table_columns(conn, "scoped_facts"):
+        fact_columns = _table_columns(conn, "scoped_facts")
+        if {"bot_id", "session_id", "visibility"} <= fact_columns:
+            status_filter = "AND status NOT IN ('deleted','superseded')" if "status" in fact_columns else ""
             rows = conn.execute(
-                """SELECT subject, predicate, object, updated_at, source_memory_id
+                f"""SELECT subject, predicate, object, updated_at, source_memory_id
                      FROM scoped_facts
                     WHERE bot_id=? AND session_id=? AND visibility=? AND (subject=? OR object=?)
+                      {status_filter}
                     ORDER BY updated_at DESC LIMIT ?""",
                 (*_scope_params(scope), name, name, limit),
             ).fetchall()

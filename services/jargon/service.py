@@ -61,6 +61,48 @@ class JargonService:
     def _repository_available(self) -> bool:
         return self._repo is not None
 
+    def _resolve_source_memory_id(self, scope: RuntimeScope, source_contexts: List[Dict[str, Any]], word: str) -> int | None:
+        """用同一 RuntimeScope 内已落库消息解析候选锚点，绝不按旧 group_id 回退。"""
+        conn = getattr(self._db, "conn", None)
+        if conn is None or scope.session is None:
+            return None
+        try:
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(memories)").fetchall()}
+            required = {"id", "content", "timestamp", "bot_id", "session_id", "visibility", "resolution_state", "quarantine"}
+            if not required <= columns:
+                return None
+            sender_clause = " AND (? = '' OR sender_id = ?)" if "sender_id" in columns else ""
+            message_clause = " AND memory_type='message'" if "memory_type" in columns else ""
+            for context in source_contexts:
+                try:
+                    timestamp = float(context.get("timestamp"))
+                except (TypeError, ValueError):
+                    continue
+                sender_id = str(context.get("sender_id") or "")
+                params: list[Any] = [
+                    scope.bot_id,
+                    scope.session.id,
+                    scope.visibility,
+                    timestamp - 120,
+                    timestamp + 120,
+                ]
+                if sender_clause:
+                    params.extend([sender_id, sender_id])
+                params.extend([f"%{word}%", timestamp])
+                row = conn.execute(
+                    "SELECT id FROM memories WHERE bot_id=? AND session_id=? AND visibility=? "
+                    "AND resolution_state='resolved' AND COALESCE(quarantine,0)=0 "
+                    "AND timestamp BETWEEN ? AND ?"
+                    f"{sender_clause}{message_clause} AND content LIKE ? "
+                    "ORDER BY ABS(timestamp - ?) ASC LIMIT 1",
+                    params,
+                ).fetchone()
+                if row is not None:
+                    return int(row[0])
+        except Exception:
+            return None
+        return None
+
     def feed_message(self, text: str, runtime_scope: RuntimeScope | None, sender_id: str = "", timestamp: float | None = None) -> None:
         key = scope_key(runtime_scope)
         if not self._enabled or key is None:
@@ -98,7 +140,12 @@ class JargonService:
         results: List[Dict[str, Any]] = []
         for candidate in candidates:
             word, contexts, now = str(candidate["word"]), candidate.get("contexts") or [], int(time.time())
+            source_contexts = candidate.get("source_contexts") or []
+            source_memory_id = self._resolve_source_memory_id(scope, source_contexts, word)
             existing = next((row for row in self._repo.list_scoped_jargon(scope, limit=100) if row.get("word") == word), None)
+            if existing and source_memory_id is None:
+                source_memory_id = existing.get("source_memory_id")
+            source_context = json.dumps(source_contexts, ensure_ascii=False) if source_contexts else (existing.get("source_context") if existing else None)
             frequency = int(candidate.get("frequency", 0))
             is_jargon = None
             meaning, confidence, status = "", 0.0, "pending"
@@ -115,6 +162,8 @@ class JargonService:
             self._repo.upsert_scoped_jargon(
                 scope, word=word, meaning=meaning, status=status, is_jargon=is_jargon,
                 frequency=frequency, confidence=confidence, contexts=contexts,
+                source_memory_id=source_memory_id,
+                source_context=source_context,
                 provenance={"source": "wave_memory", "candidate_type": "local_jargon_candidate"},
             )
             if is_jargon is True and meaning:
@@ -153,6 +202,69 @@ class JargonService:
             provenance=provenance,
         )
         return {"id": int(jargon_id), "status": status, "scope": scope}
+
+    def update_meaning(self, runtime_scope: RuntimeScope, jargon_id: int, meaning: str) -> dict[str, Any]:
+        """更新 scoped 黑话释义；任何语义修改都重新进入待审核。"""
+        scope = self._group_scope(runtime_scope)
+        meaning = str(meaning or "").strip()
+        if scope is None or not self._repository_available():
+            raise ValueError("jargon_update_command_unavailable")
+        if not meaning or len(meaning) > 2000:
+            raise ValueError("invalid_jargon_meaning")
+        current = next(
+            (row for row in self._repo.list_scoped_jargon(scope, limit=10000) if int(row.get("id", -1)) == int(jargon_id)),
+            None,
+        )
+        if current is None:
+            raise LookupError("scoped_object_not_found")
+        provenance = dict(current.get("provenance") or {})
+        provenance.update({"edited_by": "webui", "edit_requires_review": True})
+        self._repo.upsert_scoped_jargon(
+            scope,
+            word=current["word"],
+            meaning=meaning,
+            status="pending",
+            is_jargon=None,
+            frequency=int(current.get("frequency") or 0),
+            confidence=float(current.get("confidence") or 0.0),
+            contexts=current.get("contexts") or [],
+            source_memory_id=current.get("source_memory_id"),
+            source_context=current.get("source_context"),
+            provenance=provenance,
+        )
+        updated = next(
+            row for row in self._repo.list_scoped_jargon(scope, limit=10000)
+            if int(row.get("id", -1)) == int(jargon_id)
+        )
+        return updated
+
+    def archive(self, runtime_scope: RuntimeScope, jargon_id: int) -> dict[str, Any]:
+        """从正式注入集合归档 scoped 黑话，不执行物理删除。"""
+        scope = self._group_scope(runtime_scope)
+        if scope is None or not self._repository_available():
+            raise ValueError("jargon_archive_command_unavailable")
+        current = next(
+            (row for row in self._repo.list_scoped_jargon(scope, limit=10000) if int(row.get("id", -1)) == int(jargon_id)),
+            None,
+        )
+        if current is None:
+            raise LookupError("scoped_object_not_found")
+        provenance = dict(current.get("provenance") or {})
+        provenance.update({"archived_by": "webui", "archive_reason": "manual_remove"})
+        self._repo.upsert_scoped_jargon(
+            scope,
+            word=current["word"],
+            meaning=current.get("meaning") or "",
+            status="archived",
+            is_jargon=False,
+            frequency=int(current.get("frequency") or 0),
+            confidence=float(current.get("confidence") or 0.0),
+            contexts=current.get("contexts") or [],
+            source_memory_id=current.get("source_memory_id"),
+            source_context=current.get("source_context"),
+            provenance=provenance,
+        )
+        return {"id": int(jargon_id), "status": "archived", "scope": scope}
 
     def get_injection(self, text: str, runtime_scope: RuntimeScope | None) -> str:
         if not self._enabled or self._group_scope(runtime_scope) is None or not self._repository_available():

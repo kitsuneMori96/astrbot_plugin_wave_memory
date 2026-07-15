@@ -68,7 +68,7 @@ _CHANNEL_DESCRIPTORS = {
     "facts": ("注入同作用域且证据健康的事实", ["facts_repository"], "high", "/knowledge/facts"),
     "persona": ("读取当前 Bot/会话的人格投影", ["soul_runtime"], "high", "/soul"),
     "belief": ("注入 active 且证据健康的信念", ["belief_service", "evidence_resolver"], "high", "/beliefs"),
-    "jargon": ("解释显式命中的本地表达", ["jargon_service"], "medium", "/jargon"),
+    "jargon": ("解释显式命中的群聊黑话", ["jargon_service"], "medium", "/jargon"),
     "fewshot": ("提供已审核且健康的 Bot 风格样例", ["fewshot_service"], "high", "/knowledge/style-examples"),
     "book_lore": ("检索已审核的 BookLore projection", ["book_lore_adapter"], "medium", "/knowledge/book-lore"),
     "fts5": ("使用 FTS5 补充文字召回", ["fts_memories"], "medium", "/diagnostics/indexes"),

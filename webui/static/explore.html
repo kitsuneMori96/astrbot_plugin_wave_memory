@@ -163,6 +163,24 @@
         0%, 100% { box-shadow: 0 0 12px rgba(139,92,246,0.1); }
         50% { box-shadow: 0 0 20px rgba(139,92,246,0.25); }
     }
+
+    /* Embedded by the React shell: reserve the top strip for the parent controls. */
+    body.embed-mode #explore-return-link,
+    body.embed-mode #explore-maintenance-link { display: none !important; }
+    body.embed-mode .topbar {
+        top: 4.25rem !important;
+        left: 1rem !important;
+        right: 1rem !important;
+        border: 1px solid rgba(139, 92, 246, 0.14);
+        border-radius: 0.75rem;
+    }
+    body.embed-mode #toy-controls,
+    body.embed-mode #search-box,
+    body.embed-mode #path-input { top: 7.75rem !important; }
+    body.embed-mode #kg-config,
+    body.embed-mode #person-panel { top: 7.5rem !important; max-height: calc(100vh - 8.5rem) !important; }
+    body.embed-mode #detail-panel,
+    body.embed-mode #relation-panel { top: 8rem !important; }
     </style>
 </head>
 <body class="text-slate-200 font-sans">
@@ -176,7 +194,7 @@
         <form onsubmit="applyExploreScope(event)" class="glass glass-accent w-full max-w-xl rounded-2xl p-6 space-y-4">
             <div>
                 <h1 class="text-lg font-semibold text-white">选择神经云图 Scope</h1>
-                <p class="mt-1 text-xs text-slate-400">Explore 是只读视图，必须显式提供完整 RuntimeScope；不会猜测默认 Bot 或群。</p>
+                <p class="mt-1 text-xs text-slate-400">Explore 必须显式提供完整 RuntimeScope；canonical Facts 与 Tag relations 可通过安全命令编辑，其他图层保持只读。</p>
             </div>
             <div class="grid gap-3 md:grid-cols-3">
                 <label class="text-[10px] text-slate-400">BotProfile.db_id
@@ -192,7 +210,7 @@
                 </label>
             </div>
             <div class="flex items-center justify-between gap-3">
-                <span class="text-[10px] text-emerald-300">只读 · RuntimeScope 多图层投影 / HNSW 同域近邻</span>
+                <span class="text-[10px] text-emerald-300">Scoped · Facts / Tag relations 可编辑，其他图层只读</span>
                 <button type="submit" class="rounded-lg bg-purple-600 px-4 py-2 text-xs font-medium text-white hover:bg-purple-500">打开 Scope</button>
             </div>
         </form>
@@ -210,7 +228,7 @@
 
     <!-- Top Bar -->
     <div class="fixed top-0 inset-x-0 z-30 topbar flex items-center gap-3 px-5 py-2.5">
-        <a href="/#/knowledge" class="text-slate-400 text-xs px-3 py-1.5 rounded-md border border-white/5 hover:text-white hover:border-glow-dim transition">← 知识中心</a>
+        <a id="explore-return-link" href="/static/app/#/knowledge/facts" class="text-slate-400 text-xs px-3 py-1.5 rounded-md border border-white/5 hover:text-white hover:border-glow-dim transition">← 事实知识</a>
         <button onclick="toggleKgConfig()" class="text-slate-400 text-xs px-3 py-1.5 rounded-md border border-white/5 hover:text-white hover:border-glow-dim transition">⚙ 配置</button>
         <span class="brand-text font-semibold text-sm">⚡ 知识图谱</span>
         <div class="ml-auto flex gap-1" id="view-tabs">
@@ -218,7 +236,7 @@
             <button data-view="query" class="tab-btn px-3 py-1.5 rounded-md text-xs transition">联想</button>
             <button data-view="person" class="tab-btn px-3 py-1.5 rounded-md text-xs transition">人物</button>
             <button data-view="path" class="tab-btn px-3 py-1.5 rounded-md text-xs transition">路径</button>
-            <a href="/maintain" class="px-3 py-1.5 rounded-md text-xs text-amber-400/80 border border-amber-400/20 hover:bg-amber-400/10 transition">🔧 维护</a>
+            <a id="explore-maintenance-link" href="/static/app/#/maintenance" class="px-3 py-1.5 rounded-md text-xs text-amber-400/80 border border-amber-400/20 hover:bg-amber-400/10 transition">🔧 维护</a>
         </div>
     </div>
 
@@ -428,7 +446,9 @@
             </div>
             <div id="relation-body" class="space-y-2.5 max-h-[52vh] overflow-y-auto"></div>
             <div class="flex gap-2 mt-4 flex-wrap">
-                <span class="px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/20 rounded-lg text-emerald-300 text-[11px]">只读关系</span>
+                <button id="btn-edit-relation" type="button" onclick="openSelectedRelationEditor()" class="hidden px-3 py-1.5 bg-purple-500/10 border border-purple-500/20 rounded-lg text-purple-200 text-[11px] hover:bg-purple-500/20 transition">编辑</button>
+                <button id="btn-delete-relation" type="button" onclick="confirmSelectedRelationDelete()" class="hidden px-3 py-1.5 bg-red-500/10 border border-red-500/20 rounded-lg text-red-200 text-[11px] hover:bg-red-500/20 transition">删除</button>
+                <span id="relation-readonly-badge" class="px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/20 rounded-lg text-emerald-300 text-[11px]">只读关系</span>
             </div>
         </div>
     </div>
@@ -466,12 +486,82 @@
         <div class="flex justify-between"><span>🖱️ 单击星体</span><span class="text-slate-300 font-mono">选中聚焦/激活气泡</span></div>
         <div class="flex justify-between"><span>🚀 双击星体</span><span class="text-slate-300 font-mono">异步展开关联脉络</span></div>
         <div class="flex justify-between"><span>🔍 滚轮/双指</span><span class="text-slate-300 font-mono">星系无级视野缩放</span></div>
-        <div class="flex justify-between"><span>🧭 点击线段</span><span class="text-slate-300 font-mono">透视只读关系与证据</span></div>
+        <div class="flex justify-between"><span>🧭 点击线段</span><span class="text-slate-300 font-mono">查看关系；有权限时编辑</span></div>
         <div class="flex justify-between"><span>📌 拖拽星空</span><span class="text-slate-300 font-mono">3D 轨道任意平移旋转</span></div>
     </div>
 
     <!-- Legend -->
     <div id="legend" class="fixed bottom-4 right-4 z-20 glass rounded-xl px-4 py-3 flex flex-wrap gap-2 max-w-xs"></div>
+
+    <!-- Fact / Tag relation editor -->
+    <div id="knowledge-editor-dialog" class="fixed inset-0 z-[70] hidden items-center justify-center bg-black/75 p-4" role="dialog" aria-modal="true" aria-labelledby="knowledge-editor-title">
+        <form onsubmit="submitKnowledgeMutation(event)" class="glass glass-accent w-full max-w-lg rounded-2xl p-5 space-y-4">
+            <div class="flex items-start justify-between gap-4">
+                <div>
+                    <h3 id="knowledge-editor-title" class="text-sm font-semibold text-white">编辑知识</h3>
+                    <p id="knowledge-editor-description" class="mt-1 text-[10px] text-slate-400"></p>
+                </div>
+                <button id="knowledge-editor-close" type="button" onclick="closeKnowledgeEditor()" class="rounded-lg bg-white/5 px-2 py-1 text-xs text-slate-400 hover:bg-white/10 hover:text-white">✕</button>
+            </div>
+            <div id="knowledge-editor-status" class="hidden rounded-lg border px-3 py-2 text-[10px]"></div>
+            <div id="fact-editor-fields" class="hidden space-y-3">
+                <label class="block text-[10px] text-slate-400">subject
+                    <input id="fact-editor-subject" required class="mt-1 w-full rounded-lg border border-white/10 bg-nebula-700 px-3 py-2 text-xs text-white">
+                </label>
+                <label class="block text-[10px] text-slate-400">predicate
+                    <input id="fact-editor-predicate" required class="mt-1 w-full rounded-lg border border-white/10 bg-nebula-700 px-3 py-2 text-xs text-white">
+                </label>
+                <label class="block text-[10px] text-slate-400">object
+                    <textarea id="fact-editor-object" required rows="3" class="mt-1 w-full resize-y rounded-lg border border-white/10 bg-nebula-700 px-3 py-2 text-xs text-white"></textarea>
+                </label>
+                <label class="block text-[10px] text-slate-400">confidence
+                    <input id="fact-editor-confidence" type="number" min="0" max="1" step="0.01" class="mt-1 w-full rounded-lg border border-white/10 bg-nebula-700 px-3 py-2 text-xs text-white">
+                </label>
+            </div>
+            <div id="relation-editor-fields" class="hidden space-y-3">
+                <div class="grid grid-cols-2 gap-3">
+                    <label class="block text-[10px] text-slate-400">source（只读）
+                        <input id="relation-editor-source" readonly class="mt-1 w-full rounded-lg border border-white/10 bg-white/[.03] px-3 py-2 text-xs text-slate-400">
+                    </label>
+                    <label class="block text-[10px] text-slate-400">target（只读）
+                        <input id="relation-editor-target" readonly class="mt-1 w-full rounded-lg border border-white/10 bg-white/[.03] px-3 py-2 text-xs text-slate-400">
+                    </label>
+                </div>
+                <label class="block text-[10px] text-slate-400">relation_type
+                    <input id="relation-editor-type" required class="mt-1 w-full rounded-lg border border-white/10 bg-nebula-700 px-3 py-2 text-xs text-white">
+                </label>
+                <div class="grid grid-cols-2 gap-3">
+                    <label class="block text-[10px] text-slate-400">weight
+                        <input id="relation-editor-weight" type="number" min="0" step="0.01" class="mt-1 w-full rounded-lg border border-white/10 bg-nebula-700 px-3 py-2 text-xs text-white">
+                    </label>
+                    <label class="block text-[10px] text-slate-400">confidence
+                        <input id="relation-editor-confidence" type="number" min="0" max="1" step="0.01" class="mt-1 w-full rounded-lg border border-white/10 bg-nebula-700 px-3 py-2 text-xs text-white">
+                    </label>
+                </div>
+            </div>
+            <div class="flex flex-wrap items-center justify-end gap-2 border-t border-white/5 pt-4">
+                <button id="knowledge-editor-delete" type="button" onclick="openKnowledgeDeleteConfirm()" class="mr-auto hidden rounded-lg border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200 hover:bg-red-500/20">删除</button>
+                <button id="knowledge-editor-cancel" type="button" onclick="closeKnowledgeEditor()" class="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-300 hover:bg-white/10">取消</button>
+                <button id="knowledge-editor-save" type="submit" class="rounded-lg bg-purple-600 px-4 py-2 text-xs font-medium text-white hover:bg-purple-500">保存并刷新</button>
+            </div>
+        </form>
+    </div>
+
+    <!-- Destructive confirmation is intentionally separate from the editor. -->
+    <div id="knowledge-delete-confirm" class="fixed inset-0 z-[80] hidden items-center justify-center bg-black/80 p-4" role="alertdialog" aria-modal="true" aria-labelledby="knowledge-delete-title">
+        <div class="glass glass-accent w-full max-w-sm rounded-2xl p-5 space-y-4">
+            <div>
+                <h3 id="knowledge-delete-title" class="text-sm font-semibold text-red-200">确认删除这条知识？</h3>
+                <p id="knowledge-delete-description" class="mt-2 text-xs leading-relaxed text-slate-400">删除后会从服务端重新加载权威图谱，不能在本页面撤销。</p>
+            </div>
+            <div class="flex justify-end gap-2">
+                <button id="knowledge-delete-cancel" type="button" onclick="closeKnowledgeDeleteConfirm()" class="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-300 hover:bg-white/10">返回编辑</button>
+                <button id="knowledge-delete-submit" type="button" onclick="submitKnowledgeDelete()" class="rounded-lg border border-red-400/20 bg-red-500/20 px-3 py-2 text-xs font-medium text-red-100 hover:bg-red-500/30">确认删除</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="mutation-notice" class="fixed right-4 top-4 z-[90] hidden max-w-sm rounded-xl border px-4 py-3 text-xs shadow-2xl backdrop-blur-xl" role="status" aria-live="polite"></div>
 
     <!-- Loading -->
     <div id="loading" class="fixed inset-0 z-50 hidden items-center justify-center bg-nebula-900/95 flex-col gap-4">
@@ -480,6 +570,19 @@
     </div>
 
 <script>
+const EXPLORE_PARENT_MESSAGE_SOURCE = 'wavememory.explore';
+const exploreEmbedMode = new URLSearchParams(window.location.search).get('embed') === '1';
+if (exploreEmbedMode) document.body.classList.add('embed-mode');
+
+function notifyExploreParent(type, message) {
+    if (window.parent === window) return;
+    window.parent.postMessage({
+        source: EXPLORE_PARENT_MESSAGE_SOURCE,
+        type,
+        message: String(message || ''),
+    }, window.location.origin);
+}
+
 function currentExploreScope() {
     const params = new URLSearchParams(window.location.search);
     const botId = (params.get('bot_id') || '').trim();
@@ -495,15 +598,17 @@ function applyExploreScope(event) {
     params.set('bot_id', document.getElementById('scope-bot-id').value.trim());
     params.set('session_id', document.getElementById('scope-session-id').value.trim());
     params.set('visibility', document.getElementById('scope-visibility').value);
+    params.delete('token');
     window.location.search = params.toString();
 }
 
 function installScopedApiFetch() {
     const nativeFetch = window.fetch.bind(window);
-    window.fetch = function scopedExploreFetch(input, init) {
-        const rawUrl = typeof input === 'string' ? input : input.url;
+    window.fetch = function scopedExploreFetch(input, init = {}) {
+        const inputRequest = input instanceof Request ? input : null;
+        const rawUrl = inputRequest ? inputRequest.url : input instanceof URL ? input.href : String(input);
         const url = new URL(rawUrl, window.location.origin);
-        if (url.pathname.startsWith('/api/kg') || url.pathname.startsWith('/api/explore') || url.pathname.startsWith('/api/')) {
+        if (url.pathname.startsWith('/api/')) {
             const scope = currentExploreScope();
             if (!scope) {
                 return Promise.resolve(new Response(JSON.stringify({ error: { code: 'scope_required' } }), {
@@ -512,21 +617,15 @@ function installScopedApiFetch() {
                 }));
             }
             Object.entries(scope).forEach(([key, value]) => url.searchParams.set(key, value));
-            input = url.pathname + url.search + url.hash;
+            input = inputRequest ? new Request(url.toString(), inputRequest) : url.pathname + url.search + url.hash;
 
-            // 自动传递来自主应用的单点 Token
-            const token = new URLSearchParams(window.location.search).get('token') || localStorage.getItem('wave_token');
-            if (token) {
-                init = init || {};
-                init.headers = init.headers || {};
-                if (Array.isArray(init.headers)) {
-                    init.headers.push(['Authorization', `Bearer ${token}`]);
-                } else if (init.headers instanceof Headers) {
-                    init.headers.set('Authorization', `Bearer ${token}`);
-                } else {
-                    init.headers['Authorization'] = `Bearer ${token}`;
-                }
+            const headers = new Headers(inputRequest?.headers);
+            new Headers(init.headers).forEach((value, key) => headers.set(key, value));
+            const token = localStorage.getItem('wavememory.webui.token');
+            if (token && token !== 'no-auth' && !headers.has('Authorization')) {
+                headers.set('Authorization', `Bearer ${token}`);
             }
+            init = { ...init, headers };
         }
         return nativeFetch(input, init);
     };

@@ -38,6 +38,7 @@ let starFieldOuter = null; // 视差双图层
 let animationId = null;
 let pointerHandlers = null;
 let graphUnavailableReason = '';
+let initialGalaxyLoadSettled = false;
 
 let currentView = 'galaxy';
 let selectedNode = null;
@@ -78,6 +79,17 @@ const relationState = {
     editing: null,
 };
 
+const entityMutationItems = new Map();
+const knowledgeMutationState = {
+    item: null,
+    kind: null,
+    contextNodeId: null,
+    canUpdate: false,
+    canDelete: false,
+    busy: false,
+};
+let mutationNoticeTimer = null;
+
 const graphState = {
     nodes: new Map(),
     edges: new Map(),
@@ -104,6 +116,14 @@ function escapeJs(value) {
 
 function colorForType(type) {
     return TYPE_COLORS[type] || TYPE_COLORS.keyword;
+}
+
+function settleInitialGalaxyLoad(type, message) {
+    if (initialGalaxyLoadSettled) return;
+    initialGalaxyLoadSettled = true;
+    if (typeof notifyExploreParent === 'function') {
+        notifyExploreParent(type, message);
+    }
 }
 
 // 契约对齐 A：标准化节点类型
@@ -1230,13 +1250,16 @@ async function loadGalaxy() {
         applyKgConfig();
     } catch(e) {
         console.error('Load KG failed:', e);
+        const message = e?.message || '知识星海加载失败';
         setEventStatus('error', '知识星海加载失败');
-        renderEventWarnings([{ stage: 'kg_full', reason: e?.message || 'load failed' }]);
+        renderEventWarnings([{ stage: 'kg_full', reason: message }]);
         showLoading('知识星海加载失败');
+        settleInitialGalaxyLoad('initial-load-error', message);
         setTimeout(hideLoading, 1400);
         return;
     }
     setEventStatus('ok', '图谱视图已更新');
+    settleInitialGalaxyLoad('initial-load-ready', `已加载 ${_kgFullNodes.length} 节点 / ${_kgFullEdges.length} 连线`);
     hideLoading();
 }
 
@@ -1287,7 +1310,7 @@ function applyKgConfig() {
     const nodes = candidates.map(node => ({...node, id:String(node.id), degree:degree.get(String(node.id)) || node.degree || 0}));
     const edges = filtered
         .filter(e => topSet.has(String(e.s ?? e.source)) && topSet.has(String(e.t ?? e.target)))
-        .map(e => ({ ...e, source:String(e.s ?? e.source), target:String(e.t ?? e.target), label:e.l || e.label, weight:e.w ?? e.weight, layer:normalizeEdgeLayer(e.layer), editable:false, read_only:true }));
+        .map(e => ({ ...e, source:String(e.s ?? e.source), target:String(e.t ?? e.target), label:e.l || e.label, weight:e.w ?? e.weight, layer:normalizeEdgeLayer(e.layer) }));
 
     renderGraph(nodes, edges, { layout: 'galaxy' });
     updateRuntimeConfigStatus();
@@ -1657,6 +1680,297 @@ function deriveExpansionFromEntity(entityName, d) {
     return { nodes, edges };
 }
 
+// ─── Scoped Fact / Tag relation mutations ───
+function mutationCapabilityAvailable(raw, action) {
+    if (!raw || !raw.object_ref || raw.revision === undefined || raw.revision === null) return false;
+    if (raw.editable === true) return true;
+    const capabilities = raw.capabilities;
+    const names = action === 'delete' ? ['delete', 'remove'] : ['update', 'edit'];
+    const available = value => value === true
+        || value?.available === true
+        || value?.enabled === true
+        || value?.status === 'available';
+    if (Array.isArray(capabilities)) {
+        return capabilities.some(value => names.includes(String(value).toLowerCase()));
+    }
+    if (!capabilities || typeof capabilities !== 'object') return false;
+    if (names.some(name => available(capabilities[name]))) return true;
+    return ['actions', 'commands', 'mutations'].some(group => {
+        const nested = capabilities[group];
+        return nested && typeof nested === 'object' && names.some(name => available(nested[name]));
+    });
+}
+
+function knowledgeMutationKind(raw) {
+    if (!raw || !raw.object_ref || raw.revision === undefined || raw.revision === null) return null;
+    const objectRef = raw.object_ref && typeof raw.object_ref === 'object' ? raw.object_ref : {};
+    const identity = [raw.kind, raw.object_type, objectRef.kind, objectRef.type, objectRef.resource_type]
+        .filter(Boolean)
+        .join(':')
+        .toLowerCase()
+        .replace(/-/g, '_');
+    if (identity.includes('tag_relation')) return 'tag_relation';
+    if (identity.includes('fact')) return 'fact';
+    return null;
+}
+
+function mutationItemFromEdge(record) {
+    if (!record) return null;
+    const raw = { ...record.raw };
+    const kind = knowledgeMutationKind(raw);
+    if (!kind) return null;
+    const source = getNodeRecord(record.source)?.label || record.source;
+    const target = getNodeRecord(record.target)?.label || record.target;
+    if (kind === 'fact') {
+        return {
+            ...raw,
+            kind: 'fact',
+            subject: raw.subject ?? source,
+            predicate: raw.predicate ?? record.label,
+            object: raw.object ?? target,
+            confidence: raw.confidence ?? record.weight,
+        };
+    }
+    return {
+        ...raw,
+        kind: 'tag_relation',
+        source: raw.source ?? source,
+        target: raw.target ?? target,
+        relation_type: raw.relation_type ?? raw.type ?? record.label,
+        weight: raw.weight ?? record.weight,
+        confidence: raw.confidence ?? record.weight,
+    };
+}
+
+function registerEntityMutationItem(kind, item, index) {
+    const key = `${kind}:${index}:${String(item?.revision ?? '')}:${String(item?.object_ref?.id ?? item?.id ?? '')}`;
+    entityMutationItems.set(key, { ...item, kind });
+    return key;
+}
+
+function showMutationNotice(message, type='success') {
+    const notice = document.getElementById('mutation-notice');
+    if (!notice) return;
+    if (mutationNoticeTimer) clearTimeout(mutationNoticeTimer);
+    notice.textContent = message;
+    notice.className = `fixed right-4 top-4 z-[90] max-w-sm rounded-xl border px-4 py-3 text-xs shadow-2xl backdrop-blur-xl ${type === 'error' ? 'border-red-400/30 bg-red-950/90 text-red-100' : type === 'warning' ? 'border-amber-400/30 bg-amber-950/90 text-amber-100' : 'border-emerald-400/30 bg-emerald-950/90 text-emerald-100'}`;
+    notice.classList.remove('hidden');
+    mutationNoticeTimer = setTimeout(() => notice.classList.add('hidden'), 4500);
+}
+
+function setKnowledgeEditorStatus(message='', type='error') {
+    const status = document.getElementById('knowledge-editor-status');
+    if (!status) return;
+    status.textContent = message;
+    status.className = `rounded-lg border px-3 py-2 text-[10px] ${type === 'loading' ? 'border-blue-400/20 bg-blue-500/10 text-blue-100' : type === 'warning' ? 'border-amber-400/20 bg-amber-500/10 text-amber-100' : 'border-red-400/20 bg-red-500/10 text-red-100'}`;
+    status.classList.toggle('hidden', !message);
+}
+
+function setKnowledgeMutationBusy(busy) {
+    knowledgeMutationState.busy = busy;
+    const canUpdate = knowledgeMutationState.canUpdate;
+    const editor = document.getElementById('knowledge-editor-dialog');
+    editor?.querySelectorAll('button').forEach(button => { button.disabled = busy; });
+    editor?.querySelectorAll('input:not([readonly]), textarea').forEach(field => { field.disabled = busy || !canUpdate; });
+    const deleteConfirm = document.getElementById('knowledge-delete-confirm');
+    deleteConfirm?.querySelectorAll('button').forEach(button => { button.disabled = busy; });
+    const save = document.getElementById('knowledge-editor-save');
+    if (save) {
+        save.classList.toggle('hidden', !canUpdate);
+        save.disabled = busy || !canUpdate;
+        save.textContent = busy ? '提交中…' : '保存并刷新';
+    }
+    const deleteButton = document.getElementById('knowledge-editor-delete');
+    if (deleteButton) deleteButton.classList.toggle('hidden', !knowledgeMutationState.canDelete);
+}
+
+function openKnowledgeEditor(item, contextNodeId=null) {
+    const kind = knowledgeMutationKind(item);
+    const canUpdate = mutationCapabilityAvailable(item, 'update');
+    const canDelete = mutationCapabilityAvailable(item, 'delete');
+    if (!kind || (!canUpdate && !canDelete)) return;
+    knowledgeMutationState.item = { ...item, kind };
+    knowledgeMutationState.kind = kind;
+    knowledgeMutationState.contextNodeId = contextNodeId;
+    knowledgeMutationState.canUpdate = canUpdate;
+    knowledgeMutationState.canDelete = canDelete;
+    knowledgeMutationState.busy = false;
+    relationState.editing = knowledgeMutationState.item;
+
+    document.getElementById('knowledge-editor-title').textContent = kind === 'fact' ? '编辑 Fact' : '编辑 Tag relation';
+    document.getElementById('knowledge-editor-description').textContent = `revision ${String(item.revision)} · 使用服务端 ObjectRef 乐观并发更新`;
+    document.getElementById('fact-editor-fields').classList.toggle('hidden', kind !== 'fact');
+    document.getElementById('relation-editor-fields').classList.toggle('hidden', kind !== 'tag_relation');
+    if (kind === 'fact') {
+        document.getElementById('fact-editor-subject').value = item.subject ?? '';
+        document.getElementById('fact-editor-predicate').value = item.predicate ?? '';
+        document.getElementById('fact-editor-object').value = item.object ?? '';
+        document.getElementById('fact-editor-confidence').value = item.confidence ?? '';
+    } else {
+        document.getElementById('relation-editor-source').value = item.source ?? '';
+        document.getElementById('relation-editor-target').value = item.target ?? '';
+        document.getElementById('relation-editor-type').value = item.relation_type ?? item.type ?? '';
+        document.getElementById('relation-editor-weight').value = item.weight ?? '';
+        document.getElementById('relation-editor-confidence').value = item.confidence ?? '';
+    }
+    setKnowledgeEditorStatus('');
+    setKnowledgeMutationBusy(false);
+    const dialog = document.getElementById('knowledge-editor-dialog');
+    dialog.classList.remove('hidden');
+    dialog.classList.add('flex');
+}
+
+function openEntityKnowledgeEditor(key) {
+    const item = entityMutationItems.get(key);
+    if (item) openKnowledgeEditor(item, selectedFactEntity || selectedNode);
+}
+
+function openSelectedRelationEditor() {
+    const item = mutationItemFromEdge(relationState.selected);
+    if (item) openKnowledgeEditor(item, null);
+}
+
+function confirmSelectedRelationDelete() {
+    const item = mutationItemFromEdge(relationState.selected);
+    if (!item || !mutationCapabilityAvailable(item, 'delete')) return;
+    openKnowledgeEditor(item, null);
+    openKnowledgeDeleteConfirm();
+}
+
+function closeKnowledgeEditor(force=false) {
+    if (knowledgeMutationState.busy && !force) return;
+    closeKnowledgeDeleteConfirm(true);
+    const dialog = document.getElementById('knowledge-editor-dialog');
+    dialog?.classList.add('hidden');
+    dialog?.classList.remove('flex');
+    relationState.editing = null;
+    knowledgeMutationState.item = null;
+    knowledgeMutationState.kind = null;
+    knowledgeMutationState.contextNodeId = null;
+    knowledgeMutationState.canUpdate = false;
+    knowledgeMutationState.canDelete = false;
+    knowledgeMutationState.busy = false;
+}
+
+function openKnowledgeDeleteConfirm() {
+    if (!knowledgeMutationState.item || !knowledgeMutationState.canDelete || knowledgeMutationState.busy) return;
+    const kindLabel = knowledgeMutationState.kind === 'fact' ? 'Fact' : 'Tag relation';
+    document.getElementById('knowledge-delete-description').textContent = `将删除当前 ${kindLabel}（revision ${String(knowledgeMutationState.item.revision)}）。成功后会重新加载服务端权威图谱，此操作不能在页面内撤销。`;
+    const dialog = document.getElementById('knowledge-delete-confirm');
+    dialog.classList.remove('hidden');
+    dialog.classList.add('flex');
+}
+
+function closeKnowledgeDeleteConfirm(force=false) {
+    if (knowledgeMutationState.busy && !force) return;
+    const dialog = document.getElementById('knowledge-delete-confirm');
+    dialog?.classList.add('hidden');
+    dialog?.classList.remove('flex');
+}
+
+function numericEditorValue(id) {
+    const raw = document.getElementById(id)?.value;
+    if (raw === undefined || raw === null || raw === '') return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+}
+
+function currentKnowledgePatch() {
+    if (knowledgeMutationState.kind === 'fact') {
+        return {
+            subject: document.getElementById('fact-editor-subject').value.trim(),
+            predicate: document.getElementById('fact-editor-predicate').value.trim(),
+            object: document.getElementById('fact-editor-object').value.trim(),
+            confidence: numericEditorValue('fact-editor-confidence'),
+        };
+    }
+    return {
+        relation_type: document.getElementById('relation-editor-type').value.trim(),
+        weight: numericEditorValue('relation-editor-weight'),
+        confidence: numericEditorValue('relation-editor-confidence'),
+    };
+}
+
+async function reloadAuthoritativeKnowledge(contextNodeId) {
+    hideRelationDetail();
+    selectedEdge = null;
+    relationState.selected = null;
+    await loadGalaxy();
+    if (contextNodeId && getNodeRecord(contextNodeId)) {
+        selectedNode = contextNodeId;
+        await showDetail(contextNodeId);
+    }
+}
+
+function mutationErrorMessage(data, response) {
+    return data?.error?.message || data?.error?.code || data?.message || `HTTP ${response.status}`;
+}
+
+async function knowledgeCommandIdempotencyKey(action, item, patch) {
+    const payload = JSON.stringify({ action, object_ref: item.object_ref, revision: item.revision, patch });
+    if (window.crypto?.subtle && window.TextEncoder) {
+        const digest = await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
+        const fingerprint = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+        return `explore:${action}:${fingerprint}`;
+    }
+    let hash = 2166136261;
+    for (let index = 0; index < payload.length; index += 1) {
+        hash = Math.imul(hash ^ payload.charCodeAt(index), 16777619);
+    }
+    return `explore:${action}:${(hash >>> 0).toString(16).padStart(8, '0')}`;
+}
+
+async function runKnowledgeCommand(action, patch) {
+    const item = knowledgeMutationState.item;
+    const kind = knowledgeMutationState.kind;
+    if (!item || !kind || knowledgeMutationState.busy) return;
+    const contextNodeId = knowledgeMutationState.contextNodeId;
+    const resource = kind === 'fact' ? 'facts' : 'tag-relations';
+    const url = `/api/kg/commands/${resource}/${action}`;
+    setKnowledgeMutationBusy(true);
+    setKnowledgeEditorStatus(action === 'delete' ? '正在删除并刷新权威图谱…' : '正在保存并刷新权威图谱…', 'loading');
+    try {
+        const idempotencyKey = await knowledgeCommandIdempotencyKey(action, item, patch);
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                object_ref: item.object_ref,
+                revision: item.revision,
+                patch,
+                idempotency_key: idempotencyKey,
+            }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (response.status === 409) {
+            setKnowledgeEditorStatus('检测到 revision 冲突，正在刷新服务端最新内容。', 'warning');
+            await reloadAuthoritativeKnowledge(contextNodeId);
+            closeKnowledgeEditor(true);
+            showMutationNotice('数据已被其他操作更新，已刷新最新内容；请重新打开编辑器。', 'warning');
+            return;
+        }
+        if (!response.ok || data?.error) throw new Error(mutationErrorMessage(data, response));
+        await reloadAuthoritativeKnowledge(contextNodeId);
+        closeKnowledgeEditor(true);
+        showMutationNotice(action === 'delete' ? '删除成功，已加载服务端权威图谱。' : '保存成功，已加载服务端权威图谱。');
+    } catch (error) {
+        closeKnowledgeDeleteConfirm(true);
+        setKnowledgeMutationBusy(false);
+        setKnowledgeEditorStatus(error?.message || '知识命令执行失败');
+    }
+}
+
+async function submitKnowledgeMutation(event) {
+    event.preventDefault();
+    if (!knowledgeMutationState.canUpdate) return;
+    await runKnowledgeCommand('update', currentKnowledgePatch());
+}
+
+async function submitKnowledgeDelete() {
+    if (!knowledgeMutationState.canDelete) return;
+    await runKnowledgeCommand('delete', {});
+}
+
 // ─── Relation HUD ───
 function selectEdgeByKey(edgeKeyValue) {
     const record = graphState.edges.get(edgeKeyValue);
@@ -1694,10 +2008,15 @@ function showRelationDetail(record) {
                 <div>图层 <span class="text-slate-300 text-purple-300 font-semibold uppercase">${escapeHtml(record.raw.layer || record.layer || '-')}</span></div>
             </div>
         </div>`;
+    const mutationItem = mutationItemFromEdge(record);
+    const canUpdate = mutationItem ? mutationCapabilityAvailable(mutationItem, 'update') : false;
+    const canDelete = mutationItem ? mutationCapabilityAvailable(mutationItem, 'delete') : false;
     const editBtn = document.getElementById('btn-edit-relation');
     const deleteBtn = document.getElementById('btn-delete-relation');
-    if (editBtn) editBtn.style.display = record.raw.editable ? '' : 'none';
-    if (deleteBtn) deleteBtn.style.display = record.raw.editable ? '' : 'none';
+    const readonlyBadge = document.getElementById('relation-readonly-badge');
+    if (editBtn) editBtn.classList.toggle('hidden', !canUpdate);
+    if (deleteBtn) deleteBtn.classList.toggle('hidden', !canDelete);
+    if (readonlyBadge) readonlyBadge.classList.toggle('hidden', canUpdate || canDelete);
     panel.classList.remove('hidden');
     if (typeof gsap !== 'undefined') gsap.fromTo(panel, { autoAlpha: 0, x: 30 }, { autoAlpha: 1, x: 0, duration: 0.35, ease: 'power3.out' });
 }
@@ -1854,6 +2173,7 @@ async function showDetail(nodeId) {
 }
 
 function buildEntityKnowledgeHtml(d) {
+    entityMutationItems.clear();
     let html = '';
     if (d.person) {
         const p = d.person;
@@ -1861,12 +2181,26 @@ function buildEntityKnowledgeHtml(d) {
         html += `<div class="mb-3 p-3 rounded-xl border border-purple-500/20 bg-purple-500/[.04]"><div class="flex items-center gap-2 mb-2"><div class="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold" style="background:${p.affection_color || affColor}20; color:${p.affection_color || affColor}; border:2px solid ${p.affection_color || affColor}">${escapeHtml((p.name||'?')[0])}</div><div><div class="text-white text-xs font-semibold">${escapeHtml(p.name)}</div><div class="text-slate-500 text-[9px]">QQ ${escapeHtml(p.qq_id)} · ${escapeHtml(p.msg_count)} 条消息</div></div><div class="ml-auto text-right"><div class="text-[10px] font-mono" style="color:${p.affection_color || affColor}">好感 ${escapeHtml(p.affection)}</div></div></div>${p.aliases?.length ? `<div class="text-[9px] text-slate-500 mb-1.5">别名: ${p.aliases.map(escapeHtml).join(' / ')}</div>` : ''}${p.personality_tags?.length ? `<div class="flex flex-wrap gap-1">${p.personality_tags.slice(0,8).map(t => `<span class="px-1.5 py-0.5 rounded text-[9px] bg-purple-500/10 text-purple-300 border border-purple-500/20">${escapeHtml(t)}</span>`).join('')}</div>` : ''}</div>`;
     }
     if (d.facts && d.facts.length) {
-        html += '<p class="text-slate-500 text-[9px] uppercase tracking-wider mb-1.5">正式 Scoped Facts · 只读</p>';
-        html += d.facts.slice(0, 6).map(f => `<div class="px-2 py-1.5 rounded bg-white/[.02] text-[10px] text-slate-400 mb-1 border border-white/5"><span class="text-purple-300">${escapeHtml(f.subject)}</span> <span class="text-slate-600">→${escapeHtml(f.predicate)}→</span> <span class="text-blue-300">${escapeHtml(f.object)}</span>${f.confidence ? `<span class="text-[9px] text-slate-600 ml-1 font-mono">(${Math.round(f.confidence*100)}%)</span>` : ''}</div>`).join('');
+        html += '<p class="text-slate-500 text-[9px] uppercase tracking-wider mb-1.5">正式 Scoped Facts</p>';
+        html += d.facts.slice(0, 6).map((fact, index) => {
+            const item = { ...fact, kind: 'fact' };
+            const canUpdate = mutationCapabilityAvailable(item, 'update');
+            const canDelete = mutationCapabilityAvailable(item, 'delete');
+            const key = canUpdate || canDelete ? registerEntityMutationItem('fact', item, index) : '';
+            const action = key ? `<button type="button" onclick="openEntityKnowledgeEditor('${escapeJs(key)}')" class="ml-auto shrink-0 rounded border border-purple-400/20 bg-purple-500/10 px-2 py-1 text-[9px] text-purple-200 hover:bg-purple-500/20">${canUpdate ? '编辑' : '管理'}</button>` : '<span class="ml-auto text-[9px] text-slate-600">只读</span>';
+            return `<div class="flex items-start gap-2 px-2 py-1.5 rounded bg-white/[.02] text-[10px] text-slate-400 mb-1 border border-white/5"><div class="min-w-0 flex-1"><span class="text-purple-300">${escapeHtml(fact.subject)}</span> <span class="text-slate-600">→${escapeHtml(fact.predicate)}→</span> <span class="text-blue-300">${escapeHtml(fact.object)}</span>${fact.confidence !== undefined && fact.confidence !== null ? `<span class="text-[9px] text-slate-600 ml-1 font-mono">(${Math.round(Number(fact.confidence)*100)}%)</span>` : ''}</div>${action}</div>`;
+        }).join('');
     }
     if (d.relations && d.relations.length) {
-        html += '<p class="text-slate-500 text-[9px] uppercase tracking-wider mb-1.5 mt-2">关系</p>';
-        html += d.relations.slice(0, 6).map(r => `<div class="px-2 py-1.5 rounded bg-white/[.02] text-[10px] text-slate-400 mb-1"><span class="text-purple-300">${escapeHtml(r.source)}</span> <span class="text-amber-400/70">${escapeHtml(r.type)}</span> <span class="text-blue-300">${escapeHtml(r.target)}</span></div>`).join('');
+        html += '<p class="text-slate-500 text-[9px] uppercase tracking-wider mb-1.5 mt-2">Tag relations</p>';
+        html += d.relations.slice(0, 6).map((relation, index) => {
+            const item = { ...relation, relation_type: relation.relation_type ?? relation.type };
+            const canUpdate = mutationCapabilityAvailable(item, 'update');
+            const canDelete = mutationCapabilityAvailable(item, 'delete');
+            const key = canUpdate || canDelete ? registerEntityMutationItem('tag_relation', item, index) : '';
+            const action = key ? `<button type="button" onclick="openEntityKnowledgeEditor('${escapeJs(key)}')" class="ml-auto shrink-0 rounded border border-purple-400/20 bg-purple-500/10 px-2 py-1 text-[9px] text-purple-200 hover:bg-purple-500/20">${canUpdate ? '编辑' : '管理'}</button>` : '<span class="ml-auto text-[9px] text-slate-600">只读</span>';
+            return `<div class="flex items-start gap-2 px-2 py-1.5 rounded bg-white/[.02] text-[10px] text-slate-400 mb-1 border border-white/5"><div class="min-w-0 flex-1"><span class="text-purple-300">${escapeHtml(relation.source)}</span> <span class="text-amber-400/70">${escapeHtml(relation.relation_type ?? relation.type)}</span> <span class="text-blue-300">${escapeHtml(relation.target)}</span></div>${action}</div>`;
+        }).join('');
     }
     if (d.memories && d.memories.length) {
         html += '<p class="text-slate-500 text-[9px] uppercase tracking-wider mb-1.5 mt-2">记忆</p>';

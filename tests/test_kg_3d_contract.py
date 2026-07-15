@@ -138,7 +138,7 @@ class ScopedExploreKgContractTest(unittest.TestCase):
                 id INTEGER PRIMARY KEY, bot_id TEXT, session_id TEXT, visibility TEXT,
                 subject TEXT, predicate TEXT, object TEXT, confidence REAL, status TEXT,
                 source_memory_id INTEGER, provenance TEXT, valid_from REAL, valid_until REAL,
-                created_at REAL, updated_at REAL
+                created_at REAL, updated_at REAL, revision INTEGER
             );
             CREATE TABLE scoped_tags (
                 id INTEGER PRIMARY KEY, bot_id TEXT, session_id TEXT, visibility TEXT,
@@ -152,7 +152,8 @@ class ScopedExploreKgContractTest(unittest.TestCase):
             CREATE TABLE scoped_tag_relations (
                 id INTEGER PRIMARY KEY, bot_id TEXT, session_id TEXT, visibility TEXT,
                 source_tag_id INTEGER, target_tag_id INTEGER, relation_type TEXT,
-                weight REAL, confidence REAL, metadata TEXT, created_at REAL, updated_at REAL
+                weight REAL, confidence REAL, metadata TEXT, status TEXT, valid_until REAL,
+                revision INTEGER, created_at REAL, updated_at REAL
             );
             CREATE TABLE facts (id INTEGER PRIMARY KEY, subject TEXT, predicate TEXT, object TEXT);
             CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
@@ -163,23 +164,29 @@ class ScopedExploreKgContractTest(unittest.TestCase):
                 (2, 'u2', '跨域用户', 'g2', '跨域记忆', 11, 'bot-beta', 'qq:group:g2', 'group', 'resolved', 0, 1),
                 (3, 'u3', '未解析用户', 'g1', '旧记忆', 12, NULL, NULL, NULL, 'unresolved', 1, NULL);
             INSERT INTO scoped_facts VALUES
-                (11, 'bot-alpha', 'qq:group:g1', 'group', '同域用户', '喜欢', '猫', 0.9, 'reviewed', 1, '{}', NULL, NULL, 10, 10),
-                (12, 'bot-beta', 'qq:group:g2', 'group', '跨域用户', '知道', '秘密', 0.9, 'reviewed', 2, '{}', NULL, NULL, 11, 11);
+                (11, 'bot-alpha', 'qq:group:g1', 'group', '同域用户', '喜欢', '猫', 0.9, 'reviewed', 1, '{}', NULL, NULL, 10, 10, 4),
+                (12, 'bot-beta', 'qq:group:g2', 'group', '跨域用户', '知道', '秘密', 0.9, 'reviewed', 2, '{}', NULL, NULL, 11, 11, 2),
+                (13, 'bot-alpha', 'qq:group:g1', 'group', '已删除主体', '隐藏', '已删除对象', 1.0, 'deleted', NULL, '{}', NULL, 12, 12, 12, 2);
             INSERT INTO scoped_tags VALUES
                 (21, 'bot-alpha', 'qq:group:g1', 'group', '同域用户', 'person', '', 0.9, '{}', 10, 10),
                 (22, 'bot-alpha', 'qq:group:g1', 'group', '猫', 'entity', '', 0.9, '{}', 10, 10),
                 (23, 'bot-beta', 'qq:group:g2', 'group', '秘密', 'entity', '', 0.9, '{}', 11, 11);
             INSERT INTO scoped_memory_tags VALUES ('bot-alpha', 'qq:group:g1', 'group', 1, 22, 0, 1.0, 10);
             INSERT INTO scoped_tag_relations VALUES
-                (31, 'bot-alpha', 'qq:group:g1', 'group', 21, 22, '关注', 0.8, 0.8, '{}', 10, 10),
-                (32, 'bot-beta', 'qq:group:g2', 'group', 23, 23, '泄漏', 1.0, 1.0, '{}', 11, 11);
+                (31, 'bot-alpha', 'qq:group:g1', 'group', 21, 22, '关注', 0.8, 0.8, '{}', 'active', NULL, 3, 10, 10),
+                (32, 'bot-beta', 'qq:group:g2', 'group', 23, 23, '泄漏', 1.0, 1.0, '{}', 'active', NULL, 2, 11, 11),
+                (33, 'bot-alpha', 'qq:group:g1', 'group', 21, 22, '已删除关系', 1.0, 1.0, '{}', 'deleted', 12, 2, 12, 12);
             INSERT INTO facts VALUES (99, 'legacy', '泄漏', 'legacy-secret');
             """
         )
         self.conn.commit()
         container = get_container()
+        from webui.api_contract import ObjectRefRegistry
+
         container.db = types.SimpleNamespace(conn=self.conn, scoped_knowledge=None)
         container.plugin_config = {}
+        container.object_refs = ObjectRefRegistry(signing_key=b"k" * 32)
+        container.scoped_knowledge_mutations = types.SimpleNamespace()
         self.explore = explore
         self.kg = kg
         self.originals = []
@@ -218,6 +225,16 @@ class ScopedExploreKgContractTest(unittest.TestCase):
         self.assertEqual([item["content"] for item in person["memories"]], ["规范记忆"])
         self.assertNotIn("跨域记忆", str(person))
 
+    def test_explore_galaxy_excludes_scoped_tombstones(self):
+        self.explore.request = self._request(_SCOPE_ARGS)
+        payload = asyncio.run(self.explore.galaxy.__wrapped__())
+        serialized = str(payload)
+        self.assertIn("同域用户", serialized)
+        self.assertIn("关注", serialized)
+        self.assertNotIn("已删除主体", serialized)
+        self.assertNotIn("已删除对象", serialized)
+        self.assertNotIn("已删除关系", serialized)
+
     def test_kg_full_uses_scoped_facts_and_relations_only(self):
         self.kg.request = self._request({**_SCOPE_ARGS, "layers": "facts"})
         payload = asyncio.run(self.kg.kg_full.__wrapped__())
@@ -229,6 +246,198 @@ class ScopedExploreKgContractTest(unittest.TestCase):
         self.assertNotIn("legacy-secret", serialized)
         self.assertNotIn("跨域用户", serialized)
         self.assertNotIn("秘密", serialized)
+        self.assertNotIn("已删除主体", serialized)
+        self.assertNotIn("已删除对象", serialized)
+        self.assertNotIn("已删除关系", serialized)
+
+    def test_full_and_entity_sign_only_canonical_mutable_rows_without_cache_pollution(self):
+        self.kg.clear_kg_cache()
+        self.kg.request = self._request({**_SCOPE_ARGS, "layers": "facts"})
+        first = asyncio.run(self.kg.kg_full.__wrapped__())
+        fact = next(edge for edge in first["edges"] if edge["kind"] == "fact")
+        relation = next(edge for edge in first["edges"] if edge["kind"] == "tag_relation")
+        self.assertEqual(fact["revision"], 4)
+        self.assertEqual(relation["revision"], 3)
+        self.assertEqual(fact["object_ref"]["version"], 4)
+        self.assertEqual(relation["object_ref"]["version"], 3)
+        self.assertTrue(fact["capabilities"]["update"]["available"])
+        self.assertTrue(fact["editable"])
+        self.assertFalse(fact["read_only"])
+        cached_payload = next(iter(self.kg._overview_cache.values()))[1]
+        self.assertNotIn("object_ref", str(cached_payload))
+
+        second = asyncio.run(self.kg.kg_full.__wrapped__())
+        second_fact = next(edge for edge in second["edges"] if edge["kind"] == "fact")
+        self.assertTrue(second["cache"]["hit"])
+        self.assertEqual(second_fact["object_ref"]["ref"], fact["object_ref"]["ref"])
+        self.assertNotIn("object_ref", str(next(iter(self.kg._overview_cache.values()))[1]))
+
+        self.conn.execute(
+            "UPDATE scoped_facts SET confidence=0.7, revision=5, updated_at=20 WHERE id=11"
+        )
+        self.conn.commit()
+        refreshed = asyncio.run(self.kg.kg_full.__wrapped__())
+        refreshed_fact = next(edge for edge in refreshed["edges"] if edge["kind"] == "fact")
+        self.assertEqual(refreshed_fact["confidence"], 0.7)
+        self.assertEqual(refreshed_fact["object_ref"]["version"], 5)
+        self.assertFalse(refreshed["cache"]["hit"])
+        self.assertNotIn("object_ref", str(next(iter(self.kg._overview_cache.values()))[1]))
+
+        self.kg.request = self._request({**_SCOPE_ARGS, "limit": "10"})
+        entity = asyncio.run(self.kg.entity_detail.__wrapped__("同域用户"))
+        self.assertEqual(entity["facts"][0]["revision"], 5)
+        self.assertEqual(entity["facts"][0]["object_ref"]["version"], 5)
+        self.assertEqual(entity["relations"][0]["object_ref"]["version"], 3)
+
+    def test_command_api_resolves_ref_scope_and_revision_before_gateway(self):
+        container = self.kg.get_container()
+
+        class Gateway:
+            def __init__(self):
+                self.calls = []
+
+            async def update_fact(self, **kwargs):
+                self.calls.append(("update_fact", kwargs))
+                return types.SimpleNamespace(
+                    operation_id="op-1", kind="fact", locator=11, revision=5,
+                    status="reviewed", previous_locator=None,
+                )
+
+        gateway = Gateway()
+        container.scoped_knowledge_mutations = gateway
+        self.kg.clear_kg_cache()
+        self.kg.request = self._request({**_SCOPE_ARGS, "layers": "facts"})
+        graph = asyncio.run(self.kg.kg_full.__wrapped__())
+        fact = next(edge for edge in graph["edges"] if edge["kind"] == "fact")
+        ref = fact["object_ref"]["ref"]
+
+        self.kg.request = self._request(
+            _SCOPE_ARGS,
+            {"ref": ref, "revision": 4, "patch": {"confidence": 0.7}},
+        )
+        payload = asyncio.run(self.kg.command_update_fact.__wrapped__())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["revision"], 5)
+        self.assertEqual(gateway.calls[0][1]["target"].locator, 11)
+        self.assertEqual(gateway.calls[0][1]["target"].revision, 4)
+        self.assertEqual(self.kg._overview_cache, {})
+
+        self.kg.request = self._request(
+            _SCOPE_ARGS,
+            {"ref": ref, "revision": 3, "patch": {"confidence": 0.6}},
+        )
+        stale, stale_status = asyncio.run(self.kg.command_update_fact.__wrapped__())
+        self.assertEqual(stale_status, 409)
+        self.assertEqual(stale["error"]["code"], "stale_revision")
+
+        forged = ref[:-1] + ("0" if ref[-1] != "0" else "1")
+        self.kg.request = self._request(
+            _SCOPE_ARGS,
+            {"ref": forged, "revision": 4, "patch": {"confidence": 0.6}},
+        )
+        hidden, hidden_status = asyncio.run(self.kg.command_update_fact.__wrapped__())
+        self.assertEqual(hidden_status, 404)
+        self.assertEqual(hidden["error"]["code"], "not_found")
+
+        self.kg.request = self._request(
+            {"bot_id": "bot-beta", "session_id": "qq:group:g2", "visibility": "group"},
+            {"ref": ref, "revision": 4, "patch": {"confidence": 0.6}},
+        )
+        cross_scope, cross_status = asyncio.run(self.kg.command_update_fact.__wrapped__())
+        self.assertEqual(cross_status, 404)
+        self.assertEqual(cross_scope["error"]["code"], "not_found")
+
+        self.kg.request = self._request(
+            _SCOPE_ARGS,
+            {"revision": 4, "patch": {"confidence": 0.6}},
+        )
+        missing, missing_status = asyncio.run(self.kg.command_update_fact.__wrapped__())
+        self.assertEqual(missing_status, 400)
+        self.assertEqual(missing["error"]["code"], "invalid_request")
+
+        container.scoped_knowledge_mutations = None
+        container.write_gateway = None
+        self.kg.request = self._request(
+            _SCOPE_ARGS,
+            {"ref": ref, "revision": 4, "patch": {"confidence": 0.6}},
+        )
+        unavailable, unavailable_status = asyncio.run(self.kg.command_update_fact.__wrapped__())
+        self.assertEqual(unavailable_status, 503)
+        self.assertEqual(
+            unavailable["error"]["code"],
+            "scoped_knowledge_mutation_gateway_unavailable",
+        )
+
+    def test_all_four_command_routes_delegate_only_resolved_targets(self):
+        container = self.kg.get_container()
+
+        class Gateway:
+            def __init__(self):
+                self.calls = []
+
+            async def delete_fact(self, **kwargs):
+                self.calls.append(("delete_fact", kwargs["target"]))
+                return types.SimpleNamespace(
+                    operation_id="op-fd", kind="fact", locator=11, revision=5,
+                    status="deleted", previous_locator=None,
+                )
+
+            async def update_tag_relation(self, **kwargs):
+                self.calls.append(("update_relation", kwargs["target"], kwargs["fields"]))
+                return types.SimpleNamespace(
+                    operation_id="op-ru", kind="tag_relation", locator=31, revision=4,
+                    status="active", previous_locator=None,
+                )
+
+            async def delete_tag_relation(self, **kwargs):
+                self.calls.append(("delete_relation", kwargs["target"]))
+                return types.SimpleNamespace(
+                    operation_id="op-rd", kind="tag_relation", locator=31, revision=4,
+                    status="deleted", previous_locator=None,
+                )
+
+        gateway = Gateway()
+        container.scoped_knowledge_mutations = gateway
+        self.kg.clear_kg_cache()
+        self.kg.request = self._request({**_SCOPE_ARGS, "layers": "facts"})
+        graph = asyncio.run(self.kg.kg_full.__wrapped__())
+        fact = next(edge for edge in graph["edges"] if edge["kind"] == "fact")
+        relation = next(edge for edge in graph["edges"] if edge["kind"] == "tag_relation")
+
+        self.kg.request = self._request(
+            _SCOPE_ARGS, {"ref": fact["object_ref"]["ref"], "revision": 4}
+        )
+        fact_deleted = asyncio.run(self.kg.command_delete_fact.__wrapped__())
+        self.assertEqual(fact_deleted["status"], "deleted")
+
+        self.kg.request = self._request(
+            _SCOPE_ARGS,
+            {"ref": relation["object_ref"]["ref"], "revision": 3, "patch": {"weight": 0.6}},
+        )
+        relation_updated = asyncio.run(self.kg.command_update_tag_relation.__wrapped__())
+        self.assertEqual(relation_updated["revision"], 4)
+
+        self.kg.request = self._request(
+            _SCOPE_ARGS, {"ref": relation["object_ref"]["ref"], "revision": 3}
+        )
+        relation_deleted = asyncio.run(self.kg.command_delete_tag_relation.__wrapped__())
+        self.assertEqual(relation_deleted["status"], "deleted")
+        self.assertEqual(
+            [(call[0], call[1].kind, call[1].locator) for call in gateway.calls],
+            [
+                ("delete_fact", "fact", 11),
+                ("update_relation", "tag_relation", 31),
+                ("delete_relation", "tag_relation", 31),
+            ],
+        )
+
+        self.kg.request = self._request(
+            _SCOPE_ARGS,
+            {"ref": relation["object_ref"]["ref"], "revision": 3, "patch": {"metadata": {}}},
+        )
+        rejected, status = asyncio.run(self.kg.command_update_tag_relation.__wrapped__())
+        self.assertEqual(status, 400)
+        self.assertEqual(rejected["error"]["code"], "invalid_request")
 
     def test_legacy_and_bare_id_mutations_are_gone(self):
         for call in (

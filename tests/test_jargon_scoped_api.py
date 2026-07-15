@@ -102,6 +102,93 @@ class JargonScopedApiTest(unittest.TestCase):
         self.assertEqual(self.repo.list_calls[0][0].bot_id, "bot-alpha")
         self.assertEqual(self.repo.list_calls[0][0].session.id, "qq:group:g1")
 
+    def test_scoped_evidence_restores_only_same_scope_messages(self):
+        scope, _ = self._scope_envelope()
+
+        class _Cursor:
+            def __init__(self, rows=None):
+                self.rows = rows or []
+            def fetchall(self):
+                return list(self.rows)
+            def fetchone(self):
+                return self.rows[0] if self.rows else None
+
+        class _Conn:
+            def __init__(self):
+                self.calls = []
+            def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                if "PRAGMA table_info(memories)" in sql:
+                    columns = ["id", "group_id", "sender_id", "sender_name", "content", "timestamp", "bot_id", "session_id", "visibility", "resolution_state", "quarantine", "memory_type"]
+                    return _Cursor([(index, name) for index, name in enumerate(columns)])
+                self.assert_scope(sql, params)
+                if "WHERE id=?" in sql:
+                    return _Cursor([(11, "g1", "u1", "用户甲", "今天疯狂星期四 v我50", 1000.0)])
+                if "timestamp <" in sql:
+                    return _Cursor([(10, "g1", "u2", "用户乙", "前文", 990.0)])
+                if "timestamp >" in sql:
+                    return _Cursor([(12, "g1", "u3", "用户丙", "后文", 1010.0)])
+                return _Cursor([])
+            @staticmethod
+            def assert_scope(sql, params):
+                assert "bot_id=?" in sql and "session_id=?" in sql and "visibility=?" in sql
+                assert "bot-alpha" in params and "qq:group:g1" in params and "group" in params
+
+        conn = _Conn()
+        container = types.SimpleNamespace(db=types.SimpleNamespace(conn=conn))
+        item = {"id": 7, "word": "v我50", "meaning": "疯狂星期四", "revision": 2, "source_memory_id": 11, "contexts": [], "source_context": None}
+
+        payload = self.module._scoped_jargon_evidence(container, scope, item, before=1, after=1)
+
+        self.assertFalse(payload["used_fallback"])
+        self.assertEqual([message["role"] for message in payload["messages"]], ["before", "anchor", "after"])
+        self.assertEqual(payload["anchor"]["content"], "今天疯狂星期四 v我50")
+
+    def test_scoped_evidence_missing_object_ref_is_rejected(self):
+        self.module.request = types.SimpleNamespace(args={
+            "bot_id": "bot-alpha",
+            "session_id": "qq:group:g1",
+            "visibility": "group",
+            "before": "5",
+            "after": "5",
+        })
+
+        payload, status = asyncio.run(self.module.get_scoped_jargon_evidence.__wrapped__(7))
+
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["code"], "object_ref_required")
+
+    def test_batch_review_validates_each_object_ref_before_domain_calls(self):
+        scope, envelope = self._scope_envelope()
+        review_calls = []
+        validated = []
+
+        class _Service:
+            def review(self, runtime_scope, jargon_id, action):
+                review_calls.append((runtime_scope.bot_id, jargon_id, action))
+                return {"id": jargon_id, "status": "rejected", "scope": runtime_scope}
+
+        original_require = self.module._require_object_ref
+        self.module._require_object_ref = lambda body, **kwargs: validated.append((body["object_ref"]["ref"], kwargs["locator"]))
+        self.module.get_container = lambda: types.SimpleNamespace(
+            db=types.SimpleNamespace(scoped_knowledge=self.repo),
+            jargon_service=_Service(),
+        )
+        self.module.request = types.SimpleNamespace(get_json=lambda **_kwargs: _async_value({
+            "scope": envelope,
+            "action": "reject",
+            "items": [{"id": 7, "object_ref": {"ref": "opaque-7"}, "revision": 2000}],
+        }))
+        try:
+            payload = asyncio.run(self.module.batch_review_scoped_jargon.__wrapped__())
+        finally:
+            self.module._require_object_ref = original_require
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["reviewed_count"], 1)
+        self.assertEqual(validated, [("opaque-7", 7)])
+        self.assertEqual(review_calls, [(scope.bot_id, 7, "reject")])
+
     def test_create_requires_codec_envelope_and_passes_runtime_scope(self):
         _, envelope = self._scope_envelope()
         self.module.request = types.SimpleNamespace(

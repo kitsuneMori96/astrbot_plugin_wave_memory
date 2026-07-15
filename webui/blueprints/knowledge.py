@@ -356,6 +356,8 @@ async def _list_scoped_facts(*, compatibility_empty: bool = False):
         if status and "status" in columns:
             where.append("status=?")
             params.append(status)
+        elif "status" in columns:
+            where.append("status NOT IN ('deleted','superseded')")
         where_sql = " WHERE " + " AND ".join(where)
         total = int(conn.execute("SELECT COUNT(*) FROM scoped_facts" + where_sql, params).fetchone()[0])
         order = "updated_at DESC, id DESC" if {"updated_at", "id"} <= columns else "id DESC"

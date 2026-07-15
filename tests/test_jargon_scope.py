@@ -22,13 +22,17 @@ class _Repo:
 
     def upsert_scoped_jargon(self, scope, **record):
         self.calls.append(("upsert", self._key(scope), record["word"]))
-        self.rows[(self._key(scope), record["word"])] = dict(record)
+        key = (self._key(scope), record["word"])
+        previous = self.rows.get(key, {})
+        self.rows[key] = {"id": previous.get("id", len(self.rows) + 1), **record}
 
-    def list_scoped_jargon(self, scope, *, status=None, limit):
+    def list_scoped_jargon(self, scope, *, status=None, limit, include_archived=False):
         self.calls.append(("list", self._key(scope), status, limit))
         rows = [row for (key, _), row in self.rows.items() if key == self._key(scope)]
         if status is not None:
             rows = [row for row in rows if row.get("status") == status]
+        elif not include_archived:
+            rows = [row for row in rows if row.get("status") != "archived"]
         return rows[:limit]
 
 
@@ -71,6 +75,70 @@ class JargonScopeTest(unittest.TestCase):
         asyncio.run(service.mine(scope))
         self.assertEqual(db.scoped_knowledge.calls[0][:2], ("list", ("yushu", "qq:group:g1", "group")))
         self.assertEqual(db.scoped_knowledge.calls[1][0], "upsert")
+
+    def test_service_resolves_and_persists_same_scope_memory_anchor(self):
+        from services.jargon.service import JargonService
+
+        class _Cursor:
+            def __init__(self, rows): self.rows = rows
+            def fetchall(self): return list(self.rows)
+            def fetchone(self): return self.rows[0] if self.rows else None
+
+        class _Conn:
+            def execute(self, sql, params=()):
+                if "PRAGMA table_info(memories)" in sql:
+                    columns = ["id", "content", "timestamp", "sender_id", "bot_id", "session_id", "visibility", "resolution_state", "quarantine", "memory_type"]
+                    return _Cursor([(index, name) for index, name in enumerate(columns)])
+                self.last_sql, self.last_params = sql, params
+                if "SELECT id FROM memories" in sql:
+                    return _Cursor([(42,)])
+                return _Cursor([])
+
+        db, scope = _Db(), self._scope()
+        db.conn = _Conn()
+        service = JargonService(db, enabled=True, config={"min_messages": 1, "min_frequency": 1})
+        service._filter.get_candidates = lambda *_args, **_kwargs: [{
+            "word": "猫猫税",
+            "frequency": 3,
+            "contexts": ["交猫猫税"],
+            "source_contexts": [{"content": "交猫猫税", "timestamp": 1000.0, "sender_id": "u1"}],
+        }]
+
+        asyncio.run(service.mine(scope))
+
+        row = db.scoped_knowledge.list_scoped_jargon(scope, limit=10)[0]
+        self.assertEqual(row["source_memory_id"], 42)
+        self.assertIn("交猫猫税", row["source_context"])
+        self.assertIn("bot_id=?", db.conn.last_sql)
+        self.assertIn("qq:group:g1", db.conn.last_params)
+
+    def test_edit_requeues_and_archive_removes_from_default_list(self):
+        from services.jargon.service import JargonService
+
+        db, scope = _Db(), self._scope()
+        db.scoped_knowledge.upsert_scoped_jargon(
+            scope,
+            word="猫猫税",
+            meaning="旧释义",
+            status="confirmed",
+            is_jargon=True,
+            frequency=3,
+            confidence=0.9,
+            contexts=["上下文"],
+            source_memory_id=42,
+            source_context='["上下文"]',
+            provenance={"source": "wave_memory"},
+        )
+        service = JargonService(db)
+        item = db.scoped_knowledge.list_scoped_jargon(scope, limit=10)[0]
+
+        updated = service.update_meaning(scope, item["id"], "新释义")
+        self.assertEqual(updated["meaning"], "新释义")
+        self.assertEqual(updated["status"], "pending")
+        service.archive(scope, item["id"])
+        self.assertEqual(db.scoped_knowledge.list_scoped_jargon(scope, limit=10), [])
+        archived = db.scoped_knowledge.list_scoped_jargon(scope, limit=10, include_archived=True)[0]
+        self.assertEqual(archived["status"], "archived")
 
 
 if __name__ == "__main__":
