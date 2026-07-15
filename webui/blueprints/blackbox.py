@@ -223,14 +223,25 @@ def build_people_payload(conn: Any, *, limit: int = 50, offset: int = 0, search:
     if not _table_exists(conn, "person_registry") and not _table_exists(conn, "user_profiles"):
         return {"items": [], "total": 0, "limit": limit, "offset": offset, "search": search, "sort": sort, "filter": filter, "readonly": True}
 
-    profiles_by_user: dict[str, dict[str, Any]] = {}
+    # 用复合键 (user_id, group_id, bot_id) 索引 user_profiles，保留所有分组信息
+    profiles_by_key: dict[str, dict[str, Any]] = {}
+    # 同时维护 user_id → profile 索引作为回退
+    profiles_by_uid: dict[str, dict[str, Any]] = {}
     if _table_exists(conn, "user_profiles"):
         try:
             for row in conn.execute("SELECT * FROM user_profiles").fetchall():
                 prof = _row_dict(row)
-                profiles_by_user.setdefault(str(prof.get("user_id", "")), prof)
+                uid = str(prof.get("user_id", ""))
+                gid = str(prof.get("group_id", ""))
+                bid = str(prof.get("bot_id", ""))
+                key = f"{uid}\x00{gid}\x00{bid}"
+                if key not in profiles_by_key:
+                    profiles_by_key[key] = prof
+                if uid not in profiles_by_uid:
+                    profiles_by_uid[uid] = prof
         except Exception:
-            profiles_by_user = {}
+            profiles_by_key = {}
+            profiles_by_uid = {}
 
     items: list[dict[str, Any]] = []
     if _table_exists(conn, "person_registry"):
@@ -241,11 +252,14 @@ def build_people_payload(conn: Any, *, limit: int = 50, offset: int = 0, search:
         for row in rows:
             item = _row_dict(row)
             qq_id = str(item.get("qq_id") or item.get("user_id") or "")
-            prof = profiles_by_user.get(qq_id, {})
+            pgid = str(item.get("group_id", ""))
+            pbid = str(item.get("bot_id", ""))
+            # 优先精确匹配 (user_id, group_id, bot_id)，再回退到仅 user_id
+            prof = profiles_by_key.get(f"{qq_id}\x00{pgid}\x00{pbid}") or profiles_by_uid.get(qq_id, {})
             item.update({
                 "user_id": prof.get("user_id", qq_id),
-                "group_id": prof.get("group_id"),
-                "bot_id": prof.get("bot_id"),
+                "group_id": prof.get("group_id", pgid),
+                "bot_id": prof.get("bot_id", pbid),
                 "nickname": prof.get("nickname", item.get("display_name")),
                 "affection": prof.get("affection"),
                 "interaction_count": prof.get("interaction_count", item.get("message_count")),
@@ -253,7 +267,7 @@ def build_people_payload(conn: Any, *, limit: int = 50, offset: int = 0, search:
             })
             items.append(item)
     else:
-        items = list(profiles_by_user.values())
+        items = list(profiles_by_key.values())
 
     if search:
         needle = str(search)
