@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { RefreshCwIcon, SearchIcon, ShieldCheckIcon, TagsIcon } from 'lucide-react'
 
 import { isRequestCancelled } from '@/api/client'
@@ -15,12 +15,34 @@ function formatPercent(value: number): string {
   return `${(Math.max(0, Math.min(1, value || 0)) * 100).toFixed(1).replace(/\.0$/, '')}%`
 }
 
+const countFormatter = new Intl.NumberFormat('zh-CN')
+
+function formatCount(value: number): string {
+  return countFormatter.format(value)
+}
+
 function formatConfidence(value: number): string {
   return Number.isFinite(value) ? `${Math.round(value * 100)}%` : '未知'
 }
 
 function Metric({ label, value, detail }: { label: string; value: string | number; detail: string }) {
   return <div className="min-w-0 rounded-lg border bg-card p-4"><p className="text-xs text-muted-foreground">{label}</p><p className="mt-1 text-2xl font-semibold tracking-tight">{value}</p><p className="mt-1 text-xs text-muted-foreground">{detail}</p></div>
+}
+
+const RAG_MODE_LABELS = { semantic: '语义 RAG', static: '静态词表', unavailable: '不可用' } as const
+const INDEX_HEALTH_LABELS = { ready: '代次已验证', legacy: 'Legacy 索引', invalid: '清单无效', unavailable: '索引不可用' } as const
+const REASON_LABELS: Record<string, string> = {
+  provider_not_configured: 'Tag LLM Provider 未配置',
+  tag_extractor_unavailable: 'Tag 提取器未启动',
+  embedding_unavailable: 'Embedding 服务不可用',
+  tag_index_unavailable: 'Tag 向量索引不可用',
+  tag_index_empty: 'Tag 向量索引为空',
+  manifest_invalid: '索引清单验证失败',
+  manifest_unavailable: '索引尚未生成版本清单',
+}
+
+function reasonLabel(value?: string | null): string {
+  return value ? REASON_LABELS[value] ?? value : '当前无降级原因'
 }
 
 export function TagsPage() {
@@ -61,7 +83,7 @@ export function TagsPage() {
     return () => controller.abort()
   }, [limit, offset, reload, search, sort, type])
 
-  const tagTypes = useMemo(() => Array.from(new Set((data?.items ?? []).map((item) => item.type).filter(Boolean))).sort(), [data?.items])
+  const tagTypes = data?.available_types ?? []
   const status = loading ? 'loading' : error ? 'error' : !data?.items.length ? 'empty' : 'success'
   const total = data?.total ?? 0
   const pageCount = total ? Math.ceil(total / limit) : 0
@@ -75,13 +97,35 @@ export function TagsPage() {
     <Alert><ShieldCheckIcon aria-hidden="true" /><AlertTitle>只读安全边界</AlertTitle><AlertDescription>本页不会开放裸 Tag ID 的重命名、改类型或删除。需要写入的能力必须通过 scoped ObjectRef 命令与后端 capability 明确授权。</AlertDescription></Alert>
 
     <section aria-label="Tag 质量概览" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-      <Metric label="Tag 总数" value={quality?.total_tags ?? '—'} detail="当前 legacy Tag 投影记录" />
-      <Metric label="记忆覆盖率" value={quality ? formatPercent(quality.coverage) : '—'} detail={quality ? `${quality.tagged_memories} / ${quality.total_memories} 条真实记忆` : '等待真实质量接口'} />
-      <Metric label="可提取未标注" value={quality?.extractable_untagged_memories ?? '—'} detail={`短文本跳过 ${quality?.skipped_short_untagged_memories ?? '—'} 条`} />
-      <Metric label="孤立引用" value={quality?.orphan_memory_tag_refs ?? '—'} detail="仅诊断，不在本页直接清理" />
+      <Metric label="Tag 总数" value={quality ? formatCount(quality.total_tags) : '—'} detail="当前 legacy Tag 投影记录" />
+      <Metric label="记忆覆盖率" value={quality ? formatPercent(quality.coverage) : '—'} detail={quality ? `${formatCount(quality.tagged_memories)} / ${formatCount(quality.total_memories)} 条真实记忆` : '等待真实质量接口'} />
+      <Metric label="可提取未标注" value={quality ? formatCount(quality.extractable_untagged_memories ?? 0) : '—'} detail={`短文本跳过 ${quality ? formatCount(quality.skipped_short_untagged_memories ?? 0) : '—'} 条`} />
+      <Metric label="孤立引用" value={quality ? formatCount(quality.orphan_memory_tag_refs ?? 0) : '—'} detail="仅诊断，不在本页直接清理" />
     </section>
 
-    <Card className="border-border/60"><CardHeader className="gap-3 border-b pb-3"><div><CardTitle className="text-sm">Tag 目录</CardTitle><CardDescription>服务端分页的只读结果；搜索和排序会重新读取真实数据。</CardDescription></div><form className="flex flex-wrap items-center gap-2" onSubmit={(event) => { event.preventDefault(); setOffset(0); setSearch(searchDraft.trim()) }}><div className="relative min-w-0 flex-1 basis-56"><SearchIcon className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" /><Input aria-label="搜索 Tag" className="h-8 pl-8" value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)} placeholder="按 Tag 名称搜索" /></div><select aria-label="Tag 类型" className="h-8 rounded-md border bg-background px-2 text-xs" value={type} onChange={(event) => { setOffset(0); setType(event.target.value) }}><option value="">全部类型</option>{tagTypes.map((value) => <option key={value} value={value}>{value}</option>)}</select><select aria-label="排序方式" className="h-8 rounded-md border bg-background px-2 text-xs" value={sort} onChange={(event) => { setOffset(0); setSort(event.target.value === 'recent' ? 'recent' : 'frequency') }}><option value="frequency">按频率</option><option value="recent">按最近创建</option></select><Button type="submit" size="sm">查询</Button></form></CardHeader><CardContent className="p-4"><QueryState status={status} error={error} title="Tag 数据读取失败" onRetry={() => setReload((value) => value + 1)} description={status === 'empty' ? '当前筛选条件下没有 Tag；未使用演示数据填充。' : undefined}>
+    <Card className="border-border/60">
+      <CardHeader className="border-b pb-3">
+        <CardTitle className="text-sm">Tag 提取与索引状态</CardTitle>
+        <CardDescription>展示当前运行时真实能力、索引代次和 Tag RAG 降级路径，不暴露 Provider ID 或物理路径。</CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-3 p-4 sm:grid-cols-3">
+        <div className="flex min-w-0 flex-col gap-2 rounded-lg border p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs text-muted-foreground">提取能力</span><Badge variant={quality?.runtime.capabilities.extract.available ? 'secondary' : 'outline'}>{quality?.runtime.capabilities.extract.available ? '可用' : '不可用'}</Badge></div>
+          <p className="text-sm">{quality?.runtime.capabilities.extract.available ? 'Tag LLM 提取器已启动' : reasonLabel(quality?.runtime.capabilities.extract.reason_code)}</p>
+        </div>
+        <div className="flex min-w-0 flex-col gap-2 rounded-lg border p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs text-muted-foreground">Tag RAG</span><Badge variant={quality?.runtime.rag.mode === 'semantic' ? 'secondary' : 'outline'}>{quality ? RAG_MODE_LABELS[quality.runtime.rag.mode] : '状态未知'}</Badge></div>
+          <p className="text-sm">{quality?.runtime.rag.mode === 'semantic' ? '使用消息向量检索已有 Tag，并同时保留高频静态参考。' : reasonLabel(quality?.runtime.rag.fallback_reason)}</p>
+        </div>
+        <div className="flex min-w-0 flex-col gap-2 rounded-lg border p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs text-muted-foreground">Tag 向量索引</span><Badge variant={quality?.runtime.index.health === 'ready' ? 'secondary' : 'outline'}>{quality ? INDEX_HEALTH_LABELS[quality.runtime.index.health] : '状态未知'}</Badge></div>
+          <p className="text-sm tabular-nums">{quality ? `${formatCount(quality.runtime.index.count)} 个向量${quality.runtime.index.generation ? ` · generation ${formatCount(quality.runtime.index.generation)}` : ''}` : '等待运行时状态'}</p>
+          {quality?.runtime.index.reason_code ? <p className="text-xs text-muted-foreground">{reasonLabel(quality.runtime.index.reason_code)}</p> : null}
+        </div>
+      </CardContent>
+    </Card>
+
+    <Card className="border-border/60"><CardHeader className="gap-3 border-b pb-3"><div><CardTitle className="text-sm">Tag 目录</CardTitle><CardDescription>服务端分页的只读结果；搜索和排序会重新读取真实数据。</CardDescription></div><form className="flex flex-wrap items-center gap-2" onSubmit={(event) => { event.preventDefault(); setOffset(0); setSearch(searchDraft.trim()) }}><div className="relative min-w-0 flex-1 basis-56"><SearchIcon className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" /><Input name="tag-search" autoComplete="off" aria-label="搜索 Tag" className="h-8 pl-8" value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)} placeholder="例如：共同记忆…" /></div><select name="tag-type" aria-label="Tag 类型" className="h-8 rounded-md border bg-background px-2 text-xs text-foreground" value={type} onChange={(event) => { setOffset(0); setType(event.target.value) }}><option value="">全部类型</option>{tagTypes.map((value) => <option key={value} value={value}>{value}</option>)}</select><select name="tag-sort" aria-label="排序方式" className="h-8 rounded-md border bg-background px-2 text-xs text-foreground" value={sort} onChange={(event) => { setOffset(0); setSort(event.target.value === 'recent' ? 'recent' : 'frequency') }}><option value="frequency">按频率</option><option value="recent">按最近创建</option></select><Button type="submit" size="sm">查询</Button></form></CardHeader><CardContent className="p-4"><QueryState status={status} error={error} title="Tag 数据读取失败" onRetry={() => setReload((value) => value + 1)} description={status === 'empty' ? '当前筛选条件下没有 Tag；未使用演示数据填充。' : undefined}>
       {data?.items.length ? <><ResponsiveTable label="Tag 只读目录" table={<Table><TableHeader><TableRow className="bg-muted/20"><TableHead>Tag</TableHead><TableHead>类型</TableHead><TableHead className="text-right">频率</TableHead><TableHead className="text-right">置信度</TableHead><TableHead>能力</TableHead></TableRow></TableHeader><TableBody>{data.items.map((item) => <TableRow key={String(item.id)}><TableCell className="font-medium">{item.name}</TableCell><TableCell><Badge variant="outline">{item.type || '未分类'}</Badge></TableCell><TableCell className="text-right tabular-nums">{item.frequency}</TableCell><TableCell className="text-right tabular-nums">{formatConfidence(item.confidence)}</TableCell><TableCell><Badge variant="secondary">只读</Badge></TableCell></TableRow>)}</TableBody></Table>} cards={data.items.map((item) => <article key={String(item.id)} className="rounded-lg border bg-card p-4"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="truncate font-medium">{item.name}</p><p className="mt-1 text-xs text-muted-foreground">{item.type || '未分类'}</p></div><Badge variant="secondary">只读</Badge></div><dl className="mt-3 grid grid-cols-2 gap-3 text-sm"><div><dt className="text-xs text-muted-foreground">频率</dt><dd className="font-medium tabular-nums">{item.frequency}</dd></div><div><dt className="text-xs text-muted-foreground">置信度</dt><dd className="font-medium tabular-nums">{formatConfidence(item.confidence)}</dd></div></dl></article>)} />
       <PaginationControls page={{ limit, offset, total, total_status: 'exact', reason_code: null, page: Math.floor(offset / limit) + 1, page_count: pageCount, has_more: offset + limit < total }} disabled={loading} onOffsetChange={setOffset} onLimitChange={(value) => { setOffset(0); setLimit(value) }} label="Tag 分页" /></> : null}
     </QueryState></CardContent></Card>

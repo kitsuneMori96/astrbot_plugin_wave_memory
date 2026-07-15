@@ -39,6 +39,7 @@ export interface TagListItem {
 export interface TagListPayload {
   items: TagListItem[]
   total: number
+  available_types: string[]
   legacy: boolean
   readonly: boolean
   capabilities: {
@@ -58,6 +59,28 @@ export interface TagListParams {
   signal?: AbortSignal
 }
 
+export interface TagRuntimePayload {
+  capabilities: {
+    extract: { available: boolean; reason_code?: string | null }
+    mutation: { available: boolean; reason_code?: string | null }
+  }
+  index: {
+    available: boolean
+    health: 'ready' | 'legacy' | 'invalid' | 'unavailable'
+    reason_code?: string | null
+    count: number
+    generation?: number | null
+    db_watermark?: number | null
+  }
+  rag: {
+    mode: 'semantic' | 'static' | 'unavailable'
+    semantic_available: boolean
+    fallback_reason?: string | null
+    provider_configured: boolean
+    reference_refresh_interval?: number | null
+  }
+}
+
 export interface TagQualityPayload {
   total_tags: number
   total_memories: number
@@ -67,6 +90,7 @@ export interface TagQualityPayload {
   skipped_short_untagged_memories?: number
   orphan_memory_tag_refs?: number
   coverage: number
+  runtime: TagRuntimePayload
 }
 
 export interface AuditSuggestionItem {

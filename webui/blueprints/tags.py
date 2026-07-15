@@ -29,41 +29,99 @@ def _legacy_mutation_disabled(handler):
     return reject
 
 
+def build_tag_list_payload(
+    conn,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    tag_type: str = "",
+    search: str = "",
+    sort: str = "frequency",
+) -> dict:
+    """Build a filtered read projection whose counts only include live memories."""
+    limit = max(1, min(100, int(limit)))
+    offset = max(0, int(offset))
+    tag_type = str(tag_type or "").strip()
+    search = str(search or "").strip()
+    sort = sort if sort in {"frequency", "recent"} else "frequency"
+
+    where = []
+    filters: list[object] = []
+    if tag_type:
+        where.append("t.tag_type = ?")
+        filters.append(tag_type)
+    if search:
+        where.append("t.name LIKE ?")
+        filters.append(f"%{search}%")
+    where_sql = f" WHERE {' AND '.join(where)}" if where else ""
+
+    total = int(conn.execute(
+        f"SELECT COUNT(*) FROM tags t{where_sql}", filters
+    ).fetchone()[0])
+    order_sql = "frequency DESC, t.id DESC" if sort == "frequency" else "t.id DESC"
+    rows = conn.execute(
+        f"""SELECT t.id, t.name, t.tag_type,
+                   COUNT(DISTINCT m.id) AS frequency,
+                   t.confidence
+            FROM tags t
+            LEFT JOIN memory_tags mt ON mt.tag_id = t.id
+            LEFT JOIN memories m ON m.id = mt.memory_id
+            {where_sql}
+            GROUP BY t.id, t.name, t.tag_type, t.confidence
+            ORDER BY {order_sql}
+            LIMIT ? OFFSET ?""",
+        [*filters, limit, offset],
+    ).fetchall()
+    available_types = [
+        str(row[0]) for row in conn.execute(
+            """SELECT DISTINCT tag_type FROM tags
+               WHERE tag_type IS NOT NULL AND TRIM(tag_type) <> ''
+               ORDER BY tag_type"""
+        ).fetchall()
+    ]
+    return {
+        "items": [
+            {
+                "id": row[0],
+                "name": row[1],
+                "type": row[2],
+                "frequency": int(row[3] or 0),
+                "confidence": row[4],
+            }
+            for row in rows
+        ],
+        "total": total,
+        "available_types": available_types,
+        "legacy": True,
+        "readonly": True,
+        "capabilities": {
+            "mutation": {
+                "available": False,
+                "reason_code": "legacy_mutation_disabled",
+            }
+        },
+    }
+
+
 @tags_bp.route("/", methods=["GET"])
 @require_auth
 async def list_tags():
     """分页查看 Tag 列表。"""
     c = get_container()
-    limit = int(request.args.get("limit", 50))
-    offset = int(request.args.get("offset", 0))
-    tag_type = request.args.get("type")
-    search = request.args.get("search", "").strip()
-    sort = request.args.get("sort", "frequency")
-
-    sql = "SELECT id, name, tag_type, frequency, confidence FROM tags WHERE 1=1"
-    params = []
-    if tag_type:
-        sql += " AND tag_type = ?"
-        params.append(tag_type)
-    if search:
-        sql += " AND name LIKE ?"
-        params.append(f"%{search}%")
-
-    order = "frequency DESC" if sort == "frequency" else "id DESC"
-    sql += f" ORDER BY {order} LIMIT ? OFFSET ?"
-    params.extend([limit, offset])
-
-    rows = c.db.conn.execute(sql, params).fetchall()
-    total = c.db.conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0]
-
-    items = [{"id": r[0], "name": r[1], "type": r[2], "frequency": r[3], "confidence": r[4]} for r in rows]
-    return jsonify({
-        "items": items,
-        "total": total,
-        "legacy": True,
-        "readonly": True,
-        "capabilities": {"mutation": {"available": False, "reason_code": "legacy_mutation_disabled"}},
-    })
+    try:
+        limit = int(request.args.get("limit", 50))
+        offset = int(request.args.get("offset", 0))
+    except (TypeError, ValueError):
+        return _scope_error("invalid_pagination", 400)
+    payload = build_tag_list_payload(
+        c.db.conn,
+        limit=limit,
+        offset=offset,
+        tag_type=request.args.get("type", ""),
+        search=request.args.get("search", ""),
+        sort=request.args.get("sort", "frequency"),
+    )
+    return jsonify(payload)
 
 
 @tags_bp.route("/retype", methods=["POST"])
@@ -88,6 +146,83 @@ async def rename_tag():
 async def batch_delete_tags():
     """旧 Tag 裸 ID 批量物理删除永久禁用。"""
     return _scope_error("legacy_mutation_disabled", 410)
+
+
+def build_tag_runtime_payload(container) -> dict:
+    """Describe live Tag extraction/index capabilities without exposing paths or IDs."""
+    extractor = getattr(container, "tag_extractor", None)
+    index = getattr(container, "tag_index", None)
+    provider_configured = bool(
+        str((getattr(container, "plugin_config", None) or {}).get("tag_llm_provider_id", "")).strip()
+    )
+    index_available = index is not None
+    try:
+        index_count = max(0, int(getattr(index, "count", 0))) if index_available else 0
+    except Exception:
+        index_count = 0
+    manifest = getattr(index, "current_manifest", None) if index_available else None
+    manifest_invalid = bool(getattr(index, "manifest_error", None)) if index_available else False
+
+    extractor_embedding = getattr(extractor, "embedding_service", None) if extractor else None
+    extractor_index = getattr(extractor, "tag_index", None) if extractor else None
+    if extractor is None:
+        rag_mode = "unavailable"
+        fallback_reason = "tag_extractor_unavailable"
+    elif extractor_embedding is None:
+        rag_mode = "static"
+        fallback_reason = "embedding_unavailable"
+    elif extractor_index is None:
+        rag_mode = "static"
+        fallback_reason = "tag_index_unavailable"
+    elif index_count <= 0:
+        rag_mode = "static"
+        fallback_reason = "tag_index_empty"
+    else:
+        rag_mode = "semantic"
+        fallback_reason = None
+
+    if not index_available:
+        index_health = "unavailable"
+        index_reason = "tag_index_unavailable"
+    elif manifest_invalid:
+        index_health = "invalid"
+        index_reason = "manifest_invalid"
+    elif manifest is None:
+        index_health = "legacy"
+        index_reason = "manifest_unavailable"
+    else:
+        index_health = "ready"
+        index_reason = None
+
+    return {
+        "capabilities": {
+            "extract": {
+                "available": extractor is not None,
+                "reason_code": None if extractor is not None else (
+                    "provider_not_configured" if not provider_configured else "tag_extractor_unavailable"
+                ),
+            },
+            "mutation": {
+                "available": False,
+                "reason_code": "legacy_mutation_disabled",
+            },
+        },
+        "index": {
+            "available": index_available,
+            "health": index_health,
+            "reason_code": index_reason,
+            "count": index_count,
+            "generation": getattr(manifest, "generation", None),
+            "db_watermark": getattr(manifest, "db_watermark", None),
+        },
+        "rag": {
+            "mode": rag_mode,
+            "semantic_available": rag_mode == "semantic",
+            "fallback_reason": fallback_reason,
+            "provider_configured": provider_configured,
+            "reference_refresh_interval": getattr(extractor, "_reference_refresh_interval", None),
+        },
+    }
 
 
 def build_tag_quality_payload(conn) -> dict:
@@ -139,9 +274,11 @@ def build_tag_quality_payload(conn) -> dict:
 @tags_bp.route("/quality", methods=["GET"])
 @require_auth
 async def tag_quality():
-    """Tag 质量概览：总数 + 覆盖率（有 tag 的真实记忆占比）。"""
+    """Tag 质量概览：覆盖率、索引代次、提取能力与 RAG 降级状态。"""
     c = get_container()
-    return jsonify(build_tag_quality_payload(c.db.conn))
+    payload = build_tag_quality_payload(c.db.conn)
+    payload["runtime"] = build_tag_runtime_payload(c)
+    return jsonify(payload)
 
 
 @tags_bp.route("/audit/trigger", methods=["GET", "POST"])

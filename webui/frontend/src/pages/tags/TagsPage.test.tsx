@@ -21,6 +21,7 @@ describe('TagsPage', () => {
     getTags.mockReset().mockResolvedValue({
       items: [{ id: 1, name: '共同记忆', type: 'topic', frequency: 12, confidence: 0.86 }],
       total: 1,
+      available_types: ['person', 'topic'],
       legacy: true,
       readonly: true,
       capabilities: { mutation: { available: false, reason_code: 'legacy_mutation_disabled' } },
@@ -34,6 +35,14 @@ describe('TagsPage', () => {
       skipped_short_untagged_memories: 1,
       orphan_memory_tag_refs: 0,
       coverage: 0.8,
+      runtime: {
+        capabilities: {
+          extract: { available: true, reason_code: null },
+          mutation: { available: false, reason_code: 'legacy_mutation_disabled' },
+        },
+        index: { available: true, health: 'ready', reason_code: null, count: 42, generation: 7, db_watermark: 123 },
+        rag: { mode: 'semantic', semantic_available: true, fallback_reason: null, provider_configured: true, reference_refresh_interval: 200 },
+      },
     })
   })
 
@@ -43,6 +52,9 @@ describe('TagsPage', () => {
     expect(await screen.findByText('共同记忆')).toBeVisible()
     expect(screen.getByText('80%')).toBeVisible()
     expect(screen.getAllByText('只读').length).toBeGreaterThan(0)
+    expect(screen.getByText('语义 RAG')).toBeVisible()
+    expect(screen.getByText('42 个向量 · generation 7')).toBeVisible()
+    expect(screen.getByRole('option', { name: 'person' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /删除|重命名|改类型/ })).not.toBeInTheDocument()
     expect(getTags).toHaveBeenCalledWith(expect.objectContaining({ limit: 25, offset: 0, sort: 'frequency' }))
   })

@@ -270,6 +270,11 @@ class VectorIndex:
         return Path(index_path).stem or "vector"
 
     @property
+    def current_manifest(self) -> Optional[IndexManifest]:
+        """Return the already validated in-memory manifest without filesystem I/O."""
+        return self._manifest
+
+    @property
     def manifest_error(self) -> Optional[str]:
         return self._manifest_error
 
