@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import threading
 from typing import Optional, List, Tuple
 
@@ -25,6 +26,11 @@ class BookLoreIndex:
         self.data_dir = data_dir
         self.max_elements = max_elements
         self._lock = threading.Lock()
+
+        # 确保 book_lore.db 中的 SQL 表存在
+        # 注意：此数据库独立于主 wave_memory.db，BookLoreRepo 建表在主库中，
+        # 而 StudyService/BookLoreChannel 等直接读 book_lore.db。
+        self._ensure_sql_tables()
 
         # 实体索引
         self.entity_index_path = os.path.join(data_dir, "book_entities.hnsw")
@@ -60,6 +66,57 @@ class BookLoreIndex:
         self._community_int_counter = 0
         self._notes_id_map: dict[int, str] = {}
         self._notes_int_counter = 0
+
+    def _ensure_sql_tables(self):
+        """确保 book_lore.db 中的 book_communities 等 SQL 表存在。
+
+        BookLoreRepo 建表在主 wave_memory.db 中，但 StudyService、
+        BookLoreChannel、SelfReflect 等直接连接 book_lore.db 查询，
+        因此需要在此独立建表。
+        """
+        lore_db_path = os.path.join(self.data_dir, "book_lore.db")
+        try:
+            conn = sqlite3.connect(lore_db_path)
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS book_entities (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    entity_type TEXT DEFAULT 'concept',
+                    description TEXT,
+                    source_book TEXT,
+                    vector BLOB,
+                    created_at REAL
+                );
+                CREATE TABLE IF NOT EXISTS book_relations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_id INTEGER NOT NULL,
+                    target_id INTEGER NOT NULL,
+                    relation_type TEXT NOT NULL,
+                    weight REAL DEFAULT 1.0,
+                    context TEXT,
+                    created_at REAL,
+                    FOREIGN KEY (source_id) REFERENCES book_entities(id) ON DELETE CASCADE,
+                    FOREIGN KEY (target_id) REFERENCES book_entities(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS book_communities (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT,
+                    summary TEXT,
+                    rank REAL DEFAULT 0.0,
+                    created_at REAL
+                );
+                CREATE TABLE IF NOT EXISTS book_notes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    content TEXT,
+                    source TEXT,
+                    vector BLOB,
+                    created_at REAL
+                );
+            """)
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass  # 失败不影响主索引初始化
 
     # ─── 实体索引操作 ─────────────────────────────────────────────────────────
 
