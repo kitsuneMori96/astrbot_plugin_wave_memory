@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { RefreshCwIcon, SearchIcon } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 
+import { isRequestCancelled } from '@/api/client'
 import { getInjectionTrace, listInjectionTraces, type InjectionTraceSummary, type TraceDetailPayload, type TraceFilters } from '@/api/injection'
 import { getScopeOptions, scopeOptionsFor } from '@/api/options'
 import { getAgentFeedback, type AgentFeedbackPayload } from '@/api/review'
-import { PaginationControls, QueryState, ScopeSelect } from '@/components/shared'
+import { PaginationControls, QueryState, ResponsiveTable, ScopeSelect } from '@/components/shared'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -113,6 +114,41 @@ function inputToEpoch(value: string): string {
   return Number.isFinite(milliseconds) ? String(Math.floor(milliseconds / 1000)) : ''
 }
 
+type TraceFilterDraft = {
+  channel: string
+  group_id: string
+  sender_id: string
+  status: string
+  has_error: string
+  scope: string
+  from_ts: string
+  to_ts: string
+  config_revision: string
+}
+
+const privateFilterKeys: Array<keyof TraceFilterDraft> = ['channel', 'group_id', 'sender_id', 'status', 'has_error', 'scope', 'from_ts', 'to_ts', 'config_revision']
+
+function draftFromSearchParams(params: URLSearchParams): TraceFilterDraft {
+  return {
+    channel: params.get('channel') ?? '',
+    group_id: params.get('group_id') ?? '',
+    sender_id: params.get('sender_id') ?? '',
+    status: params.get('status') ?? '',
+    has_error: params.get('has_error') ?? '',
+    scope: params.get('scope') ?? '',
+    from_ts: params.get('from_ts') ?? '',
+    to_ts: params.get('to_ts') ?? '',
+    config_revision: params.get('config_revision') ?? '',
+  }
+}
+
+const emptyDraft: TraceFilterDraft = draftFromSearchParams(new URLSearchParams())
+
+function draftFromSerialized(value: string): TraceFilterDraft {
+  const values = value.split('\u0000')
+  return Object.fromEntries(privateFilterKeys.map((key, index) => [key, values[index] ?? ''])) as unknown as TraceFilterDraft
+}
+
 export function InjectionPage() {
   const pagination = usePaginationSearchParams()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -125,6 +161,9 @@ export function InjectionPage() {
   const [detail, setDetail] = useState<TraceDetailPayload | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState('')
+  const [filterDraft, setFilterDraft] = useState<TraceFilterDraft>(() => draftFromSearchParams(searchParams))
+  const traceRequestRef = useRef<{ id: number; controller: AbortController } | null>(null)
+  const feedbackRequestRef = useRef<AbortController | null>(null)
 
   const botId = searchParams.get('bot_id') ?? ''
   const sessionId = searchParams.get('session_id') ?? ''
@@ -154,15 +193,26 @@ export function InjectionPage() {
     return botId ? options.filter((option) => option.description?.startsWith(`${botId} ·`)) : options
   }, [botId])
   const loadChannels = useCallback(async () => scopeOptionsFor(await getScopeOptions(), ['channel']), [])
+  const committedDraftKey = privateFilterKeys.map((key) => searchParams.get(key) ?? '').join('\u0000')
+
+  useEffect(() => {
+    setFilterDraft(draftFromSerialized(committedDraftKey))
+  }, [committedDraftKey])
 
   const load = useCallback(async () => {
+    traceRequestRef.current?.controller.abort()
+    const controller = new AbortController()
+    const request = { id: (traceRequestRef.current?.id ?? 0) + 1, controller }
+    traceRequestRef.current = request
     setStatus('loading')
     setError(undefined)
     try {
-      const next = await listInjectionTraces(filters)
+      const next = await listInjectionTraces(filters, controller.signal)
+      if (traceRequestRef.current !== request || controller.signal.aborted) return
       setPayload(next)
       setStatus(next.items.length ? 'success' : 'empty')
     } catch (reason) {
+      if (traceRequestRef.current !== request || controller.signal.aborted || isRequestCancelled(reason)) return
       setPayload(null)
       setError(reason)
       setStatus('error')
@@ -170,22 +220,33 @@ export function InjectionPage() {
   }, [filters])
 
   const loadFeedback = useCallback(async () => {
+    feedbackRequestRef.current?.abort()
+    const controller = new AbortController()
+    feedbackRequestRef.current = controller
     setFeedbackStatus('loading')
     setFeedbackError(undefined)
     try {
-      const next = await getAgentFeedback()
+      const next = await getAgentFeedback(controller.signal)
+      if (controller.signal.aborted || feedbackRequestRef.current !== controller) return
       const records = next.feedback_records ?? []
       setFeedback(next)
       setFeedbackStatus(records.length ? 'success' : 'empty')
     } catch (reason) {
+      if (controller.signal.aborted || feedbackRequestRef.current !== controller || isRequestCancelled(reason)) return
       setFeedback(null)
       setFeedbackError(reason)
       setFeedbackStatus('error')
     }
   }, [])
 
-  useEffect(() => { void load() }, [load])
-  useEffect(() => { void loadFeedback() }, [loadFeedback])
+  useEffect(() => {
+    void load()
+    return () => traceRequestRef.current?.controller.abort()
+  }, [load])
+  useEffect(() => {
+    void loadFeedback()
+    return () => feedbackRequestRef.current?.abort()
+  }, [loadFeedback])
 
   useEffect(() => {
     if (!selectedTraceId) {
@@ -194,14 +255,15 @@ export function InjectionPage() {
       return
     }
     let active = true
+    const controller = new AbortController()
     setDetail(null)
     setDetailLoading(true)
     setDetailError('')
-    getInjectionTrace(selectedTraceId)
+    getInjectionTrace(selectedTraceId, controller.signal)
       .then((value) => { if (active) setDetail(value) })
-      .catch((reason: unknown) => { if (active) setDetailError(reason instanceof Error ? reason.message : 'Trace 详情加载失败') })
+      .catch((reason: unknown) => { if (active && !isRequestCancelled(reason)) setDetailError(reason instanceof Error ? reason.message : 'Trace 详情加载失败') })
       .finally(() => { if (active) setDetailLoading(false) })
-    return () => { active = false }
+    return () => { active = false; controller.abort() }
   }, [selectedTraceId])
 
   function selectTrace(traceId: string | null) {
@@ -213,11 +275,27 @@ export function InjectionPage() {
     })
   }
 
-  function resetFilters() {
+  function submitFilters() {
     setSearchParams((current) => {
-      const next = new URLSearchParams()
-      const traceId = current.get('trace_id')
-      if (traceId) next.set('trace_id', traceId)
+      const next = new URLSearchParams(current)
+      privateFilterKeys.forEach((key) => {
+        const value = filterDraft[key].trim()
+        if (value) next.set(key, value)
+        else next.delete(key)
+      })
+      next.delete('trace_id')
+      next.delete('offset')
+      return next
+    })
+  }
+
+  function resetFilters() {
+    setFilterDraft(emptyDraft)
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current)
+      privateFilterKeys.forEach((key) => next.delete(key))
+      next.delete('trace_id')
+      next.delete('offset')
       return next
     })
   }
@@ -235,30 +313,30 @@ export function InjectionPage() {
           <FieldGroup className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
             <ScopeSelect value={botId || undefined} loadOptions={loadBots} label="Bot" placeholder="选择真实 Bot" onValueChange={(value) => pagination.setFilters({ bot_id: value, session_id: null })} />
             <ScopeSelect value={sessionId || undefined} loadOptions={loadSessions} label="结构化会话" placeholder="选择真实会话" disabled={!botId} onValueChange={(value) => pagination.setFilters({ session_id: value })} />
-            <ScopeSelect value={channel || undefined} loadOptions={loadChannels} label="通道" placeholder="选择已注册通道" onValueChange={(value) => pagination.setFilters({ channel: value })} />
-            <Field><FieldLabel htmlFor="trace-group">Legacy 群 / 会话 ID</FieldLabel><Input id="trace-group" value={searchParams.get('group_id') ?? ''} onChange={(event) => pagination.setFilters({ group_id: event.target.value })} placeholder="仅按实际 group_id 筛选" /></Field>
-            <Field><FieldLabel htmlFor="trace-sender">发送者 ID</FieldLabel><Input id="trace-sender" value={searchParams.get('sender_id') ?? ''} onChange={(event) => pagination.setFilters({ sender_id: event.target.value })} /></Field>
+            <ScopeSelect value={filterDraft.channel || undefined} loadOptions={loadChannels} label="通道" placeholder="选择已注册通道" onValueChange={(value) => setFilterDraft((current) => ({ ...current, channel: value }))} />
+            <Field><FieldLabel htmlFor="trace-group">Legacy 群 / 会话 ID</FieldLabel><Input id="trace-group" value={filterDraft.group_id} onChange={(event) => setFilterDraft((current) => ({ ...current, group_id: event.target.value }))} placeholder="仅按实际 group_id 筛选" /></Field>
+            <Field><FieldLabel htmlFor="trace-sender">发送者 ID</FieldLabel><Input id="trace-sender" value={filterDraft.sender_id} onChange={(event) => setFilterDraft((current) => ({ ...current, sender_id: event.target.value }))} /></Field>
             <Field>
               <FieldLabel>状态</FieldLabel>
-              <Select value={searchParams.get('status') || 'all'} onValueChange={(value) => pagination.setFilters({ status: value === 'all' ? null : value })}>
+              <Select value={filterDraft.status || 'all'} onValueChange={(value) => setFilterDraft((current) => ({ ...current, status: value === 'all' ? '' : value }))}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent><SelectGroup><SelectItem value="all">全部状态</SelectItem><SelectItem value="ok">正常</SelectItem><SelectItem value="error">错误</SelectItem><SelectItem value="timeout">超时</SelectItem><SelectItem value="skipped">已跳过</SelectItem></SelectGroup></SelectContent>
               </Select>
             </Field>
             <Field>
               <FieldLabel>错误</FieldLabel>
-              <Select value={searchParams.get('has_error') || 'all'} onValueChange={(value) => pagination.setFilters({ has_error: value === 'all' ? null : value })}>
+              <Select value={filterDraft.has_error || 'all'} onValueChange={(value) => setFilterDraft((current) => ({ ...current, has_error: value === 'all' ? '' : value }))}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent><SelectGroup><SelectItem value="all">全部</SelectItem><SelectItem value="true">有错误</SelectItem><SelectItem value="false">无错误</SelectItem></SelectGroup></SelectContent>
               </Select>
             </Field>
-            <Field><FieldLabel htmlFor="trace-scope">Scope / chat type</FieldLabel><Input id="trace-scope" value={searchParams.get('scope') ?? ''} onChange={(event) => pagination.setFilters({ scope: event.target.value })} placeholder="按 trace 实际 scope 筛选" /></Field>
-            <Field><FieldLabel htmlFor="trace-from">开始时间</FieldLabel><Input id="trace-from" type="datetime-local" value={epochToInput(searchParams.get('from_ts'))} onChange={(event) => pagination.setFilters({ from_ts: inputToEpoch(event.target.value) })} /></Field>
-            <Field><FieldLabel htmlFor="trace-to">结束时间</FieldLabel><Input id="trace-to" type="datetime-local" value={epochToInput(searchParams.get('to_ts'))} onChange={(event) => pagination.setFilters({ to_ts: inputToEpoch(event.target.value) })} /></Field>
-            <Field><FieldLabel htmlFor="trace-revision">配置 revision</FieldLabel><Input id="trace-revision" value={searchParams.get('config_revision') ?? ''} onChange={(event) => pagination.setFilters({ config_revision: event.target.value })} placeholder="例如 cfg-…" /></Field>
+            <Field><FieldLabel htmlFor="trace-scope">Scope / chat type</FieldLabel><Input id="trace-scope" value={filterDraft.scope} onChange={(event) => setFilterDraft((current) => ({ ...current, scope: event.target.value }))} placeholder="按 trace 实际 scope 筛选" /></Field>
+            <Field><FieldLabel htmlFor="trace-from">开始时间</FieldLabel><Input id="trace-from" type="datetime-local" value={epochToInput(filterDraft.from_ts || null)} onChange={(event) => setFilterDraft((current) => ({ ...current, from_ts: inputToEpoch(event.target.value) }))} /></Field>
+            <Field><FieldLabel htmlFor="trace-to">结束时间</FieldLabel><Input id="trace-to" type="datetime-local" value={epochToInput(filterDraft.to_ts || null)} onChange={(event) => setFilterDraft((current) => ({ ...current, to_ts: inputToEpoch(event.target.value) }))} /></Field>
+            <Field><FieldLabel htmlFor="trace-revision">配置 revision</FieldLabel><Input id="trace-revision" value={filterDraft.config_revision} onChange={(event) => setFilterDraft((current) => ({ ...current, config_revision: event.target.value }))} placeholder="例如 cfg-…" /></Field>
           </FieldGroup>
           <div className="flex flex-wrap gap-2">
-            <Button type="button" disabled={status === 'loading'} onClick={() => void load()}><SearchIcon data-icon="inline-start" aria-hidden="true" />查询</Button>
+            <Button type="button" onClick={submitFilters}><SearchIcon data-icon="inline-start" aria-hidden="true" />查询</Button>
             <Button type="button" variant="outline" disabled={status === 'loading'} onClick={() => { void load(); void loadFeedback() }}><RefreshCwIcon data-icon="inline-start" aria-hidden="true" />刷新</Button>
             <Button type="button" variant="ghost" onClick={resetFilters}>清除筛选</Button>
           </div>
@@ -277,29 +355,32 @@ export function InjectionPage() {
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
           <QueryState status={status} error={error} onRetry={() => void load()}>
-            <div className="overflow-auto rounded-lg border">
-              <Table>
-                <TableHeader><TableRow><TableHead>Trace / 时间</TableHead><TableHead>Bot</TableHead><TableHead>会话</TableHead><TableHead>模式 / 状态</TableHead><TableHead>预览</TableHead><TableHead>命中 / 跳过 / 错误</TableHead><TableHead>主 Token 通道</TableHead><TableHead>Token / 耗时</TableHead><TableHead>Revision</TableHead></TableRow></TableHeader>
-                <TableBody>{payload?.items.map((trace) => {
-                  const session = traceSession(trace)
-                  const traceId = String(trace.trace_id ?? '')
-                  const traceStatus = String(trace.status ?? (trace.has_error ? 'error' : 'unknown'))
-                  return (
-                    <TableRow key={traceId} className="cursor-pointer" onClick={() => traceId && selectTrace(traceId)}>
-                      <TableCell><span className="flex min-w-40 flex-col"><Button type="button" variant="link" className="h-auto justify-start p-0 font-mono text-xs" onClick={(event) => { event.stopPropagation(); selectTrace(traceId) }}>{traceId || '未记录 trace_id'}</Button><span className="text-xs text-muted-foreground">{formatTime(trace.timestamp ?? trace.created_at)}</span></span></TableCell>
-                      <TableCell className="font-mono text-xs">{traceBot(trace)}</TableCell>
-                      <TableCell><span className="flex min-w-44 flex-col"><span>{session.primary}</span>{session.secondary ? <span className="text-xs text-muted-foreground">{session.secondary}</span> : null}</span></TableCell>
-                      <TableCell><span className="flex flex-col gap-1"><span>{textValue(trace.mode)}</span><Badge className="w-fit" variant={traceStatus === 'ok' ? 'secondary' : traceStatus === 'unknown' ? 'outline' : 'destructive'}>{statusLabel(traceStatus)}</Badge></span></TableCell>
-                      <TableCell className="max-w-md truncate" title={tracePreview(trace)}>{tracePreview(trace)}</TableCell>
-                      <TableCell className="font-mono text-xs">{channelCount(trace, 'hit')} / {channelCount(trace, 'skipped')} / {channelCount(trace, 'error')}</TableCell>
-                      <TableCell className="font-mono text-xs">{primaryTokenChannel(trace)}</TableCell>
-                      <TableCell>{textValue(trace.total_tokens ?? trace.tokens)} / {traceLatency(trace)}</TableCell>
-                      <TableCell className="font-mono text-xs">{textValue(trace.config_revision)}</TableCell>
-                    </TableRow>
-                  )
-                })}</TableBody>
-              </Table>
-            </div>
+            <ResponsiveTable label="Injection Trace 摘要清单" table={<Table>
+              <TableHeader><TableRow><TableHead>Trace / 时间</TableHead><TableHead>Bot</TableHead><TableHead>会话</TableHead><TableHead>模式 / 状态</TableHead><TableHead>预览</TableHead><TableHead>命中 / 跳过 / 错误</TableHead><TableHead>主 Token 通道</TableHead><TableHead>Token / 耗时</TableHead><TableHead>Revision</TableHead></TableRow></TableHeader>
+              <TableBody>{payload?.items.map((trace) => {
+                const session = traceSession(trace)
+                const traceId = String(trace.trace_id ?? '')
+                const traceStatus = String(trace.status ?? (trace.has_error ? 'error' : 'unknown'))
+                return (
+                  <TableRow key={traceId} className="cursor-pointer" onClick={() => traceId && selectTrace(traceId)}>
+                    <TableCell><span className="flex min-w-40 flex-col"><Button type="button" variant="link" className="h-auto justify-start p-0 font-mono text-xs" onClick={(event) => { event.stopPropagation(); selectTrace(traceId) }}>{traceId || '未记录 trace_id'}</Button><span className="text-xs text-muted-foreground">{formatTime(trace.timestamp ?? trace.created_at)}</span></span></TableCell>
+                    <TableCell className="font-mono text-xs">{traceBot(trace)}</TableCell>
+                    <TableCell><span className="flex min-w-44 flex-col"><span>{session.primary}</span>{session.secondary ? <span className="text-xs text-muted-foreground">{session.secondary}</span> : null}</span></TableCell>
+                    <TableCell><span className="flex flex-col gap-1"><span>{textValue(trace.mode)}</span><Badge className="w-fit" variant={traceStatus === 'ok' ? 'secondary' : traceStatus === 'unknown' ? 'outline' : 'destructive'}>{statusLabel(traceStatus)}</Badge></span></TableCell>
+                    <TableCell className="max-w-md truncate" title={tracePreview(trace)}>{tracePreview(trace)}</TableCell>
+                    <TableCell className="font-mono text-xs">{channelCount(trace, 'hit')} / {channelCount(trace, 'skipped')} / {channelCount(trace, 'error')}</TableCell>
+                    <TableCell className="font-mono text-xs">{primaryTokenChannel(trace)}</TableCell>
+                    <TableCell>{textValue(trace.total_tokens ?? trace.tokens)} / {traceLatency(trace)}</TableCell>
+                    <TableCell className="font-mono text-xs">{textValue(trace.config_revision)}</TableCell>
+                  </TableRow>
+                )
+              })}</TableBody>
+            </Table>} cards={payload?.items.map((trace) => {
+              const session = traceSession(trace)
+              const traceId = String(trace.trace_id ?? '')
+              const traceStatus = String(trace.status ?? (trace.has_error ? 'error' : 'unknown'))
+              return <article key={traceId} className="flex flex-col gap-3 rounded-lg border bg-card p-4"><div className="flex flex-wrap items-start justify-between gap-2"><div><Button type="button" variant="link" className="h-auto p-0 text-left font-mono text-xs" disabled={!traceId} onClick={() => selectTrace(traceId)}>{traceId || '未记录 trace_id'}</Button><p className="text-xs text-muted-foreground">{formatTime(trace.timestamp ?? trace.created_at)}</p></div><Badge className="w-fit" variant={traceStatus === 'ok' ? 'secondary' : traceStatus === 'unknown' ? 'outline' : 'destructive'}>{statusLabel(traceStatus)}</Badge></div><dl className="grid gap-2 text-sm sm:grid-cols-2"><div><dt className="text-muted-foreground">Bot</dt><dd className="break-all font-mono">{traceBot(trace)}</dd></div><div><dt className="text-muted-foreground">会话</dt><dd className="break-words">{session.primary}{session.secondary ? <span className="block text-xs text-muted-foreground">{session.secondary}</span> : null}</dd></div><div><dt className="text-muted-foreground">模式</dt><dd>{textValue(trace.mode)}</dd></div><div><dt className="text-muted-foreground">命中 / 跳过 / 错误</dt><dd className="font-mono text-xs">{channelCount(trace, 'hit')} / {channelCount(trace, 'skipped')} / {channelCount(trace, 'error')}</dd></div><div><dt className="text-muted-foreground">主 Token 通道</dt><dd className="break-words font-mono text-xs">{primaryTokenChannel(trace)}</dd></div><div><dt className="text-muted-foreground">Token / 耗时</dt><dd>{textValue(trace.total_tokens ?? trace.tokens)} / {traceLatency(trace)}</dd></div><div><dt className="text-muted-foreground">Revision</dt><dd className="break-all font-mono text-xs">{textValue(trace.config_revision)}</dd></div></dl><div><p className="text-xs text-muted-foreground">预览</p><p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{tracePreview(trace)}</p></div><Button type="button" variant="outline" size="sm" disabled={!traceId} onClick={() => selectTrace(traceId)}>查看 Trace 详情</Button></article>
+            })} />
           </QueryState>
           {payload ? <PaginationControls page={payload.page} onOffsetChange={pagination.setOffset} onLimitChange={pagination.setLimit} disabled={status === 'loading'} /> : null}
         </CardContent>
@@ -309,12 +390,10 @@ export function InjectionPage() {
         <CardHeader><CardTitle>反馈记录</CardTitle><CardDescription>最近 trace / memory 反馈只读展示；需要查看候选、审核与晋升时进入学习中心。</CardDescription></CardHeader>
         <CardContent>
           <QueryState status={feedbackStatus} error={feedbackError} onRetry={() => void loadFeedback()}>
-            <div className="overflow-auto rounded-lg border">
-              <Table>
-                <TableHeader><TableRow><TableHead>ID</TableHead><TableHead>反馈</TableHead><TableHead>Trace</TableHead><TableHead>记忆</TableHead><TableHead>原因</TableHead><TableHead>时间</TableHead></TableRow></TableHeader>
-                <TableBody>{feedbackRecords.slice(0, 50).map((item, index) => <TableRow key={`feedback-${String(item.id ?? index)}-${index}`}><TableCell className="font-mono text-xs">{textValue(item.id)}</TableCell><TableCell><Badge variant="secondary">{textValue(item.feedback)}</Badge></TableCell><TableCell className="font-mono text-xs">{textValue(item.trace_id)}</TableCell><TableCell className="font-mono text-xs">{textValue(item.memory_id)}</TableCell><TableCell className="max-w-lg truncate" title={textValue(item.reason ?? item.content)}>{textValue(item.reason ?? item.content)}</TableCell><TableCell>{formatTime(item.created_at ?? item.timestamp)}</TableCell></TableRow>)}</TableBody>
-              </Table>
-            </div>
+            <ResponsiveTable label="Injection 反馈记录清单" table={<Table>
+              <TableHeader><TableRow><TableHead>ID</TableHead><TableHead>反馈</TableHead><TableHead>Trace</TableHead><TableHead>记忆</TableHead><TableHead>原因</TableHead><TableHead>时间</TableHead></TableRow></TableHeader>
+              <TableBody>{feedbackRecords.slice(0, 50).map((item, index) => <TableRow key={`feedback-${String(item.id ?? index)}-${index}`}><TableCell className="font-mono text-xs">{textValue(item.id)}</TableCell><TableCell><Badge variant="secondary">{textValue(item.feedback)}</Badge></TableCell><TableCell className="font-mono text-xs">{textValue(item.trace_id)}</TableCell><TableCell className="font-mono text-xs">{textValue(item.memory_id)}</TableCell><TableCell className="max-w-lg truncate" title={textValue(item.reason ?? item.content)}>{textValue(item.reason ?? item.content)}</TableCell><TableCell>{formatTime(item.created_at ?? item.timestamp)}</TableCell></TableRow>)}</TableBody>
+            </Table>} cards={feedbackRecords.slice(0, 50).map((item, index) => <article key={`feedback-card-${String(item.id ?? index)}-${index}`} className="flex flex-col gap-3 rounded-lg border bg-card p-4"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-mono text-xs text-muted-foreground">#{textValue(item.id)}</span><Badge variant="secondary">{textValue(item.feedback)}</Badge></div><dl className="grid gap-2 text-sm sm:grid-cols-2"><div><dt className="text-muted-foreground">Trace</dt><dd className="break-all font-mono text-xs">{textValue(item.trace_id)}</dd></div><div><dt className="text-muted-foreground">记忆</dt><dd className="break-all font-mono text-xs">{textValue(item.memory_id)}</dd></div><div className="sm:col-span-2"><dt className="text-muted-foreground">原因</dt><dd className="whitespace-pre-wrap break-words">{textValue(item.reason ?? item.content)}</dd></div><div><dt className="text-muted-foreground">时间</dt><dd>{formatTime(item.created_at ?? item.timestamp)}</dd></div></dl></article>)} />
           </QueryState>
         </CardContent>
       </Card>

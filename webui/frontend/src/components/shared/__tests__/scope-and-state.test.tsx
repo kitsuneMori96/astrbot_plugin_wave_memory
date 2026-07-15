@@ -28,6 +28,29 @@ describe('ScopeSelect 与 ObjectDeepLink', () => {
     expect(screen.queryByRole('option', { name: '白真真' })).not.toBeInTheDocument()
   })
 
+  it('触发器只显示单行标签，不把下拉说明带进固定高度输入框', async () => {
+    const describedOptions = [
+      { value: 'bot:yushu', label: '羽书', description: 'Bot ID yushu · QQ 250', kind: 'bot' as const },
+    ]
+    render(<ScopeSelect value="bot:yushu" loadOptions={async () => describedOptions} onValueChange={() => undefined} />)
+
+    const trigger = await screen.findByRole('combobox', { name: '作用域' })
+    await waitFor(() => expect(trigger).toHaveTextContent('羽书'))
+    expect(trigger).not.toHaveTextContent('Bot ID yushu')
+  })
+
+  it('规范 Scope 默认值回填时保持受控，不触发 Radix uncontrolled 警告', async () => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { rerender } = render(<ScopeSelect loadOptions={async () => options} onValueChange={() => undefined} />)
+
+    await screen.findByRole('combobox', { name: '作用域' })
+    rerender(<ScopeSelect value="bot:yushu" loadOptions={async () => options} onValueChange={() => undefined} />)
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '作用域' })).toHaveTextContent('羽书'))
+
+    expect(warning.mock.calls.flat().join(' ')).not.toContain('uncontrolled')
+    warning.mockRestore()
+  })
+
   it('真实 options 为空时禁用选择且明确显示 empty', async () => {
     render(<ScopeSelect loadOptions={async () => []} onValueChange={() => undefined} />)
 

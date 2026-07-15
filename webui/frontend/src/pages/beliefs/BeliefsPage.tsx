@@ -1,20 +1,58 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
-import { ArchiveIcon, BrainCircuitIcon, CheckIcon, EyeIcon, SearchIcon, ShieldCheckIcon } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import {
+  ArchiveIcon,
+  BrainCircuitIcon,
+  CheckIcon,
+  Edit2Icon,
+  EyeIcon,
+  Loader2Icon,
+  LockIcon,
+  MessageSquareTextIcon,
+  PlusIcon,
+  SearchIcon,
+  ShieldCheckIcon,
+  Trash2Icon,
+} from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
-import { approveBelief, archiveBelief, listBeliefs, listLegacyBeliefs, type BeliefItem, type BeliefType, type LegacyBeliefsResponse, type ScopedSelection } from '@/api/beliefs'
+import {
+  approveBelief,
+  archiveBelief,
+  batchTransitionBeliefs,
+  getBeliefEvidence,
+  listBeliefs,
+  listLegacyBeliefs,
+  type BeliefEvidencePayload,
+  type BeliefItem,
+  type BeliefType,
+  type LegacyBeliefsResponse,
+  type ScopedSelection,
+} from '@/api/beliefs'
 import { fetchJson } from '@/api/client'
 import { getScopeOptions, scopeOptionsFor } from '@/api/options'
-import { EvidenceList, ObjectDeepLink, PaginationControls, QualityDecisionBadge, QueryState, ResponsiveDetail, ScopeSelect, type ObjectRefState } from '@/components/shared'
+import {
+  EvidenceList,
+  ObjectDeepLink,
+  PaginationControls,
+  QualityDecisionBadge,
+  QueryState,
+  ResponsiveDetail,
+  ResponsiveTable,
+  ScopeSelect,
+  type ObjectRefState,
+} from '@/components/shared'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Field, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
+import { ScrollArea } from '@/components/ui/scroll-area'
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useCanonicalScopeDefault, usePaginationSearchParams } from '@/hooks/use-pagination-search-params'
 
 const TYPE_LABELS: Record<BeliefType, string> = {
@@ -47,6 +85,12 @@ const EVIDENCE_TYPE_LABELS: Record<string, string> = {
   message: '消息记录',
 }
 
+const DEEP_LINK_LABELS: Record<Exclude<ObjectRefState, 'ready'>, string> = {
+  'not-found': '对象不存在或引用无效；不会使用裸 ID 回退定位。',
+  'scope-mismatch': '对象引用与当前 Bot / 会话范围不匹配。',
+  'version-stale': '对象版本已更新，请从最新列表重新打开。',
+}
+
 function deepLinkFailureState(reason: unknown): ObjectRefState {
   const payload = reason instanceof Error && 'payload' in reason ? (reason as Error & { payload?: unknown }).payload : undefined
   const code = typeof payload === 'object' && payload !== null && 'error' in payload
@@ -57,24 +101,18 @@ function deepLinkFailureState(reason: unknown): ObjectRefState {
   return 'not-found'
 }
 
-const DEEP_LINK_LABELS: Record<Exclude<ObjectRefState, 'ready'>, string> = {
-  'not-found': '对象不存在或引用无效；不会使用裸 ID 回退定位。',
-  'scope-mismatch': '对象引用与当前 Bot / 会话范围不匹配。',
-  'version-stale': '对象版本已更新，请从最新列表重新打开。',
-}
-
 function statusClass(status: BeliefItem['status']) {
-  if (status === 'active') return 'border-emerald-500/20 bg-emerald-500/10 text-emerald-600'
-  if (status === 'pending') return 'border-amber-500/20 bg-amber-500/10 text-amber-600'
-  if (status === 'quarantined') return 'border-red-500/20 bg-red-500/10 text-red-600'
+  if (status === 'active') return 'border-primary/20 bg-primary/10 text-primary'
+  if (status === 'pending') return 'border-border bg-secondary text-secondary-foreground'
+  if (status === 'quarantined') return 'border-destructive/20 bg-destructive/10 text-destructive'
   return 'border-border bg-muted text-muted-foreground'
 }
 
 function typeClass(type: BeliefType) {
-  if (type === 'self_identity') return 'border-purple-500/20 bg-purple-500/10 text-purple-600'
-  if (type === 'person_judgment') return 'border-amber-500/20 bg-amber-500/10 text-amber-600'
-  if (type === 'world_view') return 'border-blue-500/20 bg-blue-500/10 text-blue-600'
-  return 'border-pink-500/20 bg-pink-500/10 text-pink-600'
+  if (type === 'self_identity') return 'border-primary/20 bg-primary/10 text-primary'
+  if (type === 'person_judgment') return 'border-border bg-muted text-foreground'
+  if (type === 'world_view') return 'border-border bg-accent text-accent-foreground'
+  return 'border-border bg-secondary text-secondary-foreground'
 }
 
 function confidenceText(value: number | null) {
@@ -82,93 +120,87 @@ function confidenceText(value: number | null) {
   return `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%`
 }
 
+function formatTime(seconds?: number | null) {
+  return seconds && Number.isFinite(seconds) ? new Date(seconds * 1000).toLocaleString('zh-CN') : '未记录'
+}
+
+function recordText(record: Record<string, unknown>, keys: string[], fallback = '未记录') {
+  for (const key of keys) {
+    const value = record[key]
+    if (value !== undefined && value !== null && String(value).trim()) return String(value)
+  }
+  return fallback
+}
+
 function ConfidenceComponents({ item }: { item: BeliefItem }) {
   const components = Object.entries(item.confidence_components ?? {})
   if (!components.length) return <p className="text-sm text-muted-foreground">服务端未返回置信分量。</p>
-  return (
-    <div className="grid gap-3 sm:grid-cols-2">
-      {components.map(([key, raw]) => {
-        const value = Math.max(0, Math.min(1, Number(raw) || 0))
-        return (
-          <div key={key} className="rounded-lg border bg-muted/20 p-3">
-            <div className="mb-2 flex items-center justify-between gap-3 text-sm">
-              <span>{COMPONENT_LABELS[key] ?? '评估分量'}</span>
-              <span className="font-medium tabular-nums">{Math.round(value * 100)}%</span>
-            </div>
-            <div className="h-1.5 overflow-hidden rounded-full bg-muted">
-              <div className="h-full rounded-full bg-primary" style={{ width: `${value * 100}%` }} />
-            </div>
-          </div>
-        )
-      })}
-    </div>
-  )
+  return <div className="grid gap-3 sm:grid-cols-2">{components.map(([key, raw]) => {
+    const value = Math.max(0, Math.min(1, Number(raw) || 0))
+    return <div key={key} className="rounded-lg border bg-muted/20 p-3"><div className="flex items-center justify-between gap-3 text-sm"><span>{COMPONENT_LABELS[key] ?? '评估分量'}</span><span className="font-medium tabular-nums">{Math.round(value * 100)}%</span></div><div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${value * 100}%` }} /></div></div>
+  })}</div>
 }
 
 function EvidenceCards({ item }: { item: BeliefItem }) {
-  if (!item.evidence.length) {
-    return <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">当前没有可用证据，系统不会将它直接晋升为有效信念。</div>
-  }
-  return (
-    <div className="grid gap-3 sm:grid-cols-2">
-      {item.evidence.slice(0, 4).map((evidence) => (
-        <div key={`${evidence.type}:${evidence.id}`} className="rounded-lg border bg-card p-3">
-          <div className="flex items-center justify-between gap-2">
-            <span className="font-medium">{EVIDENCE_TYPE_LABELS[evidence.type] ?? '关联证据'}</span>
-            <Badge variant={evidence.availability === 'available' ? 'secondary' : 'outline'}>
-              {evidence.availability === 'available' ? '可用' : evidence.availability === 'quarantined' ? '已隔离' : '待核验'}
-            </Badge>
-          </div>
-          <p className="mt-2 line-clamp-2 text-sm text-muted-foreground">{evidence.summary || '已保留可追溯引用，可在技术详情中核对完整来源。'}</p>
-        </div>
-      ))}
-    </div>
-  )
+  if (!item.evidence.length) return <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">当前没有可用证据，系统不会将它直接晋升为有效信念。</div>
+  return <div className="grid gap-3 sm:grid-cols-2">{item.evidence.slice(0, 4).map((evidence) => <div key={`${evidence.type}:${evidence.id}`} className="rounded-lg border bg-card p-3"><div className="flex items-center justify-between gap-2"><span className="font-medium">{EVIDENCE_TYPE_LABELS[evidence.type] ?? '关联证据'}</span><Badge variant={evidence.availability === 'available' ? 'secondary' : 'outline'}>{evidence.availability === 'available' ? '可用' : evidence.availability === 'quarantined' ? '已隔离' : '待核验'}</Badge></div><p className="mt-2 line-clamp-2 text-sm text-muted-foreground">{evidence.summary || '已保留可追溯引用，可在技术详情中核对完整来源。'}</p></div>)}</div>
 }
 
 function BeliefDetails({ item, mutating, onTransition }: { item: BeliefItem; mutating: boolean; onTransition: (action: 'approve' | 'archive') => void }) {
-  return (
-    <div className="flex flex-col gap-6">
-      <section className="space-y-2">
-        <div className="flex flex-wrap gap-2"><Badge className={typeClass(item.type)}>{TYPE_LABELS[item.type]}</Badge><Badge className={statusClass(item.status)}>{STATUS_LABELS[item.status]}</Badge></div>
-        <p className="text-base leading-7 text-foreground">{item.content}</p>
-        {item.anchor_sentence ? <blockquote className="rounded-r-lg border-l-2 border-primary bg-primary/5 px-4 py-3 text-muted-foreground">“{item.anchor_sentence}”</blockquote> : null}
-      </section>
+  return <div className="flex flex-col gap-6">
+    <section className="flex flex-col gap-2"><div className="flex flex-wrap gap-2"><Badge className={typeClass(item.type)}>{TYPE_LABELS[item.type]}</Badge><Badge className={statusClass(item.status)}>{STATUS_LABELS[item.status]}</Badge></div><p className="text-base leading-7 text-foreground">{item.content}</p>{item.anchor_sentence ? <blockquote className="rounded-r-lg border-l-2 border-primary bg-primary/5 px-4 py-3 text-muted-foreground">“{item.anchor_sentence}”</blockquote> : null}</section>
+    <section className="flex flex-col gap-3"><div className="flex items-center justify-between gap-3"><h3 className="font-medium">状态分量</h3><Badge variant="outline">综合 {confidenceText(item.confidence)}</Badge></div><ConfidenceComponents item={item} /></section>
+    <section className="flex flex-col gap-3"><div className="flex items-center justify-between gap-3"><h3 className="font-medium">证据卡</h3><span className="text-sm text-muted-foreground">{item.evidence.length} 条</span></div><EvidenceCards item={item} /></section>
+    {item.quarantine_reason ? <Alert variant="destructive"><AlertTitle>当前处于隔离状态</AlertTitle><AlertDescription>{item.quarantine_reason}</AlertDescription></Alert> : null}
+    <div className="flex flex-wrap gap-2 border-t pt-4"><Button disabled={mutating || !item.actions.approve.available} onClick={() => onTransition('approve')}><CheckIcon data-icon="inline-start" />通过并激活</Button><Button variant="outline" disabled={mutating || !item.actions.archive.available} onClick={() => onTransition('archive')}><ArchiveIcon data-icon="inline-start" />归档</Button>{!item.actions.approve.available ? <span className="self-center text-sm text-muted-foreground">无法通过：{item.actions.approve.reason_code ?? '当前状态不允许'}</span> : null}</div>
+    <details className="rounded-lg border bg-muted/20 p-3"><summary className="cursor-pointer font-medium">技术字段与完整证据引用</summary><div className="mt-4 flex flex-col gap-4"><dl className="grid gap-3 text-sm sm:grid-cols-2"><div><dt className="text-muted-foreground">信念键</dt><dd className="break-all font-mono">{item.belief_key}</dd></div><div><dt className="text-muted-foreground">修订版本</dt><dd className="font-mono">{item.revision}</dd></div><div><dt className="text-muted-foreground">置信策略</dt><dd className="break-all font-mono">{item.confidence_policy_version ?? '未记录'}</dd></div><div><dt className="text-muted-foreground">作用域</dt><dd className="break-all font-mono">{item.bot_id} · {item.session_id} · {item.visibility}</dd></div></dl><EvidenceList evidence={item.evidence} />{item.object_ref ? <ObjectDeepLink to="/beliefs" objectRef={item.object_ref}>复制可复现对象深链</ObjectDeepLink> : null}<details className="rounded-md border bg-background p-3"><summary className="cursor-pointer text-sm">查看置信分量 JSON</summary><pre className="mt-3 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(item.confidence_components ?? {}, null, 2)}</pre></details></div></details>
+  </div>
+}
 
-      <section className="space-y-3">
-        <div className="flex items-center justify-between gap-3"><h3 className="font-medium">状态分量</h3><Badge variant="outline">综合 {confidenceText(item.confidence)}</Badge></div>
-        <ConfidenceComponents item={item} />
-      </section>
+function BeliefEvidenceDialog({ item, scope, onOpenChange }: { item: BeliefItem | null; scope: ScopedSelection | null; onOpenChange: (open: boolean) => void }) {
+  const [payload, setPayload] = useState<BeliefEvidencePayload | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [before, setBefore] = useState(15)
+  const [after, setAfter] = useState(15)
+  const [tab, setTab] = useState<'relationship_event' | 'episode' | 'memory'>('memory')
 
-      <section className="space-y-3">
-        <div className="flex items-center justify-between gap-3"><h3 className="font-medium">证据卡</h3><span className="text-sm text-muted-foreground">{item.evidence.length} 条</span></div>
-        <EvidenceCards item={item} />
-      </section>
+  const load = useCallback(async () => {
+    if (!item || !scope) return
+    setLoading(true)
+    setError('')
+    try {
+      const next = await getBeliefEvidence(item, scope, before, after)
+      setPayload(next)
+      setTab(next.relationship_events.length ? 'relationship_event' : next.episodes.length ? 'episode' : 'memory')
+    } catch (reason) {
+      setPayload(null)
+      setError(reason instanceof Error ? reason.message : '信念证据读取失败')
+    } finally {
+      setLoading(false)
+    }
+  }, [after, before, item, scope])
 
-      {item.quarantine_reason ? <Alert variant="destructive"><AlertTitle>当前处于隔离状态</AlertTitle><AlertDescription>{item.quarantine_reason}</AlertDescription></Alert> : null}
+  useEffect(() => {
+    if (!item) {
+      setPayload(null)
+      setError('')
+      return
+    }
+    void load()
+  }, [item, load])
 
-      <div className="flex flex-wrap gap-2 border-t pt-4">
-        <Button disabled={mutating || !item.actions.approve.available} onClick={() => onTransition('approve')}><CheckIcon data-icon="inline-start" aria-hidden="true" />通过并激活</Button>
-        <Button variant="outline" disabled={mutating || !item.actions.archive.available} onClick={() => onTransition('archive')}><ArchiveIcon data-icon="inline-start" aria-hidden="true" />归档</Button>
-        {!item.actions.approve.available ? <span className="self-center text-sm text-muted-foreground">无法通过：{item.actions.approve.reason_code ?? '当前状态不允许'}</span> : null}
-      </div>
-
-      <details className="rounded-lg border bg-muted/20 p-3">
-        <summary className="cursor-pointer font-medium">技术字段与完整证据引用</summary>
-        <div className="mt-4 flex flex-col gap-4">
-          <dl className="grid gap-3 text-sm sm:grid-cols-2">
-            <div><dt className="text-muted-foreground">信念键</dt><dd className="break-all font-mono">{item.belief_key}</dd></div>
-            <div><dt className="text-muted-foreground">修订版本</dt><dd className="font-mono">{item.revision}</dd></div>
-            <div><dt className="text-muted-foreground">置信策略</dt><dd className="break-all font-mono">{item.confidence_policy_version ?? '未记录'}</dd></div>
-            <div><dt className="text-muted-foreground">作用域</dt><dd className="break-all font-mono">{item.bot_id} · {item.session_id} · {item.visibility}</dd></div>
-          </dl>
-          <EvidenceList evidence={item.evidence} />
-          {item.object_ref ? <ObjectDeepLink to="/beliefs" objectRef={item.object_ref}>复制可复现对象深链</ObjectDeepLink> : null}
-          <details className="rounded-md border bg-background p-3"><summary className="cursor-pointer text-sm">查看置信分量 JSON</summary><pre className="mt-3 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(item.confidence_components ?? {}, null, 2)}</pre></details>
-        </div>
-      </details>
-    </div>
-  )
+  const messages = payload?.messages ?? []
+  return <Dialog open={Boolean(item)} onOpenChange={onOpenChange}><DialogContent className="flex max-h-[86vh] flex-col sm:max-w-4xl"><DialogHeader><DialogTitle className="flex flex-wrap items-center gap-2"><span>信念形成多阶证据链</span>{item ? <Badge variant="outline">#{item.id}</Badge> : null}</DialogTitle><DialogDescription>只在当前 Bot 与 canonical 会话中还原证据；关系变化和自省插曲没有 scoped 引用时保持禁用，不回退读取 Legacy。</DialogDescription></DialogHeader>
+    {loading ? <div className="flex min-h-64 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2Icon className="animate-spin" />正在还原同作用域证据链</div> : null}
+    {!loading && error ? <Alert variant="destructive"><AlertTitle>证据读取失败</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
+    {!loading && payload ? <Tabs value={tab} onValueChange={(value) => setTab(value as typeof tab)} className="flex min-h-0 flex-1 flex-col"><div className="flex flex-wrap items-end justify-between gap-3 border-b pb-3"><div className="flex items-end gap-2"><Field className="w-20 gap-1"><FieldLabel htmlFor="belief-evidence-before">前文</FieldLabel><Input id="belief-evidence-before" type="number" min={0} max={50} value={before} onChange={(event) => setBefore(Math.max(0, Math.min(50, Number(event.target.value) || 0)))} /></Field><Field className="w-20 gap-1"><FieldLabel htmlFor="belief-evidence-after">后文</FieldLabel><Input id="belief-evidence-after" type="number" min={0} max={50} value={after} onChange={(event) => setAfter(Math.max(0, Math.min(50, Number(event.target.value) || 0)))} /></Field><Button type="button" size="sm" onClick={() => void load()}>刷新</Button></div><TabsList><TabsTrigger value="relationship_event" disabled={!payload.relationship_events.length}>关系变化</TabsTrigger><TabsTrigger value="episode" disabled={!payload.episodes.length}>自省独白</TabsTrigger><TabsTrigger value="memory" disabled={!messages.length}>聊天气泡</TabsTrigger></TabsList></div>
+      <TabsContent value="relationship_event" className="min-h-0 flex-1 pt-4"><ScrollArea className="max-h-[55vh]"><div className="flex flex-col gap-3 pr-3">{payload.relationship_events.map((event, index) => <article key={recordText(event, ['id'], String(index))} className="rounded-lg border bg-card p-4"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{recordText(event, ['dimension', 'event_type'], '关系变化')}</span><Badge variant="outline">{recordText(event, ['delta'], '—')}</Badge></div><p className="mt-2 text-sm text-muted-foreground">{recordText(event, ['reason', 'summary'])}</p></article>)}</div></ScrollArea></TabsContent>
+      <TabsContent value="episode" className="min-h-0 flex-1 pt-4"><ScrollArea className="max-h-[55vh]"><div className="flex flex-col gap-3 pr-3">{payload.episodes.map((episode, index) => <article key={recordText(episode, ['id'], String(index))} className="rounded-lg border bg-card p-4"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{recordText(episode, ['episode_type'], '自省插曲')}</span><span className="text-xs text-muted-foreground">{formatTime(Number(episode.created_at) || null)}</span></div><dl className="mt-3 grid gap-3 text-sm"><div><dt className="text-muted-foreground">外部触发</dt><dd>{recordText(episode, ['trigger'])}</dd></div><div><dt className="text-muted-foreground">内心独白</dt><dd>{recordText(episode, ['bot_inner_thought'])}</dd></div><div><dt className="text-muted-foreground">回复与后果</dt><dd>{recordText(episode, ['bot_reply', 'outcome'])}</dd></div></dl></article>)}</div></ScrollArea></TabsContent>
+      <TabsContent value="memory" className="min-h-0 flex-1 pt-4"><ScrollArea className="max-h-[55vh]"><div className="flex flex-col gap-4 pr-3">{messages.map((message) => <article key={`${message.role}:${message.id}`} data-evidence-role={message.role} className={message.role === 'anchor' ? 'rounded-lg border border-primary/30 bg-primary/5 p-3' : 'rounded-lg border bg-card p-3'}><div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground"><span>{message.sender_name || message.sender_id || '发送者未记录'}</span><span>{formatTime(message.timestamp)}</span></div><p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6">{message.content}</p>{message.role === 'anchor' ? <Badge className="mt-2" variant="secondary">信念来源锚点</Badge> : null}</article>)}</div></ScrollArea></TabsContent>
+    </Tabs> : null}
+    {!loading && payload && !messages.length && !payload.relationship_events.length && !payload.episodes.length ? <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">该信念没有可安全还原的 scoped 证据；不会使用旧 group_id 猜测上下文。</div> : null}
+  </DialogContent></Dialog>
 }
 
 export function BeliefsPage() {
@@ -178,11 +210,15 @@ export function BeliefsPage() {
   const [queryStatus, setQueryStatus] = useState<'loading' | 'success' | 'empty' | 'error'>('loading')
   const [error, setError] = useState<unknown>()
   const [mutating, setMutating] = useState<number | null>(null)
+  const [batchMutating, setBatchMutating] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<number[]>([])
+  const [evidenceItem, setEvidenceItem] = useState<BeliefItem | null>(null)
   const [deepLinkedItem, setDeepLinkedItem] = useState<BeliefItem | null>(null)
   const [deepLinkStatus, setDeepLinkStatus] = useState<'loading' | ObjectRefState | null>(null)
   const [legacyPayload, setLegacyPayload] = useState<LegacyBeliefsResponse | null>(null)
   const [legacyOffset, setLegacyOffset] = useState(0)
   const [legacyLoading, setLegacyLoading] = useState(true)
+  const listRequest = useRef(0)
   const botId = searchParams.get('bot_id') ?? ''
   const sessionId = searchParams.get('session_id') ?? ''
   const visibility = searchParams.get('visibility') ?? 'group'
@@ -192,9 +228,9 @@ export function BeliefsPage() {
   const status = searchParams.get('status') ?? ''
   const search = searchParams.get('search') ?? ''
   useCanonicalScopeDefault({ botId, sessionId, setFilters: pagination.setFilters })
-  const [searchDraft, setSearchDraft] = useState(search)
+  const [filterDraft, setFilterDraft] = useState({ search, type, status })
 
-  useEffect(() => setSearchDraft(search), [search])
+  useEffect(() => setFilterDraft({ search, type, status }), [search, status, type])
 
   const scope = useMemo<ScopedSelection | null>(() => botId && sessionId && visibility === 'group' ? { bot_id: botId, session_id: sessionId, visibility: 'group' } : null, [botId, sessionId, visibility])
   const loadBots = useCallback(async () => scopeOptionsFor(await getScopeOptions(), ['bot']), [])
@@ -204,8 +240,10 @@ export function BeliefsPage() {
   }, [botId])
 
   const load = useCallback(async () => {
+    const request = ++listRequest.current
     if (!scope) {
       setPayload(null)
+      setSelectedIds([])
       setQueryStatus('empty')
       return
     }
@@ -213,10 +251,14 @@ export function BeliefsPage() {
     setError(undefined)
     try {
       const next = await listBeliefs({ ...scope, limit: pagination.limit, offset: pagination.offset, type: type || undefined, status: status || undefined, search: search || undefined })
+      if (request !== listRequest.current) return
       setPayload(next)
+      setSelectedIds([])
       setQueryStatus(next.items.length ? 'success' : 'empty')
     } catch (reason) {
+      if (request !== listRequest.current) return
       setPayload(null)
+      setSelectedIds([])
       setError(reason)
       setQueryStatus('error')
     }
@@ -267,82 +309,64 @@ export function BeliefsPage() {
     }
   }
 
+  async function transitionSelected(action: 'approve' | 'archive') {
+    if (!scope) return
+    const items = (payload?.items ?? []).filter((item) => selectedIds.includes(item.id))
+    if (!items.length) return
+    setBatchMutating(true)
+    try {
+      const result = await batchTransitionBeliefs(items, action, scope)
+      if (!result.ok || result.operation.status !== 'succeeded') throw new Error('服务端未确认批量生命周期变更成功')
+      toast.success(action === 'approve' ? `已批量激活 ${result.transitioned_count} 条信念` : `已批量归档 ${result.transitioned_count} 条信念`)
+      await load()
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : '批量生命周期变更失败')
+    } finally {
+      setBatchMutating(false)
+    }
+  }
+
   function submitSearch(event: FormEvent) {
     event.preventDefault()
-    pagination.setFilters({ search: searchDraft.trim() || null })
+    setLegacyOffset(0)
+    pagination.setFilters({ search: filterDraft.search.trim() || null, type: filterDraft.type || null, status: filterDraft.status || null })
+  }
+
+  function resetFilters() {
+    setLegacyOffset(0)
+    setFilterDraft({ search: '', type: '', status: '' })
+    pagination.setFilters({ search: null, type: null, status: null })
   }
 
   const pageItems = payload?.items ?? []
-  const activeCount = pageItems.filter((item) => item.status === 'active').length
-  const pendingCount = pageItems.filter((item) => item.status === 'pending').length
-  const evidenceCount = pageItems.reduce((sum, item) => sum + item.evidence.length, 0)
+  const selectedItems = pageItems.filter((item) => selectedIds.includes(item.id))
+  const allPageSelected = pageItems.length > 0 && pageItems.every((item) => selectedIds.includes(item.id))
+  const activeCount = payload ? pageItems.filter((item) => item.status === 'active').length : '—'
+  const pendingCount = payload ? pageItems.filter((item) => item.status === 'pending').length : '—'
+  const evidenceCount = payload ? pageItems.reduce((sum, item) => sum + item.evidence.length, 0) : '—'
   const totalText = payload?.page.total_status === 'exact' && payload.page.total !== null ? payload.page.total : '—'
+  const legacyTotal = legacyPayload?.page.total ?? null
+  const legacyRangeEnd = legacyPayload ? legacyTotal === null ? legacyOffset + legacyPayload.items.length : Math.min(legacyOffset + 25, legacyTotal) : legacyOffset
+  const batchAvailable = payload?.capabilities.batch_lifecycle?.available === true
+  const selectedCanApprove = selectedItems.length > 0 && selectedItems.every((item) => item.actions.approve.available && item.object_ref)
+  const selectedCanArchive = selectedItems.length > 0 && selectedItems.every((item) => item.actions.archive.available && item.object_ref)
 
-  return (
-    <div data-slot="beliefs-page" className="flex flex-col gap-6">
-      <Card className="overflow-hidden border-primary/10 bg-gradient-to-br from-primary/5 via-card to-card">
-        <CardHeader className="gap-4 sm:flex-row sm:items-start sm:justify-between">
-          <div className="flex gap-3"><div className="rounded-xl bg-primary/10 p-3 text-primary"><BrainCircuitIcon className="size-6" /></div><div><CardTitle className="text-xl">信念证据与生命周期</CardTitle><CardDescription className="mt-1 max-w-3xl">以证据为中心查看心智信念；审核状态与生效、归档、隔离生命周期严格分离。</CardDescription></div></div>
-          <Badge variant="outline" className="w-fit"><ShieldCheckIcon className="size-3.5" />仅允许受控状态迁移</Badge>
-        </CardHeader>
-        <CardContent className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <div className="rounded-lg border bg-background/80 p-3"><p className="text-xs text-muted-foreground">匹配总数</p><p className="mt-1 text-2xl font-semibold tabular-nums">{totalText}</p></div>
-          <div className="rounded-lg border bg-background/80 p-3"><p className="text-xs text-muted-foreground">本页已生效</p><p className="mt-1 text-2xl font-semibold tabular-nums text-emerald-600">{activeCount}</p></div>
-          <div className="rounded-lg border bg-background/80 p-3"><p className="text-xs text-muted-foreground">本页待审核</p><p className="mt-1 text-2xl font-semibold tabular-nums text-amber-600">{pendingCount}</p></div>
-          <div className="rounded-lg border bg-background/80 p-3"><p className="text-xs text-muted-foreground">本页证据引用</p><p className="mt-1 text-2xl font-semibold tabular-nums text-primary">{evidenceCount}</p></div>
-        </CardContent>
-      </Card>
+  return <div data-slot="beliefs-page" className="flex flex-col gap-6">
+    <Card className="overflow-hidden border-primary/10 bg-gradient-to-br from-primary/5 via-card to-card"><CardHeader className="gap-4 sm:flex-row sm:items-start sm:justify-between"><div className="flex gap-3"><div className="rounded-xl bg-primary/10 p-3 text-primary"><BrainCircuitIcon className="size-6" /></div><div><CardTitle className="text-xl">信念审核与证据链</CardTitle><CardDescription className="mt-1 max-w-3xl">恢复高密度人工裁决、批量生命周期与多阶证据追溯；所有正式操作都绑定当前 RuntimeScope、ObjectRef 与 revision。</CardDescription></div></div><Badge variant="outline" className="w-fit"><ShieldCheckIcon className="size-3.5" />受控生命周期</Badge></CardHeader><CardContent className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><div className="rounded-lg border bg-background/80 p-3"><p className="text-xs text-muted-foreground">匹配总数</p><p className="mt-1 text-2xl font-semibold tabular-nums">{totalText}</p></div><div className="rounded-lg border bg-background/80 p-3"><p className="text-xs text-muted-foreground">本页已生效</p><p className="mt-1 text-2xl font-semibold tabular-nums">{activeCount}</p></div><div className="rounded-lg border bg-background/80 p-3"><p className="text-xs text-muted-foreground">本页待审核</p><p className="mt-1 text-2xl font-semibold tabular-nums">{pendingCount}</p></div><div className="rounded-lg border bg-background/80 p-3"><p className="text-xs text-muted-foreground">本页证据引用</p><p className="mt-1 text-2xl font-semibold tabular-nums text-primary">{evidenceCount}</p></div></CardContent></Card>
 
-      <Card>
-        <CardHeader><CardTitle className="text-base">范围与筛选</CardTitle><CardDescription>先选择真实 Bot 和群会话；搜索仅在提交时更新地址，不会逐字写入浏览历史。</CardDescription></CardHeader>
-        <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          <ScopeSelect value={botId || undefined} loadOptions={loadBots} label="Bot" onValueChange={(value) => pagination.setFilters({ bot_id: value, session_id: null })} />
-          <ScopeSelect value={sessionId || undefined} loadOptions={loadSessions} label="群 / 会话" disabled={!botId} onValueChange={(value) => pagination.setFilters({ session_id: value })} />
-          <Field><FieldLabel>信念类型</FieldLabel><Select value={type || 'all'} onValueChange={(value) => pagination.setFilters({ type: value === 'all' ? null : value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectGroup><SelectItem value="all">全部类型</SelectItem>{Object.entries(TYPE_LABELS).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectGroup></SelectContent></Select></Field>
-          <Field><FieldLabel>生命周期</FieldLabel><Select value={status || 'all'} onValueChange={(value) => pagination.setFilters({ status: value === 'all' ? null : value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectGroup><SelectItem value="all">全部状态</SelectItem><SelectItem value="pending">待审核</SelectItem><SelectItem value="active">已生效</SelectItem><SelectItem value="archived">已归档</SelectItem><SelectItem value="quarantined">已隔离</SelectItem></SelectGroup></SelectContent></Select></Field>
-          <form className="flex items-end gap-2 md:col-span-2 xl:col-span-4" onSubmit={submitSearch}><Field className="flex-1"><FieldLabel htmlFor="belief-search">内容搜索</FieldLabel><Input id="belief-search" value={searchDraft} placeholder="搜索信念内容或锚定句" onChange={(event) => setSearchDraft(event.target.value)} /></Field><Button type="submit"><SearchIcon data-icon="inline-start" />搜索</Button>{search ? <Button type="button" variant="ghost" onClick={() => { setSearchDraft(''); pagination.setFilters({ search: null }) }}>清除</Button> : null}</form>
-        </CardContent>
-      </Card>
+    {deepLinkStatus ? <Alert data-slot="belief-deep-link-state" variant={deepLinkStatus === 'ready' || deepLinkStatus === 'loading' ? 'default' : 'destructive'}><AlertTitle>{deepLinkStatus === 'loading' ? '正在校验对象深链' : deepLinkStatus === 'ready' ? '深链信念已定位' : '无法打开深链信念'}</AlertTitle><AlertDescription>{deepLinkStatus === 'ready' && deepLinkedItem ? <span><strong>{TYPE_LABELS[deepLinkedItem.type]}</strong>：{deepLinkedItem.content}</span> : deepLinkStatus === 'loading' ? '正在验证对象引用、当前范围与版本。' : DEEP_LINK_LABELS[deepLinkStatus as Exclude<ObjectRefState, 'ready'>]}</AlertDescription></Alert> : null}
 
-      {deepLinkStatus ? <Alert data-slot="belief-deep-link-state" variant={deepLinkStatus === 'ready' || deepLinkStatus === 'loading' ? 'default' : 'destructive'}><AlertTitle>{deepLinkStatus === 'loading' ? '正在校验对象深链' : deepLinkStatus === 'ready' ? '深链信念已定位' : '无法打开深链信念'}</AlertTitle><AlertDescription>{deepLinkStatus === 'ready' && deepLinkedItem ? <span><strong>{TYPE_LABELS[deepLinkedItem.type]}</strong>：{deepLinkedItem.content}</span> : deepLinkStatus === 'loading' ? '正在验证对象引用、当前范围与版本。' : DEEP_LINK_LABELS[deepLinkStatus as Exclude<ObjectRefState, 'ready'>]}</AlertDescription></Alert> : null}
+    <Card><CardContent className="p-4"><form className="flex flex-wrap items-end gap-2" onSubmit={submitSearch}><ScopeSelect className="w-48 shrink-0 [&_[data-slot=field-label]]:sr-only" value={botId || undefined} loadOptions={loadBots} label="Bot" placeholder="选择真实 Bot" onValueChange={(value) => pagination.setFilters({ bot_id: value, session_id: null })} /><ScopeSelect className="w-56 shrink-0 [&_[data-slot=field-label]]:sr-only" value={sessionId || undefined} loadOptions={loadSessions} label="群 / 会话" placeholder="选择真实群会话" disabled={!botId} onValueChange={(value) => pagination.setFilters({ session_id: value })} /><Field className="w-32 shrink-0 gap-0 [&_[data-slot=field-label]]:sr-only"><FieldLabel>信念类型</FieldLabel><Select value={filterDraft.type || 'all'} onValueChange={(value) => setFilterDraft((current) => ({ ...current, type: value === 'all' ? '' : value as BeliefType }))}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectGroup><SelectItem value="all">全部类型</SelectItem>{Object.entries(TYPE_LABELS).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectGroup></SelectContent></Select></Field><Field className="w-32 shrink-0 gap-0 [&_[data-slot=field-label]]:sr-only"><FieldLabel>生命周期</FieldLabel><Select value={filterDraft.status || 'all'} onValueChange={(value) => setFilterDraft((current) => ({ ...current, status: value === 'all' ? '' : value }))}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectGroup><SelectItem value="all">全部状态</SelectItem><SelectItem value="pending">待审核</SelectItem><SelectItem value="active">已生效</SelectItem><SelectItem value="archived">已归档</SelectItem><SelectItem value="quarantined">已隔离</SelectItem></SelectGroup></SelectContent></Select></Field><Field className="min-w-52 flex-1 gap-0 [&_[data-slot=field-label]]:sr-only"><FieldLabel htmlFor="belief-search">搜索信念</FieldLabel><Input id="belief-search" value={filterDraft.search} placeholder="搜索信念内容或锚定句…" onChange={(event) => setFilterDraft((current) => ({ ...current, search: event.target.value }))} /></Field><Button type="submit" size="sm"><SearchIcon data-icon="inline-start" />搜索</Button><Button type="button" variant="outline" size="sm" onClick={resetFilters}>重置</Button><Button type="button" variant="outline" size="sm" disabled title={payload?.capabilities.create?.reason_code ?? '带证据的新建命令尚未开放'}><PlusIcon data-icon="inline-start" />新增信念</Button><Button type="button" variant="outline" size="sm" disabled title={payload?.capabilities.archive_legacy?.reason_code ?? 'Legacy 只读'}><LockIcon data-icon="inline-start" />归档旧遗产</Button></form></CardContent></Card>
 
-      <Card>
-        <CardHeader><CardTitle className="text-base">信念清单</CardTitle><CardDescription>主表仅展示可读业务字段；证据引用、版本和 JSON 收纳在详情中。</CardDescription></CardHeader>
-        <CardContent className="flex flex-col gap-4">
-          <QueryState status={queryStatus} error={error} onRetry={() => void load()} title={!scope ? '请选择真实 Bot 与会话' : undefined} description={!scope ? '作用域未选择时不会查询，也不会补入默认 Bot。' : undefined}>
-            <div className="overflow-hidden rounded-lg border">
-              <Table>
-                <TableHeader><TableRow><TableHead>信念</TableHead><TableHead className="w-32">类型</TableHead><TableHead className="w-28">生命周期</TableHead><TableHead className="w-28">综合置信度</TableHead><TableHead className="w-24">证据</TableHead><TableHead className="w-28 text-right">操作</TableHead></TableRow></TableHeader>
-                <TableBody>{pageItems.map((item) => (
-                  <TableRow key={item.id} data-slot="belief-card">
-                    <TableCell><p className="max-w-2xl font-medium leading-6">{item.content}</p>{item.anchor_sentence ? <p className="mt-1 max-w-2xl truncate text-xs text-muted-foreground">锚定句：{item.anchor_sentence}</p> : null}</TableCell>
-                    <TableCell><Badge className={typeClass(item.type)}>{TYPE_LABELS[item.type]}</Badge></TableCell>
-                    <TableCell><Badge className={statusClass(item.status)}>{STATUS_LABELS[item.status]}</Badge></TableCell>
-                    <TableCell><div className="flex items-center gap-2"><span className="font-medium tabular-nums">{confidenceText(item.confidence)}</span><QualityDecisionBadge decision={item.evidence_health === 'available' ? 'allow' : 'quarantine'} /></div></TableCell>
-                    <TableCell><span className="tabular-nums">{item.evidence.length} 条</span></TableCell>
-                    <TableCell className="text-right"><ResponsiveDetail title={TYPE_LABELS[item.type]} description="证据、状态分量与受控生命周期操作" className="sm:max-w-4xl" trigger={<Button type="button" variant="outline" size="sm"><EyeIcon data-icon="inline-start" />查看</Button>}><BeliefDetails item={item} mutating={mutating === item.id} onTransition={(action) => void transition(item, action)} /></ResponsiveDetail></TableCell>
-                  </TableRow>
-                ))}</TableBody>
-              </Table>
-            </div>
-          </QueryState>
-          {payload ? <PaginationControls page={payload.page} onOffsetChange={pagination.setOffset} onLimitChange={pagination.setLimit} /> : null}
-        </CardContent>
-      </Card>
+    <Card><CardHeader><CardTitle className="text-base">信念清单</CardTitle><CardDescription>恢复旧版高密度裁决入口；跨页全选、自由编辑和物理删除因安全契约保持禁用。</CardDescription></CardHeader><CardContent className="flex flex-col gap-4">
+      {selectedItems.length ? <div className="flex flex-wrap items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 p-3"><Badge variant="secondary">已选 {selectedItems.length} 条</Badge><Button type="button" size="sm" disabled={batchMutating || !batchAvailable || !selectedCanApprove} onClick={() => void transitionSelected('approve')}><CheckIcon data-icon="inline-start" />批量确认通过</Button><Button type="button" size="sm" variant="outline" disabled={batchMutating || !batchAvailable || !selectedCanArchive} onClick={() => void transitionSelected('archive')}><ArchiveIcon data-icon="inline-start" />批量归档</Button><Button type="button" size="sm" variant="destructive" disabled title={payload?.capabilities.physical_delete?.reason_code ?? '物理删除禁用'}><Trash2Icon data-icon="inline-start" />批量物理删除</Button><Button type="button" size="sm" variant="ghost" className="ml-auto" onClick={() => setSelectedIds([])}>取消选择</Button>{!payload?.capabilities.select_all_matching?.available ? <span className="w-full text-xs text-muted-foreground">跨页全部匹配暂不可用：{payload?.capabilities.select_all_matching?.reason_code ?? '需要服务端重新签发整批 ObjectRef'}</span> : null}</div> : null}
+      <QueryState status={queryStatus} error={error} onRetry={() => void load()} title={!scope ? '请选择真实 Bot 与会话' : undefined} description={!scope ? '作用域未选择时不会查询，也不会补入默认 Bot。' : undefined}>
+        <ResponsiveTable label="信念清单" table={<Table><TableHeader><TableRow><TableHead className="w-10"><input aria-label="选择当前页全部信念" type="checkbox" checked={allPageSelected} onChange={(event) => setSelectedIds(event.target.checked ? pageItems.map((item) => item.id) : [])} /></TableHead><TableHead>信念</TableHead><TableHead className="w-28">类型</TableHead><TableHead className="w-24">状态</TableHead><TableHead className="w-24">置信度</TableHead><TableHead className="w-20">证据</TableHead><TableHead className="w-36">更新时间</TableHead><TableHead className="w-64 text-right">操作</TableHead></TableRow></TableHeader><TableBody>{pageItems.map((item) => <TableRow key={item.id} data-slot="belief-card" className={selectedIds.includes(item.id) ? 'bg-primary/5' : undefined}><TableCell><input aria-label={`选择信念 ${item.id}`} type="checkbox" checked={selectedIds.includes(item.id)} onChange={(event) => setSelectedIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} /></TableCell><TableCell><p className="max-w-xl font-medium leading-6">{item.content}</p>{item.anchor_sentence ? <p className="mt-1 max-w-xl truncate text-xs text-muted-foreground">锚定句：{item.anchor_sentence}</p> : null}</TableCell><TableCell><Badge className={typeClass(item.type)}>{TYPE_LABELS[item.type]}</Badge></TableCell><TableCell><Badge className={statusClass(item.status)}>{STATUS_LABELS[item.status]}</Badge></TableCell><TableCell><div className="flex items-center gap-2"><span className="font-medium tabular-nums">{confidenceText(item.confidence)}</span><QualityDecisionBadge decision={item.evidence_health === 'available' ? 'allow' : 'quarantine'} /></div></TableCell><TableCell>{item.evidence.length} 条</TableCell><TableCell className="text-xs text-muted-foreground">{formatTime(item.updated_at)}</TableCell><TableCell className="text-right"><div className="flex justify-end gap-1"><Button type="button" variant="outline" size="sm" disabled={!item.object_ref || !payload?.capabilities.evidence?.available} title={item.object_ref ? '还原同作用域证据链' : '缺少服务端签发的 ObjectRef'} onClick={() => setEvidenceItem(item)}><MessageSquareTextIcon data-icon="inline-start" />证据</Button>{item.status === 'pending' ? <Button type="button" size="icon-sm" aria-label={`通过信念 ${item.id}`} disabled={mutating === item.id || !item.actions.approve.available} title={item.actions.approve.reason_code ?? '通过并激活'} onClick={() => void transition(item, 'approve')}><CheckIcon /></Button> : null}<Button type="button" variant="outline" size="icon-sm" aria-label={`归档信念 ${item.id}`} disabled={mutating === item.id || !item.actions.archive.available} title={item.actions.archive.reason_code ?? '归档'} onClick={() => void transition(item, 'archive')}><ArchiveIcon /></Button><Button type="button" variant="ghost" size="icon-sm" aria-label={`编辑信念 ${item.id}`} disabled title={payload?.capabilities.edit?.reason_code ?? '自由编辑禁用'}><Edit2Icon /></Button><ResponsiveDetail title={TYPE_LABELS[item.type]} description="证据、状态分量与受控生命周期操作" className="sm:max-w-4xl" trigger={<Button type="button" variant="ghost" size="icon-sm" aria-label={`查看信念 ${item.id} 详情`} title="查看详情"><EyeIcon /></Button>}><BeliefDetails item={item} mutating={mutating === item.id} onTransition={(action) => void transition(item, action)} /></ResponsiveDetail><Button type="button" variant="ghost" size="icon-sm" aria-label={`删除信念 ${item.id}`} disabled title={payload?.capabilities.physical_delete?.reason_code ?? '物理删除禁用'}><Trash2Icon /></Button></div></TableCell></TableRow>)}</TableBody></Table>} cards={pageItems.map((item) => <article key={item.id} data-slot="belief-card" className={`flex flex-col gap-3 rounded-lg border bg-card p-4 ${selectedIds.includes(item.id) ? 'border-primary/50 bg-primary/5' : ''}`}><div className="flex items-start justify-between gap-2"><label className="flex min-w-0 items-start gap-2"><input aria-label={`选择信念 ${item.id}`} type="checkbox" checked={selectedIds.includes(item.id)} onChange={(event) => setSelectedIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} /><span className="whitespace-pre-wrap break-words font-medium leading-6">{item.content}</span></label><Badge className={statusClass(item.status)}>{STATUS_LABELS[item.status]}</Badge></div><div className="flex flex-wrap gap-2"><Badge className={typeClass(item.type)}>{TYPE_LABELS[item.type]}</Badge><span className="text-sm text-muted-foreground">置信度 {confidenceText(item.confidence)} · {item.evidence.length} 条证据</span></div><div className="flex flex-wrap justify-end gap-2"><Button type="button" variant="outline" size="sm" disabled={!item.object_ref} onClick={() => setEvidenceItem(item)}><MessageSquareTextIcon data-icon="inline-start" />证据</Button>{item.status === 'pending' ? <Button type="button" size="sm" disabled={!item.actions.approve.available} onClick={() => void transition(item, 'approve')}><CheckIcon data-icon="inline-start" />确认</Button> : null}<Button type="button" variant="outline" size="sm" disabled={!item.actions.archive.available} onClick={() => void transition(item, 'archive')}><ArchiveIcon data-icon="inline-start" />归档</Button><ResponsiveDetail title={TYPE_LABELS[item.type]} description="证据、状态分量与受控生命周期操作" className="sm:max-w-4xl" trigger={<Button type="button" variant="outline" size="sm">详情</Button>}><BeliefDetails item={item} mutating={mutating === item.id} onTransition={(action) => void transition(item, action)} /></ResponsiveDetail></div></article>)} />
+      </QueryState>{payload ? <PaginationControls page={payload.page} onOffsetChange={pagination.setOffset} onLimitChange={pagination.setLimit} /> : null}
+    </CardContent></Card>
 
-      <Card className="border-amber-500/10 bg-amber-500/[0.02]">
-        <CardHeader className="py-4">
-          <div className="flex items-center gap-2">
-            <Badge variant="outline" className="border-amber-500/20 text-amber-600 bg-amber-500/5">只读审计</Badge>
-            <CardTitle className="text-base">Legacy 历史信念</CardTitle>
-          </div>
-          <CardDescription>旧 belief_system 记录没有真实 BotProfile.db_id 与 canonical session 证据；这里不允许审核、激活或归档，也不会将旧 group_id 当作正式会话。</CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-4 pt-0">
-          <Alert className="mb-4 border-amber-500/15 bg-amber-500/[0.02] text-amber-700 dark:text-amber-500"><ShieldCheckIcon className="size-4 text-amber-600" /><AlertTitle>严格隔离的历史记录</AlertTitle><AlertDescription className="text-xs">{legacyPayload ? `共 ${legacyPayload.page.total.toLocaleString('zh-CN')} 条待审计记录。` : legacyLoading ? '正在读取审计清单。' : 'Legacy 审计接口暂不可用。'} 只有唯一作用域证据成立时才可由后端投影。</AlertDescription></Alert>
-          {legacyPayload?.items.length ? <><div className="overflow-auto rounded-lg border bg-background"><Table><TableHeader><TableRow><TableHead>ID</TableHead><TableHead>内容</TableHead><TableHead>类型</TableHead><TableHead>旧 bot_id</TableHead><TableHead>状态</TableHead><TableHead>置信度</TableHead></TableRow></TableHeader><TableBody>{legacyPayload.items.map((item) => <TableRow key={item.id}><TableCell className="font-mono text-xs">#{item.id}</TableCell><TableCell className="max-w-xl"><p className="line-clamp-2">{item.content}</p></TableCell><TableCell>{TYPE_LABELS[item.type] ?? item.type}</TableCell><TableCell className="font-mono text-xs text-muted-foreground">{item.bot_id || '未记录'}</TableCell><TableCell>{item.status || '未知'}</TableCell><TableCell>{confidenceText(item.confidence)}</TableCell></TableRow>)}</TableBody></Table></div><div className="flex items-center justify-between text-sm text-muted-foreground"><span>第 {legacyOffset + 1}-{Math.min(legacyOffset + 25, legacyPayload.page.total)} 条</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={legacyLoading || legacyOffset === 0} onClick={() => setLegacyOffset(Math.max(0, legacyOffset - 25))}>上一页</Button><Button size="sm" variant="outline" disabled={legacyLoading || legacyOffset + 25 >= legacyPayload.page.total} onClick={() => setLegacyOffset(legacyOffset + 25)}>下一页</Button></div></div></> : !legacyLoading ? <p className="text-xs text-muted-foreground py-4 text-center">没有未归属的 Legacy 信念。</p> : null}
-        </CardContent>
-      </Card>
-    </div>
-  )
+    <Card className="bg-muted/10"><CardHeader className="py-4"><div className="flex items-center gap-2"><Badge variant="outline">只读审计</Badge><CardTitle className="text-base">Legacy 历史信念</CardTitle></div><CardDescription>旧 belief_system 记录没有真实 BotProfile.db_id 与 canonical session 证据；这里不允许审核、激活、归档或证据回填。</CardDescription></CardHeader><CardContent className="flex flex-col gap-4 pt-0"><Alert><ShieldCheckIcon /><AlertTitle>严格隔离的历史记录</AlertTitle><AlertDescription className="text-xs">{legacyPayload ? legacyTotal === null ? 'Legacy 审计总数未提供。' : `共 ${legacyTotal.toLocaleString('zh-CN')} 条待审计记录。` : legacyLoading ? '正在读取审计清单。' : 'Legacy 审计接口暂不可用。'} 只有唯一作用域证据成立时才可由后端投影。</AlertDescription></Alert>{legacyPayload?.items.length ? <><div className="overflow-auto rounded-lg border bg-background"><Table><TableHeader><TableRow><TableHead>ID</TableHead><TableHead>内容</TableHead><TableHead>类型</TableHead><TableHead>旧 bot_id</TableHead><TableHead>状态</TableHead><TableHead>置信度</TableHead></TableRow></TableHeader><TableBody>{legacyPayload.items.map((item) => <TableRow key={item.id}><TableCell className="font-mono text-xs">#{item.id}</TableCell><TableCell className="max-w-xl"><p className="line-clamp-2">{item.content}</p></TableCell><TableCell>{TYPE_LABELS[item.type] ?? item.type}</TableCell><TableCell className="font-mono text-xs text-muted-foreground">{item.bot_id || '未记录'}</TableCell><TableCell>{item.status || '未知'}</TableCell><TableCell>{confidenceText(item.confidence)}</TableCell></TableRow>)}</TableBody></Table></div><div className="flex items-center justify-between text-sm text-muted-foreground"><span>{legacyTotal === null ? `已读取第 ${legacyOffset + 1}-${legacyRangeEnd} 条；总数未提供` : `第 ${legacyOffset + 1}-${legacyRangeEnd} 条`}</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={legacyLoading || legacyOffset === 0} onClick={() => setLegacyOffset(Math.max(0, legacyOffset - 25))}>上一页</Button><Button size="sm" variant="outline" disabled={legacyLoading || !legacyPayload.page.has_next} onClick={() => setLegacyOffset(legacyOffset + 25)}>下一页</Button></div></div></> : !legacyLoading ? <p className="py-4 text-center text-xs text-muted-foreground">没有未归属的 Legacy 信念。</p> : null}</CardContent></Card>
+
+    <BeliefEvidenceDialog item={evidenceItem} scope={scope} onOpenChange={(open) => { if (!open) setEvidenceItem(null) }} />
+  </div>
 }

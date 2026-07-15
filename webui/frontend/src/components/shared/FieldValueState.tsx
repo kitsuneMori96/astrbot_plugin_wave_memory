@@ -83,7 +83,7 @@ export function FieldValueState({
         {differs ? (
           <>
             <AlertTriangleIcon className="size-3 text-amber-500 shrink-0" />
-            <span className="text-amber-600">已保存修改，但尚未在当前进程生效（需要{APPLY_LABELS[mode]}）。</span>
+            <span className="text-amber-600">已保存值与当前生效值不同；修改尚未在当前进程生效（需要{APPLY_LABELS[mode]}）。</span>
           </>
         ) : (
           <>

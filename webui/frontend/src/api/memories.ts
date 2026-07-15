@@ -86,7 +86,7 @@ export function listSenders(scope: MemoryScope): Promise<{ senders: SenderItem[]
 export function getMemoryDetail(detailUrl: string): Promise<{ item: MemoryDetail }> { return fetchJson(detailUrl) }
 export function updateMemory(mutationUrl: string, content: string, importance: number): Promise<MemoryMutationResult> { return fetchJson(mutationUrl, { method: 'PUT', body: JSON.stringify({ content, importance }) }) }
 export function deleteMemory(mutationUrl: string): Promise<MemoryMutationResult> { return fetchJson(mutationUrl, { method: 'DELETE' }) }
-export function reEmbedMemory(item: Pick<MemoryItem, 'mutation_url'>): Promise<{ ok: boolean; error?: string }> { return fetchJson(scopedActionUrl(item, '/re-embed'), { method: 'POST' }) }
+export function reEmbedMemory(item: Pick<MemoryItem, 'mutation_url'>): Promise<Partial<MemoryMutationResult> & { accepted?: boolean; status?: string; error?: string }> { return fetchJson(scopedActionUrl(item, '/re-embed'), { method: 'POST' }) }
 export function getSimilarMemories(item: Pick<MemoryItem, 'mutation_url'>): Promise<{ items: SimilarMemoryItem[]; reason?: string }> { return fetchJson(scopedActionUrl(item, '/similar')) }
 export function addMemoryTag(item: Pick<MemoryItem, 'mutation_url'>, tagName: string): Promise<{ ok: boolean }> { return fetchJson(scopedActionUrl(item, '/tags'), { method: 'POST', body: JSON.stringify({ tag_name: tagName }) }) }
 export function deleteMemoryTag(item: Pick<MemoryItem, 'mutation_url'>, tagName: string): Promise<{ ok: boolean }> { return fetchJson(scopedActionUrl(item, `/tags/${encodeURIComponent(tagName)}`), { method: 'DELETE' }) }

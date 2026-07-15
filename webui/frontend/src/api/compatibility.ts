@@ -54,6 +54,6 @@ export interface CompatibilityPayload extends CompatibilityFact {
   }
 }
 
-export function getCompatibilityStatus(): Promise<CompatibilityPayload> {
-  return fetchJson<CompatibilityPayload>('/api/compat/status')
+export function getCompatibilityStatus(signal?: AbortSignal): Promise<CompatibilityPayload> {
+  return fetchJson<CompatibilityPayload>('/api/compat/status', { signal })
 }

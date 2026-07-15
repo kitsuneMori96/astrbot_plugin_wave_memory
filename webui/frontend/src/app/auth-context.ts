@@ -1,9 +1,10 @@
 import { createContext, useContext } from 'react'
 
 export type AuthState =
-  | { status: 'checking' }
+  | { status: 'checking'; token?: string | null; requiresAuth?: boolean }
   | { status: 'anonymous'; requiresAuth: true }
   | { status: 'ready'; token: string | null; requiresAuth: boolean }
+  | { status: 'error'; message: string; token?: string | null; requiresAuth?: boolean }
 
 export interface AuthContextValue {
   state: AuthState

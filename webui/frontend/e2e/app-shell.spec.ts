@@ -19,7 +19,7 @@ test('恢复后的正式页面均可从应用壳进入且不会崩溃', async ({
     ['/channels', '通道配置'],
     ['/learning', '学习过程'],
     ['/beliefs', '信念'],
-    ['/jargon', '本地表达'],
+    ['/jargon', '黑话与口癖'],
     ['/soul', 'Soul 状态'],
     ['/knowledge/book-lore', 'BookLore'],
     ['/knowledge/style-examples', '风格样例'],
@@ -34,7 +34,8 @@ test('恢复后的正式页面均可从应用壳进入且不会崩溃', async ({
     await authenticatedPage.goto(`./#${path}`)
     await authenticatedPage.waitForTimeout(50)
     expect(pageErrors, `${path} 不应触发页面运行时异常`).toEqual([])
-    await expect(authenticatedPage.getByRole('main').getByText(title, { exact: true }).first()).toBeVisible()
+    await expect(authenticatedPage).toHaveURL(new RegExp(`#${path}(?:\\?|$)`))
+    await expect(authenticatedPage.getByText(title, { exact: true }).first()).toBeVisible()
     await expect(authenticatedPage.getByText('页面不存在', { exact: true })).toHaveCount(0)
   }
 })

@@ -1,20 +1,37 @@
-import { useCallback, useEffect, useRef } from 'react'
-import { useSearchParams } from 'react-router-dom'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { CompassIcon, SparklesIcon } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { AlertTriangleIcon, ArrowLeftIcon, CompassIcon, LoaderCircleIcon, RefreshCwIcon, Settings2Icon } from 'lucide-react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 
 import { getScopeOptions, scopeOptionsFor } from '@/api/options'
 import { ScopeSelect } from '@/components/shared'
-import { useCanonicalScopeDefault, usePaginationSearchParams } from '@/hooks/use-pagination-search-params'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Separator } from '@/components/ui/separator'
+import { usePaginationSearchParams } from '@/hooks/use-pagination-search-params'
+import {
+  buildExploreFrameUrl,
+  nextExploreFrameState,
+  parseExploreFrameMessage,
+  type ExploreFrameState,
+} from '@/lib/explore-frame'
+
+const EXPLORE_LOAD_TIMEOUT_MS = 15_000
 
 export function ExplorePage() {
+  const navigate = useNavigate()
   const pagination = usePaginationSearchParams()
   const [params] = useSearchParams()
   const botId = params.get('bot_id') ?? ''
   const sessionId = params.get('session_id') ?? ''
+  const hasScope = Boolean(botId && sessionId)
   const iframeRef = useRef<HTMLIFrameElement>(null)
-
-  useCanonicalScopeDefault({ botId, sessionId, setFilters: pagination.setFilters })
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [scopeDialogOpen, setScopeDialogOpen] = useState(!hasScope)
+  const [frameAttempt, setFrameAttempt] = useState(0)
+  const [frameState, setFrameState] = useState<ExploreFrameState>({ status: 'loading' })
+  const iframeUrl = hasScope ? buildExploreFrameUrl(botId, sessionId) : ''
 
   const loadBots = useCallback(async () => scopeOptionsFor(await getScopeOptions(), ['bot']), [])
   const loadSessions = useCallback(async () => {
@@ -23,42 +40,144 @@ export function ExplorePage() {
   }, [botId])
 
   useEffect(() => {
-    if (!botId || !sessionId) return
-    const token = localStorage.getItem('wave_token') || ''
-    const query = new URLSearchParams({
-      bot_id: botId,
-      session_id: sessionId,
-      visibility: 'group',
-    })
-    if (token) {
-      query.set('token', token)
+    if (!hasScope) setScopeDialogOpen(true)
+  }, [hasScope])
+
+  const clearFrameTimeout = useCallback(() => {
+    if (timeoutRef.current !== null) {
+      clearTimeout(timeoutRef.current)
+      timeoutRef.current = null
     }
-    if (iframeRef.current) {
-      iframeRef.current.src = `/explore?${query.toString()}`
+  }, [])
+
+  useEffect(() => {
+    clearFrameTimeout()
+    if (!iframeUrl) return
+
+    setFrameState((current) => nextExploreFrameState(current, { type: 'reset' }))
+    timeoutRef.current = setTimeout(() => {
+      timeoutRef.current = null
+      setFrameState((current) => nextExploreFrameState(current, { type: 'timeout' }))
+    }, EXPLORE_LOAD_TIMEOUT_MS)
+
+    return clearFrameTimeout
+  }, [clearFrameTimeout, frameAttempt, iframeUrl])
+
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      const message = parseExploreFrameMessage(
+        event,
+        iframeRef.current?.contentWindow ?? null,
+        window.location.origin,
+      )
+      if (!message) return
+
+      clearFrameTimeout()
+      setFrameState((current) => nextExploreFrameState(current, { type: 'message', message }))
     }
-  }, [botId, sessionId])
+
+    window.addEventListener('message', handleMessage)
+    return () => window.removeEventListener('message', handleMessage)
+  }, [clearFrameTimeout])
+
+  const retryFrame = useCallback(() => {
+    clearFrameTimeout()
+    setFrameState((current) => nextExploreFrameState(current, { type: 'reset' }))
+    setFrameAttempt((attempt) => attempt + 1)
+  }, [clearFrameTimeout])
+
+  const statusLabel = frameState.status === 'ready'
+    ? 'ready · 已就绪'
+    : frameState.status === 'loading'
+      ? 'loading · 加载中'
+      : frameState.status === 'timeout'
+        ? 'timeout · 已超时'
+        : 'error · 加载失败'
+  const statusVariant = frameState.status === 'error' || frameState.status === 'timeout' ? 'destructive' : frameState.status === 'ready' ? 'secondary' : 'outline'
 
   return (
-    <div data-page="explore-galaxy" className="flex flex-col gap-5 h-[calc(100svh-6.5rem)] min-h-[600px]">
-      <Card className="border-border/60">
-        <CardHeader className="py-4">
-          <CardTitle className="text-base flex items-center gap-2">
-            <CompassIcon className="size-4.5 text-primary" />
-            3D 神经云图
-          </CardTitle>
-          <CardDescription>
-            查看当前作用域下的 HNSW 同域近邻与 facts、Soul、学习投影等正式知识图层。只读浏览，跨 Scope 结果会被后端拒绝。
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="pt-0">
-          <div className="grid gap-4 md:grid-cols-2">
+    <main data-page="explore-galaxy" className="fixed inset-0 z-40 h-[100svh] w-[100vw] overflow-hidden bg-black">
+      {hasScope ? (
+        <iframe
+          key={`${iframeUrl}:${frameAttempt}`}
+          ref={iframeRef}
+          title="3D Cosmic NeuroGalaxy"
+          src={iframeUrl}
+          className="absolute inset-0 h-full w-full border-none bg-black"
+          sandbox="allow-scripts allow-same-origin allow-popups"
+        />
+      ) : (
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,oklch(0.35_0.14_290/.35),transparent_38%),radial-gradient(circle_at_bottom_right,oklch(0.35_0.14_240/.25),transparent_42%),#05070b]" />
+      )}
+
+      <div className="absolute left-1/2 top-3 z-30 flex max-w-[calc(100vw-1.5rem)] -translate-x-1/2 flex-wrap items-center justify-center gap-2 rounded-xl border border-border bg-background/88 p-2 shadow-2xl backdrop-blur-xl">
+        <Button type="button" size="sm" variant="ghost" onClick={() => navigate('/dashboard')}>
+          <ArrowLeftIcon data-icon="inline-start" aria-hidden="true" />
+          返回总览
+        </Button>
+        <Separator orientation="vertical" className="hidden data-[orientation=vertical]:h-5 sm:block" />
+        <Badge variant="secondary" className="max-w-[min(52vw,34rem)] truncate">
+          <CompassIcon data-icon="inline-start" aria-hidden="true" />
+          {hasScope ? `${botId} · ${sessionId}` : '等待完整 Scope'}
+        </Badge>
+        {hasScope ? <Badge variant={statusVariant}>{statusLabel}</Badge> : null}
+        <Button type="button" size="sm" variant="outline" onClick={() => setScopeDialogOpen(true)}>
+          <Settings2Icon data-icon="inline-start" aria-hidden="true" />
+          切换 Scope
+        </Button>
+        {hasScope && (frameState.status === 'error' || frameState.status === 'timeout') ? (
+          <Button type="button" size="sm" variant="secondary" onClick={retryFrame}>
+            <RefreshCwIcon data-icon="inline-start" aria-hidden="true" />
+            重试
+          </Button>
+        ) : null}
+      </div>
+
+      {hasScope && frameState.status === 'loading' ? (
+        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-black/75 p-6 text-center" role="status" aria-live="polite">
+          <div className="flex max-w-sm flex-col items-center gap-3 text-slate-200">
+            <LoaderCircleIcon className="size-8 animate-spin text-primary" aria-hidden="true" />
+            <p className="font-medium">正在加载神经云图…</p>
+            <p className="text-xs text-slate-400">首次图谱请求完成后会自动显示。</p>
+          </div>
+        </div>
+      ) : null}
+      {hasScope && (frameState.status === 'error' || frameState.status === 'timeout') ? (
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/85 p-6 text-center" role="alert">
+          <div className="flex max-w-md flex-col items-center gap-3 text-slate-200">
+            <AlertTriangleIcon className="size-8 text-destructive" aria-hidden="true" />
+            <p className="font-medium">神经云图未能就绪</p>
+            <p className="text-sm text-slate-400">{frameState.message}</p>
+            <Button type="button" variant="secondary" onClick={retryFrame}>
+              <RefreshCwIcon data-icon="inline-start" aria-hidden="true" />
+              重新加载图谱
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      <Dialog
+        open={scopeDialogOpen}
+        onOpenChange={(open) => {
+          if (!open && !hasScope) return
+          setScopeDialogOpen(open)
+        }}
+      >
+        <DialogContent showCloseButton={hasScope} className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>选择神经云图 Scope</DialogTitle>
+            <DialogDescription>
+              必须选择服务端授权的真实 Bot 与 canonical 群会话。iframe 仅接收 Scope，不在 URL 中传递认证 token。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 sm:grid-cols-2">
             <ScopeSelect
               value={botId || undefined}
               loadOptions={loadBots}
               label="Bot"
               placeholder="选择真实 Bot"
               required
-              onValueChange={(value) => pagination.setFilters({ bot_id: value, session_id: null })}
+              onValueChange={(value) => pagination.setFilters({ bot_id: value, session_id: null, visibility: 'group' })}
             />
             <ScopeSelect
               value={sessionId || undefined}
@@ -67,39 +186,16 @@ export function ExplorePage() {
               placeholder="选择 canonical 活跃会话"
               disabled={!botId}
               required
-              onValueChange={(value) => pagination.setFilters({ session_id: value })}
+              onValueChange={(value) => {
+                pagination.setFilters({ session_id: value, visibility: 'group' })
+                setScopeDialogOpen(false)
+              }}
             />
           </div>
-        </CardContent>
-      </Card>
-
-      {!botId || !sessionId ? (
-        <Card className="flex-1 border-dashed bg-gradient-to-br from-primary/5 via-card to-card flex items-center justify-center p-6">
-          <div className="text-center max-w-md">
-            <div className="mx-auto mb-4 flex size-12 items-center justify-center rounded-full bg-primary/10 text-primary">
-              <CompassIcon className="size-6 animate-pulse" />
-            </div>
-            <h3 className="font-semibold text-lg">等待唤醒星云</h3>
-            <p className="mt-2 text-sm text-muted-foreground">
-              请从上方选择服务端授权的真实 Bot 与 canonical 会话。Scope 确立后，高维图谱引擎会自动装载。
-            </p>
-          </div>
-        </Card>
-      ) : (
-        <Card className="flex-1 overflow-hidden border-primary/20 bg-black relative shadow-2xl">
-          <div className="absolute top-4 left-4 z-10 flex items-center gap-2 rounded-full border border-primary/20 bg-background/80 px-3 py-1.5 backdrop-blur text-xs font-medium shadow-md">
-            <SparklesIcon className="size-3.5 text-primary animate-spin" style={{ animationDuration: '3s' }} />
-            <span>实时 Scope：{botId} · {sessionId}</span>
-          </div>
-          <iframe
-            ref={iframeRef}
-            title="3D Cosmic NeuroGalaxy"
-            className="w-full h-full border-none bg-transparent"
-            sandbox="allow-scripts allow-same-origin allow-popups"
-          />
-        </Card>
-      )}
-    </div>
+          {!hasScope ? <p className="text-xs text-muted-foreground">完成两项选择后才会加载 3D 图谱。</p> : null}
+        </DialogContent>
+      </Dialog>
+    </main>
   )
 }
 

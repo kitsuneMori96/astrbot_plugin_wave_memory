@@ -74,11 +74,11 @@ function toSearchParams(filters: TraceFilters): string {
   return params.toString()
 }
 
-export function listInjectionTraces(filters: TraceFilters = {}): Promise<TraceListPayload> {
+export function listInjectionTraces(filters: TraceFilters = {}, signal?: AbortSignal): Promise<TraceListPayload> {
   const query = toSearchParams(filters)
-  return fetchJson<TraceListPayload>(`/api/observatory/traces${query ? `?${query}` : ''}`)
+  return fetchJson<TraceListPayload>(`/api/observatory/traces${query ? `?${query}` : ''}`, { signal })
 }
 
-export function getInjectionTrace(traceId: string): Promise<TraceDetailPayload> {
-  return fetchJson<TraceDetailPayload>(`/api/observatory/traces/${encodeURIComponent(traceId)}`)
+export function getInjectionTrace(traceId: string, signal?: AbortSignal): Promise<TraceDetailPayload> {
+  return fetchJson<TraceDetailPayload>(`/api/observatory/traces/${encodeURIComponent(traceId)}`, { signal })
 }

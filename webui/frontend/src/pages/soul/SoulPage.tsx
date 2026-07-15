@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { ActivityIcon, AlertCircleIcon, Clock3Icon, HeartHandshakeIcon, LockIcon, TargetIcon, CompassIcon } from 'lucide-react'
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'recharts'
 
+import { isRequestCancelled } from '@/api/client'
 import { getScopeOptions, scopeOptionsFor } from '@/api/options'
 import { getLegacySoulSnapshot, getSoulState, type LegacyMoodItem, type LegacySoulSnapshot, type SoulScopeSelection, type SoulStatePayload } from '@/api/soul'
 import { EvidenceList, ObjectDeepLink, PaginationControls, QueryState, ScopeSelect } from '@/components/shared'
@@ -74,6 +75,10 @@ export function SoulPage() {
   const [legacy, setLegacy] = useState<LegacySoulSnapshot | null>(null)
   const [status, setStatus] = useState<'loading' | 'success' | 'empty' | 'unknown' | 'error'>('empty')
   const [error, setError] = useState<unknown>()
+  const [legacyStatus, setLegacyStatus] = useState<'loading' | 'success' | 'empty' | 'error'>('empty')
+  const [legacyError, setLegacyError] = useState<unknown>()
+  const formalRequestRef = useRef<AbortController | null>(null)
+  const legacyRequestRef = useRef<AbortController | null>(null)
   const botId = searchParams.get('bot_id') ?? ''
   const sessionId = searchParams.get('session_id') ?? ''
   useCanonicalScopeDefault({ botId, sessionId, setFilters: pagination.setFilters })
@@ -85,32 +90,62 @@ export function SoulPage() {
     return botId ? options.filter((option) => option.description?.startsWith(`${botId} ·`)) : options
   }, [botId])
 
-  const load = useCallback(async () => {
+  const loadFormal = useCallback(async () => {
+    formalRequestRef.current?.abort()
     if (!scope) {
       setPayload(null)
-      setLegacy(null)
       setStatus('empty')
       return
     }
+    const controller = new AbortController()
+    formalRequestRef.current = controller
     setStatus('loading')
     setError(undefined)
     try {
-      const [formal, legacySnapshot] = await Promise.all([
-        getSoulState(scope, pagination.limit, pagination.offset),
-        getLegacySoulSnapshot(scope),
-      ])
+      const formal = await getSoulState(scope, pagination.limit, pagination.offset, controller.signal)
+      if (formalRequestRef.current !== controller || controller.signal.aborted) return
       setPayload(formal)
-      setLegacy(legacySnapshot)
       setStatus('success')
     } catch (reason) {
+      if (formalRequestRef.current !== controller || controller.signal.aborted || isRequestCancelled(reason)) return
       setPayload(null)
-      setLegacy(null)
       setError(reason)
       setStatus('error')
     }
   }, [pagination.limit, pagination.offset, scope])
 
-  useEffect(() => { void load() }, [load])
+  const loadLegacy = useCallback(async () => {
+    legacyRequestRef.current?.abort()
+    if (!scope) {
+      setLegacy(null)
+      setLegacyStatus('empty')
+      return
+    }
+    const controller = new AbortController()
+    legacyRequestRef.current = controller
+    setLegacyStatus('loading')
+    setLegacyError(undefined)
+    try {
+      const snapshot = await getLegacySoulSnapshot(scope, controller.signal)
+      if (legacyRequestRef.current !== controller || controller.signal.aborted) return
+      setLegacy(snapshot)
+      setLegacyStatus('success')
+    } catch (reason) {
+      if (legacyRequestRef.current !== controller || controller.signal.aborted || isRequestCancelled(reason)) return
+      setLegacy(null)
+      setLegacyError(reason)
+      setLegacyStatus('error')
+    }
+  }, [scope])
+
+  useEffect(() => {
+    void loadFormal()
+    return () => formalRequestRef.current?.abort()
+  }, [loadFormal])
+  useEffect(() => {
+    void loadLegacy()
+    return () => legacyRequestRef.current?.abort()
+  }, [loadLegacy])
 
   const componentData = useMemo(() => Object.entries(payload?.mood.components ?? {}).map(([name, value]) => ({ name, value })), [payload?.mood.components])
   const formalUnavailable = payload?.source.health === 'unavailable' || payload?.source.health === 'error'
@@ -125,7 +160,7 @@ export function SoulPage() {
         <CardContent className="grid gap-3 pt-0 md:grid-cols-2"><ScopeSelect value={botId || undefined} loadOptions={loadBots} label="Bot" onValueChange={(value) => pagination.setFilters({ bot_id: value, session_id: null })} /><ScopeSelect value={sessionId || undefined} loadOptions={loadSessions} label="群 / 会话" disabled={!botId} onValueChange={(value) => pagination.setFilters({ session_id: value })} /></CardContent>
       </Card>
 
-      <QueryState status={status} error={error} onRetry={() => void load()} title={!scope ? '请选择真实 Bot 与群会话' : undefined} description={!scope ? 'Soul 不接受默认 Bot、私聊或伪群作用域。' : undefined}>
+      <QueryState status={status} error={error} onRetry={() => void loadFormal()} title={!scope ? '请选择真实 Bot 与群会话' : undefined} description={!scope ? 'Soul 不接受默认 Bot、私聊或伪群作用域。' : undefined}>
         {payload ? <div className="flex flex-col gap-5">
           {formalUnavailable ? <Alert><AlertCircleIcon /><AlertTitle>正式 scoped Soul 数据 unavailable</AlertTitle><AlertDescription>{reasonText(payload.source.reason_code)}。下方正式区域会保持 unavailable/unknown；不会用 Legacy 表内容伪装成当前 Scope。</AlertDescription></Alert> : null}
 
@@ -148,24 +183,26 @@ export function SoulPage() {
 
           <div className="grid gap-4 lg:grid-cols-2">
             <Card>
-              <CardHeader className="border-b bg-muted/10 py-4"><div className="flex items-center gap-2"><TargetIcon className="size-4 text-primary" /><CardTitle className="text-sm">Concern · 当前关切</CardTitle></div><CardDescription>正式 SoulScope 记录</CardDescription></CardHeader>
+              <CardHeader className="border-b bg-muted/10 py-4"><div className="flex items-center gap-2"><TargetIcon className="size-4 text-primary" /><CardTitle className="text-sm">Concern · 当前关切</CardTitle></div><CardDescription>正式 SoulScope 共享窗口记录</CardDescription></CardHeader>
               <CardContent className="flex flex-col gap-3 pt-5">{formalUnavailable || payload.concerns.page.total_status === 'unavailable' ? <SectionUnavailable reason={payload.concerns.page.reason_code ?? payload.source.reason_code} /> : payload.concerns.items.length ? payload.concerns.items.map((item) => <div key={item.id} className="rounded-lg border bg-muted/10 p-3"><div className="flex items-start justify-between gap-3"><p className="text-sm font-semibold">{item.summary || '未命名关切'}</p><Badge variant="outline">revision {item.revision ?? '—'}</Badge></div><p className="mt-1 text-[10px] text-muted-foreground">policy {item.policy_version ?? '未记录'}</p><div className="mt-3"><EvidenceList evidence={item.evidence} /></div></div>) : <p className="p-6 text-center text-sm text-muted-foreground">当前 Scope 没有关切记录。</p>}</CardContent>
             </Card>
 
             <Card>
-              <CardHeader className="border-b bg-muted/10 py-4"><div className="flex items-center gap-2"><Clock3Icon className="size-4 text-primary" /><CardTitle className="text-sm">Timeline · 时间线</CardTitle></div><CardDescription>正式 SoulScope 事件锚点</CardDescription></CardHeader>
+              <CardHeader className="border-b bg-muted/10 py-4"><div className="flex items-center gap-2"><Clock3Icon className="size-4 text-primary" /><CardTitle className="text-sm">Timeline · 时间线</CardTitle></div><CardDescription>正式 SoulScope 共享窗口事件锚点</CardDescription></CardHeader>
               <CardContent className="pt-5">{formalUnavailable || payload.timeline.page.total_status === 'unavailable' ? <SectionUnavailable reason={payload.timeline.page.reason_code ?? payload.source.reason_code} /> : payload.timeline.items.length ? <div className="ml-2 flex flex-col gap-5 border-l-2 border-muted pl-5">{payload.timeline.items.map((item) => <div key={item.id} className="relative"><span className="absolute -left-[27px] top-1 size-3 rounded-full border-2 border-background bg-primary" /><div className="rounded-lg border bg-muted/10 p-3"><p className="text-sm font-semibold">{item.summary || '未命名事件'}</p><p className="mt-1 text-[10px] text-muted-foreground">revision {item.revision ?? '未记录'} · policy {item.policy_version ?? '未记录'}</p><div className="mt-3"><EvidenceList evidence={item.evidence} /></div></div></div>)}</div> : <p className="p-6 text-center text-sm text-muted-foreground">当前 Scope 没有时间线记录。</p>}</CardContent>
             </Card>
           </div>
 
-          <PaginationControls page={payload.concerns.page} onOffsetChange={pagination.setOffset} onLimitChange={pagination.setLimit} />
+          <div className="flex flex-col gap-2"><p className="text-xs text-muted-foreground">正式 Soul API 对 Concern 与 Timeline 使用同一组 limit/offset；下方分页会同时移动两个列表的共享窗口。</p><PaginationControls page={payload.concerns.page} onOffsetChange={pagination.setOffset} onLimitChange={pagination.setLimit} /></div>
 
           <Separator />
 
-          <Card className="border-amber-500/25 bg-amber-500/[0.03]">
-            <CardHeader className="border-b border-amber-500/15 py-4"><div className="flex flex-wrap items-center gap-2"><LockIcon className="size-4 text-amber-500" /><CardTitle className="text-sm">Legacy 只读审计（非当前 Scope）</CardTitle><Badge variant="outline" className="border-amber-500/30 text-amber-600">readonly</Badge><Badge variant="outline">legacy-not-session-scoped</Badge></div><CardDescription>以下内容来自可安全读取的旧表，最多只能证明 Bot 级筛选，不能证明属于当前 session。它与上方正式 SoulScope 数据严格分区，不提供任何写按钮。</CardDescription></CardHeader>
-            <CardContent className="flex flex-col gap-5 pt-5">
-              {!legacy ? <SectionUnavailable reason="legacy_read_unavailable" /> : <>
+          <details className="overflow-hidden rounded-xl border border-amber-500/25 bg-amber-500/[0.03]">
+            <summary className="flex cursor-pointer list-none flex-wrap items-center gap-2 px-6 py-4 marker:hidden"><LockIcon className="size-4 text-amber-500" /><span className="text-sm font-semibold">Legacy 只读审计（非当前 Scope）</span><Badge variant="outline" className="border-amber-500/30 text-amber-600">readonly</Badge><Badge variant="outline">legacy-not-session-scoped</Badge><span className="text-xs text-muted-foreground">默认收起</span></summary>
+            <div className="border-t border-amber-500/15 px-6 py-5">
+              <p className="mb-5 text-sm text-muted-foreground">以下内容来自可安全读取的旧表，最多只能证明 Bot 级筛选，不能证明属于当前 session。它与上方正式 SoulScope 数据严格分区，不提供任何写按钮。</p>
+              <QueryState status={legacyStatus} error={legacyError} title="Legacy 只读投影不可用" onRetry={() => void loadLegacy()}>
+              {legacy ? <>
                 <div>
                   <div className="mb-3 flex items-center justify-between"><h3 className="text-sm font-semibold">Legacy Mood trajectory</h3><Badge variant={legacy.moods.status === 'available' ? 'secondary' : 'outline'}>{legacy.moods.status}</Badge></div>
                   {legacy.moods.status === 'available' ? <LegacyMoodChart moods={legacy.moods.items} /> : <SectionUnavailable reason={legacy.moods.reason} />}
@@ -175,9 +212,10 @@ export function SoulPage() {
                   <div><div className="mb-3 flex items-center justify-between"><h3 className="text-sm font-semibold">Legacy Concern</h3><Badge variant={legacy.concerns.status === 'available' ? 'secondary' : 'outline'}>{legacy.concerns.status}</Badge></div>{legacy.concerns.status === 'unavailable' ? <SectionUnavailable reason={legacy.concerns.reason} /> : legacy.concerns.items.length ? <div className="flex flex-col gap-3">{legacy.concerns.items.map((item) => <div key={item.id} className="rounded-lg border bg-background/50 p-3"><div className="flex items-center justify-between gap-3"><p className="truncate text-xs font-semibold">{item.topic}</p><Badge variant="outline" className="font-mono">{Math.round(Number(item.intensity || 0) * 100)}%</Badge></div><div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-amber-500" style={{ width: `${Math.max(0, Math.min(100, Number(item.intensity || 0) * 100))}%` }} /></div><p className="mt-2 text-[10px] text-muted-foreground">Bot {item.bot_id || botId} · 最近触发 {formatTime(item.last_triggered)}</p></div>)}</div> : <p className="rounded-xl border p-6 text-center text-xs text-muted-foreground">Legacy 表中没有该 Bot 的 Concern。</p>}</div>
                   <div><div className="mb-3 flex items-center justify-between"><h3 className="text-sm font-semibold">Legacy Timeline</h3><Badge variant={legacy.timeline.status === 'available' ? 'secondary' : 'outline'}>{legacy.timeline.status}</Badge></div>{legacy.timeline.status === 'unavailable' ? <SectionUnavailable reason={legacy.timeline.reason} /> : legacy.timeline.items.length ? <div className="ml-2 flex flex-col gap-5 border-l-2 border-amber-500/20 pl-5">{legacy.timeline.items.map((item) => <div key={item.id} className="relative"><span className="absolute -left-[27px] top-1 size-3 rounded-full border-2 border-background bg-amber-500" /><p className="text-xs font-semibold leading-relaxed">{item.event_summary}</p><p className="mt-1 text-[10px] text-muted-foreground">{formatTime(item.timestamp)} · 情绪印记 {Math.round(Number(item.emotional_weight || 0) * 100)}% · Bot {item.bot_id || botId}</p></div>)}</div> : <p className="rounded-xl border p-6 text-center text-xs text-muted-foreground">Legacy 表中没有该 Bot 的 Timeline。</p>}</div>
                 </div>
-              </>}
-            </CardContent>
-          </Card>
+              </> : null}
+              </QueryState>
+            </div>
+          </details>
 
           <Alert><AlertTitle>运行时一致性边界</AlertTitle><AlertDescription>正式 mutation：{payload.capabilities.mutate.available ? 'available' : `unavailable（${reasonText(payload.capabilities.mutate.reason_code)}）`}；runtime refresh：{payload.runtime_refresh.status}。页面不会展示不可用的写按钮，也不会把 Legacy 读数据声明为当前 Scope。</AlertDescription></Alert>
         </div> : null}

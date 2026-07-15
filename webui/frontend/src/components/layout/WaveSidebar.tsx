@@ -4,6 +4,7 @@ import { NavLink, useLocation } from 'react-router-dom'
 import { appRoutes, type RouteGroup } from '@/app/routes'
 import { Badge } from '@/components/ui/badge'
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem } from '@/components/ui/sidebar'
+import { sharedScopeSearch } from '@/lib/navigation-search'
 
 const groups: Array<{ id: RouteGroup; label: string }> = [
   { id: 'overview', label: '总览' },
@@ -16,7 +17,8 @@ const groups: Array<{ id: RouteGroup; label: string }> = [
 
 export function WaveSidebar() {
   const location = useLocation()
-  return <Sidebar collapsible="icon" variant="inset"><SidebarHeader><SidebarMenu><SidebarMenuItem><SidebarMenuButton asChild size="lg" tooltip="Wave Memory"><NavLink to="/dashboard"><WavesIcon aria-hidden="true" /><span className="flex flex-col gap-0.5"><span className="font-semibold">Wave Memory</span><span className="text-sm text-muted-foreground">WebUI 控制台</span></span></NavLink></SidebarMenuButton></SidebarMenuItem></SidebarMenu></SidebarHeader><SidebarContent>
-    {groups.map((group) => <SidebarGroup key={group.id}><SidebarGroupLabel>{group.label}</SidebarGroupLabel><SidebarGroupContent><SidebarMenu>{appRoutes.filter((route) => route.group === group.id).map((route) => { const Icon = route.icon; return <SidebarMenuItem key={route.path}><SidebarMenuButton asChild isActive={location.pathname === route.path || location.pathname.startsWith(`${route.path}/`)} tooltip={route.title}><NavLink to={{ pathname: route.path, search: location.search }}><Icon aria-hidden="true" /><span>{route.title}</span></NavLink></SidebarMenuButton></SidebarMenuItem> })}</SidebarMenu></SidebarGroupContent></SidebarGroup>)}
+  const navigationSearch = sharedScopeSearch(location.search)
+  return <Sidebar collapsible="icon" variant="inset"><SidebarHeader><SidebarMenu><SidebarMenuItem><SidebarMenuButton asChild size="lg" tooltip="Wave Memory"><NavLink to={{ pathname: '/dashboard', search: navigationSearch }}><WavesIcon aria-hidden="true" /><span className="flex flex-col gap-0.5"><span className="font-semibold">Wave Memory</span><span className="text-sm text-muted-foreground">WebUI 控制台</span></span></NavLink></SidebarMenuButton></SidebarMenuItem></SidebarMenu></SidebarHeader><SidebarContent>
+    {groups.map((group) => <SidebarGroup key={group.id}><SidebarGroupLabel>{group.label}</SidebarGroupLabel><SidebarGroupContent><SidebarMenu>{appRoutes.filter((route) => route.group === group.id).map((route) => { const Icon = route.icon; return <SidebarMenuItem key={route.path}><SidebarMenuButton asChild isActive={location.pathname === route.path || location.pathname.startsWith(`${route.path}/`)} tooltip={route.title}><NavLink to={{ pathname: route.path, search: navigationSearch }}><Icon aria-hidden="true" /><span>{route.title}</span></NavLink></SidebarMenuButton></SidebarMenuItem> })}</SidebarMenu></SidebarGroupContent></SidebarGroup>)}
   </SidebarContent><SidebarFooter><div className="flex items-center gap-2 px-2 py-1 text-sm text-muted-foreground"><MoonStarIcon className="size-4" aria-hidden="true" /><span>shadcn · Nova</span><Badge variant="secondary">v1</Badge></div></SidebarFooter></Sidebar>
 }

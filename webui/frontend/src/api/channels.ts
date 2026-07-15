@@ -18,6 +18,7 @@ export interface ChannelSettings {
   [key: string]: unknown
 }
 export interface ChannelConfigData { mode?: string; recent_dedup_minutes?: number; trace_enabled?: boolean; channels?: Record<string, ChannelSettings>; [key: string]: unknown }
+export interface NumericRangeDto { min?: number; max?: number; minimum?: number; maximum?: number }
 export interface ChannelDescriptor {
   id: string
   purpose: string
@@ -26,6 +27,8 @@ export interface ChannelDescriptor {
   management_route: string | null
   verification_filters: Record<string, string>
   available: boolean
+  numeric_limits?: Record<string, NumericRangeDto>
+  limits?: Record<string, NumericRangeDto>
 }
 export interface ChannelDiffItem { path?: string; before?: unknown; after?: unknown; [key: string]: unknown }
 export interface ChannelConfigPayload {
@@ -58,7 +61,7 @@ export interface ChannelValidationPayload {
 }
 export type ChannelPatch = Partial<ChannelConfigData>
 
-export function getChannelConfig(): Promise<ChannelConfigPayload> { return fetchJson('/api/config/channels') }
+export function getChannelConfig(signal?: AbortSignal): Promise<ChannelConfigPayload> { return fetchJson('/api/config/channels', { signal }) }
 export function validateChannelConfig(patch: ChannelPatch): Promise<ChannelValidationPayload> { return fetchJson('/api/config/channels/validate', { method: 'POST', body: JSON.stringify(patch) }) }
 export function applyChannelConfig(patch: ChannelPatch, preflightToken: string): Promise<ChannelValidationPayload> { return fetchJson('/api/config/channels', { method: 'POST', body: JSON.stringify({ ...patch, preflight_token: preflightToken, confirmation: 'apply' }) }) }
 export function resetChannelConfigDefaults(): Promise<ChannelValidationPayload> { return fetchJson('/api/config/channels/defaults', { method: 'POST' }) }

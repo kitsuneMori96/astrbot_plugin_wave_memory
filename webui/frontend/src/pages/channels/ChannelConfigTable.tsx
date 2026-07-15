@@ -1,12 +1,14 @@
 import { ExternalLinkIcon } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
-import type { ChannelConfigData, ChannelDescriptor, ChannelSettings, FieldValueDto } from '@/api/channels'
+import type { ChannelConfigData, ChannelDescriptor, ChannelSettings, FieldValueDto, NumericRangeDto } from '@/api/channels'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import type { NumericConstraints } from '@/lib/numeric-draft'
+import { ResponsiveTable } from '@/components/shared'
 
 const numericFields = [
   ['priority', '优先级'],
@@ -17,22 +19,37 @@ const numericFields = [
   ['min_score', '最低分'],
 ] as const
 
-type NumericField = (typeof numericFields)[number][0]
+export type ChannelNumericField = (typeof numericFields)[number][0]
 
 function display(value: unknown): string {
   if (value === null || value === undefined || value === '') return '—'
   return String(value)
 }
 
-function fieldValue(channel: ChannelSettings | undefined, field: NumericField): string {
-  const value = channel?.[field]
-  return value === undefined || value === null ? '' : String(value)
+function numericKey(name: string, field: ChannelNumericField): string {
+  return `${name}.${field}`
 }
 
-function parseField(field: NumericField, value: string): number | null {
-  if (value === '') return field === 'top_k' || field === 'max_items' || field === 'min_score' ? null : 0
-  const parsed = field === 'min_score' ? Number.parseFloat(value) : Number.parseInt(value, 10)
-  return Number.isFinite(parsed) ? parsed : null
+function rangeValue(range: NumericRangeDto | undefined, side: 'min' | 'max'): number | undefined {
+  const value = side === 'min' ? (range?.min ?? range?.minimum) : (range?.max ?? range?.maximum)
+  return Number.isFinite(value) ? value : undefined
+}
+
+function numericConstraints(
+  descriptor: ChannelDescriptor | undefined,
+  field: ChannelNumericField,
+  label: string,
+  globalLimits: Record<string, number>,
+): NumericConstraints {
+  const range = descriptor?.numeric_limits?.[field] ?? descriptor?.limits?.[field]
+  const globalMin = globalLimits[`${field}_min`]
+  const globalMax = globalLimits[`${field}_max`]
+  return {
+    label,
+    integer: field !== 'min_score',
+    min: rangeValue(range, 'min') ?? (Number.isFinite(globalMin) ? globalMin : undefined),
+    max: rangeValue(range, 'max') ?? (Number.isFinite(globalMax) ? globalMax : undefined),
+  }
 }
 
 function ValueState({ state }: { state?: FieldValueDto }) {
@@ -49,11 +66,19 @@ function ValueState({ state }: { state?: FieldValueDto }) {
 export function ChannelConfigTable({
   draft,
   descriptors,
+  limits,
+  numericDrafts,
+  numericErrors,
   onDraftChange,
+  onNumericChange,
 }: {
   draft: ChannelConfigData
   descriptors: ChannelDescriptor[]
+  limits: Record<string, number>
+  numericDrafts: Record<string, string>
+  numericErrors: Record<string, string>
   onDraftChange: (draft: ChannelConfigData) => void
+  onNumericChange: (name: string, field: ChannelNumericField, raw: string, constraints: NumericConstraints) => void
 }) {
   const channels = draft.channels ?? {}
   const descriptorMap = new Map(descriptors.map((item) => [item.id, item]))
@@ -63,8 +88,8 @@ export function ChannelConfigTable({
   }
 
   return (
-    <div data-slot="channel-config-table" className="overflow-hidden rounded-xl border border-border/70">
-      <Table>
+    <div data-slot="channel-config-table">
+      <ResponsiveTable label="通道配置清单" table={<Table>
         <TableHeader className="bg-muted/25">
           <TableRow>
             <TableHead className="w-[24%]">通道与用途</TableHead>
@@ -109,18 +134,29 @@ export function ChannelConfigTable({
                 </TableCell>
                 <TableCell>
                   <div className="grid min-w-[360px] gap-3 py-1 sm:grid-cols-2 xl:grid-cols-3">
-                    {numericFields.map(([field, label]) => (
-                      <label key={field} className="flex min-w-0 flex-col gap-1.5 text-xs font-medium">
-                        <span>{label}</span>
-                        <Input
-                          aria-label={`${name} ${label}`}
-                          inputMode={field === 'min_score' ? 'decimal' : 'numeric'}
-                          value={fieldValue(channel, field)}
-                          onChange={(event) => updateChannel(name, { [field]: parseField(field, event.target.value) })}
-                        />
-                        <ValueState state={channel.field_states?.[field]} />
-                      </label>
-                    ))}
+                    {numericFields.map(([field, label]) => {
+                      const key = numericKey(name, field)
+                      const constraints = numericConstraints(descriptor, field, `${name} ${label}`, limits)
+                      const error = numericErrors[key]
+                      return (
+                        <label key={field} className="flex min-w-0 flex-col gap-1.5 text-xs font-medium">
+                          <span>{label}</span>
+                          <Input
+                            aria-label={`${name} ${label}`}
+                            aria-invalid={Boolean(error)}
+                            inputMode={field === 'min_score' ? 'decimal' : 'numeric'}
+                            min={constraints.min}
+                            max={constraints.max}
+                            step={constraints.integer ? 1 : 'any'}
+                            type="number"
+                            value={numericDrafts[key] ?? ''}
+                            onChange={(event) => onNumericChange(name, field, event.target.value, constraints)}
+                          />
+                          {error ? <span className="text-destructive" role="alert">{error}</span> : null}
+                          <ValueState state={channel.field_states?.[field]} />
+                        </label>
+                      )
+                    })}
                   </div>
                 </TableCell>
                 <TableCell className="text-right">
@@ -134,7 +170,11 @@ export function ChannelConfigTable({
             )
           })}
         </TableBody>
-      </Table>
+      </Table>} cards={Object.entries(channels).map(([name, channel]) => {
+        const descriptor = descriptorMap.get(name)
+        const safety = name === 'safety'
+        return <article key={name} className="flex flex-col gap-4 rounded-lg border bg-card p-4"><div className="flex flex-wrap items-start justify-between gap-2"><div><p className="font-semibold">{name}</p><p className="mt-1 text-sm leading-relaxed text-muted-foreground">{descriptor?.purpose ?? '后端未返回用途说明'}</p></div>{safety ? <Badge variant="secondary">固定启用</Badge> : null}</div><div className="flex flex-wrap gap-1"><Badge variant={descriptor?.risk === 'critical' || descriptor?.risk === 'high' ? 'destructive' : 'outline'}>风险：{descriptor?.risk ?? 'unknown'}</Badge>{(descriptor?.dependencies ?? []).slice(0, 3).map((dependency) => <Badge key={dependency} variant="outline">{dependency}</Badge>)}</div><div className="flex flex-wrap items-center gap-3 rounded-md border bg-muted/20 p-3"><div className="flex items-center gap-2"><Switch aria-label={`${name} 启用状态`} checked={safety ? true : Boolean(channel.enabled)} disabled={safety} onCheckedChange={(checked) => updateChannel(name, { enabled: safety ? true : checked })} /><span className="text-sm">{channel.enabled || safety ? '已启用' : '已停用'}</span></div><Badge variant={channel.status === 'error' || channel.status === 'timeout' ? 'destructive' : 'secondary'}>{String(channel.status ?? 'unknown')}</Badge><span className="text-xs text-muted-foreground">最近 {display(channel.last_hit_count)} 命中 · {display(channel.last_latency_ms)} ms</span></div><ValueState state={channel.field_states?.enabled} /><div className="grid gap-3 sm:grid-cols-2">{numericFields.map(([field, label]) => { const key = numericKey(name, field); const constraints = numericConstraints(descriptor, field, `${name} ${label}`, limits); const error = numericErrors[key]; return <label key={field} className="flex min-w-0 flex-col gap-1.5 text-xs font-medium"><span>{label}</span><Input aria-label={`${name} ${label}`} aria-invalid={Boolean(error)} inputMode={field === 'min_score' ? 'decimal' : 'numeric'} min={constraints.min} max={constraints.max} step={constraints.integer ? 1 : 'any'} type="number" value={numericDrafts[key] ?? ''} onChange={(event) => onNumericChange(name, field, event.target.value, constraints)} />{error ? <span className="text-destructive" role="alert">{error}</span> : null}<ValueState state={channel.field_states?.[field]} /></label> })}</div><div className="flex justify-end">{descriptor?.management_route ? <Button asChild variant="outline" size="sm"><Link to={descriptor.management_route}>负责页面<ExternalLinkIcon data-icon="inline-end" aria-hidden="true" /></Link></Button> : <span className="text-xs text-muted-foreground">当前页管理</span>}</div></article>
+      })} />
     </div>
   )
 }

@@ -8,6 +8,25 @@ export interface ApiRequestInit extends RequestInit {
   noAuth?: boolean
 }
 
+export class ApiRequestCancelledError extends Error {
+  constructor(message = '请求已取消。') {
+    super(message)
+    this.name = 'AbortError'
+  }
+}
+
+export class ApiRequestTimeoutError extends Error {
+  constructor(message = 'API 请求超时（15 秒上限），请检查网络或服务端响应健康。') {
+    super(message)
+    this.name = 'TimeoutError'
+  }
+}
+
+export function isRequestCancelled(error: unknown): boolean {
+  return error instanceof ApiRequestCancelledError
+    || (error instanceof Error && error.name === 'AbortError')
+}
+
 const TOKEN_KEY = 'wavememory.webui.token'
 
 let authFailureHandler: (() => void) | undefined
@@ -81,6 +100,7 @@ function createApiError(response: Response, payload: unknown): ApiError {
 
 export async function fetchJson<T>(path: string, init: ApiRequestInit = {}): Promise<T> {
   const { noAuth, headers, body, signal, ...fetchInit } = init
+  if (signal?.aborted) throw new ApiRequestCancelledError()
   const requestHeaders = new Headers(headers)
   const token = getStoredToken()
 
@@ -96,7 +116,8 @@ export async function fetchJson<T>(path: string, init: ApiRequestInit = {}): Pro
   const controller = new AbortController()
   let timedOut = false
   const abortFromCaller = () => controller.abort(signal?.reason)
-  signal?.addEventListener('abort', abortFromCaller, { once: true })
+  if (signal?.aborted) controller.abort(signal.reason)
+  else signal?.addEventListener('abort', abortFromCaller, { once: true })
   const timeoutId = setTimeout(() => {
     timedOut = true
     controller.abort()
@@ -123,9 +144,9 @@ export async function fetchJson<T>(path: string, init: ApiRequestInit = {}): Pro
 
     return payload as T
   } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      if (timedOut) throw new Error('API 请求超时（15 秒上限），请检查网络或服务端响应健康。')
-      throw new Error('请求已取消。')
+    if (timedOut) throw new ApiRequestTimeoutError()
+    if (signal?.aborted || controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
+      throw new ApiRequestCancelledError()
     }
     throw error
   } finally {

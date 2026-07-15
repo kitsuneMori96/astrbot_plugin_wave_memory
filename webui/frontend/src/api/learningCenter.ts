@@ -174,24 +174,24 @@ function idempotentInit(idempotencyKey?: string, body?: Record<string, unknown>)
   }
 }
 
-export function listLearningSources(query: LearningListQuery): Promise<LearningListPayload<LearningSourceItem>> {
-  return fetchJson<LearningListPayload<LearningSourceItem>>(`/api/learning-center/sources${toQueryString(query)}`)
+export function listLearningSources(query: LearningListQuery, signal?: AbortSignal): Promise<LearningListPayload<LearningSourceItem>> {
+  return fetchJson<LearningListPayload<LearningSourceItem>>(`/api/learning-center/sources${toQueryString(query)}`, { signal })
 }
 
-export function listLearningJobs(query: LearningListQuery): Promise<LearningListPayload<LearningJobItem>> {
-  return fetchJson<LearningListPayload<LearningJobItem>>(`/api/learning-center/jobs${toQueryString(query)}`)
+export function listLearningJobs(query: LearningListQuery, signal?: AbortSignal): Promise<LearningListPayload<LearningJobItem>> {
+  return fetchJson<LearningListPayload<LearningJobItem>>(`/api/learning-center/jobs${toQueryString(query)}`, { signal })
 }
 
 export function runLearningJob(jobId: number, botId: string, idempotencyKey?: string): Promise<LearningActionResponse> {
   return fetchJson<LearningActionResponse>(`/api/learning-center/jobs/${jobId}/run?bot_id=${encodeURIComponent(botId)}`, idempotentInit(idempotencyKey))
 }
 
-export function listLearningCandidates(query: LearningListQuery): Promise<LearningListPayload<LearningCandidateItem>> {
-  return fetchJson<LearningListPayload<LearningCandidateItem>>(`/api/learning-center/candidates${toQueryString(query)}`)
+export function listLearningCandidates(query: LearningListQuery, signal?: AbortSignal): Promise<LearningListPayload<LearningCandidateItem>> {
+  return fetchJson<LearningListPayload<LearningCandidateItem>>(`/api/learning-center/candidates${toQueryString(query)}`, { signal })
 }
 
-export function getLearningCandidate(candidateId: number, botId: string): Promise<{ item: LearningCandidateItem }> {
-  return fetchJson<{ item: LearningCandidateItem }>(`/api/learning-center/candidates/${candidateId}?bot_id=${encodeURIComponent(botId)}`)
+export function getLearningCandidate(candidateId: number, botId: string, signal?: AbortSignal): Promise<{ item: LearningCandidateItem }> {
+  return fetchJson<{ item: LearningCandidateItem }>(`/api/learning-center/candidates/${candidateId}?bot_id=${encodeURIComponent(botId)}`, { signal })
 }
 
 export function reviewLearningCandidate(
@@ -206,8 +206,8 @@ export function reviewLearningCandidate(
   )
 }
 
-export function listLearningPromotions(query: LearningListQuery): Promise<LearningListPayload<LearningPromotionItem>> {
-  return fetchJson<LearningListPayload<LearningPromotionItem>>(`/api/learning-center/promotions${toQueryString(query)}`)
+export function listLearningPromotions(query: LearningListQuery, signal?: AbortSignal): Promise<LearningListPayload<LearningPromotionItem>> {
+  return fetchJson<LearningListPayload<LearningPromotionItem>>(`/api/learning-center/promotions${toQueryString(query)}`, { signal })
 }
 
 export function retryLearningPromotion(promotionId: number, botId: string, idempotencyKey?: string): Promise<LearningActionResponse> {
@@ -217,17 +217,18 @@ export function retryLearningPromotion(promotionId: number, botId: string, idemp
   )
 }
 
-export function getLearningFewShot(query: LearningListQuery): Promise<LearningFewShotPayload> {
-  return fetchJson<LearningFewShotPayload>(`/api/learning-center/few-shot${toQueryString(query)}`)
+export function getLearningFewShot(query: LearningListQuery, signal?: AbortSignal): Promise<LearningFewShotPayload> {
+  return fetchJson<LearningFewShotPayload>(`/api/learning-center/few-shot${toQueryString(query)}`, { signal })
 }
 
-export function getLearningExperiences(query: LearningListQuery): Promise<LearningExperiencesPayload> {
-  return fetchJson<LearningExperiencesPayload>(`/api/learning-center/experiences${toQueryString(query)}`)
+export function getLearningExperiences(query: LearningListQuery, signal?: AbortSignal): Promise<LearningExperiencesPayload> {
+  return fetchJson<LearningExperiencesPayload>(`/api/learning-center/experiences${toQueryString(query)}`, { signal })
 }
 
-export function getDedicatedReviewStatus(candidateId: number, botId: string): Promise<{ item: DedicatedReviewStatus }> {
+export function getDedicatedReviewStatus(candidateId: number, botId: string, signal?: AbortSignal): Promise<{ item: DedicatedReviewStatus }> {
   return fetchJson<{ item: DedicatedReviewStatus }>(
     `/api/learning-center/dedicated-review-status/${candidateId}?bot_id=${encodeURIComponent(botId)}`,
+    { signal },
   )
 }
 

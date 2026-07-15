@@ -44,9 +44,47 @@ export interface BeliefFilters extends ScopedSelection {
   search?: string
 }
 
+export interface BeliefCapability {
+  available: boolean
+  reason_code: string | null
+  actions?: Array<'approve' | 'archive'>
+}
+
 export interface BeliefsResponse extends PageResponse<BeliefItem> {
   scope: { kind: string; payload: unknown }
-  capabilities: Record<string, unknown>
+  capabilities: {
+    lifecycle: BeliefCapability
+    batch_lifecycle: BeliefCapability
+    evidence: BeliefCapability
+    create: BeliefCapability
+    edit: BeliefCapability
+    physical_delete: BeliefCapability
+    archive_legacy: BeliefCapability
+    select_all_matching: BeliefCapability
+  }
+}
+
+export interface BeliefEvidenceMessage {
+  id: number
+  group_id: string | null
+  sender_id: string | null
+  sender_name: string | null
+  content: string
+  timestamp: number
+  role: 'before' | 'anchor' | 'after'
+}
+
+export interface BeliefEvidencePayload {
+  ok: boolean
+  belief: Pick<BeliefItem, 'id' | 'content' | 'type' | 'revision'>
+  scope: { kind: string; payload: unknown }
+  anchor: BeliefEvidenceMessage | null
+  messages: BeliefEvidenceMessage[]
+  memories: BeliefEvidenceMessage[]
+  relationship_events: Array<Record<string, unknown>>
+  episodes: Array<Record<string, unknown>>
+  used_fallback: boolean
+  reason_code: string | null
 }
 
 export interface LegacyBeliefItem {
@@ -116,6 +154,41 @@ export function listLegacyBeliefs(filters: { bot_id?: string; type?: BeliefType;
   if (filters.status) params.set('status', filters.status)
   if (filters.search) params.set('search', filters.search)
   return fetchJson<LegacyBeliefsResponse>(`/api/beliefs/legacy/audit?${params.toString()}`)
+}
+
+export function getBeliefEvidence(item: BeliefItem, scope: ScopedSelection, before = 15, after = 15): Promise<BeliefEvidencePayload> {
+  if (!item.object_ref?.ref) throw new Error('该信念没有服务端签发的 ObjectRef，不能安全读取证据')
+  const params = new URLSearchParams({
+    bot_id: scope.bot_id,
+    session_id: scope.session_id,
+    visibility: scope.visibility,
+    ref: item.object_ref.ref,
+    before: String(before),
+    after: String(after),
+  })
+  return fetchJson<BeliefEvidencePayload>(`/api/beliefs/${item.id}/evidence?${params.toString()}`)
+}
+
+export function batchTransitionBeliefs(items: BeliefItem[], action: 'approve' | 'archive', scope: ScopedSelection): Promise<{
+  ok: boolean
+  operation: { kind: string; status: string }
+  transitioned_count: number
+  items: Array<{ id: number; status: string }>
+}> {
+  if (!items.length || items.some((item) => !item.object_ref?.ref)) throw new Error('批量操作要求每条信念都带有服务端签发的 ObjectRef')
+  return fetchJson<{
+    ok: boolean
+    operation: { kind: string; status: string }
+    transitioned_count: number
+    items: Array<{ id: number; status: string }>
+  }>('/api/beliefs/commands/batch-lifecycle', {
+    method: 'POST',
+    body: JSON.stringify({
+      scope: scopeEnvelope(scope),
+      action,
+      items: items.map((item) => ({ id: item.id, object_ref: item.object_ref, revision: item.revision })),
+    }),
+  })
 }
 
 function transitionBelief(item: BeliefItem | number, action: 'approve' | 'archive', scope: ScopedSelection): Promise<MutationResult> {

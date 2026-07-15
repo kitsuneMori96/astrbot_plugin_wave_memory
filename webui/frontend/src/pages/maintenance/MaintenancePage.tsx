@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import {
   BanIcon,
@@ -10,6 +10,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 
+import { isRequestCancelled } from '@/api/client'
 import {
   cancelMaintenanceJob,
   getMaintenanceCheckpoint,
@@ -131,6 +132,13 @@ export function MaintenancePage() {
   const [detail, setDetail] = useState<MaintenanceJob | null>(null)
   const [logs, setLogs] = useState<MaintenanceLog[]>([])
   const [checkpoint, setCheckpoint] = useState<MaintenanceCheckpoint | null>(null)
+  const [detailError, setDetailError] = useState<unknown>()
+  const [logsError, setLogsError] = useState<unknown>()
+  const [checkpointError, setCheckpointError] = useState<unknown>()
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [detailVersion, setDetailVersion] = useState(0)
+  const listRequestRef = useRef<AbortController | null>(null)
+  const detailRequestRef = useRef<AbortController | null>(null)
 
   const setActiveTab = useCallback((tab: string) => {
     setParams((current) => {
@@ -141,6 +149,14 @@ export function MaintenancePage() {
   }, [setParams])
 
   const selectJob = useCallback((id: string) => {
+    detailRequestRef.current?.abort()
+    setDetail(null)
+    setLogs([])
+    setCheckpoint(null)
+    setDetailError(undefined)
+    setLogsError(undefined)
+    setCheckpointError(undefined)
+    setDetailLoading(true)
     setParams((current) => {
       const next = new URLSearchParams(current)
       next.set('tab', 'jobs')
@@ -149,49 +165,110 @@ export function MaintenancePage() {
     })
   }, [setParams])
 
+  const clearJobUrl = useCallback(() => {
+    detailRequestRef.current?.abort()
+    setDetail(null)
+    setLogs([])
+    setCheckpoint(null)
+    setDetailError(undefined)
+    setLogsError(undefined)
+    setCheckpointError(undefined)
+    setDetailLoading(false)
+    setParams((current) => {
+      const next = new URLSearchParams(current)
+      next.delete('job_id')
+      return next
+    })
+  }, [setParams])
+
   const loadJobs = useCallback(async () => {
+    listRequestRef.current?.abort()
+    const controller = new AbortController()
+    listRequestRef.current = controller
+    setJobs(null)
     setStatus('loading')
     setError(undefined)
     try {
-      const next = await listMaintenanceJobs(pagination.limit, pagination.offset)
+      const next = await listMaintenanceJobs(pagination.limit, pagination.offset, controller.signal)
+      if (controller.signal.aborted || listRequestRef.current !== controller) return
       setJobs(next)
       setStatus(next.items.length ? 'success' : 'empty')
     } catch (reason) {
+      if (controller.signal.aborted || listRequestRef.current !== controller || isRequestCancelled(reason)) return
+      setJobs(null)
       setError(reason)
       setStatus('error')
     }
   }, [pagination.limit, pagination.offset])
 
-  useEffect(() => { if (activeTab === 'jobs') void loadJobs() }, [activeTab, loadJobs])
-
   useEffect(() => {
-    if (!jobId) {
-      setDetail(null)
-      setLogs([])
-      setCheckpoint(null)
+    if (activeTab !== 'jobs') {
+      listRequestRef.current?.abort()
       return
     }
-    let active = true
+    void loadJobs()
+    return () => listRequestRef.current?.abort()
+  }, [activeTab, loadJobs])
+
+  useEffect(() => {
+    detailRequestRef.current?.abort()
+    setDetail(null)
+    setLogs([])
+    setCheckpoint(null)
+    setDetailError(undefined)
+    setLogsError(undefined)
+    setCheckpointError(undefined)
+    if (!jobId) {
+      setDetailLoading(false)
+      return
+    }
+    const controller = new AbortController()
+    detailRequestRef.current = controller
     let timer: number | undefined
     const read = async () => {
+      setDetailLoading(true)
       try {
-        const [jobPayload, logPage, state] = await Promise.all([
-          getMaintenanceJob(jobId),
-          getMaintenanceLogs(jobId, 100, 0),
-          getMaintenanceCheckpoint(jobId),
+        const [jobResult, logsResult, checkpointResult] = await Promise.allSettled([
+          getMaintenanceJob(jobId, controller.signal),
+          getMaintenanceLogs(jobId, 100, 0, controller.signal),
+          getMaintenanceCheckpoint(jobId, controller.signal),
         ])
-        if (!active) return
-        setDetail(jobPayload.item)
-        setLogs(logPage.items)
-        setCheckpoint(state)
-        if (activeStatuses.has(jobPayload.item.status)) timer = window.setTimeout(() => void read(), 2000)
+        if (controller.signal.aborted || detailRequestRef.current !== controller) return
+        if (jobResult.status === 'rejected') throw jobResult.reason
+
+        setDetail(jobResult.value.item)
+        setDetailError(undefined)
+        if (logsResult.status === 'fulfilled') {
+          setLogs(logsResult.value.items)
+          setLogsError(undefined)
+        } else {
+          setLogs([])
+          setLogsError(logsResult.reason)
+        }
+        if (checkpointResult.status === 'fulfilled') {
+          setCheckpoint(checkpointResult.value)
+          setCheckpointError(undefined)
+        } else {
+          setCheckpoint(null)
+          setCheckpointError(checkpointResult.reason)
+        }
+        if (activeStatuses.has(jobResult.value.item.status)) timer = window.setTimeout(() => void read(), 2000)
       } catch (reason) {
-        if (active) toast.error(reason instanceof Error ? reason.message : '任务详情加载失败')
+        if (!controller.signal.aborted && detailRequestRef.current === controller && !isRequestCancelled(reason)) {
+          setDetail(null)
+          setLogs([])
+          setCheckpoint(null)
+          setLogsError(undefined)
+          setCheckpointError(undefined)
+          setDetailError(reason)
+        }
+      } finally {
+        if (!controller.signal.aborted && detailRequestRef.current === controller) setDetailLoading(false)
       }
     }
     void read()
-    return () => { active = false; if (timer) window.clearTimeout(timer) }
-  }, [jobId])
+    return () => { controller.abort(); if (timer) window.clearTimeout(timer) }
+  }, [detailVersion, jobId])
 
   async function cancel() {
     if (!detail) return
@@ -225,18 +302,21 @@ export function MaintenancePage() {
         </QueryState>
         {jobs ? <PaginationControls page={jobs.page} onOffsetChange={pagination.setOffset} onLimitChange={pagination.setLimit} /> : null}
 
+        {jobId && detailLoading && !detail ? <Card><CardContent className="py-6 text-sm text-muted-foreground">正在读取所选任务详情、日志与 checkpoint…</CardContent></Card> : null}
+        {jobId && detailError ? <Card><CardContent className="py-6"><QueryState status="error" error={detailError} title="任务详情读取失败" onRetry={() => setDetailVersion((value) => value + 1)} /><p className="mt-3 text-xs text-muted-foreground">旧任务详情已清空，不会继续展示为当前 job。</p><Button type="button" className="mt-3" variant="ghost" onClick={clearJobUrl}>清除 URL 中的任务引用</Button></CardContent></Card> : null}
         {detail ? <Card>
           <CardHeader><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle>{jobKind(detail)}详情</CardTitle><CardDescription>创建于 {formatTime(detail.created_at)} · 最近更新 {formatTime(detail.updated_at)}</CardDescription></div><Badge variant={statusVariant(detail.status)}>{statusLabel(detail.status)}</Badge></div></CardHeader>
           <CardContent className="flex flex-col gap-5">
             <JobProgress job={detail} />
             <div className="grid gap-3 md:grid-cols-3">
-              <div className="rounded-lg border bg-muted/20 p-3"><p className="text-xs text-muted-foreground">当前阶段</p><p className="mt-1 font-medium">{typeof checkpoint?.checkpoint?.phase === 'string' ? checkpoint.checkpoint.phase : activeStatuses.has(detail.status) ? '等待 checkpoint' : statusLabel(detail.status)}</p></div>
+              <div className="rounded-lg border bg-muted/20 p-3"><p className="text-xs text-muted-foreground">当前阶段</p><p className="mt-1 font-medium">{checkpointError ? 'Checkpoint 不可用' : typeof checkpoint?.checkpoint?.phase === 'string' ? checkpoint.checkpoint.phase : activeStatuses.has(detail.status) ? '等待 checkpoint' : statusLabel(detail.status)}</p></div>
               <div className="rounded-lg border bg-muted/20 p-3"><p className="text-xs text-muted-foreground">错误状态</p><p className="mt-1 font-medium">{detail.error_code ?? '无错误'}</p></div>
-              <div className="rounded-lg border bg-muted/20 p-3"><p className="text-xs text-muted-foreground">checkpoint 更新时间</p><p className="mt-1 font-medium">{formatTime(checkpoint?.updated_at)}</p></div>
+              <div className="rounded-lg border bg-muted/20 p-3"><p className="text-xs text-muted-foreground">checkpoint 更新时间</p><p className="mt-1 font-medium">{checkpointError ? '不可用' : formatTime(checkpoint?.updated_at)}</p></div>
             </div>
-            <div><h3 className="mb-2 text-sm font-semibold">任务日志</h3><div className="max-h-64 overflow-auto rounded-lg border bg-muted/20 p-3 font-mono text-xs">{logs.length ? logs.map((log, index) => <div key={`${log.at}-${log.event}-${index}`} className={log.level === 'error' ? 'text-destructive' : 'text-muted-foreground'}>[{formatTime(log.at)}] {logLabel(log.event)}{dataSummary(log.data) ? ` · ${dataSummary(log.data)}` : ''}</div>) : <p className="text-muted-foreground">当前没有任务日志。</p>}</div></div>
+            {checkpointError ? <AlertBox message={`Checkpoint 读取失败：${checkpointError instanceof Error ? checkpointError.message : '未知错误'}。任务核心状态仍可查看。`} /> : null}
+            <div><h3 className="mb-2 text-sm font-semibold">任务日志</h3>{logsError ? <div className="mb-2"><AlertBox message={`任务日志读取失败：${logsError instanceof Error ? logsError.message : '未知错误'}。任务核心状态仍可查看。`} /></div> : null}<div className="max-h-64 overflow-auto rounded-lg border bg-muted/20 p-3 font-mono text-xs">{logsError ? <p className="text-muted-foreground">日志当前不可用。</p> : logs.length ? logs.map((log, index) => <div key={`${log.at}-${log.event}-${index}`} className={log.level === 'error' ? 'text-destructive' : 'text-muted-foreground'}>[{formatTime(log.at)}] {logLabel(log.event)}{dataSummary(log.data) ? ` · ${dataSummary(log.data)}` : ''}</div>) : <p className="text-muted-foreground">当前没有任务日志。</p>}</div></div>
             {detail.error_message ? <AlertBox message={detail.error_message} /> : null}
-            <div className="flex flex-wrap items-center justify-between gap-3"><details className="rounded-md border p-3 text-xs text-muted-foreground"><summary className="cursor-pointer font-medium text-foreground">技术详情</summary><div className="mt-2 font-mono">job_id: {detail.run_id}<br />request_id: {detail.request_id}<br />checkpoint source: {checkpoint?.source ?? '未记录'}</div></details><Button variant="destructive" disabled={!activeStatuses.has(detail.status)} onClick={() => void cancel()}><BanIcon />请求取消</Button></div>
+            <div className="flex flex-wrap items-center justify-between gap-3"><details className="rounded-md border p-3 text-xs text-muted-foreground"><summary className="cursor-pointer font-medium text-foreground">技术详情</summary><div className="mt-2 font-mono">job_id: {detail.run_id}<br />request_id: {detail.request_id}<br />checkpoint source: {checkpoint?.source ?? '未记录'}</div></details><div className="flex flex-wrap gap-2"><Button variant="outline" disabled={detailLoading} onClick={() => setDetailVersion((value) => value + 1)}><RefreshCwIcon />刷新详情</Button><Button variant="destructive" disabled={!activeStatuses.has(detail.status)} onClick={() => void cancel()}><BanIcon />请求取消</Button></div></div>
           </CardContent>
         </Card> : null}
       </TabsContent>

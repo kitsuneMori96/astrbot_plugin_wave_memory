@@ -60,20 +60,20 @@ export interface MaintenanceLog {
   data?: unknown
 }
 
-export function listMaintenanceJobs(limit: number, offset: number): Promise<PageResponse<MaintenanceJob>> {
-  return fetchJson<PageResponse<MaintenanceJob>>(`/api/maintenance/jobs?limit=${limit}&offset=${offset}`)
+export function listMaintenanceJobs(limit: number, offset: number, signal?: AbortSignal): Promise<PageResponse<MaintenanceJob>> {
+  return fetchJson<PageResponse<MaintenanceJob>>(`/api/maintenance/jobs?limit=${limit}&offset=${offset}`, { signal })
 }
 
 export function getMaintenanceJob(jobId: string, signal?: AbortSignal): Promise<MaintenanceJobDetail> {
   return fetchJson<MaintenanceJobDetail>(`/api/maintenance/jobs/${encodeURIComponent(jobId)}`, { signal })
 }
 
-export function getMaintenanceLogs(jobId: string, limit: number, offset: number): Promise<PageResponse<MaintenanceLog>> {
-  return fetchJson<PageResponse<MaintenanceLog>>(`/api/maintenance/jobs/${encodeURIComponent(jobId)}/logs?limit=${limit}&offset=${offset}`)
+export function getMaintenanceLogs(jobId: string, limit: number, offset: number, signal?: AbortSignal): Promise<PageResponse<MaintenanceLog>> {
+  return fetchJson<PageResponse<MaintenanceLog>>(`/api/maintenance/jobs/${encodeURIComponent(jobId)}/logs?limit=${limit}&offset=${offset}`, { signal })
 }
 
-export function getMaintenanceCheckpoint(jobId: string): Promise<MaintenanceCheckpoint> {
-  return fetchJson<MaintenanceCheckpoint>(`/api/maintenance/jobs/${encodeURIComponent(jobId)}/checkpoint`)
+export function getMaintenanceCheckpoint(jobId: string, signal?: AbortSignal): Promise<MaintenanceCheckpoint> {
+  return fetchJson<MaintenanceCheckpoint>(`/api/maintenance/jobs/${encodeURIComponent(jobId)}/checkpoint`, { signal })
 }
 
 export function startTagBackfill(options: TagBackfillRequest): Promise<MaintenanceJobAccepted> {
@@ -109,6 +109,10 @@ export async function waitForMaintenanceJob(
     onUpdate(item)
     if (['succeeded', 'failed', 'cancelled'].includes(item.status)) return item
     await new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(new DOMException('Aborted', 'AbortError'))
+        return
+      }
       const onAbort = () => {
         window.clearTimeout(timer)
         reject(new DOMException('Aborted', 'AbortError'))

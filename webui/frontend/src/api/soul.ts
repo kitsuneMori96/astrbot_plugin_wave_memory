@@ -1,4 +1,4 @@
-import { fetchJson } from './client'
+import { fetchJson, isRequestCancelled } from './client'
 import type { EvidenceRef, ObjectRefDescriptor, PageResponse } from '@/components/shared/types'
 
 export interface SoulScopeSelection {
@@ -90,8 +90,8 @@ function scopeQuery(scope: SoulScopeSelection, extra: Record<string, string> = {
   return new URLSearchParams({ bot_id: scope.bot_id, session_id: scope.session_id, visibility: scope.visibility, ...extra }).toString()
 }
 
-export function getSoulState(scope: SoulScopeSelection, limit: 25 | 50 | 100, offset: number): Promise<SoulStatePayload> {
-  return fetchJson<SoulStatePayload>(`/api/soul/state?${scopeQuery(scope, { limit: String(limit), offset: String(offset) })}`)
+export function getSoulState(scope: SoulScopeSelection, limit: 25 | 50 | 100, offset: number, signal?: AbortSignal): Promise<SoulStatePayload> {
+  return fetchJson<SoulStatePayload>(`/api/soul/state?${scopeQuery(scope, { limit: String(limit), offset: String(offset) })}`, { signal })
 }
 
 async function legacyCollection<T>(request: Promise<{ items: T[] }>): Promise<LegacySoulCollection<T>> {
@@ -99,15 +99,16 @@ async function legacyCollection<T>(request: Promise<{ items: T[] }>): Promise<Le
     const payload = await request
     return { status: 'available', items: payload.items ?? [] }
   } catch (reason) {
+    if (isRequestCancelled(reason)) throw reason
     return { status: 'unavailable', items: [], reason: reason instanceof Error ? reason.message : 'legacy_read_unavailable' }
   }
 }
 
-export async function getLegacySoulSnapshot(scope: SoulScopeSelection): Promise<LegacySoulSnapshot> {
-  const concerns = legacyCollection(fetchJson<{ items: LegacyConcernItem[] }>(`/api/concerns?${scopeQuery(scope, { limit: '50' })}`))
-  const timeline = legacyCollection(fetchJson<{ items: LegacyTimelineItem[] }>(`/api/time-anchors?${scopeQuery(scope, { limit: '50' })}`))
+export async function getLegacySoulSnapshot(scope: SoulScopeSelection, signal?: AbortSignal): Promise<LegacySoulSnapshot> {
+  const concerns = legacyCollection(fetchJson<{ items: LegacyConcernItem[] }>(`/api/concerns?${scopeQuery(scope, { limit: '50' })}`, { signal }))
+  const timeline = legacyCollection(fetchJson<{ items: LegacyTimelineItem[] }>(`/api/time-anchors?${scopeQuery(scope, { limit: '50' })}`, { signal }))
   const moods = legacyCollection(
-    fetchJson<{ items: Array<LegacyMoodItem & { desc?: string; ts?: number }> }>(`/api/mood/trajectory?${scopeQuery(scope, { limit: '100' })}`).then((payload) => ({
+    fetchJson<{ items: Array<LegacyMoodItem & { desc?: string; ts?: number }> }>(`/api/mood/trajectory?${scopeQuery(scope, { limit: '100' })}`, { signal }).then((payload) => ({
       items: payload.items.map((item) => ({ ...item, description: item.description ?? item.desc ?? '', timestamp: item.timestamp ?? item.ts ?? 0 })),
     })),
   )

@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { AlertTriangleIcon, EyeIcon, RefreshCwIcon, SearchIcon, ShieldCheckIcon } from 'lucide-react'
 
+import { isRequestCancelled } from '@/api/client'
 import { getIndexDiagnostics, type DiagnosticCheck, type DiagnosticHealth, type IndexDiagnostics } from '@/api/diagnostics'
-import { QueryState, ResponsiveDetail } from '@/components/shared'
+import { QueryState, ResponsiveDetail, ResponsiveTable } from '@/components/shared'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -70,6 +71,11 @@ const EVIDENCE_LABELS: Record<string, string> = {
 
 function checkLabel(name: string): string { return CHECK_LABELS[name] ?? name }
 
+function formatCheckedAt(value: unknown): string {
+  const date = new Date(String(value ?? ''))
+  return Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN') : '时间不可用'
+}
+
 function healthVariant(health: DiagnosticHealth): 'default' | 'secondary' | 'destructive' | 'outline' {
   if (health === 'healthy') return 'default'
   if (health === 'drift' || health === 'probe_error') return 'destructive'
@@ -130,12 +136,19 @@ function CheckDetail({ check }: { check: DiagnosticCheck }) {
     <div className="flex flex-wrap gap-2"><Badge variant={healthVariant(check.health)}>{HEALTH_LABELS[check.health]}</Badge><Badge variant="outline">{sourceLabel(check.source)}</Badge></div>
     <div className="rounded-md border bg-muted/10 p-3"><h3 className="text-sm font-medium">影响</h3><p className="mt-1 text-sm text-muted-foreground">{impactText(check)}</p></div>
     <dl className="grid gap-3 sm:grid-cols-2">{evidence.length ? evidence.map(([key, value]) => <div key={key} className="rounded-md border p-3"><dt className="text-xs font-medium text-muted-foreground">{EVIDENCE_LABELS[key] ?? key}</dt><dd className="mt-1 break-words text-sm">{formatEvidenceValue(key, value)}</dd></div>) : <div className="text-sm text-muted-foreground">该检查没有可安全展示的结构化证据。</div>}</dl>
-    <div className="text-xs text-muted-foreground">检查时间：{new Date(check.checked_at).toLocaleString('zh-CN')}。内部物理路径与原始诊断对象不会在界面中展开。</div>
+    <div className="text-xs text-muted-foreground">检查时间：{formatCheckedAt(check.checked_at)}。内部物理路径与原始诊断对象不会在界面中展开。</div>
   </div>
 }
 
-function SummaryTile({ label, value, tone }: { label: string; value: number; tone?: string }) {
-  return <div className="min-w-[7rem] rounded-lg border bg-muted/20 px-3 py-2 text-center"><div className="text-xs text-muted-foreground">{label}</div><div className={`text-lg font-semibold ${tone ?? ''}`}>{value}</div></div>
+function SummaryTile({ label, value, tone }: { label: string; value: number | string; tone?: string }) {
+  return <div className="min-w-0 px-3 py-1.5 text-center"><div className="truncate text-[10px] text-muted-foreground">{label}</div><div className={`text-lg font-semibold leading-5 ${tone ?? ''}`}>{value}</div></div>
+}
+
+function HealthStatus({ loading, error, data, issueCount }: { loading: boolean; error: unknown; data: IndexDiagnostics | null; issueCount: number }) {
+  if (loading) return <Alert className="py-2"><RefreshCwIcon className="animate-spin" aria-hidden="true" /><AlertTitle>正在读取索引诊断</AlertTitle><AlertDescription>检查完成前，健康度保持未知。</AlertDescription></Alert>
+  if (error || !data) return <Alert className="py-2"><AlertTriangleIcon aria-hidden="true" /><AlertTitle>索引健康状态未知</AlertTitle><AlertDescription>诊断接口不可用，当前不能证明索引健康；请重试只读检查。</AlertDescription></Alert>
+  if (issueCount > 0) return <Alert variant="destructive" className="py-2"><AlertTriangleIcon aria-hidden="true" /><AlertTitle>检测到索引漂移或检查失败</AlertTitle><AlertDescription><span>先在健康矩阵定位异常；修复仅通过 Maintenance durable job 执行。</span><details className="mt-1"><summary className="cursor-pointer text-xs font-medium">查看影响与安全边界</summary><p className="mt-1 text-xs">漂移可能造成关键词或语义召回漏项、孤立结果及派生页面滞后；检查失败表示当前无法证明索引健康。本页不提供直接 rebuild，任务进入 running 也不代表修复完成。</p></details></AlertDescription></Alert>
+  return <Alert className="py-2"><ShieldCheckIcon aria-hidden="true" /><AlertTitle>{data.health === 'repairing' ? '后台修复进行中' : '未发现阻断性索引漂移'}</AlertTitle><AlertDescription>“真实为空”与“未配置”保留原始语义，不会被显示为健康或故障。</AlertDescription></Alert>
 }
 
 export function IndexesPage() {
@@ -145,16 +158,24 @@ export function IndexesPage() {
   const [reload, setReload] = useState(0)
   const [search, setSearch] = useState('')
   const [healthFilter, setHealthFilter] = useState('')
+  const requestRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
-    let active = true
+    requestRef.current?.abort()
+    const controller = new AbortController()
+    requestRef.current = controller
     setLoading(true)
     setError(undefined)
-    getIndexDiagnostics()
-      .then((value) => { if (active) setData(value) })
-      .catch((reason: unknown) => { if (active) { setData(null); setError(reason) } })
-      .finally(() => { if (active) setLoading(false) })
-    return () => { active = false }
+    getIndexDiagnostics(controller.signal)
+      .then((value) => { if (!controller.signal.aborted && requestRef.current === controller) setData(value) })
+      .catch((reason: unknown) => {
+        if (!controller.signal.aborted && requestRef.current === controller && !isRequestCancelled(reason)) {
+          setData(null)
+          setError(reason)
+        }
+      })
+      .finally(() => { if (!controller.signal.aborted && requestRef.current === controller) setLoading(false) })
+    return () => controller.abort()
   }, [reload])
 
   const checks = useMemo(() => {
@@ -169,17 +190,13 @@ export function IndexesPage() {
   return <div className="flex flex-col gap-5" data-page="indexes">
     <div className="flex flex-wrap items-start justify-between gap-4">
       <header className="max-w-2xl"><h1 className="text-xl font-bold tracking-tight">索引与派生数据诊断</h1><p className="text-xs text-muted-foreground">以只读探针检查 FTS、向量、索引清单、运行时 shadow、派生消费进度与 BookLore 数据源。</p></header>
-      <div className="flex flex-wrap gap-2"><SummaryTile label="检查项" value={data?.evidence?.probe_count ?? 0} /><SummaryTile label="健康" value={counts.healthy ?? 0} tone="text-emerald-600" /><SummaryTile label="漂移" value={driftCount} tone={driftCount ? 'text-destructive' : ''} /><SummaryTile label="检查失败" value={counts.probe_error ?? 0} tone={(counts.probe_error ?? 0) ? 'text-destructive' : ''} /></div>
+      <div className="grid min-w-[20rem] grid-cols-4 divide-x overflow-hidden rounded-lg border bg-muted/15"><SummaryTile label="检查项" value={data ? data.evidence?.probe_count ?? 0 : '—'} /><SummaryTile label="健康" value={data ? counts.healthy ?? 0 : '—'} tone={data ? 'text-emerald-600' : undefined} /><SummaryTile label="漂移" value={data ? driftCount : '—'} tone={driftCount ? 'text-destructive' : ''} /><SummaryTile label="检查失败" value={data ? counts.probe_error ?? 0 : '—'} tone={(counts.probe_error ?? 0) ? 'text-destructive' : ''} /></div>
     </div>
 
-    {issueCount > 0 ? <Alert variant="destructive"><AlertTriangleIcon aria-hidden="true" /><AlertTitle>检测到索引漂移或检查失败</AlertTitle><AlertDescription>漂移会导致关键词/语义召回漏项、孤立结果或派生页面滞后；检查失败表示当前无法证明索引健康。此页面不会直接执行 rebuild，请先查看具体证据，再进入 Maintenance 通过可恢复任务、checkpoint 与日志进行安全处理。</AlertDescription></Alert> : <Alert><ShieldCheckIcon aria-hidden="true" /><AlertTitle>{data?.health === 'repairing' ? '后台修复进行中' : '未发现阻断性索引漂移'}</AlertTitle><AlertDescription>“真实为空”或“未配置”仍可能意味着相关能力没有结果，请结合各检查项说明判断。</AlertDescription></Alert>}
+    <HealthStatus loading={loading} error={error} data={data} issueCount={issueCount} />
 
-    <Card className="border-border/60"><CardHeader><CardTitle className="text-sm">检查筛选与安全入口</CardTitle><CardDescription>重新检查只执行只读探针；任何重建或修复都应进入 Maintenance durable job 链路。</CardDescription></CardHeader><CardContent className="flex flex-wrap items-center gap-2"><div className="relative min-w-64 flex-1"><SearchIcon className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input aria-label="搜索诊断项" className="h-8 pl-8" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索检查名称" /></div><select aria-label="健康状态" className="h-8 rounded-md border bg-background px-2 text-xs" value={healthFilter} onChange={(event) => setHealthFilter(event.target.value)}><option value="">全部状态</option>{Object.entries(HEALTH_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select><Button type="button" size="sm" variant="outline" disabled={loading} onClick={() => setReload((value) => value + 1)}><RefreshCwIcon aria-hidden="true" />重新检查</Button><Button asChild size="sm"><Link to="/maintenance?source=diagnostics&panel=indexes">前往安全 Maintenance</Link></Button></CardContent></Card>
-
-    <Card className="border-border/60"><CardContent className="p-4"><QueryState status={status} error={error} title="索引诊断读取失败" onRetry={() => setReload((value) => value + 1)}>
-      {checks.length ? <div className="overflow-hidden rounded-lg border"><Table><TableHeader><TableRow className="bg-muted/20"><TableHead>检查对象</TableHead><TableHead className="w-36">健康状态</TableHead><TableHead>关键证据 / 影响</TableHead><TableHead className="w-44">来源</TableHead><TableHead className="w-14"><span className="sr-only">详情</span></TableHead></TableRow></TableHeader><TableBody>{checks.map((check) => <TableRow key={check.name}><TableCell><div className="font-medium">{checkLabel(check.name)}</div><div className="font-mono text-xs text-muted-foreground">{check.name}</div></TableCell><TableCell><Badge variant={healthVariant(check.health)}>{HEALTH_LABELS[check.health]}</Badge></TableCell><TableCell className="max-w-xl text-sm text-muted-foreground">{primaryMetric(check)}</TableCell><TableCell>{sourceLabel(check.source)}</TableCell><TableCell className="text-right"><ResponsiveDetail title={checkLabel(check.name)} description="只读健康证据与用户可见影响" trigger={<Button type="button" variant="ghost" size="icon-sm" aria-label={`查看 ${checkLabel(check.name)} 详情`}><EyeIcon aria-hidden="true" /></Button>}><CheckDetail check={check} /></ResponsiveDetail></TableCell></TableRow>)}</TableBody></Table></div> : <QueryState status="empty" title="没有匹配的诊断项" description="请调整名称或健康状态筛选；原始诊断数据没有被修改。" />}
+    <Card className="border-border/60"><CardHeader className="gap-3 border-b pb-3"><div className="flex flex-wrap items-center justify-between gap-2"><div><CardTitle className="text-sm">索引健康矩阵</CardTitle><CardDescription>优先展示各只读探针的当前状态与关键证据。</CardDescription></div><Badge variant="outline" className="text-[10px]">{data ? `检查于 ${formatCheckedAt(data.checked_at)}` : '状态未确认'}</Badge></div><div className="flex flex-wrap items-center gap-2"><div className="relative min-w-0 flex-1 basis-56"><SearchIcon className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input aria-label="搜索诊断项" className="h-8 pl-8" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索检查名称" /></div><select aria-label="健康状态" className="h-8 rounded-md border bg-background px-2 text-xs" value={healthFilter} onChange={(event) => setHealthFilter(event.target.value)}><option value="">全部状态</option>{Object.entries(HEALTH_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select><Button type="button" size="sm" variant="outline" disabled={loading} onClick={() => setReload((value) => value + 1)}><RefreshCwIcon aria-hidden="true" />重新检查</Button><Button asChild size="sm"><Link to="/maintenance?source=diagnostics&panel=indexes">进入 Maintenance 修复任务</Link></Button></div></CardHeader><CardContent className="p-4"><QueryState status={status} error={error} title="索引诊断读取失败" onRetry={() => setReload((value) => value + 1)}>
+      {checks.length ? <ResponsiveTable label="索引诊断检查项" table={<Table><TableHeader><TableRow className="bg-muted/20"><TableHead>检查对象</TableHead><TableHead className="w-36">健康状态</TableHead><TableHead>关键证据 / 影响</TableHead><TableHead className="w-44">来源</TableHead><TableHead className="w-14"><span className="sr-only">详情</span></TableHead></TableRow></TableHeader><TableBody>{checks.map((check) => <TableRow key={check.name}><TableCell><div className="font-medium">{checkLabel(check.name)}</div><div className="font-mono text-xs text-muted-foreground">{check.name}</div></TableCell><TableCell><Badge variant={healthVariant(check.health)}>{HEALTH_LABELS[check.health]}</Badge></TableCell><TableCell className="max-w-xl text-sm text-muted-foreground">{primaryMetric(check)}</TableCell><TableCell>{sourceLabel(check.source)}</TableCell><TableCell className="text-right"><ResponsiveDetail title={checkLabel(check.name)} description="只读健康证据与用户可见影响" trigger={<Button type="button" variant="ghost" size="icon-sm" aria-label={`查看 ${checkLabel(check.name)} 详情`}><EyeIcon aria-hidden="true" /></Button>}><CheckDetail check={check} /></ResponsiveDetail></TableCell></TableRow>)}</TableBody></Table>} cards={checks.map((check) => <article key={check.name} className="flex flex-col gap-3 rounded-lg border bg-card p-4"><div className="flex flex-wrap items-start justify-between gap-2"><div><p className="font-medium">{checkLabel(check.name)}</p><p className="break-all font-mono text-xs text-muted-foreground">{check.name}</p></div><Badge variant={healthVariant(check.health)}>{HEALTH_LABELS[check.health]}</Badge></div><dl className="grid gap-2 text-sm"><div><dt className="text-muted-foreground">关键证据 / 影响</dt><dd className="break-words">{primaryMetric(check)}</dd></div><div><dt className="text-muted-foreground">来源</dt><dd>{sourceLabel(check.source)}</dd></div></dl><ResponsiveDetail title={checkLabel(check.name)} description="只读健康证据与用户可见影响" trigger={<Button type="button" variant="outline" size="sm">查看详情</Button>}><CheckDetail check={check} /></ResponsiveDetail></article>)} /> : <p className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">当前筛选没有匹配的诊断项。</p>}
     </QueryState></CardContent></Card>
-
-    <Card className="border-dashed"><CardHeader><CardTitle className="text-sm">如何处理 drift</CardTitle><CardDescription>先确认受影响对象与水位、缺失数或孤立数，再从 Maintenance 发起正式可恢复任务并观察 checkpoint、日志和最终状态。任务被受理或进入 running 不代表修复已经完成；完成后返回本页重新检查。</CardDescription></CardHeader></Card>
   </div>
 }

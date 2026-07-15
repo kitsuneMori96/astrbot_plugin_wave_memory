@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 
+import { isRequestCancelled } from '@/api/client'
 import {
   getImportSources,
   preflightImport,
@@ -110,6 +111,8 @@ export function ImportPage() {
   const [job, setJob] = useState<MaintenanceJob | null>(null)
   const [logs, setLogs] = useState<MaintenanceLog[]>([])
   const [checkpoint, setCheckpoint] = useState<MaintenanceCheckpoint | null>(null)
+  const [jobError, setJobError] = useState<unknown>()
+  const [auxiliaryErrors, setAuxiliaryErrors] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
   const [tracking, setTracking] = useState(false)
   const [pollVersion, setPollVersion] = useState(0)
@@ -135,21 +138,46 @@ export function ImportPage() {
   useEffect(() => { void loadSources() }, [loadSources])
 
   useEffect(() => {
-    if (!jobId) return
+    pollingRef.current?.abort()
+    setJob(null)
+    setLogs([])
+    setCheckpoint(null)
+    setJobError(undefined)
+    setAuxiliaryErrors([])
+    if (!jobId) {
+      setTracking(false)
+      return
+    }
     const controller = new AbortController()
     pollingRef.current = controller
     setTracking(true)
 
-    const updateAuxiliary = () => {
-      void Promise.all([
-        getMaintenanceLogs(jobId, 100, 0),
-        getMaintenanceCheckpoint(jobId),
-      ]).then(([logPage, state]) => {
-        if (!controller.signal.aborted) {
-          setLogs(logPage.items)
-          setCheckpoint(state)
+    let auxiliaryInFlight = false
+    const updateAuxiliary = async () => {
+      if (auxiliaryInFlight || controller.signal.aborted) return
+      auxiliaryInFlight = true
+      try {
+        const [logsResult, checkpointResult] = await Promise.allSettled([
+          getMaintenanceLogs(jobId, 100, 0, controller.signal),
+          getMaintenanceCheckpoint(jobId, controller.signal),
+        ])
+        if (controller.signal.aborted) return
+
+        const failures: string[] = []
+        if (logsResult.status === 'fulfilled') setLogs(logsResult.value.items)
+        else {
+          setLogs([])
+          failures.push(`日志：${logsResult.reason instanceof Error ? logsResult.reason.message : '未知错误'}`)
         }
-      }).catch(() => undefined)
+        if (checkpointResult.status === 'fulfilled') setCheckpoint(checkpointResult.value)
+        else {
+          setCheckpoint(null)
+          failures.push(`checkpoint：${checkpointResult.reason instanceof Error ? checkpointResult.reason.message : '未知错误'}`)
+        }
+        setAuxiliaryErrors(failures)
+      } finally {
+        auxiliaryInFlight = false
+      }
     }
 
     const resume = async () => {
@@ -157,14 +185,14 @@ export function ImportPage() {
         const initial = (await getMaintenanceJob(jobId, controller.signal)).item
         if (controller.signal.aborted) return
         setJob(initial)
-        updateAuxiliary()
+        void updateAuxiliary()
         if (!activeStatuses.has(initial.status)) return initial
         return await waitForImportJob(jobId, (next) => {
           setJob(next)
-          updateAuxiliary()
+          void updateAuxiliary()
         }, controller.signal)
       } catch (reason) {
-        if (!controller.signal.aborted) toast.error(reason instanceof Error ? reason.message : '导入任务恢复失败')
+        if (!controller.signal.aborted && !isRequestCancelled(reason)) setJobError(reason)
         return null
       } finally {
         if (pollingRef.current === controller) setTracking(false)
@@ -240,6 +268,8 @@ export function ImportPage() {
     setJob(null)
     setLogs([])
     setCheckpoint(null)
+    setJobError(undefined)
+    setAuxiliaryErrors([])
     setParams((current) => {
       const next = new URLSearchParams(current)
       next.delete('job_id')
@@ -320,11 +350,12 @@ export function ImportPage() {
           <div className="rounded-lg border bg-muted/20 p-3"><p className="text-xs text-muted-foreground">跳过 / 重复</p><p className="mt-1 text-lg font-semibold">{progress.skipped.toLocaleString('zh-CN')}</p></div>
           <div className="rounded-lg border bg-muted/20 p-3"><p className="text-xs text-muted-foreground">失败</p><p className="mt-1 text-lg font-semibold">{progress.errors.toLocaleString('zh-CN')}</p></div>
         </div>
-        <div><h3 className="mb-2 text-sm font-semibold">进度与日志</h3><div className="max-h-56 overflow-auto rounded-lg border bg-muted/30 p-3 font-mono text-xs">{logs.length ? logs.map((log, index) => <div key={`${log.at}-${log.event}-${index}`} className={log.level === 'error' ? 'text-destructive' : 'text-muted-foreground'}>[{formatTime(log.at)}] {logSummary(log)}</div>) : <p className="text-muted-foreground">等待后台任务日志与 checkpoint...</p>}</div></div>
+        {auxiliaryErrors.length ? <Alert><AlertCircleIcon /><AlertTitle>部分任务附属信息不可用</AlertTitle><AlertDescription>{auxiliaryErrors.join('；')}。核心 job 状态仍可继续跟踪。</AlertDescription></Alert> : null}
+        <div><h3 className="mb-2 text-sm font-semibold">进度与日志</h3><div className="max-h-56 overflow-auto rounded-lg border bg-muted/30 p-3 font-mono text-xs">{logs.length ? logs.map((log, index) => <div key={`${log.at}-${log.event}-${index}`} className={log.level === 'error' ? 'text-destructive' : 'text-muted-foreground'}>[{formatTime(log.at)}] {logSummary(log)}</div>) : <p className="text-muted-foreground">{auxiliaryErrors.length ? '日志或 checkpoint 当前不可用。' : '等待后台任务日志与 checkpoint...'}</p>}</div></div>
         {job.error_message ? <Alert variant="destructive"><AlertCircleIcon /><AlertTitle>导入失败</AlertTitle><AlertDescription>{job.error_message}</AlertDescription></Alert> : null}
         <div className="flex flex-wrap items-center justify-between gap-3"><details className="rounded-md border p-3 text-xs text-muted-foreground"><summary className="cursor-pointer font-medium text-foreground">技术详情</summary><div className="mt-2 font-mono">job_id: {job.run_id}<br />request_id: {job.request_id}<br />checkpoint: {typeof checkpoint?.checkpoint?.phase === 'string' ? checkpoint.checkpoint.phase : '未记录'}<br />error_code: {job.error_code ?? '无'}</div></details><div className="flex flex-wrap gap-2">{tracking ? <Button variant="outline" onClick={stopTracking}><PauseIcon />停止页面轮询</Button> : activeStatuses.has(job.status) ? <Button variant="outline" onClick={() => setPollVersion((value) => value + 1)}><RefreshCwIcon />恢复跟踪</Button> : null}<Button variant="ghost" onClick={clearJob}>关闭任务卡片</Button></div></div>
       </CardContent>
-    </Card> : jobId ? <Card><CardContent className="flex items-center gap-2 py-6 text-sm text-muted-foreground"><Loader2Icon className="animate-spin" />正在通过 URL 中的 job_id 恢复导入任务...</CardContent></Card> : null}
+    </Card> : jobId ? <Card><CardContent className="py-6">{jobError ? <Alert variant="destructive"><AlertCircleIcon /><AlertTitle>无法恢复 URL 中的导入任务</AlertTitle><AlertDescription className="flex flex-col gap-3"><span>{jobError instanceof Error ? jobError.message : 'job_id 无效、已删除或当前账号不可访问。'}</span><span className="flex flex-wrap gap-2"><Button type="button" size="sm" variant="outline" onClick={() => setPollVersion((value) => value + 1)}><RefreshCwIcon />重试</Button><Button type="button" size="sm" variant="ghost" onClick={clearJob}>清除无效任务引用</Button></span></AlertDescription></Alert> : <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2Icon className="animate-spin" />正在通过 URL 中的 job_id 恢复导入任务...</div>}</CardContent></Card> : null}
 
     <Card>
       <CardHeader><CardTitle className="text-base">4. 结果复核</CardTitle><CardDescription>导入完成后分别检查新数据、Tag 审计和系统覆盖率。</CardDescription></CardHeader>

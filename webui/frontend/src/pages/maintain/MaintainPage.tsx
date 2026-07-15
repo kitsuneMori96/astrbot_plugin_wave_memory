@@ -35,10 +35,12 @@ import {
 } from '@/api/tags'
 import { getSystemStatus, type SystemPayload } from '@/api/system'
 import { TagExtractionConfigPanel } from '@/components/tag/TagExtractionConfigPanel'
+import { ResponsiveTable } from '@/components/shared'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Field, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -104,6 +106,7 @@ export function MaintainPage() {
   const [error, setError] = useState('')
   const [activeTab, setActiveTab] = useState('extract')
   const [submitting, setSubmitting] = useState(false)
+  const [batchRejectDialogOpen, setBatchRejectDialogOpen] = useState(false)
   const [job, setJob] = useState<MaintenanceJob | null>(null)
   const [jobLogs, setJobLogs] = useState<MaintenanceLog[]>([])
   const [jobType, setJobType] = useState<'extract' | 'audit' | null>(null)
@@ -250,6 +253,7 @@ export function MaintainPage() {
 
   async function handleBatchReject() {
     if (!suggestions.length) return
+    setBatchRejectDialogOpen(false)
     try {
       const result = await resolveAuditBatch(suggestions.map((item) => item.id), 'reject')
       toast.success(`已拒绝 ${result.processed} 条建议`)
@@ -328,11 +332,11 @@ export function MaintainPage() {
                 <Field className="min-w-52"><FieldLabel>审计策略</FieldLabel><select value={auditStrategy} disabled={running} onChange={(event) => setAuditStrategy(event.target.value as TagAuditStrategy)} className="h-9 w-full rounded-md border bg-background px-3 text-sm"><option value="mixed">混合采样</option><option value="low_quality">低质量优先</option><option value="high_freq">高频标签优先</option></select></Field>
                 <Field className="w-32"><FieldLabel>扫描数量</FieldLabel><Input type="number" min={10} max={2000} value={auditCount} disabled={running} onChange={(event) => setAuditCount(Math.max(10, Math.min(2000, Number(event.target.value) || 10)))} /></Field>
                 <Button size="sm" disabled={running} onClick={() => void handleStartAudit()}>{running && jobType === 'audit' ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />}启动质量审计</Button>
-                {suggestions.length ? <Button size="sm" variant="outline" onClick={() => void handleBatchReject()}><XIcon />全部拒绝</Button> : null}
+                {suggestions.length ? <Button size="sm" variant="outline" onClick={() => setBatchRejectDialogOpen(true)}><XIcon />全部拒绝</Button> : null}
               </div>
             </div>
 
-            {suggestions.length ? <div className="overflow-auto rounded-xl border"><Table><TableHeader><TableRow><TableHead>治理类型</TableHead><TableHead>源标签</TableHead><TableHead>目标对象</TableHead><TableHead>建议原因</TableHead><TableHead className="text-right">审核</TableHead></TableRow></TableHeader><TableBody>{suggestions.map((item) => <TableRow key={item.id}><TableCell><Badge variant={item.action === 'delete' ? 'destructive' : 'secondary'}>{item.action === 'merge' ? '合并' : item.action === 'retype' ? '重分类' : '删除'}</Badge></TableCell><TableCell>{sourceTagLabel(item)}</TableCell><TableCell>{targetLabel(item)}</TableCell><TableCell className="max-w-md text-sm text-muted-foreground">{item.reason}</TableCell><TableCell><div className="flex justify-end gap-2"><Button size="icon-sm" variant="outline" title="批准建议（仍受后端作用域门禁约束）" onClick={() => void handleResolve(item.id, 'approve')}><CheckIcon /></Button><Button size="icon-sm" variant="outline" title="拒绝建议" onClick={() => void handleResolve(item.id, 'reject')}><XIcon /></Button></div></TableCell></TableRow>)}</TableBody></Table></div> : <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed py-12 text-center"><HelpCircleIcon className="size-8 text-muted-foreground" /><p className="font-medium">当前没有待审核建议</p><p className="text-xs text-muted-foreground">可启动质量审计生成新的治理建议。</p></div>}
+            {suggestions.length ? <ResponsiveTable label="质量审计建议清单" table={<Table><TableHeader><TableRow><TableHead>治理类型</TableHead><TableHead>源标签</TableHead><TableHead>目标对象</TableHead><TableHead>建议原因</TableHead><TableHead className="text-right">审核</TableHead></TableRow></TableHeader><TableBody>{suggestions.map((item) => <TableRow key={item.id}><TableCell><Badge variant={item.action === 'delete' ? 'destructive' : 'secondary'}>{item.action === 'merge' ? '合并' : item.action === 'retype' ? '重分类' : '删除'}</Badge></TableCell><TableCell>{sourceTagLabel(item)}</TableCell><TableCell>{targetLabel(item)}</TableCell><TableCell className="max-w-md text-sm text-muted-foreground">{item.reason}</TableCell><TableCell><div className="flex justify-end gap-2"><Button type="button" size="icon-sm" variant="outline" title="批准建议（仍受后端作用域门禁约束）" onClick={() => void handleResolve(item.id, 'approve')}><CheckIcon /></Button><Button type="button" size="icon-sm" variant="outline" title="拒绝建议" onClick={() => void handleResolve(item.id, 'reject')}><XIcon /></Button></div></TableCell></TableRow>)}</TableBody></Table>} cards={suggestions.map((item) => <article key={item.id} className="flex flex-col gap-3 rounded-lg border bg-card p-4"><div className="flex flex-wrap items-center justify-between gap-2"><Badge variant={item.action === 'delete' ? 'destructive' : 'secondary'}>{item.action === 'merge' ? '合并' : item.action === 'retype' ? '重分类' : '删除'}</Badge><span className="font-mono text-xs text-muted-foreground">#{item.id}</span></div><dl className="grid gap-2 text-sm"><div><dt className="text-muted-foreground">源标签</dt><dd className="break-words">{sourceTagLabel(item)}</dd></div><div><dt className="text-muted-foreground">目标对象</dt><dd className="break-words">{targetLabel(item)}</dd></div><div><dt className="text-muted-foreground">建议原因</dt><dd className="whitespace-pre-wrap break-words text-muted-foreground">{item.reason}</dd></div></dl><div className="flex flex-wrap justify-end gap-2"><Button type="button" size="sm" variant="outline" onClick={() => void handleResolve(item.id, 'approve')}><CheckIcon data-icon="inline-start" />批准</Button><Button type="button" size="sm" variant="outline" onClick={() => void handleResolve(item.id, 'reject')}><XIcon data-icon="inline-start" />拒绝</Button></div></article>)} /> : <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed py-12 text-center"><HelpCircleIcon className="size-8 text-muted-foreground" /><p className="font-medium">当前没有待审核建议</p><p className="text-xs text-muted-foreground">可启动质量审计生成新的治理建议。</p></div>}
           </TabsContent>
         </Tabs>
 
@@ -347,5 +351,18 @@ export function MaintainPage() {
         </div> : null}
       </CardContent>
     </Card>
+
+    <Dialog open={batchRejectDialogOpen} onOpenChange={setBatchRejectDialogOpen}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>拒绝全部待审核建议？</DialogTitle>
+          <DialogDescription>将通过服务端批量写入 API 拒绝当前列表中的 {suggestions.length} 条建议。确认前不会提交任何批量操作。</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={() => setBatchRejectDialogOpen(false)}>取消</Button>
+          <Button type="button" variant="destructive" onClick={() => void handleBatchReject()}>确认全部拒绝</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
 }

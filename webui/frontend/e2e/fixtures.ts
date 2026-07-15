@@ -21,11 +21,44 @@ export const test = base.extend<FrontendFixtures>({
     const database = new DatabaseSync(databasePath)
     database.exec('CREATE TABLE api_responses (pathname TEXT PRIMARY KEY, payload_json TEXT NOT NULL)')
     const insert = database.prepare('INSERT INTO api_responses(pathname, payload_json) VALUES (?, ?)')
+    const emptyPage = {
+      items: [],
+      page: { total: 0, total_status: 'exact', reason_code: null, limit: 50, offset: 0, page: 1, page_count: 0, has_more: false },
+    }
+    const unavailable = { available: false, reason_code: 'e2e_fixture_empty' }
     const responses: Record<string, unknown> = {
       '/api/auth/check': { requires_auth: true },
+      '/api/options/scopes': { bots: [], sessions: [], legacy_groups: [], channels: [], generated_at: 0, source: { health: 'empty', reason_code: 'e2e_fixture_empty' } },
       '/api/system': { memories: { total: 0 }, coverage: { vector_pct: 0, tag_pct: 0 }, tags: { structured: 0 }, todos: { untagged_count: 0, pending_fewshot: 0, has_errors: false }, services_health: [] },
       '/api/errors': { errors: [], total: 0 },
       '/api/metrics/injection': { count: 0, series: [], ranking: [], range: '7d' },
+      '/api/memories': emptyPage,
+      '/api/memories/legacy/audit': { ...emptyPage, legacy: true, readonly: true, scope: null, scope_status: 'unresolved_legacy', reason_code: 'e2e_fixture_empty' },
+      '/api/memories/senders': { senders: [], source: { status: 'empty', reason_code: 'e2e_fixture_empty' } },
+      '/api/import/sources': { sources: [] },
+      '/api/maintenance/jobs': emptyPage,
+      '/api/observatory/traces': emptyPage,
+      '/api/config/channels': { current: { channels: {} }, defaults: { channels: {} }, descriptors: [], diff: [], editable_fields: [] },
+      '/api/learning-center/sources': { items: [], total: 0 },
+      '/api/learning-center/jobs': { items: [], total: 0 },
+      '/api/learning-center/candidates': { items: [], total: 0 },
+      '/api/learning-center/promotions': { items: [], total: 0 },
+      '/api/learning-center/few-shot': { items: [], total: 0 },
+      '/api/learning-center/experiences': { items: [], total: 0 },
+      '/api/beliefs': { ...emptyPage, scope: { kind: 'RuntimeScope', payload: null }, capabilities: { lifecycle: unavailable, batch_lifecycle: unavailable, evidence: unavailable, create: unavailable, edit: unavailable, physical_delete: unavailable, archive_legacy: unavailable, select_all_matching: unavailable } },
+      '/api/beliefs/legacy/audit': { items: [], total: 0, pending_count: 0, legacy: true, unresolved_legacy: true, readonly: true, scope: null, page: { number: 1, page_size: 25, total: 0, total_status: 'exact', has_next: false } },
+      '/api/jargon': { ...emptyPage, scope: { kind: 'RuntimeScope', payload: null }, capabilities: { review: unavailable, batch_review: unavailable, edit: unavailable, archive: unavailable, evidence: unavailable, create: unavailable, delete: unavailable, toggle_global: unavailable, select_all_matching: unavailable } },
+      '/api/jargon/legacy/audit': { items: [], total: 0, pending_count: 0, legacy: true, readonly: true, page: { number: 1, page_size: 25, total: 0, total_status: 'exact', has_next: false } },
+      '/api/people': emptyPage,
+      '/api/people/legacy/audit': { ...emptyPage, legacy: true, readonly: true, scope: null, scope_status: 'legacy_group_key', reason_code: 'e2e_fixture_empty' },
+      '/api/people/legacy/relationships': { ...emptyPage, legacy: true, readonly: true, scope: null, scope_status: 'legacy_group_key', reason_code: 'e2e_fixture_empty' },
+      '/api/knowledge/facts': { ...emptyPage, scope: { bot_id: '', session_id: '', visibility: 'group' } },
+      '/api/knowledge/facts/legacy/audit': { ...emptyPage, legacy: true, readonly: true, scope: null, scope_status: 'unresolved_legacy', reason_code: 'e2e_fixture_empty' },
+      '/api/knowledge/few-shot': emptyPage,
+      '/api/knowledge/book-lore/summary': { scope: { catalog_id: 'fixture', corpus_id: 'fixture', version: 'fixture' }, counts: { entities: 0, communities: 0, relations: 0, notes: 0 }, schema: { fingerprint: '', tables: {}, missing_tables: [] }, read_only: true },
+      '/api/knowledge/book-lore/entities': { ...emptyPage, scope: { catalog_id: 'fixture', corpus_id: 'fixture', version: 'fixture' }, resource: 'entities', read_only: true },
+      '/api/diagnostics/indexes': { health: 'empty', source: 'wave_memory_readonly_diagnostics', checked_at: '', evidence: { read_only: true, probe_count: 0, health_counts: {} }, checks: [] },
+      '/api/compat/status': { status: 'not_detected', source: 'e2e_fixture', checked_at: '', error: null, evidence: [], probe: { status: 'not_detected', source: 'e2e_fixture', checked_at: '', error: null, evidence: [], plugins: [] }, facade: { id: 'facade', enabled: false, configured: false, status: 'not_configured', source: 'e2e_fixture', checked_at: '', error: null, evidence: [] }, tool_aliases: {}, capabilities: [], detected_plugins: [], duplicate_warnings: [], recommended_settings: [], documentation: { kind: 'static', facade_interfaces: [], tool_aliases: {}, notice: '' } },
       '/api/channels/config': { current: { channels: {} } },
     }
     Object.entries(responses).forEach(([pathname, payload]) => insert.run(pathname, JSON.stringify(payload)))

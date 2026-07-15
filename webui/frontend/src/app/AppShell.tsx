@@ -37,9 +37,13 @@ export function AppShell() {
 export function AppRoutes() {
   return (
     <Routes>
+      {appRoutes.filter((route) => route.path === '/explore').map((route) => {
+        const Element = route.element
+        return <Route key={route.path} path={route.path} element={<Element />} />
+      })}
       <Route element={<AppShell />}>
         <Route index element={<Navigate replace to={defaultRoute} />} />
-        {appRoutes.map((route) => {
+        {appRoutes.filter((route) => route.path !== '/explore').map((route) => {
           const Element = route.element
           return <Route key={route.path} path={route.path} element={<Element />} />
         })}

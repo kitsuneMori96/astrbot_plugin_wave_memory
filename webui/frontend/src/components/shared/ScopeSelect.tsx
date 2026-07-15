@@ -70,6 +70,7 @@ export function ScopeSelect({
   const grouped = (Object.keys(KIND_LABELS) as ScopeOptionKind[])
     .map((kind) => ({ kind, items: options.filter((option) => option.kind === kind) }))
     .filter((group) => group.items.length > 0)
+  const selectedOption = options.find((option) => option.value === value)
 
   return (
     <Field data-slot="scope-select" data-invalid={status === 'error'} className={cn('min-w-0', className)}>
@@ -77,9 +78,11 @@ export function ScopeSelect({
       {status === 'loading' ? (
         <Skeleton className="h-8 w-full" aria-label="正在加载作用域选项" />
       ) : (
-        <Select value={value} onValueChange={selectOption} disabled={disabled || status !== 'ready'} required={required}>
-          <SelectTrigger id={id} className="w-full" aria-describedby={description ? `${id}-description ${id}-status` : `${id}-status`} aria-invalid={status === 'error'}>
-            <SelectValue placeholder={status === 'empty' ? '当前授权范围内没有可用作用域' : placeholder} />
+        <Select value={value ?? ''} onValueChange={selectOption} disabled={disabled || status !== 'ready'} required={required}>
+          <SelectTrigger id={id} className="w-full min-w-0 overflow-hidden" aria-describedby={description ? `${id}-description ${id}-status` : `${id}-status`} aria-invalid={status === 'error'}>
+            <SelectValue placeholder={status === 'empty' ? '当前授权范围内没有可用作用域' : placeholder}>
+              {selectedOption?.label}
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             {grouped.map((group) => (

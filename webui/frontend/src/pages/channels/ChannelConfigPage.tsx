@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ArrowRightIcon, Loader2Icon, RotateCcwIcon, SaveIcon, ShieldCheckIcon, WandSparklesIcon } from 'lucide-react'
 import { toast } from 'sonner'
@@ -11,24 +11,25 @@ import {
   validateChannelConfig,
   type ChannelConfigData,
   type ChannelDescriptor,
-  type ChannelPatch,
-  type ChannelSettings,
   type ChannelValidationPayload,
 } from '@/api/channels'
 import { getAgentFeedback, reviewConfigSuggestion, type AgentFeedbackPayload } from '@/api/review'
+import { useUnsavedChangesGuard } from '@/app/unsaved-changes'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
-import { ChannelConfigTable } from '@/pages/channels/ChannelConfigTable'
+import { validateNumericDraft, type NumericConstraints } from '@/lib/numeric-draft'
+import { ChannelConfigTable, type ChannelNumericField } from '@/pages/channels/ChannelConfigTable'
 import { ChannelDiffCard } from '@/pages/channels/ChannelDiffCard'
-
-const editableFields = ['enabled', 'priority', 'top_k', 'max_items', 'token_budget', 'timeout_ms', 'min_score'] as const
+import { channelPatchFingerprint, hasFreshChannelPreflight, serializeChannelPatch } from '@/pages/channels/channel-config-state'
 const numericFields = ['priority', 'top_k', 'max_items', 'token_budget', 'timeout_ms', 'min_score'] as const
+const rootNumericKey = 'root.recent_dedup_minutes'
 
 const fieldHelp = [
   'enabled：是否参与注入',
@@ -40,50 +41,110 @@ const fieldHelp = [
   'min_score：检索命中最低分',
 ]
 
-function serializePatch(draft: ChannelConfigData): ChannelPatch {
-  const channels: Record<string, Partial<ChannelSettings>> = {}
-  Object.entries(draft.channels ?? {}).forEach(([name, channel]) => {
-    channels[name] = {}
-    editableFields.forEach((field) => {
-      if (field in channel) {
-        const val = channel[field]
-        if (numericFields.includes(field as never)) {
-          // 极致类型保护：强制转为精确的 float/int
-          channels[name][field] = val === null || val === undefined ? (null as never) : (Number(val) as never)
-        } else {
-          channels[name][field] = val as never
-        }
-      }
-    })
-    if (name === 'safety') {
-      channels[name].enabled = true
-    }
-  })
-
-  return {
-    recent_dedup_minutes: Number(draft.recent_dedup_minutes ?? 30),
-    trace_enabled: Boolean(draft.trace_enabled),
-    channels,
+function numericDraftsFrom(data: ChannelConfigData): Record<string, string> {
+  const values: Record<string, string> = {
+    [rootNumericKey]: data.recent_dedup_minutes == null ? '' : String(data.recent_dedup_minutes),
   }
+  Object.entries(data.channels ?? {}).forEach(([name, channel]) => {
+    numericFields.forEach((field) => {
+      const value = channel[field]
+      values[`${name}.${field}`] = value == null ? '' : String(value)
+    })
+  })
+  return values
+}
+
+function finiteLimit(limits: Record<string, number>, key: string): number | undefined {
+  const value = limits[key]
+  return Number.isFinite(value) ? value : undefined
 }
 
 export function ChannelConfigPage() {
   const [draft, setDraft] = useState<ChannelConfigData | null>(null)
   const [original, setOriginal] = useState<ChannelConfigData | null>(null)
+  const [numericDrafts, setNumericDrafts] = useState<Record<string, string>>({})
+  const [numericErrors, setNumericErrors] = useState<Record<string, string>>({})
   const [runtime, setRuntime] = useState<Record<string, unknown>>({})
   const [descriptors, setDescriptors] = useState<ChannelDescriptor[]>([])
+  const [limits, setLimits] = useState<Record<string, number>>({})
   const [revision, setRevision] = useState('')
   const [effectiveSince, setEffectiveSince] = useState<number | null>(null)
   const [verificationUrl, setVerificationUrl] = useState('/observatory')
   const [validation, setValidation] = useState<ChannelValidationPayload | null>(null)
+  const [validatedFingerprint, setValidatedFingerprint] = useState<string | null>(null)
+  const [resetDialogOpen, setResetDialogOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [configSuggestions, setConfigSuggestions] = useState<Array<Record<string, unknown>>>([])
   const [suggestionsLoading, setSuggestionsLoading] = useState(false)
 
-  // 检测配置是否修改过
-  const isDirty = draft && original && JSON.stringify(serializePatch(draft)) !== JSON.stringify(serializePatch(original))
+  const currentPatch = useMemo(() => draft ? serializeChannelPatch(draft) : null, [draft])
+  const hasNumericErrors = Object.keys(numericErrors).length > 0
+  const isDirty = Boolean(
+    draft
+    && original
+    && (channelPatchFingerprint(serializeChannelPatch(draft)) !== channelPatchFingerprint(serializeChannelPatch(original)) || hasNumericErrors),
+  )
+  useUnsavedChangesGuard(isDirty, '您当前有未保存的通道配置修改，离开后这些草稿将丢失。')
+
+  function invalidateValidation() {
+    setValidation(null)
+    setValidatedFingerprint(null)
+  }
+
+  function updateDraft(next: ChannelConfigData) {
+    invalidateValidation()
+    setDraft(next)
+  }
+
+  function updateNumericError(key: string, message: string | null) {
+    setNumericErrors((current) => {
+      if (!message && !(key in current)) return current
+      const next = { ...current }
+      if (message) next[key] = message
+      else delete next[key]
+      return next
+    })
+  }
+
+  function updateRootNumeric(raw: string) {
+    const constraints: NumericConstraints = {
+      label: '近期去重分钟',
+      integer: true,
+      min: finiteLimit(limits, 'recent_dedup_minutes_min'),
+      max: finiteLimit(limits, 'recent_dedup_minutes_max'),
+    }
+    const result = validateNumericDraft(raw, constraints)
+    setNumericDrafts((current) => ({ ...current, [rootNumericKey]: raw }))
+    updateNumericError(rootNumericKey, result.error)
+    invalidateValidation()
+    if (result.value !== null) setDraft((current) => current ? { ...current, recent_dedup_minutes: result.value as number } : current)
+  }
+
+  function updateChannelNumeric(name: string, field: ChannelNumericField, raw: string, constraints: NumericConstraints) {
+    const key = `${name}.${field}`
+    const result = validateNumericDraft(raw, constraints)
+    setNumericDrafts((current) => ({ ...current, [key]: raw }))
+    updateNumericError(key, result.error)
+    invalidateValidation()
+    if (result.value === null) return
+    setDraft((current) => current ? {
+      ...current,
+      channels: {
+        ...(current.channels ?? {}),
+        [name]: { ...(current.channels?.[name] ?? {}), [field]: result.value },
+      },
+    } : current)
+  }
+
+  function replaceEffectiveConfig(next: ChannelConfigData) {
+    const cloned = JSON.parse(JSON.stringify(next)) as ChannelConfigData
+    setDraft(next)
+    setOriginal(cloned)
+    setNumericDrafts(numericDraftsFrom(next))
+    setNumericErrors({})
+  }
 
   async function load() {
     setLoading(true)
@@ -91,19 +152,17 @@ export function ChannelConfigPage() {
     try {
       const [payload, feedbackPayload] = await Promise.all([
         getChannelConfig(),
-        // 配置建议属于配置域；读取失败不能阻断通道配置本身。
         getAgentFeedback().catch((): AgentFeedbackPayload => ({ config_suggestions: [] })),
       ])
       if (!payload.current) throw new Error('服务端未返回当前有效通道配置')
-      const currentData = payload.current
-      setDraft(currentData)
-      setOriginal(JSON.parse(JSON.stringify(currentData)))
+      replaceEffectiveConfig(payload.current)
       setRuntime(payload.runtime ?? {})
       setDescriptors(payload.descriptors ?? [])
+      setLimits(payload.limits ?? {})
       setRevision(payload.revision ?? '')
       setEffectiveSince(payload.effective_since ?? null)
       setVerificationUrl(payload.verification_url ?? '/observatory')
-      setValidation(null)
+      invalidateValidation()
       setConfigSuggestions(feedbackPayload.config_suggestions ?? [])
     } catch (err) {
       setError(err instanceof Error ? err.message : '通道配置加载失败')
@@ -113,21 +172,23 @@ export function ChannelConfigPage() {
   }
 
   async function preview() {
-    if (!draft) {
+    if (!draft || !currentPatch) return
+    if (hasNumericErrors) {
+      toast.error('请先修正通道配置中的数值错误')
       return
     }
+    const fingerprint = channelPatchFingerprint(currentPatch)
     setSaving(true)
     try {
-      const result = safeValidation(await validateChannelConfig(serializePatch(draft)))
+      const result = safeValidation(await validateChannelConfig(currentPatch))
       setValidation(result)
-      if (result.ok) {
-        toast.success('通道配置校验通过')
-      } else {
-        toast.error(result.errors.join('；') || '通道配置校验失败')
-      }
+      setValidatedFingerprint(result.ok && result.preflight_token ? fingerprint : null)
+      if (result.ok) toast.success('通道配置校验通过')
+      else toast.error(result.errors.join('；') || '通道配置校验失败')
     } catch (err) {
       const result = safeValidation({ ok: false, errors: [err instanceof Error ? err.message : '通道配置校验失败'], diff: [] })
       setValidation(result)
+      setValidatedFingerprint(null)
       toast.error(result.errors[0])
     } finally {
       setSaving(false)
@@ -135,16 +196,19 @@ export function ChannelConfigPage() {
   }
 
   async function apply() {
-    if (!draft) {
+    if (!draft || !currentPatch) return
+    if (hasNumericErrors || !hasFreshChannelPreflight(validation, validatedFingerprint, currentPatch)) {
+      invalidateValidation()
+      toast.error('当前配置与最近一次校验预览不一致，请重新校验后再应用')
       return
     }
     setSaving(true)
     try {
-      const result = safeValidation(await applyChannelConfig(serializePatch(draft), validation?.preflight_token ?? ''))
+      const result = safeValidation(await applyChannelConfig(currentPatch, validation?.preflight_token ?? ''))
       setValidation(result)
+      setValidatedFingerprint(null)
       if (result.ok && result.operation?.status === 'succeeded' && result.effective) {
-        setDraft(result.effective)
-        setOriginal(JSON.parse(JSON.stringify(result.effective)))
+        replaceEffectiveConfig(result.effective)
         setRevision(String(result.revision ?? ''))
         setEffectiveSince(typeof result.effective_since === 'number' ? result.effective_since : null)
         setVerificationUrl(result.verification_url ?? '/observatory')
@@ -155,6 +219,7 @@ export function ChannelConfigPage() {
     } catch (err) {
       const message = err instanceof Error ? err.message : '通道配置应用失败'
       setValidation(safeValidation({ ok: false, errors: [message], diff: [] }))
+      setValidatedFingerprint(null)
       toast.error(message)
     } finally {
       setSaving(false)
@@ -162,13 +227,14 @@ export function ChannelConfigPage() {
   }
 
   async function resetDefaults() {
+    setResetDialogOpen(false)
     setSaving(true)
     try {
       const result = safeValidation(await resetChannelConfigDefaults())
       setValidation(result)
+      setValidatedFingerprint(null)
       if (result.ok && result.operation?.status === 'succeeded' && result.effective) {
-        setDraft(result.effective)
-        setOriginal(JSON.parse(JSON.stringify(result.effective)))
+        replaceEffectiveConfig(result.effective)
         setRevision(String(result.revision ?? ''))
         setEffectiveSince(typeof result.effective_since === 'number' ? result.effective_since : null)
         setVerificationUrl(result.verification_url ?? '/observatory')
@@ -179,6 +245,7 @@ export function ChannelConfigPage() {
     } catch (err) {
       const message = err instanceof Error ? err.message : '恢复默认失败'
       setValidation(safeValidation({ ok: false, errors: [message], diff: [] }))
+      setValidatedFingerprint(null)
       toast.error(message)
     } finally {
       setSaving(false)
@@ -200,44 +267,15 @@ export function ChannelConfigPage() {
     }
   }
 
-  useEffect(() => {
-    void load()
-  }, [])
+  useEffect(() => { void load() }, [])
 
-  // 未保存离开防护
-  useEffect(() => {
-    if (!isDirty) return
-    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      e.preventDefault()
-      e.returnValue = '您当前有未保存的通道配置修改，确定离开吗？'
-    }
-    window.addEventListener('beforeunload', handleBeforeUnload)
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
-  }, [isDirty])
-
-  if (loading) {
-    return (
-      <div className="flex flex-col gap-4">
-        <Skeleton className="h-32 w-full" />
-        <Skeleton className="h-96 w-full" />
-      </div>
-    )
-  }
-
-  if (error) {
-    return (
-      <Alert variant="destructive">
-        <AlertTitle>通道配置加载失败</AlertTitle>
-        <AlertDescription>{error}</AlertDescription>
-      </Alert>
-    )
-  }
-
-  if (!draft) {
-    return <p className="text-sm text-muted-foreground">暂无通道配置。</p>
-  }
+  if (loading) return <div className="flex flex-col gap-4"><Skeleton className="h-32 w-full" /><Skeleton className="h-96 w-full" /></div>
+  if (error) return <Alert variant="destructive"><AlertTitle>通道配置加载失败</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>
+  if (!draft || !currentPatch) return <p className="text-sm text-muted-foreground">暂无通道配置。</p>
 
   const validationShape = safeValidation(validation)
+  const preflightFresh = hasFreshChannelPreflight(validation, validatedFingerprint, currentPatch)
+  const rootError = numericErrors[rootNumericKey]
 
   return (
     <div className="flex flex-col gap-6">
@@ -259,59 +297,39 @@ export function ChannelConfigPage() {
               <FieldLabel htmlFor="dedup-minutes">近期去重分钟</FieldLabel>
               <Input
                 id="dedup-minutes"
+                aria-invalid={Boolean(rootError)}
                 inputMode="numeric"
-                value={draft.recent_dedup_minutes ?? 30}
-                onChange={(event) => setDraft({ ...draft, recent_dedup_minutes: Number(event.target.value) || 0 })}
+                min={finiteLimit(limits, 'recent_dedup_minutes_min')}
+                max={finiteLimit(limits, 'recent_dedup_minutes_max')}
+                step={1}
+                type="number"
+                value={numericDrafts[rootNumericKey] ?? ''}
+                onChange={(event) => updateRootNumeric(event.target.value)}
               />
+              {rootError ? <span className="text-xs text-destructive" role="alert">{rootError}</span> : null}
             </Field>
             <Field>
               <FieldLabel>Trace 记录开关</FieldLabel>
               <div className="flex h-10 items-center justify-between gap-3 rounded-md border px-3">
                 <span className="text-sm text-muted-foreground">{draft.trace_enabled ? '已开启' : '已关闭'}</span>
-                <Switch checked={Boolean(draft.trace_enabled)} onCheckedChange={(checked) => setDraft({ ...draft, trace_enabled: checked })} />
+                <Switch checked={Boolean(draft.trace_enabled)} onCheckedChange={(checked) => updateDraft({ ...draft, trace_enabled: checked })} />
               </div>
             </Field>
           </FieldGroup>
-          <Alert>
-            <ShieldCheckIcon />
-            <AlertTitle>安全边界</AlertTitle>
-            <AlertDescription>安全通道始终保持启用，防止近期上下文重复和身份污染过滤被绕过。</AlertDescription>
-          </Alert>
+          <Alert><ShieldCheckIcon /><AlertTitle>安全边界</AlertTitle><AlertDescription>安全通道始终保持启用，防止近期上下文重复和身份污染过滤被绕过。</AlertDescription></Alert>
           <div className="flex flex-wrap items-center gap-3">
-            <Button disabled={saving} onClick={() => void preview()}>
-              {saving ? <Loader2Icon className="animate-spin" data-icon="inline-start" /> : <WandSparklesIcon data-icon="inline-start" />}
-              校验预览
-            </Button>
-            <Button disabled={saving || !validationShape.ok || !validation?.preflight_token} onClick={() => void apply()}>
-              {saving ? <Loader2Icon className="animate-spin" data-icon="inline-start" /> : <SaveIcon data-icon="inline-start" />}
-              应用配置
-            </Button>
-            <Button disabled={saving} variant="outline" onClick={() => void resetDefaults()}>
-              <RotateCcwIcon data-icon="inline-start" />
-              恢复默认
-            </Button>
+            <Button disabled={saving || hasNumericErrors} onClick={() => void preview()}>{saving ? <Loader2Icon className="animate-spin" data-icon="inline-start" /> : <WandSparklesIcon data-icon="inline-start" />}校验预览</Button>
+            <Button disabled={saving || !preflightFresh || hasNumericErrors} onClick={() => void apply()}>{saving ? <Loader2Icon className="animate-spin" data-icon="inline-start" /> : <SaveIcon data-icon="inline-start" />}应用配置</Button>
+            <Button disabled={saving} variant="outline" onClick={() => setResetDialogOpen(true)}><RotateCcwIcon data-icon="inline-start" />恢复默认</Button>
             {validation ? <Badge variant={validationShape.ok ? 'secondary' : 'destructive'}>{validationShape.ok ? '校验通过' : '校验失败'}</Badge> : null}
-            {isDirty ? (
-              <Badge variant="secondary" className="animate-pulse">
-                <WandSparklesIcon className="mr-1 size-3" />
-                配置已修改（未保存）
-              </Badge>
-            ) : null}
-            <Button asChild variant="outline">
-              <Link to={verificationUrl}>
-                去注入观测台验证最近 trace
-                <ArrowRightIcon data-icon="inline-end" />
-              </Link>
-            </Button>
+            {isDirty ? <Badge variant="secondary" className="animate-pulse"><WandSparklesIcon className="mr-1 size-3" />配置已修改（未保存）</Badge> : null}
+            <Button asChild variant="outline"><Link to={verificationUrl}>去注入观测台验证最近 trace<ArrowRightIcon data-icon="inline-end" /></Link></Button>
           </div>
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader>
-          <CardTitle>配置建议</CardTitle>
-          <CardDescription>配置建议保留在配置域；人工批准只记录状态，不会绕过校验自动应用。</CardDescription>
-        </CardHeader>
+        <CardHeader><CardTitle>配置建议</CardTitle><CardDescription>配置建议保留在配置域；人工批准只记录状态，不会绕过校验自动应用。</CardDescription></CardHeader>
         <CardContent className="flex flex-col gap-3">
           {configSuggestions.length === 0 ? <p className="text-sm text-muted-foreground">暂无待处理配置建议。</p> : configSuggestions.map((suggestion, index) => {
             const id = Number(suggestion.id)
@@ -322,13 +340,7 @@ export function ChannelConfigPage() {
                 <p className="text-sm text-muted-foreground">范围：{String(suggestion.scope ?? '未指定')} · 通道：{String(suggestion.channel ?? '未指定')}</p>
                 <p className="text-sm leading-relaxed">{String(suggestion.reason ?? suggestion.description ?? '服务端未提供补充说明。')}</p>
                 <details className="text-xs text-muted-foreground"><summary className="cursor-pointer">技术详情</summary><pre className="mt-2 max-h-48 overflow-auto rounded-md bg-muted p-2 font-mono">{JSON.stringify(suggestion, null, 2)}</pre></details>
-                <div className="flex flex-wrap gap-2">
-                  {(['approve', 'reject', 'ignore'] as const).map((action) => (
-                    <Button key={action} size="sm" variant={action === 'approve' ? 'default' : action === 'reject' ? 'destructive' : 'secondary'} disabled={suggestionsLoading || !Number.isFinite(id)} onClick={() => void handleSuggestionReview(id, action)}>
-                      {action === 'approve' ? '记录批准' : action === 'reject' ? '拒绝' : '忽略'}
-                    </Button>
-                  ))}
-                </div>
+                <div className="flex flex-wrap gap-2">{(['approve', 'reject', 'ignore'] as const).map((action) => <Button key={action} size="sm" variant={action === 'approve' ? 'default' : action === 'reject' ? 'destructive' : 'secondary'} disabled={suggestionsLoading || !Number.isFinite(id)} onClick={() => void handleSuggestionReview(id, action)}>{action === 'approve' ? '记录批准' : action === 'reject' ? '拒绝' : '忽略'}</Button>)}</div>
               </div>
             )
           })}
@@ -337,13 +349,24 @@ export function ChannelConfigPage() {
 
       <details className="rounded-xl border border-border/70 bg-muted/10 px-4 py-3 text-sm">
         <summary className="cursor-pointer font-medium">参数说明</summary>
-        <ul className="mt-3 grid gap-x-8 gap-y-2 text-muted-foreground md:grid-cols-2 xl:grid-cols-3">
-          {fieldHelp.map((item) => <li key={item}>{item}</li>)}
-        </ul>
+        <ul className="mt-3 grid gap-x-8 gap-y-2 text-muted-foreground md:grid-cols-2 xl:grid-cols-3">{fieldHelp.map((item) => <li key={item}>{item}</li>)}</ul>
       </details>
 
-      <ChannelConfigTable draft={draft} descriptors={descriptors} onDraftChange={setDraft} />
+      <ChannelConfigTable draft={draft} descriptors={descriptors} limits={limits} numericDrafts={numericDrafts} numericErrors={numericErrors} onDraftChange={updateDraft} onNumericChange={updateChannelNumeric} />
       <ChannelDiffCard diff={validationShape.diff} validation={validation} />
+
+      <Dialog open={resetDialogOpen} onOpenChange={setResetDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>恢复默认通道配置？</DialogTitle>
+            <DialogDescription>这是一次服务端写操作，会立即覆盖当前通道配置并影响运行时。取消不会调用任何 API。</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setResetDialogOpen(false)}>取消</Button>
+            <Button type="button" variant="destructive" onClick={() => void resetDefaults()}>确认恢复默认</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

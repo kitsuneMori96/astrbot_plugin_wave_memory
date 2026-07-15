@@ -22,6 +22,6 @@ export interface IndexDiagnostics {
   checks: DiagnosticCheck[]
 }
 
-export function getIndexDiagnostics(): Promise<IndexDiagnostics> {
-  return fetchJson<IndexDiagnostics>('/api/diagnostics/indexes')
+export function getIndexDiagnostics(signal?: AbortSignal): Promise<IndexDiagnostics> {
+  return fetchJson<IndexDiagnostics>('/api/diagnostics/indexes', { signal })
 }

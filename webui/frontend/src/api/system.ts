@@ -98,14 +98,14 @@ export interface InjectionMetricsPayload {
   error?: string
 }
 
-export function getSystemStatus(): Promise<SystemPayload> {
-  return fetchJson<SystemPayload>('/api/system')
+export function getSystemStatus(signal?: AbortSignal): Promise<SystemPayload> {
+  return fetchJson<SystemPayload>('/api/system', { signal })
 }
 
-export function getRecentErrors(): Promise<ErrorPayload> {
-  return fetchJson<ErrorPayload>('/api/errors')
+export function getRecentErrors(signal?: AbortSignal): Promise<ErrorPayload> {
+  return fetchJson<ErrorPayload>('/api/errors', { signal })
 }
 
-export function getInjectionMetrics(range = '7d'): Promise<InjectionMetricsPayload> {
-  return fetchJson<InjectionMetricsPayload>(`/api/metrics/injection?range=${encodeURIComponent(range)}`)
+export function getInjectionMetrics(range = '7d', signal?: AbortSignal): Promise<InjectionMetricsPayload> {
+  return fetchJson<InjectionMetricsPayload>(`/api/metrics/injection?range=${encodeURIComponent(range)}`, { signal })
 }

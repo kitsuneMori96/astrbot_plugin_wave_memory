@@ -28,6 +28,36 @@ export function clampTagBatchSize(value: unknown, fallback = defaultTagExecution
   return Math.max(1, Math.min(50, Math.round(parsed)))
 }
 
+export interface TagListItem {
+  id: string | number
+  name: string
+  type: string
+  frequency: number
+  confidence: number
+}
+
+export interface TagListPayload {
+  items: TagListItem[]
+  total: number
+  legacy: boolean
+  readonly: boolean
+  capabilities: {
+    mutation: {
+      available: boolean
+      reason_code?: string
+    }
+  }
+}
+
+export interface TagListParams {
+  limit?: number
+  offset?: number
+  type?: string
+  search?: string
+  sort?: 'frequency' | 'recent'
+  signal?: AbortSignal
+}
+
 export interface TagQualityPayload {
   total_tags: number
   total_memories: number
@@ -67,8 +97,15 @@ export interface AuditSuggestionsPayload {
   }
 }
 
-export function getTagQuality(): Promise<TagQualityPayload> {
-  return fetchJson<TagQualityPayload>('/api/tags/quality')
+export function getTags({ limit = 25, offset = 0, type = '', search = '', sort = 'frequency', signal }: TagListParams = {}): Promise<TagListPayload> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset), sort })
+  if (type) params.set('type', type)
+  if (search.trim()) params.set('search', search.trim())
+  return fetchJson<TagListPayload>(`/api/tags/?${params.toString()}`, { signal })
+}
+
+export function getTagQuality(signal?: AbortSignal): Promise<TagQualityPayload> {
+  return fetchJson<TagQualityPayload>('/api/tags/quality', { signal })
 }
 
 export function getAuditSuggestions(

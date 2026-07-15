@@ -13,10 +13,10 @@ import {
   type ReviewedBookLoreProjection,
 } from '@/api/knowledge'
 import { getScopeOptions, scopeOptionsFor } from '@/api/options'
-import { EvidenceList, PaginationControls, QueryState, ResponsiveDetail, ScopeSelect } from '@/components/shared'
+import { EvidenceList, PaginationControls, QueryState, ResponsiveDetail, ResponsiveTable, ScopeSelect } from '@/components/shared'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -44,6 +44,12 @@ function itemTitle(item: BookLoreItem): string {
 
 function itemSummary(item: BookLoreItem): string {
   return displayText(item.summary ?? item.description ?? item.content ?? item.original, '无摘要')
+}
+
+function serverRank(value: unknown): string {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  if (typeof value === 'string' && value.trim()) return value
+  return '未记录'
 }
 
 function governance(item: BookLoreItem) {
@@ -94,11 +100,11 @@ function ItemDetail({ item, resource }: { item: BookLoreItem; resource: BookLore
 }
 
 function ReviewedProjectionDetail({ item }: { item: ReviewedBookLoreProjection }) {
-  return <div className="flex flex-col gap-4"><div className="flex flex-wrap gap-2"><Badge>approved</Badge><Badge variant="outline">revision {item.revision}</Badge><Badge variant="secondary">rank {item.rank.toFixed(2)}</Badge></div><div><h3 className="mb-1 text-sm font-medium text-muted-foreground">正式投影内容</h3><p className="whitespace-pre-wrap rounded-md border p-3 leading-relaxed">{item.content}</p></div><dl className="grid gap-3 sm:grid-cols-2"><div><dt className="text-sm text-muted-foreground">Community</dt><dd className="font-mono">{item.community_id}</dd></div><div><dt className="text-sm text-muted-foreground">来源 Catalog</dt><dd className="font-mono">{item.source_scope.catalog_id} · {item.source_scope.corpus_id} · {item.source_scope.version}</dd></div><div className="sm:col-span-2"><dt className="text-sm text-muted-foreground">目标 RuntimeScope</dt><dd className="break-all font-mono">{item.target_scope.bot_id} · {item.target_scope.session.id}</dd></div></dl><div><h3 className="mb-2 text-sm font-medium">审核证据</h3><EvidenceList evidence={item.evidence} emptyDescription="正式投影未返回可展示的证据引用。" /></div></div>
+  return <div className="flex flex-col gap-4"><div className="flex flex-wrap gap-2"><Badge>approved</Badge><Badge variant="outline">revision {item.revision}</Badge><Badge variant="secondary">服务端 rank {serverRank(item.rank)}</Badge></div><div><h3 className="mb-1 text-sm font-medium text-muted-foreground">正式投影内容</h3><p className="whitespace-pre-wrap rounded-md border p-3 leading-relaxed">{item.content}</p></div><dl className="grid gap-3 sm:grid-cols-2"><div><dt className="text-sm text-muted-foreground">Community</dt><dd className="font-mono">{item.community_id}</dd></div><div><dt className="text-sm text-muted-foreground">来源 Catalog</dt><dd className="font-mono">{item.source_scope.catalog_id} · {item.source_scope.corpus_id} · {item.source_scope.version}</dd></div><div className="sm:col-span-2"><dt className="text-sm text-muted-foreground">目标 RuntimeScope</dt><dd className="break-all font-mono">{item.target_scope.bot_id} · {item.target_scope.session.id}</dd></div></dl><div><h3 className="mb-2 text-sm font-medium">审核证据</h3><EvidenceList evidence={item.evidence} emptyDescription="正式投影未返回可展示的证据引用。" /></div></div>
 }
 
 function SummaryTile({ label, value, help }: { label: string; value: number | undefined; help: string }) {
-  return <div className="min-w-[7rem] rounded-lg border bg-muted/20 px-3 py-2 text-center"><div className="text-xs text-muted-foreground">{label}</div><div className="text-lg font-semibold">{value ?? '—'}</div><div className="sr-only">{help}</div></div>
+  return <div className="min-w-[4.75rem] rounded-lg border bg-muted/20 px-2.5 py-1.5 text-center"><div className="text-[11px] text-muted-foreground">{label}</div><div className="text-base font-semibold leading-5">{value ?? '—'}</div><div className="sr-only">{help}</div></div>
 }
 
 export function BookLorePage() {
@@ -165,56 +171,72 @@ export function BookLorePage() {
   const submitSearch = (event: FormEvent) => {
     event.preventDefault()
     setProjectionOffset(0)
-    pagination.setFilters({ search: searchDraft.trim() })
+    pagination.setFilters({ search: searchDraft.trim() || null })
   }
   const status = !summary && summaryError ? 'error' : loading ? 'loading' : error ? 'error' : !payload?.items.length ? 'empty' : 'success'
 
   return (
-    <div className="flex flex-col gap-5" data-page="book-lore">
-      <div className="flex flex-wrap items-start justify-between gap-4">
+    <div className="flex flex-col gap-4" data-page="book-lore">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <header className="max-w-2xl">
           <h1 className="text-xl font-bold tracking-tight">BookLore 世界观知识库</h1>
-          <p className="text-xs text-muted-foreground">只读查看独立知识源中的实体、社区、关系和笔记；解析与隔离状态来自服务端，不在这里修改数据。</p>
+          <p className="text-xs text-muted-foreground">只读浏览实体、社区、关系与笔记；正式 Reviewed 投影和原始 Catalog 始终保持边界。</p>
         </header>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-2 text-xs">
           {RESOURCES.map((item) => <SummaryTile key={item.value} label={item.label} value={summary?.counts[item.value]} help={item.help} />)}
         </div>
       </div>
 
-      <Card className="border-primary/20 bg-primary/5"><CardHeader><CardTitle className="text-sm">当前群可用的 Reviewed BookLore</CardTitle><CardDescription>这里只展示已审核并明确投影到当前 RuntimeScope 的正式世界观知识；下方原始 Catalog 保持独立只读审计，不会自动注入群聊。</CardDescription></CardHeader><CardContent className="flex flex-col gap-4"><div className="grid gap-4 md:grid-cols-2"><ScopeSelect value={botId || undefined} loadOptions={loadBots} label="Bot" placeholder="选择真实 Bot" required onValueChange={(value) => { setProjectionOffset(0); pagination.setFilters({ bot_id: value, session_id: null }) }} /><ScopeSelect value={sessionId || undefined} loadOptions={loadSessions} label="群 / 会话" placeholder="选择 canonical 群会话" disabled={!botId} required onValueChange={(value) => { setProjectionOffset(0); pagination.setFilters({ session_id: value }) }} /></div><QueryState status={!botId || !sessionId ? 'unknown' : projectionLoading ? 'loading' : projectionError ? 'error' : projectionPayload?.items.length ? 'success' : 'empty'} error={projectionError} title="Reviewed BookLore 读取失败" description={!botId || !sessionId ? '请选择服务端证实的 Bot 与 canonical 群会话。' : '当前 RuntimeScope 尚无 approved reviewed projection；不会从原始 Catalog 或其他群补数据。'} onRetry={() => setReload((value) => value + 1)}><div className="overflow-hidden rounded-lg border bg-background"><Table><TableHeader><TableRow><TableHead>标题</TableHead><TableHead>摘要</TableHead><TableHead className="w-24">Rank</TableHead><TableHead className="w-24">证据</TableHead><TableHead className="w-20">详情</TableHead></TableRow></TableHeader><TableBody>{projectionPayload?.items.map((item) => <TableRow key={item.id}><TableCell className="font-medium">{item.title}</TableCell><TableCell className="max-w-xl"><p className="line-clamp-2 text-muted-foreground">{item.summary}</p></TableCell><TableCell className="font-mono text-xs">{item.rank.toFixed(2)}</TableCell><TableCell>{item.evidence.length} 条</TableCell><TableCell><ResponsiveDetail title={item.title} description="审核证据、来源 Catalog 与目标 RuntimeScope" className="sm:max-w-3xl" trigger={<Button type="button" variant="ghost" size="icon-sm" aria-label={`查看 ${item.title} 正式投影`}><EyeIcon /></Button>}><ReviewedProjectionDetail item={item} /></ResponsiveDetail></TableCell></TableRow>)}</TableBody></Table></div></QueryState>{projectionPayload ? <div className="flex items-center justify-between text-sm text-muted-foreground"><span>共 {projectionPayload.page.total ?? 0} 条</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={projectionLoading || projectionOffset === 0} onClick={() => setProjectionOffset(Math.max(0, projectionOffset - 25))}>上一页</Button><Button size="sm" variant="outline" disabled={projectionLoading || projectionOffset + 25 >= (projectionPayload.page.total ?? 0)} onClick={() => setProjectionOffset(projectionOffset + 25)}>下一页</Button></div></div> : null}</CardContent></Card>
+      <Card className="overflow-hidden border-border/60">
+        <CardContent className="p-0">
+          <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
+            <form className="flex min-w-[17rem] flex-1 flex-wrap items-center gap-2" onSubmit={submitSearch}>
+              <div className="relative min-w-48 max-w-md flex-1"><SearchIcon className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input aria-label="搜索 BookLore" className="h-8 pl-8" value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)} placeholder="搜索标题、摘要或内容" /></div>
+              <Button type="submit" size="sm" className="h-8" disabled={loading}>搜索</Button>
+              <Button type="button" size="sm" className="h-8" variant="ghost" onClick={() => { setSearchDraft(''); setProjectionOffset(0); pagination.setFilters({ search: null }) }}>清除</Button>
+              <Button type="button" size="sm" className="h-8" variant="outline" disabled={loading} onClick={() => setReload((value) => value + 1)}><RefreshCwIcon aria-hidden="true" /><span className="sr-only">重新读取</span></Button>
+            </form>
+            <Badge variant="outline">Catalog · 只读</Badge>
+          </div>
 
-      <QueryState status={summaryError ? 'error' : summary ? 'success' : 'loading'} error={summaryError} title="BookLore 摘要读取失败" onRetry={() => setReload((value) => value + 1)}>
-        {summary ? <Card className="border-border/60"><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm"><div><span className="text-muted-foreground">当前 catalog：</span><span className="font-medium">{summary.scope.catalog_id}</span> · {summary.scope.corpus_id} · {summary.scope.version}</div><Badge variant="outline">服务端配置 · 只读</Badge></CardContent></Card> : null}
-      </QueryState>
+          <QueryState status={summaryError ? 'error' : summary ? 'success' : 'loading'} error={summaryError} title="BookLore 摘要读取失败" onRetry={() => setReload((value) => value + 1)}>
+            {summary ? <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-y bg-muted/15 px-4 py-2 text-xs"><span className="font-medium">Catalog Scope</span><span className="text-muted-foreground">{summary.scope.catalog_id} · {summary.scope.corpus_id} · {summary.scope.version}</span><span className="ml-auto text-muted-foreground">搜索与分页仅作用于当前分类</span></div> : null}
+          </QueryState>
 
-      <Card className="border-border/60">
-        <CardHeader className="pb-3">
-          <CardTitle className="text-sm">知识目录</CardTitle>
-          <CardDescription>搜索仅作用于当前分类；切换分类时保留搜索词，并从第一页开始。</CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-4">
-          <form className="flex flex-wrap items-center gap-2" onSubmit={submitSearch}>
-            <div className="relative min-w-64 max-w-xl flex-1"><SearchIcon className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input aria-label="搜索 BookLore" className="h-8 pl-8" value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)} placeholder="搜索标题、摘要或内容" /></div>
-            <Button type="submit" size="sm" disabled={loading}>搜索</Button>
-            <Button type="button" size="sm" variant="outline" disabled={loading} onClick={() => setReload((value) => value + 1)}><RefreshCwIcon aria-hidden="true" />重新读取</Button>
-          </form>
-
-          <Tabs value={resource} onValueChange={(tab) => pagination.setFilters({ tab })}>
-            <TabsList className="h-8 border bg-muted/40 p-0.5">{RESOURCES.map((item) => <TabsTrigger key={item.value} value={item.value} className="h-7 text-xs">{item.label}</TabsTrigger>)}</TabsList>
+          <Tabs value={resource} onValueChange={(tab) => pagination.setFilters({ tab })} className="w-full">
+            <div className="px-4 pt-3"><TabsList className="h-8 border bg-muted/40 p-0.5">{RESOURCES.map((item) => <TabsTrigger key={item.value} value={item.value} className="h-7 text-xs">{item.label}<span className="ml-1 text-[10px] text-muted-foreground">{summary?.counts[item.value] ?? '—'}</span></TabsTrigger>)}</TabsList></div>
             {RESOURCES.map((item) => <TabsContent key={item.value} value={item.value} className="mt-3"><QueryState status={status} error={error ?? summaryError} title={`${item.label}读取失败`} description={!summary && summaryError ? '无法确认服务端 catalog scope，因此没有使用硬编码默认值继续查询。' : undefined} onRetry={() => setReload((value) => value + 1)}>
-              <div className="overflow-hidden rounded-lg border">
-                <Table>
-                  <TableHeader><TableRow className="bg-muted/20"><TableHead className="w-20">ID</TableHead><TableHead className="w-56">标题</TableHead><TableHead>摘要</TableHead><TableHead className="w-48">治理状态</TableHead><TableHead className="w-14"><span className="sr-only">详情</span></TableHead></TableRow></TableHeader>
-                  <TableBody>{payload?.items.map((entry) => <TableRow key={String(entry.id)}><TableCell className="font-mono text-xs">{entry.id}</TableCell><TableCell className="font-medium">{itemTitle(entry)}</TableCell><TableCell className="max-w-xl truncate text-muted-foreground">{itemSummary(entry)}</TableCell><TableCell>{governance(entry)}</TableCell><TableCell className="text-right"><ResponsiveDetail title={itemTitle(entry)} description={`${item.label}的只读内容与治理状态`} trigger={<Button type="button" variant="ghost" size="icon-sm" aria-label={`查看 ${itemTitle(entry)} 详情`}><EyeIcon aria-hidden="true" /></Button>}><ItemDetail item={entry} resource={item.value} /></ResponsiveDetail></TableCell></TableRow>)}</TableBody>
-                </Table>
-              </div>
+              <ResponsiveTable label={`${item.label}知识目录`} table={<Table>
+                <TableHeader><TableRow className="bg-muted/15"><TableHead className="w-56">标题</TableHead><TableHead>摘要 / 内容</TableHead><TableHead className="w-48">治理状态</TableHead><TableHead className="w-14"><span className="sr-only">详情</span></TableHead></TableRow></TableHeader>
+                <TableBody>{payload?.items.map((entry) => <TableRow key={String(entry.id)}><TableCell className="font-medium">{itemTitle(entry)}</TableCell><TableCell className="max-w-2xl truncate text-muted-foreground">{itemSummary(entry)}</TableCell><TableCell>{governance(entry)}</TableCell><TableCell className="text-right"><ResponsiveDetail title={itemTitle(entry)} description={`${item.label}的只读内容与治理状态`} trigger={<Button type="button" variant="ghost" size="icon-sm" aria-label={`查看 ${itemTitle(entry)} 详情`}><EyeIcon aria-hidden="true" /></Button>}><ItemDetail item={entry} resource={item.value} /></ResponsiveDetail></TableCell></TableRow>)}</TableBody>
+              </Table>} cards={payload?.items.map((entry) => <article key={String(entry.id)} className="flex flex-col gap-3 rounded-lg border bg-card p-4"><div><p className="font-medium">{itemTitle(entry)}</p><p className="mt-1 whitespace-pre-wrap break-words text-sm text-muted-foreground">{itemSummary(entry)}</p></div><div className="flex flex-wrap items-center justify-between gap-3">{governance(entry)}<ResponsiveDetail title={itemTitle(entry)} description={`${item.label}的只读内容与治理状态`} trigger={<Button type="button" variant="outline" size="sm">查看详情</Button>}><ItemDetail item={entry} resource={item.value} /></ResponsiveDetail></div></article>)} />
             </QueryState></TabsContent>)}
           </Tabs>
-          {payload?.page ? <PaginationControls page={payload.page} onOffsetChange={pagination.setOffset} onLimitChange={pagination.setLimit} disabled={loading} label="BookLore 分页" /> : null}
+          {payload?.page ? <div className="border-t px-4 py-3"><PaginationControls page={payload.page} onOffsetChange={pagination.setOffset} onLimitChange={pagination.setLimit} disabled={loading} label="BookLore 分页" /></div> : null}
         </CardContent>
       </Card>
 
-      <Card className="border-dashed"><CardHeader><CardTitle className="text-sm">如何理解这些数据</CardTitle><CardDescription>BookLore 是独立只读知识源。隔离项不会被当作可用知识；“解析状态未知”表示服务端没有提供该字段，不等同于解析成功。需要变更来源或重新导入时，请使用正式导入与学习流程。</CardDescription></CardHeader></Card>
+      <details className="rounded-lg border border-primary/20 bg-primary/5">
+        <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5 text-sm marker:hidden">
+          <span className="font-medium">Reviewed BookLore</span>
+          <span className="text-xs text-muted-foreground">RuntimeScope · {botId || '未选择 Bot'} · {sessionId || '未选择群会话'}</span>
+          <Badge className="ml-auto" variant="secondary">{projectionPayload?.page.total ?? '—'} 条正式投影</Badge>
+        </summary>
+        <div className="border-t border-primary/15 px-4 py-4">
+          <p className="mb-3 text-xs text-muted-foreground">仅展示 approved 且明确投影到所选 canonical RuntimeScope 的正式知识；不会从原始 Catalog 或其他群补数据。</p>
+          <div className="grid gap-3 md:grid-cols-2">
+            <ScopeSelect value={botId || undefined} loadOptions={loadBots} label="Bot" placeholder="选择真实 Bot" required onValueChange={(value) => { setProjectionOffset(0); pagination.setFilters({ bot_id: value, session_id: null }) }} />
+            <ScopeSelect value={sessionId || undefined} loadOptions={loadSessions} label="群 / 会话" placeholder="选择 canonical 群会话" disabled={!botId} required onValueChange={(value) => { setProjectionOffset(0); pagination.setFilters({ session_id: value }) }} />
+          </div>
+          <div className="mt-4"><QueryState status={!botId || !sessionId ? 'unknown' : projectionLoading ? 'loading' : projectionError ? 'error' : projectionPayload?.items.length ? 'success' : 'empty'} error={projectionError} title="Reviewed BookLore 读取失败" description={!botId || !sessionId ? '请选择服务端证实的 Bot 与 canonical 群会话。' : '当前 RuntimeScope 尚无 approved reviewed projection。'} onRetry={() => setReload((value) => value + 1)}><ResponsiveTable label="Reviewed BookLore 正式投影清单" table={<Table><TableHeader><TableRow className="bg-background/50"><TableHead>标题</TableHead><TableHead>摘要</TableHead><TableHead className="w-24">Rank</TableHead><TableHead className="w-20">证据</TableHead><TableHead className="w-14"><span className="sr-only">详情</span></TableHead></TableRow></TableHeader><TableBody>{projectionPayload?.items.map((item) => <TableRow key={item.id}><TableCell className="font-medium">{item.title}</TableCell><TableCell className="max-w-xl"><p className="line-clamp-2 text-muted-foreground">{item.summary}</p></TableCell><TableCell className="font-mono text-xs">{serverRank(item.rank)}</TableCell><TableCell>{item.evidence.length} 条</TableCell><TableCell className="text-right"><ResponsiveDetail title={item.title} description="审核证据、来源 Catalog 与目标 RuntimeScope" className="sm:max-w-3xl" trigger={<Button type="button" variant="ghost" size="icon-sm" aria-label={`查看 ${item.title} 正式投影`}><EyeIcon aria-hidden="true" /></Button>}><ReviewedProjectionDetail item={item} /></ResponsiveDetail></TableCell></TableRow>)}</TableBody></Table>} cards={projectionPayload?.items.map((item) => <article key={item.id} className="flex flex-col gap-3 rounded-lg border bg-card p-4"><div className="flex flex-wrap items-start justify-between gap-2"><div><p className="font-medium">{item.title}</p><p className="mt-1 whitespace-pre-wrap break-words text-sm text-muted-foreground">{item.summary}</p></div><Badge variant="secondary">Rank {serverRank(item.rank)}</Badge></div><div className="flex items-center justify-between gap-3 text-sm"><span className="text-muted-foreground">审核证据 {item.evidence.length} 条</span><ResponsiveDetail title={item.title} description="审核证据、来源 Catalog 与目标 RuntimeScope" className="sm:max-w-3xl" trigger={<Button type="button" variant="outline" size="sm">查看详情</Button>}><ReviewedProjectionDetail item={item} /></ResponsiveDetail></div></article>)} /></QueryState></div>
+          {projectionPayload ? <div className="mt-3 flex items-center justify-between text-sm text-muted-foreground"><span>共 {projectionPayload.page.total ?? '未提供'} 条</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={projectionLoading || projectionOffset === 0} onClick={() => setProjectionOffset(Math.max(0, projectionOffset - 25))}>上一页</Button><Button size="sm" variant="outline" disabled={projectionLoading || projectionOffset + 25 >= (projectionPayload.page.total ?? 0)} onClick={() => setProjectionOffset(projectionOffset + 25)}>下一页</Button></div></div> : null}
+        </div>
+      </details>
+
+      <details className="rounded-lg border border-dashed text-sm">
+        <summary className="cursor-pointer list-none px-4 py-2.5 font-medium marker:hidden">数据边界与治理说明</summary>
+        <p className="border-t px-4 py-3 text-xs leading-relaxed text-muted-foreground">BookLore Catalog 是独立只读知识源；Reviewed 是经过审核并投影到 canonical RuntimeScope 的正式子集。隔离项不会被当作可用知识，“解析状态未知”也不等同于解析成功。</p>
+      </details>
     </div>
   )
 }

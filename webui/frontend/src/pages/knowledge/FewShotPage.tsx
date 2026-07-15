@@ -3,11 +3,11 @@ import { EyeIcon, RefreshCwIcon, SearchIcon } from 'lucide-react'
 
 import { getApprovedFewShot, type ApprovedFewShot } from '@/api/knowledge'
 import { getScopeOptions, scopeOptionsFor } from '@/api/options'
-import { PaginationControls, QueryState, ResponsiveDetail, ScopeSelect, usePaginationSearchParams, type PageResponse } from '@/components/shared'
+import { PaginationControls, QueryState, ResponsiveDetail, ResponsiveTable, ScopeSelect, usePaginationSearchParams, type PageResponse } from '@/components/shared'
 import { useCanonicalScopeDefault } from '@/hooks/use-pagination-search-params'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 
@@ -37,7 +37,7 @@ function FewShotDetail({ item }: { item: ApprovedFewShot }) {
 }
 
 function SummaryTile({ label, value, tone }: { label: string; value: string | number; tone?: string }) {
-  return <div className="min-w-[7rem] rounded-lg border bg-muted/20 px-3 py-2 text-center"><div className="text-xs text-muted-foreground">{label}</div><div className={`text-lg font-semibold ${tone ?? ''}`}>{value}</div></div>
+  return <div className="min-w-[5rem] rounded-lg border bg-muted/20 px-2.5 py-1.5 text-center"><div className="text-[11px] text-muted-foreground">{label}</div><div className={`text-base font-semibold leading-5 ${tone ?? ''}`}>{value}</div></div>
 }
 
 export function FewShotPage() {
@@ -67,33 +67,38 @@ export function FewShotPage() {
     return () => { active = false }
   }, [botId, pagination.limit, pagination.offset, reload, search, sessionId])
 
-  const submitSearch = (event: FormEvent) => { event.preventDefault(); pagination.setFilters({ search: searchDraft.trim() }) }
+  const submitSearch = (event: FormEvent) => { event.preventDefault(); pagination.setFilters({ search: searchDraft.trim() || null }) }
+  const clearSearch = () => { setSearchDraft(''); pagination.setFilters({ search: null }) }
   const pageItems = data?.items ?? []
   const scoredItems = pageItems.filter((item) => typeof item.score === 'number' && Number.isFinite(item.score))
   const averageScore = scoredItems.length ? (scoredItems.reduce((sum, item) => sum + (item.score ?? 0), 0) / scoredItems.length).toFixed(2) : '—'
-  const traitCount = new Set(pageItems.flatMap((item) => item.traits ?? [])).size
-  const total = data?.page.total_status === 'exact' ? data.page.total ?? 0 : '—'
+  const traitCount = data ? new Set(pageItems.flatMap((item) => item.traits ?? [])).size : '—'
+  const total = data?.page.total_status === 'exact' ? data.page.total ?? '—' : '—'
   const status = !botId || !sessionId ? 'unknown' : loading ? 'loading' : error ? 'error' : !pageItems.length ? 'empty' : 'success'
 
-  return <div className="flex flex-col gap-5" data-page="few-shot">
-    <div className="flex flex-wrap items-start justify-between gap-4">
-      <header className="max-w-2xl"><h1 className="text-xl font-bold tracking-tight">FewShot 正式风格范例</h1><p className="text-xs text-muted-foreground">仅展示所选 Bot 下 approved 且通过健康检查的正式范例；候选、拒绝项与审核写操作不属于此页面。</p></header>
-      <div className="flex flex-wrap gap-2"><SummaryTile label="筛选总数" value={total} /><SummaryTile label="本页平均分" value={averageScore} tone="text-emerald-600" /><SummaryTile label="本页 traits" value={traitCount} /></div>
+  return <div className="flex flex-col gap-4" data-page="few-shot">
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <header className="max-w-2xl"><h1 className="text-xl font-bold tracking-tight">FewShot 正式风格范例</h1><p className="text-xs text-muted-foreground">仅展示所选 canonical RuntimeScope 下 approved 且通过健康检查的正式范例。</p></header>
+      <div className="flex flex-wrap gap-2 text-xs"><SummaryTile label="筛选总数" value={total} /><SummaryTile label="本页平均分" value={averageScore} tone="text-emerald-600" /><SummaryTile label="本页 traits" value={traitCount} /></div>
     </div>
 
-    <Card className="border-border/60"><CardHeader><CardTitle className="text-sm">真实群聊 Scope 与搜索</CardTitle><CardDescription>正式 FewShot 以完整 RuntimeScope 隔离；必须使用服务端证实的 BotProfile.db_id 与 canonical 群会话。</CardDescription></CardHeader><CardContent className="grid gap-4 lg:grid-cols-3">
-      <ScopeSelect value={botId || undefined} loadOptions={loadBots} label="Bot" placeholder="选择真实 Bot" required onValueChange={(value) => pagination.setFilters({ bot_id: value, session_id: null })} />
-      <ScopeSelect value={sessionId || undefined} loadOptions={loadSessions} label="群 / 会话" placeholder="选择 canonical 群会话" disabled={!botId} required onValueChange={(value) => pagination.setFilters({ session_id: value })} />
-      <form className="flex items-end gap-2" onSubmit={submitSearch}><div className="relative min-w-0 flex-1"><SearchIcon className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input aria-label="搜索 FewShot" className="h-8 pl-8" value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)} placeholder="搜索范例内容、traits" disabled={!botId || !sessionId} /></div><Button type="submit" size="sm" disabled={loading || !botId || !sessionId}>搜索</Button><Button type="button" size="sm" variant="outline" disabled={loading || !botId || !sessionId} onClick={() => setReload((value) => value + 1)}><RefreshCwIcon aria-hidden="true" /><span className="sr-only">刷新</span></Button></form>
-    </CardContent></Card>
+    <Card className="overflow-hidden border-border/60"><CardContent className="p-0">
+      <div className="grid items-center gap-2 border-b bg-muted/10 px-4 py-3 lg:grid-cols-[auto_minmax(10rem,0.75fr)_minmax(12rem,1fr)_minmax(20rem,1.4fr)]">
+        <div className="pr-1 text-xs"><div className="font-medium">RuntimeScope</div><div className="text-muted-foreground">Bot + canonical 群会话</div></div>
+        <ScopeSelect className="[&_[data-slot=field-label]]:sr-only" value={botId || undefined} loadOptions={loadBots} label="Bot" placeholder="选择真实 Bot" required onValueChange={(value) => pagination.setFilters({ bot_id: value, session_id: null })} />
+        <ScopeSelect className="[&_[data-slot=field-label]]:sr-only" value={sessionId || undefined} loadOptions={loadSessions} label="群 / 会话" placeholder="选择 canonical 群会话" disabled={!botId} required onValueChange={(value) => pagination.setFilters({ session_id: value })} />
+        <form className="flex min-w-0 flex-wrap items-center gap-2" onSubmit={submitSearch}><div className="relative min-w-48 flex-1"><SearchIcon className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input aria-label="搜索 FewShot" className="h-8 pl-8" value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)} placeholder="搜索范例内容、traits" disabled={!botId || !sessionId} /></div><Button type="submit" size="sm" className="h-8" disabled={loading || !botId || !sessionId}>搜索</Button><Button type="button" size="sm" className="h-8" variant="ghost" onClick={clearSearch}>清除</Button><Button type="button" size="sm" className="h-8" variant="outline" disabled={loading || !botId || !sessionId} onClick={() => setReload((value) => value + 1)}><RefreshCwIcon aria-hidden="true" /><span className="sr-only">刷新</span></Button></form>
+      </div>
 
-    <Card className="border-border/60"><CardContent className="flex flex-col gap-4 p-4">
       <QueryState status={status} error={error} title="FewShot 读取失败" description={!botId || !sessionId ? '请选择真实 Bot 与 canonical 群会话；页面禁止跨群或跨 Bot 汇总。' : '当前 RuntimeScope 与搜索条件下没有 approved / healthy 正式范例。'} onRetry={() => setReload((value) => value + 1)}>
-        <div className="overflow-hidden rounded-lg border"><Table><TableHeader><TableRow className="bg-muted/20"><TableHead className="w-20">ID</TableHead><TableHead>范例内容</TableHead><TableHead className="w-24">评分</TableHead><TableHead className="w-64">Traits</TableHead><TableHead className="w-36">状态</TableHead><TableHead className="w-14"><span className="sr-only">详情</span></TableHead></TableRow></TableHeader><TableBody>{pageItems.map((item) => <TableRow key={item.id}><TableCell className="font-mono text-xs">{item.id}</TableCell><TableCell className="max-w-xl truncate leading-relaxed">{item.content}</TableCell><TableCell className="font-mono text-xs">{score(item.score)}</TableCell><TableCell><div className="flex max-w-64 gap-1 overflow-hidden">{item.traits?.length ? item.traits.slice(0, 3).map((trait) => <Badge key={trait} variant="outline" className="max-w-24 truncate">{trait}</Badge>) : <span className="text-xs text-muted-foreground">未记录</span>}</div></TableCell><TableCell><Badge>approved / healthy</Badge></TableCell><TableCell className="text-right"><ResponsiveDetail title={`FewShot #${item.id}`} description={`Bot ${item.bot_id} 的只读正式范例`} trigger={<Button type="button" variant="ghost" size="icon-sm" aria-label={`查看 FewShot ${item.id} 详情`}><EyeIcon aria-hidden="true" /></Button>}><FewShotDetail item={item} /></ResponsiveDetail></TableCell></TableRow>)}</TableBody></Table></div>
+        <ResponsiveTable label="FewShot 正式范例清单" table={<Table><TableHeader><TableRow className="bg-muted/15"><TableHead>范例内容</TableHead><TableHead className="w-24">评分</TableHead><TableHead className="w-64">Traits</TableHead><TableHead className="w-36">正式状态</TableHead><TableHead className="w-14"><span className="sr-only">详情</span></TableHead></TableRow></TableHeader><TableBody>{pageItems.map((item) => <TableRow key={item.id}><TableCell className="max-w-2xl truncate leading-relaxed">{item.content}</TableCell><TableCell className="font-mono text-xs">{score(item.score)}</TableCell><TableCell><div className="flex max-w-64 gap-1 overflow-hidden">{item.traits?.length ? item.traits.slice(0, 3).map((trait) => <Badge key={trait} variant="outline" className="max-w-24 truncate">{trait}</Badge>) : <span className="text-xs text-muted-foreground">未记录</span>}</div></TableCell><TableCell><Badge>approved / healthy</Badge></TableCell><TableCell className="text-right"><ResponsiveDetail title="FewShot 正式范例" description={`Bot ${item.bot_id} 的只读正式范例`} trigger={<Button type="button" variant="ghost" size="icon-sm" aria-label="查看 FewShot 正式范例详情"><EyeIcon aria-hidden="true" /></Button>}><FewShotDetail item={item} /></ResponsiveDetail></TableCell></TableRow>)}</TableBody></Table>} cards={pageItems.map((item) => <article key={item.id} className="flex flex-col gap-3 rounded-lg border bg-card p-4"><div className="flex flex-wrap items-start justify-between gap-2"><Badge>approved / healthy</Badge><span className="font-mono text-xs text-muted-foreground">评分 {score(item.score)}</span></div><p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{item.content}</p><div className="flex flex-wrap gap-1">{item.traits?.length ? item.traits.map((trait) => <Badge key={trait} variant="outline">{trait}</Badge>) : <span className="text-xs text-muted-foreground">未记录 traits</span>}</div><div className="flex justify-end"><ResponsiveDetail title="FewShot 正式范例" description={`Bot ${item.bot_id} 的只读正式范例`} trigger={<Button type="button" variant="outline" size="sm">查看详情</Button>}><FewShotDetail item={item} /></ResponsiveDetail></div></article>)} />
       </QueryState>
-      {data?.page ? <PaginationControls page={data.page} onOffsetChange={pagination.setOffset} onLimitChange={pagination.setLimit} disabled={loading} label="FewShot 分页" /> : null}
+      {data?.page ? <div className="border-t px-4 py-3"><PaginationControls page={data.page} onOffsetChange={pagination.setOffset} onLimitChange={pagination.setLimit} disabled={loading} label="FewShot 分页" /></div> : null}
     </CardContent></Card>
 
-    <Card className="border-dashed"><CardHeader><CardTitle className="text-sm">健康与作用域说明</CardTitle><CardDescription>approved 只表示已批准；本页还要求内容通过身份污染与不安全风格检查。总数、分页和搜索始终限定在完整 RuntimeScope，不使用空 bot_id 或旧 group_id 作为汇总入口。</CardDescription></CardHeader></Card>
+    <details className="rounded-lg border border-dashed text-sm">
+      <summary className="cursor-pointer list-none px-4 py-2.5 font-medium marker:hidden">正式数据边界与健康规则</summary>
+      <p className="border-t px-4 py-3 text-xs leading-relaxed text-muted-foreground">本页不展示候选、拒绝项、Legacy 数据或审核写操作。approved 之外还要求内容通过身份污染与不安全风格检查；总数、分页和搜索始终限定在完整 canonical RuntimeScope。</p>
+    </details>
   </div>
 }

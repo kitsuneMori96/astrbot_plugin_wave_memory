@@ -19,8 +19,8 @@ export interface AgentActionResponse {
 
 export type AgentAction = 'approve' | 'reject' | 'ignore'
 
-export function getAgentFeedback(): Promise<AgentFeedbackPayload> {
-  return fetchJson<AgentFeedbackPayload>('/api/agent-feedback')
+export function getAgentFeedback(signal?: AbortSignal): Promise<AgentFeedbackPayload> {
+  return fetchJson<AgentFeedbackPayload>('/api/agent-feedback', { signal })
 }
 
 export function reviewConfigSuggestion(id: number, action: AgentAction): Promise<AgentActionResponse> {

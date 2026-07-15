@@ -1,20 +1,23 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react'
-import { BookOpenIcon, CheckIcon, DatabaseIcon, EyeIcon, Globe2Icon, MessageSquareQuoteIcon, SearchIcon, ShieldCheckIcon, XIcon, LockIcon } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { AlertCircleIcon, ArchiveIcon, BookOpenIcon, CheckCircle2Icon, CheckIcon, DatabaseIcon, Edit2Icon, EyeIcon, Globe2Icon, Loader2Icon, MessageSquareQuoteIcon, PlusIcon, RefreshCwIcon, SearchIcon, ShieldCheckIcon, XIcon, LockIcon } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
 import { fetchJson } from '@/api/client'
-import { getCatalogAudit, listJargons, listLegacyJargons, reviewJargon, type CatalogAssetRecord, type CatalogAuditPayload, type JargonItem, type JargonResponse, type LegacyJargonResponse } from '@/api/jargon'
+import { archiveJargon, batchReviewJargons, checkHolymanUpdate, getCatalogAudit, getJargonEvidence, listJargons, listLegacyJargons, previewHolymanSync, reviewJargon, updateJargonMeaning, type CatalogAssetRecord, type CatalogAuditPayload, type HolymanSyncPreviewPayload, type HolymanUpdateCheckPayload, type JargonEvidencePayload, type JargonItem, type JargonResponse, type JargonScopeSelection, type LegacyJargonResponse } from '@/api/jargon'
 import { getScopeOptions, scopeOptionsFor } from '@/api/options'
-import { EvidenceList, ObjectDeepLink, PaginationControls, QueryState, ResponsiveDetail, ScopeSelect, type ObjectRefState } from '@/components/shared'
+import { EvidenceList, ObjectDeepLink, PaginationControls, QueryState, ResponsiveDetail, ResponsiveTable, ScopeSelect, type ObjectRefState } from '@/components/shared'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Field, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
+import { ScrollArea } from '@/components/ui/scroll-area'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Textarea } from '@/components/ui/textarea'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useCanonicalScopeDefault, usePaginationSearchParams } from '@/hooks/use-pagination-search-params'
 
@@ -58,6 +61,11 @@ function confidenceText(value: number | null) {
   return `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%`
 }
 
+function formatTime(seconds: unknown): string {
+  const value = Number(seconds)
+  return Number.isFinite(value) && value > 0 ? new Date(value * 1000).toLocaleString('zh-CN') : '时间未记录'
+}
+
 function textOf(item: CatalogAssetRecord, keys: string[], fallback = '—') {
   for (const key of keys) {
     const value = item[key]
@@ -83,12 +91,87 @@ function EvidenceCards({ item }: { item: JargonItem }) {
 
 function JargonDetails({ item, reviewAvailable, busy, onReview }: { item: JargonItem; reviewAvailable: boolean; busy: boolean; onReview: (action: 'approve' | 'reject') => void }) {
   return <div className="flex flex-col gap-6">
-    <section className="space-y-3"><div className="flex flex-wrap items-center gap-2"><Badge className={statusClass(item.status)}>{STATUS_LABELS[item.status]}</Badge><Badge variant="outline">出现 {item.frequency} 次</Badge><Badge variant="outline">置信度 {confidenceText(item.confidence)}</Badge></div><div><h3 className="text-xl font-semibold">{item.word}</h3><p className="mt-2 text-base leading-7 text-muted-foreground">{item.meaning || '尚未形成可展示的释义。'}</p></div></section>
-    <section className="space-y-3"><div className="flex items-center justify-between"><h3 className="font-medium">证据卡</h3><span className="text-sm text-muted-foreground">{item.anchors.length} 条</span></div><EvidenceCards item={item} /></section>
+    <section className="flex flex-col gap-3"><div className="flex flex-wrap items-center gap-2"><Badge className={statusClass(item.status)}>{STATUS_LABELS[item.status]}</Badge><Badge variant="outline">出现 {item.frequency} 次</Badge><Badge variant="outline">置信度 {confidenceText(item.confidence)}</Badge></div><div><h3 className="text-xl font-semibold">{item.word}</h3><p className="mt-2 text-base leading-7 text-muted-foreground">{item.meaning || '尚未形成可展示的释义。'}</p></div></section>
+    <section className="flex flex-col gap-3"><div className="flex items-center justify-between"><h3 className="font-medium">证据卡</h3><span className="text-sm text-muted-foreground">{item.anchors.length} 条</span></div><EvidenceCards item={item} /></section>
     <Alert><ShieldCheckIcon /><AlertTitle>审核边界</AlertTitle><AlertDescription>只有待审核且拥有可解析证据的领域候选可以通过；页面不提供自由创建、物理删除或绕过审核写入。</AlertDescription></Alert>
     <div className="flex flex-wrap gap-2 border-t pt-4"><Button disabled={busy || !reviewAvailable || item.status !== 'pending' || item.anchors.length === 0} onClick={() => onReview('approve')}><CheckIcon data-icon="inline-start" />通过审核</Button><Button variant="outline" disabled={busy || !reviewAvailable || item.status !== 'pending'} onClick={() => onReview('reject')}><XIcon data-icon="inline-start" />拒绝候选</Button></div>
     <details className="rounded-lg border bg-muted/20 p-3"><summary className="cursor-pointer font-medium">技术字段与完整证据引用</summary><div className="mt-4 flex flex-col gap-4"><dl className="grid gap-3 text-sm sm:grid-cols-2"><div><dt className="text-muted-foreground">修订版本</dt><dd className="font-mono">{item.revision}</dd></div><div><dt className="text-muted-foreground">审核状态</dt><dd className="break-all font-mono">{item.review_status}</dd></div><div><dt className="text-muted-foreground">来源</dt><dd className="break-all font-mono">{item.source}</dd></div><div><dt className="text-muted-foreground">规则版本</dt><dd className="break-all font-mono">{item.rule_version ?? '未记录'}</dd></div><div className="sm:col-span-2"><dt className="text-muted-foreground">作用域</dt><dd className="break-all font-mono">{item.bot_id} · {item.session_id} · {item.visibility}</dd></div></dl><EvidenceList evidence={item.anchors} emptyDescription="该条目没有可解析 anchor，无法安全晋升。" />{item.object_ref ? <ObjectDeepLink to="/jargon" objectRef={item.object_ref}>复制可复现对象深链</ObjectDeepLink> : null}<details className="rounded-md border bg-background p-3"><summary className="cursor-pointer text-sm">查看晋升记录 JSON</summary><pre className="mt-3 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(item.promotion ?? {}, null, 2)}</pre></details></div></details>
   </div>
+}
+
+function JargonEvidenceDialog({ item, scope, onClose }: { item: JargonItem | null; scope: JargonScopeSelection; onClose: () => void }) {
+  const [before, setBefore] = useState(15)
+  const [after, setAfter] = useState(15)
+  const [payload, setPayload] = useState<JargonEvidencePayload | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const evidenceRequest = useRef(0)
+
+  const loadEvidence = useCallback(async (windowBefore: number, windowAfter: number) => {
+    if (!item) return
+    const request = ++evidenceRequest.current
+    setLoading(true)
+    setError('')
+    try {
+      const next = await getJargonEvidence(item, scope, windowBefore, windowAfter)
+      if (request === evidenceRequest.current) setPayload(next)
+    } catch (reason) {
+      if (request !== evidenceRequest.current) return
+      setPayload(null)
+      setError(reason instanceof Error ? reason.message : '黑话证据加载失败')
+    } finally {
+      if (request === evidenceRequest.current) setLoading(false)
+    }
+  }, [item, scope])
+
+  useEffect(() => {
+    if (!item) {
+      evidenceRequest.current += 1
+      setPayload(null)
+      setLoading(false)
+      setError('')
+      return
+    }
+    setBefore(15)
+    setAfter(15)
+    void loadEvidence(15, 15)
+  }, [item, loadEvidence])
+
+  const beforeCount = payload?.messages.filter((message) => message.role === 'before').length ?? 0
+  const afterCount = payload?.messages.filter((message) => message.role === 'after').length ?? 0
+
+  return <Dialog open={Boolean(item)} onOpenChange={(open) => { if (!open) onClose() }}>
+    <DialogContent className="flex h-[min(80vh,760px)] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
+      <DialogHeader className="border-b p-4 pr-12">
+        <DialogTitle>黑话证据{item ? ` · ${item.word}` : ''}</DialogTitle>
+        <DialogDescription>仅还原当前 Bot、当前 canonical 会话与当前 ObjectRef 对应锚点的前后聊天，不使用裸 ID 或旧群号跨域查找。</DialogDescription>
+      </DialogHeader>
+      <div className="flex flex-wrap items-end gap-3 border-b bg-muted/30 p-3">
+        <Field className="w-24 gap-1">
+          <FieldLabel htmlFor="jargon-evidence-before">前文条数</FieldLabel>
+          <Input id="jargon-evidence-before" type="number" min="0" max="50" value={before} onChange={(event) => setBefore(Number(event.target.value) || 0)} />
+        </Field>
+        <Field className="w-24 gap-1">
+          <FieldLabel htmlFor="jargon-evidence-after">后文条数</FieldLabel>
+          <Input id="jargon-evidence-after" type="number" min="0" max="50" value={after} onChange={(event) => setAfter(Number(event.target.value) || 0)} />
+        </Field>
+        <Button type="button" size="sm" disabled={loading || !item} onClick={() => void loadEvidence(before, after)}>
+          {loading ? <Loader2Icon data-icon="inline-start" className="animate-spin" /> : <MessageSquareQuoteIcon data-icon="inline-start" />}
+          刷新证据
+        </Button>
+        {payload ? <div className="ml-auto flex flex-wrap gap-2"><Badge variant={payload.used_fallback ? 'outline' : 'secondary'}>{payload.used_fallback ? '保存的回退上下文' : '同作用域动态上下文'}</Badge><Badge variant="outline">前 {beforeCount} / 后 {afterCount}</Badge><Badge variant="outline">锚点 {payload.anchor?.id ?? '无'}</Badge></div> : null}
+      </div>
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="flex flex-col gap-3 p-4">
+          {loading ? <div className="flex min-h-48 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2Icon className="animate-spin" />正在读取同作用域证据上下文</div> : null}
+          {!loading && error ? <Alert variant="destructive"><AlertTitle>证据读取失败</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
+          {!loading && payload?.messages.length ? payload.messages.map((message) => <article key={`${message.role}:${message.id}`} data-evidence-role={message.role} className={message.role === 'anchor' ? 'rounded-lg border border-primary/30 bg-primary/5 p-3' : 'rounded-lg border bg-card p-3'}><div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground"><span>{message.sender_name || message.sender_id || '发送者未记录'}</span><span>{formatTime(message.timestamp)}</span></div><p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6">{message.content}</p>{message.role === 'anchor' ? <Badge className="mt-2" variant="secondary">黑话提取锚点</Badge> : null}</article>) : null}
+          {!loading && payload && !payload.messages.length && payload.fallback_contexts.length ? <div className="flex flex-col gap-3"><Alert><ShieldCheckIcon /><AlertTitle>动态锚点不可用，展示该黑话保存的回退上下文</AlertTitle><AlertDescription>这些内容来自当前 scoped 黑话记录自身，不会根据旧 group_id 猜测其他会话。</AlertDescription></Alert>{payload.fallback_contexts.map((context, index) => <article key={`${index}:${context}`} className="rounded-lg border bg-card p-3 text-sm leading-6 whitespace-pre-wrap break-words">{context}</article>)}</div> : null}
+          {!loading && payload && !payload.messages.length && !payload.fallback_contexts.length ? <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">该黑话没有可安全还原的上下文证据。</div> : null}
+        </div>
+      </ScrollArea>
+    </DialogContent>
+  </Dialog>
 }
 
 function CatalogRecordDetail({ title, item }: { title: string; item: CatalogAssetRecord }) {
@@ -96,46 +179,81 @@ function CatalogRecordDetail({ title, item }: { title: string; item: CatalogAsse
   return <div className="flex flex-col gap-4"><div><h3 className="text-lg font-semibold">{title}</h3><p className="mt-2 whitespace-pre-wrap leading-7 text-muted-foreground">{textOf(item, ['meaning', 'summary', 'content', 'text'], '当前资产没有可展示的正文。')}</p></div>{tags.length ? <div><p className="mb-2 text-sm font-medium">关联词条</p><div className="flex flex-wrap gap-1">{tags.map((tag) => <Badge key={tag} variant="secondary">{tag}</Badge>)}</div></div> : null}<details className="rounded-lg border bg-muted/20 p-3"><summary className="cursor-pointer font-medium">技术字段与原始 JSON</summary><pre className="mt-3 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(item, null, 2)}</pre></details></div>
 }
 
-function CatalogTable({ items, titleKeys, summaryKeys, emptyText }: { items: CatalogAssetRecord[]; titleKeys: string[]; summaryKeys: string[]; emptyText: string }) {
+function CatalogTable({ items, titleKeys, summaryKeys, emptyText, phrases = false }: { items: CatalogAssetRecord[]; titleKeys: string[]; summaryKeys: string[]; emptyText: string; phrases?: boolean }) {
   if (!items.length) return <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">{emptyText}</div>
-  return <div className="overflow-hidden rounded-lg border"><Table><TableHeader><TableRow><TableHead>名称</TableHead><TableHead>内容摘要</TableHead><TableHead className="w-24 text-right">详情</TableHead></TableRow></TableHeader><TableBody>{items.map((item, index) => { const title = textOf(item, titleKeys, `资产 ${index + 1}`); return <TableRow key={`${title}:${index}`}><TableCell className="font-medium">{title}</TableCell><TableCell className="max-w-2xl"><p className="line-clamp-2 text-sm text-muted-foreground">{textOf(item, summaryKeys)}</p></TableCell><TableCell className="text-right"><ResponsiveDetail title={title} description="Holyman 广域资产只读详情" className="sm:max-w-3xl" trigger={<Button type="button" variant="ghost" size="sm"><EyeIcon data-icon="inline-start" />查看</Button>}><CatalogRecordDetail title={title} item={item} /></ResponsiveDetail></TableCell></TableRow> })}</TableBody></Table></div>
+  return <ResponsiveTable label="Holyman 广域资产清单" table={<Table><TableHeader><TableRow><TableHead>名称</TableHead><TableHead>内容摘要</TableHead>{phrases ? <TableHead className="w-40">分类 / 状态</TableHead> : null}<TableHead className="w-24 text-right">详情</TableHead></TableRow></TableHeader><TableBody>{items.map((item, index) => { const title = textOf(item, titleKeys, `资产 ${index + 1}`); return <TableRow key={`${title}:${index}`}><TableCell className="font-medium">{title}</TableCell><TableCell className="max-w-2xl"><p className="line-clamp-2 text-sm text-muted-foreground">{textOf(item, summaryKeys)}</p></TableCell>{phrases ? <TableCell><div className="flex flex-wrap items-center gap-1"><Badge variant="outline">{textOf(item, ['category_label', 'category'], '未分类')}</Badge><Badge variant={item.is_activated ? 'secondary' : 'outline'}>{item.is_activated ? '已启用' : '未启用'}</Badge><Button type="button" size="icon-sm" variant="ghost" disabled title="legacy_mutation_disabled"><RefreshCwIcon /></Button></div></TableCell> : null}<TableCell className="text-right"><ResponsiveDetail title={title} description="Holyman 广域资产只读详情" className="sm:max-w-3xl" trigger={<Button type="button" variant="ghost" size="sm"><EyeIcon data-icon="inline-start" />查看</Button>}><CatalogRecordDetail title={title} item={item} /></ResponsiveDetail></TableCell></TableRow> })}</TableBody></Table>} cards={items.map((item, index) => { const title = textOf(item, titleKeys, `资产 ${index + 1}`); return <article key={`${title}:${index}`} className="flex flex-col gap-3 rounded-lg border bg-card p-4"><div><p className="font-medium">{title}</p><p className="mt-1 whitespace-pre-wrap break-words text-sm text-muted-foreground">{textOf(item, summaryKeys)}</p></div>{phrases ? <div className="flex flex-wrap gap-1"><Badge variant="outline">{textOf(item, ['category_label', 'category'], '未分类')}</Badge><Badge variant={item.is_activated ? 'secondary' : 'outline'}>{item.is_activated ? '已启用' : '未启用'}</Badge></div> : null}<ResponsiveDetail title={title} description="Holyman 广域资产只读详情" className="sm:max-w-3xl" trigger={<Button type="button" variant="outline" size="sm">查看详情</Button>}><CatalogRecordDetail title={title} item={item} /></ResponsiveDetail></article> })} />
 }
 
 function CatalogBrowser({ catalog }: { catalog: CatalogAuditPayload | null }) {
   const [search, setSearch] = useState('')
+  const [categoryFilter, setCategoryFilter] = useState('all')
+  const [activationFilter, setActivationFilter] = useState('all')
+  const [updateCheck, setUpdateCheck] = useState<HolymanUpdateCheckPayload | null>(null)
+  const [updateChecking, setUpdateChecking] = useState(false)
+  const [preview, setPreview] = useState<HolymanSyncPreviewPayload | null>(null)
+  const [previewOpen, setPreviewOpen] = useState(false)
+  const [previewLoading, setPreviewLoading] = useState(false)
   const normalized = search.trim().toLocaleLowerCase()
   const filter = useCallback((items: CatalogAssetRecord[] | undefined) => (items ?? []).filter((item) => !normalized || Object.values(item).some((value) => typeof value === 'string' && value.toLocaleLowerCase().includes(normalized))), [normalized])
-  const phrases = filter(catalog?.phrases)
+  const categories = useMemo(() => Array.from(new Set((catalog?.phrases ?? []).map((item) => String(item.category ?? '')).filter(Boolean))).sort(), [catalog?.phrases])
+  const phrases = filter(catalog?.phrases).filter((item) => (categoryFilter === 'all' || String(item.category) === categoryFilter) && (activationFilter === 'all' || (activationFilter === 'active') === Boolean(item.is_activated)))
   const concepts = filter(catalog?.concepts)
   const examples = filter(catalog?.examples)
   const corpus = filter(catalog?.corpus)
   const candidates = filter(catalog?.candidates)
   const blocked = useMemo<CatalogAssetRecord[]>(() => Object.entries(catalog?.blocked ?? {}).map(([word, reason]) => ({ word, reason })), [catalog?.blocked])
-  const sourceCount = Number(catalog?.manifest_summary?.source_count ?? 0)
+  const sourceCount = typeof catalog?.manifest_summary?.source_count === 'number' ? catalog.manifest_summary.source_count : null
   const parseStatuses = catalog?.manifest_summary?.parse_statuses
   const parsedCorpus = catalog?.quality_summary?.parsed_corpus_count
   const declaredCorpus = catalog?.quality_summary?.declared_corpus_count
-  const errorCount = Number(catalog?.quality_summary?.error_count ?? 0)
+  const errorCount = typeof catalog?.quality_summary?.error_count === 'number' ? catalog.quality_summary.error_count : null
+
+  async function refreshUpdateCheck() {
+    setUpdateChecking(true)
+    try {
+      const result = await checkHolymanUpdate(true)
+      setUpdateCheck(result)
+      toast.success(result.has_update ? '检测到 Holyman 远端更新' : 'Holyman 资产已是最新')
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : 'Holyman 更新检查失败')
+    } finally {
+      setUpdateChecking(false)
+    }
+  }
+
+  async function openSyncPreview() {
+    setPreviewOpen(true)
+    setPreviewLoading(true)
+    setPreview(null)
+    try {
+      setPreview(await previewHolymanSync(true))
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : 'Holyman 同步预览失败')
+    } finally {
+      setPreviewLoading(false)
+    }
+  }
 
   return <div className="flex flex-col gap-5">
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><AuditMetric label="精选口癖" value={`${catalog?.phrases?.length ?? 0} 条`} description="仅显式授权项可参与理解提示" /><AuditMetric label="文化概念" value={`${catalog?.concepts?.length ?? 0} 组`} description="只读语境参考" /><AuditMetric label="声音样本与知识" value={`${catalog?.examples?.length ?? 0} 条`} description="只读语境参考" /><AuditMetric label="原始语料" value={`${catalog?.corpus?.length ?? Number(catalog?.corpus_summary?.count ?? 0)} 条`} description="只读参考，不进入提示" /></div>
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><AuditMetric label="精选口癖" value={catalog?.phrases ? `${catalog.phrases.length} 条` : '未提供'} description="仅显式授权项可参与理解提示" /><AuditMetric label="文化概念" value={catalog?.concepts ? `${catalog.concepts.length} 组` : '未提供'} description="只读语境参考" /><AuditMetric label="声音样本与知识" value={catalog?.examples ? `${catalog.examples.length} 条` : '未提供'} description="只读语境参考" /><AuditMetric label="原始语料" value={catalog?.corpus ? `${catalog.corpus.length} 条` : typeof catalog?.corpus_summary?.count === 'number' ? `${catalog.corpus_summary.count} 条` : '未提供'} description="只读参考，不进入提示" /></div>
 
-    <Card className="bg-muted/10"><CardHeader><CardTitle className="text-base">广域资产审计</CardTitle><CardDescription>版本、解析结果与质量摘要用于核对广域资产完整性；同步命令当前不可用。</CardDescription></CardHeader><CardContent className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><AuditMetric label="本地版本" value={catalog?.local_version || '未知'} /><AuditMetric label="远端版本" value={catalog?.remote_version || '未知'} /><AuditMetric label="清单来源文件" value={sourceCount} description={parseStatuses && typeof parseStatuses === 'object' ? `已记录 ${Object.values(parseStatuses).reduce<number>((sum, value) => sum + Number(value || 0), 0)} 个解析结果` : '暂无解析摘要'} /><AuditMetric label="语料核对" value={`${String(parsedCorpus ?? '—')} / ${String(declaredCorpus ?? '—')}`} description={errorCount ? `${errorCount} 个质量错误` : '未报告质量错误'} /></CardContent></Card>
+    <Card className="bg-muted/10"><CardHeader className="gap-3 sm:flex-row sm:items-start sm:justify-between"><div><CardTitle className="text-base">广域资产审计</CardTitle><CardDescription>恢复旧版更新检查与同步预览；正式 apply 仍由安全契约禁用。</CardDescription></div><div className="flex flex-wrap gap-2"><Button type="button" size="sm" variant="outline" disabled={updateChecking} onClick={() => void refreshUpdateCheck()}>{updateChecking ? <Loader2Icon data-icon="inline-start" className="animate-spin" /> : <RefreshCwIcon data-icon="inline-start" />}检查更新</Button><Button type="button" size="sm" onClick={() => void openSyncPreview()}><EyeIcon data-icon="inline-start" />同步预览</Button><Button type="button" size="sm" variant="outline" disabled title="catalog_sync_command_unavailable">确认同步</Button></div></CardHeader><CardContent className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><AuditMetric label="本地版本" value={updateCheck?.local_version || catalog?.local_version || '未知'} /><AuditMetric label="远端版本" value={updateCheck?.remote_version || catalog?.remote_version || '未知'} description={updateCheck ? updateCheck.has_update ? '检测到可用更新' : '当前已是最新' : undefined} /><AuditMetric label="清单来源文件" value={sourceCount ?? '未提供'} description={parseStatuses && typeof parseStatuses === 'object' ? `已记录 ${Object.values(parseStatuses).reduce<number>((sum, value) => sum + Number(value || 0), 0)} 个解析结果` : '暂无解析摘要'} /><AuditMetric label="语料核对" value={`${String(parsedCorpus ?? '—')} / ${String(declaredCorpus ?? '—')}`} description={errorCount === null ? '未提供质量错误计数' : errorCount > 0 ? `${errorCount} 个质量错误` : '服务端报告无质量错误'} /></CardContent></Card>
 
-    <Alert><Globe2Icon /><AlertTitle>广域资产只读浏览</AlertTitle><AlertDescription>资产策略为“仅辅助理解”。原始语料只作为参考，只有资产明确授权的精选项才可能进入受控提示；同步命令当前不可用。</AlertDescription></Alert>
+    <Alert><Globe2Icon /><AlertTitle>广域资产分层浏览</AlertTitle><AlertDescription>资产策略为“仅辅助理解”。更新检查与同步预览可用；toggle、候选写入、blocklist 写入和同步 apply 仍由正式安全契约禁用，并保留可见状态。</AlertDescription></Alert>
 
-    <Field><FieldLabel htmlFor="catalog-search">浏览器内筛选</FieldLabel><Input id="catalog-search" value={search} placeholder="搜索口癖、概念、声音样本或语料" onChange={(event) => setSearch(event.target.value)} /></Field>
+    <div className="flex flex-wrap items-end gap-2"><Field className="min-w-56 flex-1"><FieldLabel htmlFor="catalog-search">广域资产筛选</FieldLabel><Input id="catalog-search" value={search} placeholder="搜索口癖、概念、声音样本、语料或候选" onChange={(event) => setSearch(event.target.value)} /></Field><Field className="w-40"><FieldLabel>口癖分类</FieldLabel><Select value={categoryFilter} onValueChange={setCategoryFilter}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部分类</SelectItem>{categories.map((category) => <SelectItem key={category} value={category}>{category}</SelectItem>)}</SelectContent></Select></Field><Field className="w-36"><FieldLabel>启用状态</FieldLabel><Select value={activationFilter} onValueChange={setActivationFilter}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部状态</SelectItem><SelectItem value="active">已启用</SelectItem><SelectItem value="inactive">未启用</SelectItem></SelectContent></Select></Field></div>
 
     <Tabs defaultValue="phrases"><TabsList className="grid h-auto w-full grid-cols-2 gap-1 sm:grid-cols-3 xl:grid-cols-6"><TabsTrigger value="phrases">精选口癖</TabsTrigger><TabsTrigger value="concepts">文化概念</TabsTrigger><TabsTrigger value="examples">声音样本</TabsTrigger><TabsTrigger value="corpus">原始语料</TabsTrigger><TabsTrigger value="candidates">资产候选</TabsTrigger><TabsTrigger value="blocked">屏蔽项</TabsTrigger></TabsList>
-      <TabsContent value="phrases" className="pt-3"><CatalogTable items={phrases} titleKeys={['word', 'title']} summaryKeys={['meaning', 'summary']} emptyText="没有符合筛选条件的精选口癖。" /></TabsContent>
+      <TabsContent value="phrases" className="pt-3"><CatalogTable items={phrases} titleKeys={['word', 'title']} summaryKeys={['meaning', 'summary']} emptyText="没有符合筛选条件的精选口癖。" phrases /></TabsContent>
       <TabsContent value="concepts" className="pt-3"><CatalogTable items={concepts} titleKeys={['title', 'key', 'word']} summaryKeys={['summary', 'content', 'meaning']} emptyText="没有符合筛选条件的文化概念。" /></TabsContent>
       <TabsContent value="examples" className="pt-3"><CatalogTable items={examples} titleKeys={['title', 'word']} summaryKeys={['text', 'content', 'summary']} emptyText="没有符合筛选条件的声音样本与知识。" /></TabsContent>
       <TabsContent value="corpus" className="pt-3"><CatalogTable items={corpus} titleKeys={['title', 'source', 'line']} summaryKeys={['preview', 'text', 'content']} emptyText="没有符合筛选条件的原始语料。" /></TabsContent>
-      <TabsContent value="candidates" className="pt-3"><Alert className="mb-3"><ShieldCheckIcon /><AlertTitle>只读候选层</AlertTitle><AlertDescription>这里展示资产包内的候选，不提供审核或写入操作，也不会把昵称、普通词或技术噪声重新包装为本地候选。</AlertDescription></Alert><CatalogTable items={candidates} titleKeys={['word', 'title']} summaryKeys={['meaning', 'reason', 'summary']} emptyText="资产包中没有符合筛选条件的候选。" /></TabsContent>
-      <TabsContent value="blocked" className="pt-3"><CatalogTable items={filter(blocked)} titleKeys={['word']} summaryKeys={['reason']} emptyText="没有符合筛选条件的屏蔽项。" /></TabsContent>
+      <TabsContent value="candidates" className="pt-3"><Alert className="mb-3"><ShieldCheckIcon /><AlertTitle>资产候选审计</AlertTitle><AlertDescription className="flex flex-wrap items-center gap-2"><span>候选清单已恢复；正式全局资产审核命令尚未开放。</span><Button type="button" size="sm" disabled title="legacy_mutation_disabled">批量通过</Button><Button type="button" size="sm" variant="outline" disabled title="legacy_mutation_disabled">批量拒绝</Button></AlertDescription></Alert><CatalogTable items={candidates} titleKeys={['word', 'title']} summaryKeys={['meaning', 'reason', 'summary']} emptyText="资产包中没有符合筛选条件的候选。" /></TabsContent>
+      <TabsContent value="blocked" className="pt-3"><div className="mb-3 flex gap-2"><Input disabled placeholder="添加屏蔽词（正式命令未开放）" /><Button type="button" disabled title="legacy_mutation_disabled">添加屏蔽</Button></div><CatalogTable items={filter(blocked)} titleKeys={['word']} summaryKeys={['reason']} emptyText="没有符合筛选条件的屏蔽项。" /></TabsContent>
     </Tabs>
 
     <details className="rounded-lg border bg-muted/20 p-3"><summary className="cursor-pointer font-medium">技术字段与资产审计 JSON</summary><div className="mt-4 grid gap-4"><dl className="grid gap-3 text-sm sm:grid-cols-2"><div><dt className="text-muted-foreground">资产类型</dt><dd className="break-all font-mono">{catalog?.asset_type ?? '未知'}</dd></div><div><dt className="text-muted-foreground">运行策略</dt><dd className="break-all font-mono">{catalog?.runtime_policy ?? '未知'}</dd></div><div><dt className="text-muted-foreground">资产状态</dt><dd className="break-all font-mono">{catalog?.asset_status ?? '未知'}</dd></div><div><dt className="text-muted-foreground">检查时间</dt><dd className="break-all font-mono">{catalog?.checked_at ?? '未知'}</dd></div><div><dt className="text-muted-foreground">原始语料策略</dt><dd className="font-mono">reference-only</dd></div><div><dt className="text-muted-foreground">精选匹配标记</dt><dd className="font-mono">runtime-match</dd></div><div><dt className="text-muted-foreground">同步能力代码</dt><dd className="break-all font-mono">catalog_sync_command_unavailable</dd></div></dl><details className="rounded-md border bg-background p-3"><summary className="cursor-pointer text-sm">manifest / quality report</summary><pre className="mt-3 max-h-96 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify({ manifest: catalog?.manifest, quality_report: catalog?.quality_report, corpus_counts: catalog?.corpus_counts }, null, 2)}</pre></details></div></details>
+    <Dialog open={previewOpen} onOpenChange={setPreviewOpen}><DialogContent className="flex max-h-[86vh] flex-col sm:max-w-4xl"><DialogHeader><DialogTitle>Holyman 同步预览</DialogTitle><DialogDescription>只读取远端并在内存中比较；当前正式 apply 命令仍禁用，不会从此弹窗写入资产。</DialogDescription></DialogHeader>{previewLoading ? <div className="flex min-h-48 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2Icon className="animate-spin" />正在读取远端并生成差异</div> : preview ? <ScrollArea className="min-h-0 flex-1"><div className="flex flex-col gap-4 pr-3"><div className="grid gap-3 sm:grid-cols-2"><AuditMetric label="本地版本" value={preview.local_version || '未知'} description={preview.local_content_hash || '无 hash'} /><AuditMetric label="远端版本" value={preview.remote_version || '未知'} description={preview.remote_content_hash || '无 hash'} /></div><Alert variant={preview.will_update ? 'default' : undefined}>{preview.will_update ? <AlertCircleIcon /> : <CheckCircle2Icon />}<AlertTitle>{preview.will_update ? '检测到资产变化' : '没有资产变化'}</AlertTitle><AlertDescription>{preview.safety?.statement || '原始语料保持 reference-only，不直接进入 prompt。'}</AlertDescription></Alert><div className="overflow-auto rounded-lg border"><Table><TableHeader><TableRow><TableHead>资产层</TableHead><TableHead className="text-right">本地</TableHead><TableHead className="text-right">远端</TableHead><TableHead className="text-right">变化</TableHead></TableRow></TableHeader><TableBody>{Object.keys({ ...preview.local_counts, ...preview.remote_counts }).map((key) => <TableRow key={key}><TableCell>{key}</TableCell><TableCell className="text-right font-mono">{preview.local_counts[key] ?? 0}</TableCell><TableCell className="text-right font-mono">{preview.remote_counts[key] ?? 0}</TableCell><TableCell className="text-right font-mono">{preview.delta_counts[key] > 0 ? `+${preview.delta_counts[key]}` : preview.delta_counts[key] ?? 0}</TableCell></TableRow>)}</TableBody></Table></div><div className="grid gap-3 md:grid-cols-3">{([['新增口癖', preview.samples?.added_phrases ?? []], ['变更口癖', preview.samples?.changed_phrases ?? []], ['移除口癖', preview.samples?.removed_phrases ?? []]] as const).map(([title, words]) => <Card key={title}><CardHeader className="py-3"><CardTitle className="text-sm">{title}</CardTitle></CardHeader><CardContent className="flex flex-wrap gap-1 pt-0">{words.length ? words.slice(0, 12).map((word) => <Badge key={word} variant="secondary">{word}</Badge>) : <span className="text-sm text-muted-foreground">无变化</span>}</CardContent></Card>)}</div></div></ScrollArea> : <Alert variant="destructive"><AlertTitle>同步预览不可用</AlertTitle><AlertDescription>服务端没有返回可展示的差异。</AlertDescription></Alert>}<DialogFooter><Button type="button" variant="outline" onClick={() => setPreviewOpen(false)}>关闭</Button><Button type="button" disabled title="catalog_sync_command_unavailable">确认同步并写入</Button></DialogFooter></DialogContent></Dialog>
   </div>
 }
 
@@ -150,7 +268,7 @@ export function JargonPage() {
   const statusFilter = params.get('status') ?? ''
   const search = params.get('search') ?? ''
   useCanonicalScopeDefault({ botId, sessionId, setFilters: pagination.setFilters })
-  const scope = useMemo(() => ({ bot_id: botId, session_id: sessionId, visibility: 'group' as const }), [botId, sessionId])
+  const scope = useMemo<JargonScopeSelection>(() => ({ bot_id: botId, session_id: sessionId, visibility: 'group' }), [botId, sessionId])
   const [payload, setPayload] = useState<JargonResponse | null>(null)
   const [deepLinkedItem, setDeepLinkedItem] = useState<JargonItem | null>(null)
   const [deepLinkStatus, setDeepLinkStatus] = useState<'loading' | ObjectRefState | null>(null)
@@ -159,35 +277,64 @@ export function JargonPage() {
   const [queryStatus, setQueryStatus] = useState<'loading' | 'success' | 'empty' | 'error'>('empty')
   const [error, setError] = useState<unknown>()
   const [mutating, setMutating] = useState<number | null>(null)
-  const [searchDraft, setSearchDraft] = useState(search)
+  const [batchMutating, setBatchMutating] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<number[]>([])
+  const [evidenceItem, setEvidenceItem] = useState<JargonItem | null>(null)
+  const [editItem, setEditItem] = useState<JargonItem | null>(null)
+  const [editMeaning, setEditMeaning] = useState('')
+  const [archiveItem, setArchiveItem] = useState<JargonItem | null>(null)
+  const [filterDraft, setFilterDraft] = useState({ search, status: statusFilter })
+  const [activeTab, setActiveTab] = useState<'local' | 'catalog'>('local')
   const [legacyPayload, setLegacyPayload] = useState<LegacyJargonResponse | null>(null)
   const [legacyOffset, setLegacyOffset] = useState(0)
   const [legacyLoading, setLegacyLoading] = useState(true)
+  const listRequest = useRef(0)
+  const catalogRequest = useRef(0)
 
-  useEffect(() => setSearchDraft(search), [search])
+  useEffect(() => setFilterDraft({ search, status: statusFilter }), [search, statusFilter])
+  useEffect(() => {
+    setEvidenceItem(null)
+    setEditItem(null)
+    setArchiveItem(null)
+    setSelectedIds([])
+  }, [botId, sessionId])
   const loadBots = useCallback(async () => scopeOptionsFor(await getScopeOptions(), ['bot']), [])
   const loadSessions = useCallback(async () => scopeOptionsFor(await getScopeOptions(), ['session']).filter((option) => !botId || option.description?.startsWith(`${botId} ·`)), [botId])
 
   const load = useCallback(async () => {
+    const request = ++listRequest.current
     if (!botId || !sessionId) { setPayload(null); setQueryStatus('empty'); return }
     setQueryStatus('loading')
     setError(undefined)
     try {
       const next = await listJargons({ ...scope, limit: pagination.limit, offset: pagination.offset, status: statusFilter || undefined, search: search || undefined })
+      if (request !== listRequest.current) return
       setPayload(next)
+      setSelectedIds([])
       setQueryStatus(next.items.length ? 'success' : 'empty')
-    } catch (reason) { setPayload(null); setError(reason); setQueryStatus('error') }
+    } catch (reason) {
+      if (request !== listRequest.current) return
+      setPayload(null); setError(reason); setQueryStatus('error')
+    }
   }, [botId, pagination.limit, pagination.offset, scope, search, sessionId, statusFilter])
 
   const loadCatalog = useCallback(async () => {
+    const request = ++catalogRequest.current
     setCatalogStatus('loading')
-    try { setCatalog(await getCatalogAudit()); setCatalogStatus('success') }
-    catch { setCatalog(null); setCatalogStatus('error') }
+    try {
+      const next = await getCatalogAudit()
+      if (request !== catalogRequest.current) return
+      setCatalog(next); setCatalogStatus('success')
+    } catch {
+      if (request !== catalogRequest.current) return
+      setCatalog(null); setCatalogStatus('error')
+    }
   }, [])
 
-  useEffect(() => { void load() }, [load])
-  useEffect(() => { void loadCatalog() }, [loadCatalog])
+  useEffect(() => { if (activeTab === 'local') void load() }, [activeTab, load])
+  useEffect(() => { if (activeTab === 'catalog') void loadCatalog() }, [activeTab, loadCatalog])
   useEffect(() => {
+    if (activeTab !== 'local') return
     let cancelled = false
     setLegacyLoading(true)
     listLegacyJargons({ status: statusFilter || undefined, search: search || undefined, limit: 25, offset: legacyOffset })
@@ -195,7 +342,7 @@ export function JargonPage() {
       .catch(() => { if (!cancelled) setLegacyPayload(null) })
       .finally(() => { if (!cancelled) setLegacyLoading(false) })
     return () => { cancelled = true }
-  }, [legacyOffset, search, statusFilter])
+  }, [activeTab, legacyOffset, search, statusFilter])
   useEffect(() => {
     if (!objectRef) { setDeepLinkedItem(null); setDeepLinkStatus(null); return }
     if (!botId || !sessionId || visibility !== 'group') { setDeepLinkedItem(null); setDeepLinkStatus('scope-mismatch'); return }
@@ -227,68 +374,113 @@ export function JargonPage() {
     finally { setMutating(null) }
   }
 
+  async function reviewSelected(action: 'approve' | 'reject') {
+    const selected = (payload?.items ?? []).filter((item) => selectedIds.includes(item.id))
+    if (!selected.length) return
+    setBatchMutating(true)
+    try {
+      const result = await batchReviewJargons(selected, action, scope)
+      if (!result.ok || result.operation.status !== 'succeeded') throw new Error('服务端未确认批量审核成功')
+      toast.success(`已${action === 'approve' ? '确认' : '拒绝'} ${result.reviewed_count} 条黑话`)
+      await load()
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : '批量审核失败')
+    } finally {
+      setBatchMutating(false)
+    }
+  }
+
+  async function saveMeaning() {
+    if (!editItem) return
+    setMutating(editItem.id)
+    try {
+      const result = await updateJargonMeaning(editItem, editMeaning, scope)
+      if (!result.ok || result.operation.status !== 'succeeded') throw new Error('服务端未确认释义更新成功')
+      toast.success('释义已更新，并重新进入待审核')
+      setEditItem(null)
+      await load()
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : '释义更新失败')
+    } finally {
+      setMutating(null)
+    }
+  }
+
+  async function archiveSelectedItem() {
+    if (!archiveItem) return
+    setMutating(archiveItem.id)
+    try {
+      const result = await archiveJargon(archiveItem, scope)
+      if (!result.ok || result.operation.status !== 'succeeded') throw new Error('服务端未确认归档成功')
+      toast.success('黑话已从正式注入集合归档，未物理删除')
+      setArchiveItem(null)
+      await load()
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : '归档失败')
+    } finally {
+      setMutating(null)
+    }
+  }
+
+  function openMeaningEditor(item: JargonItem) {
+    setEditItem(item)
+    setEditMeaning(item.meaning || '')
+  }
+
+  function toggleSelected(id: number, checked: boolean) {
+    setSelectedIds((current) => checked ? [...current, id] : current.filter((value) => value !== id))
+  }
+
   function submitSearch(event: FormEvent) {
     event.preventDefault()
-    pagination.setFilters({ search: searchDraft.trim() || null })
+    setLegacyOffset(0)
+    pagination.setFilters({ search: filterDraft.search.trim() || null, status: filterDraft.status || null })
+  }
+
+  function resetFilters() {
+    setLegacyOffset(0)
+    setFilterDraft({ search: '', status: '' })
+    pagination.setFilters({ search: null, status: null })
   }
 
   const pageItems = payload?.items ?? []
-  const confirmedCount = pageItems.filter((item) => item.status === 'confirmed').length
-  const pendingCount = pageItems.filter((item) => item.status === 'pending').length
-  const anchorCount = pageItems.reduce((sum, item) => sum + item.anchors.length, 0)
+  const selectedItems = pageItems.filter((item) => selectedIds.includes(item.id))
+  const allPageSelected = pageItems.length > 0 && selectedItems.length === pageItems.length
+  const confirmedCount = payload ? pageItems.filter((item) => item.status === 'confirmed').length : '—'
+  const pendingCount = payload ? pageItems.filter((item) => item.status === 'pending').length : '—'
+  const anchorCount = payload ? pageItems.reduce((sum, item) => sum + item.anchors.length, 0) : '—'
   const totalText = payload?.page.total_status === 'exact' && payload.page.total !== null ? payload.page.total : '—'
-  const reviewAvailable = payload?.capabilities.review.available === true
+  const legacyTotal = legacyPayload?.page.total ?? null
+  const legacyRangeEnd = legacyPayload ? legacyTotal === null ? legacyOffset + legacyPayload.items.length : Math.min(legacyOffset + 25, legacyTotal) : legacyOffset
+  const reviewAvailable = payload?.capabilities.review?.available === true
+  const batchReviewAvailable = payload?.capabilities.batch_review?.available === true
+  const editAvailable = payload?.capabilities.edit?.available === true
+  const archiveAvailable = payload?.capabilities.archive?.available === true
 
   return <div data-slot="jargon-page" className="flex flex-col gap-6">
-    <Card className="overflow-hidden border-primary/10 bg-gradient-to-br from-primary/5 via-card to-card"><CardHeader className="gap-4 sm:flex-row sm:items-start sm:justify-between"><div className="flex gap-3"><div className="rounded-xl bg-primary/10 p-3 text-primary"><MessageSquareQuoteIcon className="size-6" /></div><div><CardTitle className="text-xl">群聊黑话与广域资产</CardTitle><CardDescription className="mt-1 max-w-3xl">本地已确认词条、待审核候选与 Holyman 广域参考资产严格分层；昵称、普通词和技术噪声不进入默认候选。</CardDescription></div></div><div className="flex items-center gap-2">{reviewAvailable ? <Badge variant="outline" className="border-emerald-500/25 bg-emerald-500/5 text-emerald-600"><ShieldCheckIcon className="size-3.5 mr-1" />证据审核中</Badge> : <Badge variant="outline" className="border-amber-500/25 bg-amber-500/5 text-amber-600"><LockIcon className="size-3.5 mr-1" />只读模式</Badge>}</div></CardHeader><CardContent className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><AuditMetric label="匹配总数" value={totalText} /><AuditMetric label="本页已确认" value={confirmedCount} /><AuditMetric label="本页待审核" value={pendingCount} /><AuditMetric label="本页证据锚点" value={anchorCount} /></CardContent></Card>
+    <Card className="overflow-hidden border-primary/10 bg-gradient-to-br from-primary/5 via-card to-card"><CardHeader className="gap-4 sm:flex-row sm:items-start sm:justify-between"><div className="flex gap-3"><div className="rounded-xl bg-primary/10 p-3 text-primary"><MessageSquareQuoteIcon className="size-6" /></div><div><CardTitle className="text-xl">群聊黑话与广域资产</CardTitle><CardDescription className="mt-1 max-w-3xl">本群已确认黑话、待审核候选与 Holyman 广域参考资产严格分层；昵称、普通词和技术噪声不进入默认候选。</CardDescription></div></div><div className="flex items-center gap-2">{reviewAvailable ? <Badge variant="outline" className="border-emerald-500/25 bg-emerald-500/5 text-emerald-600"><ShieldCheckIcon className="size-3.5 mr-1" />证据审核中</Badge> : <Badge variant="outline" className="border-amber-500/25 bg-amber-500/5 text-amber-600"><LockIcon className="size-3.5 mr-1" />只读模式</Badge>}</div></CardHeader><CardContent className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><AuditMetric label="匹配总数" value={totalText} /><AuditMetric label="本页已确认" value={confirmedCount} /><AuditMetric label="本页待审核" value={pendingCount} /><AuditMetric label="本页证据锚点" value={anchorCount} /></CardContent></Card>
 
     {deepLinkStatus ? <Alert data-slot="jargon-deep-link-state" variant={deepLinkStatus === 'ready' || deepLinkStatus === 'loading' ? 'default' : 'destructive'}><AlertTitle>{deepLinkStatus === 'loading' ? '正在校验对象深链' : deepLinkStatus === 'ready' ? '深链词条已定位' : '无法打开深链词条'}</AlertTitle><AlertDescription>{deepLinkStatus === 'ready' && deepLinkedItem ? <span><strong>{deepLinkedItem.word}</strong>：{deepLinkedItem.meaning || '尚未形成释义'}</span> : deepLinkStatus === 'loading' ? '正在验证对象引用、当前范围与版本。' : DEEP_LINK_LABELS[deepLinkStatus as Exclude<ObjectRefState, 'ready'>]}</AlertDescription></Alert> : null}
 
-    <Tabs defaultValue="local"><TabsList><TabsTrigger value="local"><BookOpenIcon />本地词条</TabsTrigger><TabsTrigger value="catalog"><Globe2Icon />Holyman 广域资产</TabsTrigger></TabsList>
-      <TabsContent value="local" className="space-y-4">
-        <Card><CardHeader><CardTitle className="text-base">范围与筛选</CardTitle><CardDescription>搜索仅在提交时更新地址，不会逐字写入浏览历史。</CardDescription></CardHeader><CardContent className="grid gap-4 md:grid-cols-2"><ScopeSelect value={botId || undefined} loadOptions={loadBots} label="Bot" placeholder="选择真实 Bot" onValueChange={(value) => pagination.setFilters({ bot_id: value, session_id: null })} /><ScopeSelect value={sessionId || undefined} loadOptions={loadSessions} label="群 / 会话" placeholder="选择真实群会话" disabled={!botId} onValueChange={(value) => pagination.setFilters({ session_id: value })} /><Field><FieldLabel>审核状态</FieldLabel><Select value={statusFilter || 'all'} onValueChange={(value) => pagination.setFilters({ status: value === 'all' ? null : value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部领域词条</SelectItem><SelectItem value="confirmed">已确认</SelectItem><SelectItem value="pending">待审核</SelectItem></SelectContent></Select></Field><form className="flex items-end gap-2" onSubmit={submitSearch}><Field className="flex-1"><FieldLabel htmlFor="jargon-search">词条搜索</FieldLabel><Input id="jargon-search" value={searchDraft} placeholder="搜索词条或释义" onChange={(event) => setSearchDraft(event.target.value)} /></Field><Button type="submit"><SearchIcon data-icon="inline-start" />搜索</Button>{search ? <Button type="button" variant="ghost" onClick={() => { setSearchDraft(''); pagination.setFilters({ search: null }) }}>清除</Button> : null}</form></CardContent></Card>
+    <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as 'local' | 'catalog')}><TabsList><TabsTrigger value="local"><BookOpenIcon />群聊黑话</TabsTrigger><TabsTrigger value="catalog"><Globe2Icon />Holyman 广域资产</TabsTrigger></TabsList>
+      <TabsContent value="local" className="flex flex-col gap-4">
+        <Card><CardContent className="p-4"><form className="flex flex-wrap items-end gap-2" onSubmit={submitSearch}><ScopeSelect className="w-48 shrink-0 [&_[data-slot=field-label]]:sr-only" value={botId || undefined} loadOptions={loadBots} label="Bot" placeholder="选择真实 Bot" onValueChange={(value) => pagination.setFilters({ bot_id: value, session_id: null })} /><ScopeSelect className="w-56 shrink-0 [&_[data-slot=field-label]]:sr-only" value={sessionId || undefined} loadOptions={loadSessions} label="群 / 会话" placeholder="选择真实群会话" disabled={!botId} onValueChange={(value) => pagination.setFilters({ session_id: value })} /><Field className="w-32 shrink-0 gap-0 [&_[data-slot=field-label]]:sr-only"><FieldLabel>审核状态</FieldLabel><Select value={filterDraft.status || 'all'} onValueChange={(value) => setFilterDraft((current) => ({ ...current, status: value === 'all' ? '' : value }))}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部状态</SelectItem><SelectItem value="confirmed">已确认</SelectItem><SelectItem value="pending">待审核</SelectItem><SelectItem value="rejected">已拒绝</SelectItem></SelectContent></Select></Field><Field className="min-w-52 flex-1 gap-0 [&_[data-slot=field-label]]:sr-only"><FieldLabel htmlFor="jargon-search">搜索黑话</FieldLabel><Input id="jargon-search" value={filterDraft.search} placeholder="搜索黑话或释义…" onChange={(event) => setFilterDraft((current) => ({ ...current, search: event.target.value }))} /></Field><Button type="submit" size="sm"><SearchIcon data-icon="inline-start" />搜索</Button><Button type="button" variant="outline" size="sm" onClick={resetFilters}>重置</Button><Button type="button" variant="outline" size="sm" disabled title={payload?.capabilities.create?.reason_code ?? '带证据的新建命令尚未开放'}><PlusIcon data-icon="inline-start" />新建黑话</Button></form></CardContent></Card>
 
         <Card>
 <CardHeader>
-<CardTitle className="text-base">本地词条清单</CardTitle>
+<CardTitle className="text-base">群聊黑话清单</CardTitle>
 <CardDescription>主表只显示中文业务字段；来源、规则、对象引用和 JSON 收纳在详情中。</CardDescription>
 </CardHeader>
 <CardContent className="flex flex-col gap-4">
+{selectedItems.length ? <div className="flex flex-wrap items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 p-3"><Badge variant="secondary">已选 {selectedItems.length} 条</Badge><Button type="button" size="sm" disabled={batchMutating || !batchReviewAvailable || selectedItems.some((item) => item.anchors.length === 0 || !item.object_ref)} onClick={() => void reviewSelected('approve')}><CheckIcon data-icon="inline-start" />批量确认</Button><Button type="button" size="sm" variant="outline" disabled={batchMutating || !batchReviewAvailable || selectedItems.some((item) => !item.object_ref)} onClick={() => void reviewSelected('reject')}><XIcon data-icon="inline-start" />批量拒绝</Button><Button type="button" size="sm" variant="ghost" className="ml-auto" onClick={() => setSelectedIds([])}>取消选择</Button>{!payload?.capabilities.select_all_matching?.available ? <span className="w-full text-xs text-muted-foreground">跨页全部匹配暂不可用：{payload?.capabilities.select_all_matching?.reason_code ?? '需要服务端重新签发全量 ObjectRef'}</span> : null}</div> : null}
 <QueryState status={queryStatus} error={error} onRetry={() => void load()} title={!botId || !sessionId ? '请选择真实 Bot 与会话' : undefined} description={!botId || !sessionId ? '作用域未选择时不会查询，也不会补入默认 Bot。' : undefined}>
-<div className="overflow-hidden rounded-lg border">
-<Table>
-<TableHeader>
-<TableRow>
-<TableHead>词条</TableHead>
-<TableHead>释义</TableHead>
-<TableHead className="w-24">频次</TableHead>
-<TableHead className="w-28">审核状态</TableHead>
-<TableHead className="w-24">证据</TableHead>
-<TableHead className="w-24 text-right">操作</TableHead>
-</TableRow>
-</TableHeader>
-<TableBody>{pageItems.map((item) => <TableRow key={item.id}>
-<TableCell className="font-semibold">{item.word}</TableCell>
-<TableCell className="max-w-xl">
-<p className="line-clamp-2 text-sm text-muted-foreground">{item.meaning || '尚未形成可展示的释义'}</p>
-</TableCell>
-<TableCell className="tabular-nums">{item.frequency} 次</TableCell>
-<TableCell>
-<Badge className={statusClass(item.status)}>{STATUS_LABELS[item.status]}</Badge>
-</TableCell>
-<TableCell>{item.anchors.length} 条</TableCell>
-<TableCell className="text-right">
-<ResponsiveDetail title={item.word} description="词条释义、证据卡与审核操作" className="sm:max-w-4xl" trigger={<Button type="button" variant="outline" size="sm">
-<EyeIcon data-icon="inline-start" />查看</Button>}>
-<JargonDetails item={item} reviewAvailable={payload?.capabilities.review.available ?? false} busy={mutating === item.id} onReview={(action) => void review(item, action)} />
-</ResponsiveDetail>
-</TableCell>
-</TableRow>)}</TableBody>
-</Table>
-</div>
-</QueryState>{payload && !payload.capabilities.review.available ? <Alert>
+<ResponsiveTable label="群聊黑话清单" table={<Table>
+<TableHeader><TableRow><TableHead className="w-10"><input aria-label="选择当前页全部黑话" type="checkbox" checked={allPageSelected} onChange={(event) => setSelectedIds(event.target.checked ? pageItems.map((item) => item.id) : [])} /></TableHead><TableHead>词条</TableHead><TableHead>释义</TableHead><TableHead className="w-20">频次</TableHead><TableHead className="w-24">来源</TableHead><TableHead className="w-24">状态</TableHead><TableHead className="w-20">证据</TableHead><TableHead className="w-64 text-right">操作</TableHead></TableRow></TableHeader>
+<TableBody>{pageItems.map((item) => <TableRow key={item.id} className={selectedIds.includes(item.id) ? 'bg-primary/5' : undefined}><TableCell><input aria-label={`选择黑话 ${item.word}`} type="checkbox" checked={selectedIds.includes(item.id)} onChange={(event) => toggleSelected(item.id, event.target.checked)} /></TableCell><TableCell className="font-semibold">{item.word}</TableCell><TableCell className="max-w-xl"><p className="line-clamp-2 text-sm text-muted-foreground">{item.meaning || '尚未形成可展示的释义'}</p></TableCell><TableCell className="tabular-nums">{item.frequency}</TableCell><TableCell><Badge variant="secondary" className="font-mono text-[10px]">{item.source || 'wave_memory'}</Badge></TableCell><TableCell><Badge className={statusClass(item.status)}>{STATUS_LABELS[item.status]}</Badge></TableCell><TableCell>{item.anchors.length ? `${item.anchors.length} 条` : '无锚点'}</TableCell><TableCell className="text-right"><div className="flex justify-end gap-1"><Button type="button" variant="outline" size="sm" disabled={!item.object_ref} title={item.object_ref ? '还原同作用域聊天证据' : '缺少服务端签发的 ObjectRef'} onClick={() => setEvidenceItem(item)}><MessageSquareQuoteIcon data-icon="inline-start" />证据</Button>{item.status === 'pending' ? <><Button type="button" size="icon-sm" aria-label={`确认黑话 ${item.word}`} disabled={mutating === item.id || !reviewAvailable || item.anchors.length === 0} title="确认黑话" onClick={() => void review(item, 'approve')}><CheckIcon /></Button><Button type="button" variant="outline" size="icon-sm" aria-label={`拒绝黑话 ${item.word}`} disabled={mutating === item.id || !reviewAvailable} title="拒绝候选" onClick={() => void review(item, 'reject')}><XIcon /></Button></> : null}<Button type="button" variant="ghost" size="icon-sm" aria-label={`编辑黑话 ${item.word}`} disabled={!editAvailable || !item.object_ref} title={editAvailable ? '编辑释义；保存后回到待审核' : payload?.capabilities.edit?.reason_code ?? '编辑不可用'} onClick={() => openMeaningEditor(item)}><Edit2Icon /></Button><ResponsiveDetail title={item.word} description="黑话释义、证据引用与审核操作" className="sm:max-w-4xl" trigger={<Button type="button" variant="ghost" size="icon-sm" aria-label={`查看黑话 ${item.word} 详情`} title="查看详情"><EyeIcon /></Button>}><JargonDetails item={item} reviewAvailable={reviewAvailable} busy={mutating === item.id} onReview={(action) => void review(item, action)} /></ResponsiveDetail><Button type="button" variant="ghost" size="icon-sm" aria-label={`归档黑话 ${item.word}`} disabled={!archiveAvailable || !item.object_ref} title={archiveAvailable ? '归档并移出正式注入集合' : payload?.capabilities.archive?.reason_code ?? '归档不可用'} onClick={() => setArchiveItem(item)}><ArchiveIcon /></Button></div></TableCell></TableRow>)}</TableBody>
+</Table>} cards={pageItems.map((item) => <article key={item.id} className={`flex flex-col gap-3 rounded-lg border bg-card p-4 ${selectedIds.includes(item.id) ? 'border-primary/50 bg-primary/5' : ''}`}><div className="flex items-start justify-between gap-2"><label className="flex min-w-0 items-start gap-2"><input aria-label={`选择黑话 ${item.word}`} type="checkbox" checked={selectedIds.includes(item.id)} onChange={(event) => toggleSelected(item.id, event.target.checked)} /><span><span className="block font-semibold">{item.word}</span><span className="mt-1 block whitespace-pre-wrap break-words text-sm text-muted-foreground">{item.meaning || '尚未形成可展示的释义'}</span></span></label><Badge className={statusClass(item.status)}>{STATUS_LABELS[item.status]}</Badge></div><div className="flex flex-wrap gap-2 text-xs text-muted-foreground"><span>频次 {item.frequency}</span><span>来源 {item.source || 'wave_memory'}</span><span>证据 {item.anchors.length} 条</span></div><div className="flex flex-wrap justify-end gap-2"><Button type="button" variant="outline" size="sm" disabled={!item.object_ref} onClick={() => setEvidenceItem(item)}><MessageSquareQuoteIcon data-icon="inline-start" />证据</Button><Button type="button" variant="outline" size="sm" disabled={!editAvailable || !item.object_ref} onClick={() => openMeaningEditor(item)}><Edit2Icon data-icon="inline-start" />编辑</Button><ResponsiveDetail title={item.word} description="黑话释义、证据引用与审核操作" className="sm:max-w-4xl" trigger={<Button type="button" variant="outline" size="sm">详情</Button>}><JargonDetails item={item} reviewAvailable={reviewAvailable} busy={mutating === item.id} onReview={(action) => void review(item, action)} /></ResponsiveDetail></div></article>)} />
+</QueryState>{payload && !payload.capabilities.review?.available ? <Alert>
 <AlertTitle>审核能力当前不可用</AlertTitle>
-<AlertDescription>服务端拒绝原因：{payload.capabilities.review.reason_code ?? '未提供'}</AlertDescription>
+<AlertDescription>服务端拒绝原因：{payload.capabilities.review?.reason_code ?? '未提供'}</AlertDescription>
 </Alert> : null}{payload ? <PaginationControls page={payload.page} onOffsetChange={pagination.setOffset} onLimitChange={pagination.setLimit} /> : null}</CardContent>
 </Card>
       </TabsContent>
@@ -296,16 +488,20 @@ export function JargonPage() {
       <TabsContent value="catalog"><Card><CardHeader><div className="flex items-start justify-between gap-3"><div><CardTitle className="flex items-center gap-2 text-base"><DatabaseIcon className="size-4" />广域资产浏览</CardTitle><CardDescription className="mt-1">只读审计 Holyman 分层参考资产，不赋予本地审核语义，也不提供同步写入。</CardDescription></div><Badge variant={catalog?.asset_status === 'ready' ? 'secondary' : 'outline'}>{catalog?.asset_status === 'ready' ? '资产就绪' : '状态待核验'}</Badge></div></CardHeader><CardContent><QueryState status={catalogStatus} title="广域资产暂不可用" description="未使用演示数据或旧缓存替代。" onRetry={() => void loadCatalog()}>{catalog ? <CatalogBrowser catalog={catalog} /> : null}</QueryState></CardContent></Card></TabsContent>
     </Tabs>
 
-    <Card className="border-amber-500/10 bg-amber-500/[0.02]">
-      <CardHeader className="py-4">
-        <div className="flex items-center gap-2">
-          <Badge variant="outline" className="border-amber-500/20 text-amber-600 bg-amber-500/5">只读审计</Badge>
-          <CardTitle className="text-base">Legacy 历史黑话</CardTitle>
-        </div>
-        <CardDescription>旧 group_jargon 只记录了旧 group_id，没有真实 BotProfile.db_id 与 canonical session。历史词条仅供审计，不参与上方审核流程。</CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-4 pt-0">
-        <Alert className="mb-4 border-amber-500/15 bg-amber-500/[0.02] text-amber-700 dark:text-amber-500"><ShieldCheckIcon className="size-4 text-amber-600" /><AlertTitle>未归属历史词条</AlertTitle><AlertDescription className="text-xs">{legacyPayload ? `共 ${legacyPayload.page.total.toLocaleString('zh-CN')} 条待审计记录。` : legacyLoading ? '正在读取审计清单。' : 'Legacy 审计接口暂不可用。'} 页面不会用旧 QQ 群号猜测 canonical Scope。</AlertDescription></Alert>{legacyPayload?.items.length ? <><div className="overflow-auto rounded-lg border bg-background"><Table><TableHeader><TableRow><TableHead>ID</TableHead><TableHead>词条</TableHead><TableHead>释义</TableHead><TableHead>旧 group_id</TableHead><TableHead>频次</TableHead><TableHead>状态</TableHead></TableRow></TableHeader><TableBody>{legacyPayload.items.map((item) => <TableRow key={item.id}><TableCell className="font-mono text-xs">#{item.id}</TableCell><TableCell className="font-semibold">{item.word}</TableCell><TableCell className="max-w-xl"><p className="line-clamp-2">{item.meaning || '未记录'}</p></TableCell><TableCell className="font-mono text-xs text-muted-foreground">{item.group_id || '未记录'}</TableCell><TableCell>{item.frequency}</TableCell><TableCell>{item.status || '未知'}</TableCell></TableRow>)}</TableBody></Table></div><div className="flex items-center justify-between text-sm text-muted-foreground"><span>第 {legacyOffset + 1}-{Math.min(legacyOffset + 25, legacyPayload.page.total)} 条</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={legacyLoading || legacyOffset === 0} onClick={() => setLegacyOffset(Math.max(0, legacyOffset - 25))}>上一页</Button><Button size="sm" variant="outline" disabled={legacyLoading || legacyOffset + 25 >= legacyPayload.page.total} onClick={() => setLegacyOffset(legacyOffset + 25)}>下一页</Button></div></div></> : !legacyLoading ? <p className="text-xs text-muted-foreground py-4 text-center">没有未归属的 Legacy 黑话记录。</p> : null}</CardContent></Card>
+    {activeTab === 'local' ? <details className="overflow-hidden rounded-lg border border-amber-500/10 bg-amber-500/[0.02]">
+      <summary className="flex cursor-pointer list-none flex-wrap items-center gap-2 px-6 py-4 marker:hidden">
+        <Badge variant="outline" className="border-amber-500/20 bg-amber-500/5 text-amber-600">只读审计</Badge>
+        <span className="text-base font-semibold">Legacy 历史黑话</span>
+        <span className="text-xs text-muted-foreground">非当前 Scope · 默认收起</span>
+      </summary>
+      <div className="border-t border-amber-500/10 px-6 py-4">
+        <p className="mb-4 text-sm text-muted-foreground">旧 group_jargon 只记录了旧 group_id，没有真实 BotProfile.db_id 与 canonical session。历史词条仅供审计，不参与上方审核流程。</p>
+        <Alert className="mb-4 border-amber-500/15 bg-amber-500/[0.02] text-amber-700 dark:text-amber-500"><ShieldCheckIcon className="size-4 text-amber-600" /><AlertTitle>未归属历史词条</AlertTitle><AlertDescription className="text-xs">{legacyPayload ? legacyTotal === null ? 'Legacy 审计总数未提供。' : `共 ${legacyTotal.toLocaleString('zh-CN')} 条待审计记录。` : legacyLoading ? '正在读取审计清单。' : 'Legacy 审计接口暂不可用。'} 页面不会用旧 QQ 群号猜测 canonical Scope。</AlertDescription></Alert>{legacyPayload?.items.length ? <><div className="overflow-auto rounded-lg border bg-background"><Table><TableHeader><TableRow><TableHead>ID</TableHead><TableHead>词条</TableHead><TableHead>释义</TableHead><TableHead>旧 group_id</TableHead><TableHead>频次</TableHead><TableHead>状态</TableHead></TableRow></TableHeader><TableBody>{legacyPayload.items.map((item) => <TableRow key={item.id}><TableCell className="font-mono text-xs">#{item.id}</TableCell><TableCell className="font-semibold">{item.word}</TableCell><TableCell className="max-w-xl"><p className="line-clamp-2">{item.meaning || '未记录'}</p></TableCell><TableCell className="font-mono text-xs text-muted-foreground">{item.group_id || '未记录'}</TableCell><TableCell>{item.frequency}</TableCell><TableCell>{item.status || '未知'}</TableCell></TableRow>)}</TableBody></Table></div><div className="flex items-center justify-between text-sm text-muted-foreground"><span>{legacyTotal === null ? `已读取第 ${legacyOffset + 1}-${legacyRangeEnd} 条；总数未提供` : `第 ${legacyOffset + 1}-${legacyRangeEnd} 条`}</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={legacyLoading || legacyOffset === 0} onClick={() => setLegacyOffset(Math.max(0, legacyOffset - 25))}>上一页</Button><Button size="sm" variant="outline" disabled={legacyLoading || !legacyPayload.page.has_next} onClick={() => setLegacyOffset(legacyOffset + 25)}>下一页</Button></div></div></> : !legacyLoading ? <p className="py-4 text-center text-xs text-muted-foreground">没有未归属的 Legacy 黑话记录。</p> : null}
+      </div>
+    </details> : null}
+    <Dialog open={Boolean(editItem)} onOpenChange={(open) => { if (!open && mutating === null) setEditItem(null) }}><DialogContent className="sm:max-w-lg"><DialogHeader><DialogTitle>编辑黑话释义{editItem ? ` · ${editItem.word}` : ''}</DialogTitle><DialogDescription>保存会推进 revision，并把该黑话重新置为待审核；不会绕过现有证据门禁直接修改已确认语义。</DialogDescription></DialogHeader><Field><FieldLabel htmlFor="jargon-edit-meaning">黑话释义</FieldLabel><Textarea id="jargon-edit-meaning" className="min-h-28" value={editMeaning} onChange={(event) => setEditMeaning(event.target.value)} /></Field><DialogFooter><Button type="button" variant="outline" disabled={mutating !== null} onClick={() => setEditItem(null)}>取消</Button><Button type="button" disabled={mutating !== null || !editMeaning.trim()} onClick={() => void saveMeaning()}>{mutating !== null ? <Loader2Icon data-icon="inline-start" className="animate-spin" /> : <Edit2Icon data-icon="inline-start" />}保存并回到待审核</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={Boolean(archiveItem)} onOpenChange={(open) => { if (!open && mutating === null) setArchiveItem(null) }}><DialogContent><DialogHeader><DialogTitle>归档黑话{archiveItem ? ` · ${archiveItem.word}` : ''}</DialogTitle><DialogDescription>该操作会把黑话移出正式注入集合，但保留记录、证据和审计信息；不会物理删除数据库行。</DialogDescription></DialogHeader><Alert><ArchiveIcon /><AlertTitle>可恢复的安全移除</AlertTitle><AlertDescription>旧版物理删除已替换为 scoped 归档，避免误删和跨 Scope 数据破坏。</AlertDescription></Alert><DialogFooter><Button type="button" variant="outline" disabled={mutating !== null} onClick={() => setArchiveItem(null)}>取消</Button><Button type="button" variant="destructive" disabled={mutating !== null} onClick={() => void archiveSelectedItem()}>{mutating !== null ? <Loader2Icon data-icon="inline-start" className="animate-spin" /> : <ArchiveIcon data-icon="inline-start" />}确认归档</Button></DialogFooter></DialogContent></Dialog>
+    <JargonEvidenceDialog item={evidenceItem} scope={scope} onClose={() => setEvidenceItem(null)} />
   </div>
 }
 

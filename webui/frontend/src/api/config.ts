@@ -10,6 +10,10 @@ export interface ProviderPayload {
 export type ConfigApplyMode = 'hot' | 'restart' | 'next_run' | 'unknown'
 
 export interface ConfigValueState {
+  min?: number
+  max?: number
+  minimum?: number
+  maximum?: number
   default: unknown
   saved: unknown
   saved_present?: boolean
