@@ -982,3 +982,117 @@ async def import_from_source():
                     yield f"data: {json.dumps({'error': 'No importable tables found'})}\n\n"
 
     return Response(event_stream(), content_type="text/event-stream")
+
+
+# ─── React 前端兼容路由（/api/memories/import/*） ───
+
+@memories_bp.route("/memories/import/sources", methods=["GET"])
+@require_auth
+async def memories_discover_sources():
+    """兼容 React 前端的 /api/memories/import/sources → 代理到现有 discover_sources。"""
+    return await discover_sources()
+
+
+@memories_bp.route("/memories/import/run", methods=["POST"])
+@require_auth
+async def memories_import_run():
+    """兼容 React 前端的 /api/memories/import/run → 代理到现有 import_from_source。"""
+    return await import_from_source()
+
+
+# LLM 批量提取锁
+_llm_extract_lock = asyncio.Lock()
+_llm_extract_stop_event: asyncio.Event = asyncio.Event()
+
+
+@memories_bp.route("/memories/import/llm-extract", methods=["POST"])
+@require_auth
+async def memories_llm_extract():
+    """对无标签记忆批量提取 Tag（SSE 流），兼容 React 前端调用。"""
+    c = get_container()
+    batch_size = max(1, min(200, _safe_int(request.args.get("batch_size", 50), 50)))
+
+    if _llm_extract_lock.locked():
+        async def locked_msg():
+            yield f"data: {json.dumps({'error': '另一个提取任务正在运行'})}\n\n"
+        return Response(locked_msg(), content_type="text/event-stream")
+
+    if not c.tag_extractor:
+        async def no_extractor():
+            yield f"data: {json.dumps({'error': 'Tag extractor 未配置，需要配置 tag_llm_provider_id'})}\n\n"
+        return Response(no_extractor(), content_type="text/event-stream")
+
+    # 重置停止信号
+    _llm_extract_stop_event.clear()
+
+    async def event_stream():
+        async with _llm_extract_lock:
+            # 找到所有无标签记忆
+            try:
+                rows = c.db.conn.execute(
+                    "SELECT DISTINCT m.id, m.content, m.sender_name FROM memories m "
+                    "LEFT JOIN memory_tags mt ON m.id = mt.memory_id "
+                    "WHERE mt.memory_id IS NULL AND LENGTH(m.content) >= 4 "
+                    "ORDER BY m.id"
+                ).fetchall()
+            except Exception as e:
+                yield f"data: {json.dumps({'error': f'查询无标签记忆失败: {e}'})}\n\n"
+                return
+
+            total = len(rows)
+            if total == 0:
+                yield f"data: {json.dumps({'progress': 1.0, 'processed': 0, 'total': 0, 'done': True, 'message': '没有需要提取标签的记忆'})}\n\n"
+                return
+
+            yield f"data: {json.dumps({'progress': 0, 'total': total, 'message': f'开始提取 {total} 条无标签记忆的标签'})}\n\n"
+            processed = tagged = errors = 0
+
+            for i in range(0, total, batch_size):
+                if _llm_extract_stop_event.is_set():
+                    yield f"data: {json.dumps({'progress': round(processed / total, 3) if total else 1, 'processed': processed, 'total': total, 'tagged': tagged, 'errors': errors, 'done': True, 'message': f'用户中止，已处理 {processed}/{total}'})}\n\n"
+                    return
+
+                batch = rows[i:i + batch_size]
+                for row in batch:
+                    if _llm_extract_stop_event.is_set():
+                        break
+                    try:
+                        mid, content, sender = row[0], (row[1] or "")[:800], (row[2] or "")
+                        if content and len(content) >= 4:
+                            tags = await c.tag_extractor.extract_tags(content, sender=sender)
+                            if tags:
+                                names = [t["name"] for t in tags]
+                                try:
+                                    vecs = await c.embedding_service.get_embeddings(names)
+                                except Exception:
+                                    vecs = [None] * len(names)
+                                for tag_info, tv in zip(tags, vecs):
+                                    tid = c.db.add_tag_extended(
+                                        name=tag_info["name"],
+                                        tag_type=tag_info.get("type", "keyword"),
+                                        vector=tv,
+                                        confidence=tag_info.get("confidence", 0.8),
+                                    )
+                                    c.db.conn.execute(
+                                        "INSERT OR IGNORE INTO memory_tags (memory_id, tag_id, position, relevance) VALUES (?, ?, ?, ?)",
+                                        (mid, tid, 1, tag_info.get("confidence", 0.8)),
+                                    )
+                                c.db.conn.commit()
+                                tagged += 1
+                    except Exception:
+                        errors += 1
+                    processed += 1
+
+                yield f"data: {json.dumps({'progress': round(processed / total, 3) if total else 1, 'processed': processed, 'total': total, 'tagged': tagged, 'errors': errors, 'message': f'批 {i // batch_size + 1}: {processed}/{total}（标签: {tagged}）'})}\n\n"
+
+            yield f"data: {json.dumps({'progress': 1.0, 'processed': processed, 'total': total, 'tagged': tagged, 'errors': errors, 'done': True, 'message': f'完成: {tagged} 条已提取标签'})}\n\n"
+
+    return Response(event_stream(), content_type="text/event-stream")
+
+
+@memories_bp.route("/memories/import/llm-extract/stop", methods=["POST"])
+@require_auth
+async def memories_llm_extract_stop():
+    """停止正在运行的 LLM 提取。"""
+    _llm_extract_stop_event.set()
+    return jsonify({"ok": True, "message": "提取已发送中止信号"})
