@@ -1,0 +1,27 @@
+{
+  "status": "ready",
+  "phrases_count": 10,
+  "concepts_count": 44,
+  "examples_count": 50,
+  "corpus_count": 362,
+  "candidates_count": 300,
+  "blocked_count": 7,
+  "declared_corpus_count": 365,
+  "source_corpus_items_count": 362,
+  "parsed_corpus_count": 362,
+  "corpus_count_mismatch": true,
+  "corpus_count_note": "README declares 365 items; current raw JSON contains 362 non-empty items and all were parsed.",
+  "errors": {
+    "corpus_frequency_in_phrases": 0,
+    "generic_meaning_in_phrases": 0,
+    "unbalanced_bracket_in_phrases": 0,
+    "plain_sentence_in_phrases": 0,
+    "blocked_phrase_in_phrases": 0,
+    "entity_only_in_phrases": 0,
+    "missing_core_terms": 0,
+    "missing_layered_sources": 0,
+    "persona_instruction_in_phrases": 0,
+    "raw_parsed_corpus_mismatch": 0
+  },
+  "generated_at": 1783236271
+}

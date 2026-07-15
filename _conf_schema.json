@@ -1,0 +1,518 @@
+{
+  "_system_status": {
+    "description": "⚡ WaveMemory 系统运行状态说明",
+    "type": "string",
+    "hint": "本页配置系统基础能力开关和模型选择。核心交互机制：(1) 记忆注入：允许机器人结合历史上下文在聊天中主动提及过去的交往经历；(2) 深度社交认知：无需独立调用LLM，系统根据互动次数和事实三元组自动沉淀出对每个群友的用户画像，实现自然的陪伴调教；(3) 情绪半衰期防刷机制：辱骂等恶意事件3次后自动进入安全冷却期。",
+    "obvious_hint": true,
+    "default": "仅供说明，无需修改",
+    "_readonly": true
+  },
+  "embedding_provider_id": {
+    "description": "向量特征模型 (Embedding) 提供商",
+    "type": "string",
+    "hint": "填写您在 AstrBot 中创建的 Embedding 提供商完整ID（如 'siliconflow/Qwen3-Embedding'）。向量模型负责对聊天记录进行空间语义转化，使其具备模糊联想能力。",
+    "obvious_hint": true,
+    "default": "",
+    "restart_required": true
+  },
+  "embedding_dimension": {
+    "description": "特征向量维度",
+    "type": "int",
+    "hint": "必须与所选择的 Embedding 特征模型输出维度完全一致。通义千问 Qwen3-Embedding 默认 1024 维，SiliconFlow 或 OpenAI 依模型而定。",
+    "default": 1024,
+    "restart_required": true
+  },
+  "tag_llm_provider_id": {
+    "description": "自省标签提取大模型 (Tag LLM)",
+    "type": "string",
+    "hint": "用于对聊天记录分析并提炼标签、事实三元组（Subject-Predicate-Object）的大模型 ID。留空则只用向量搜索，不生成知识图谱、黑话和心智信念。",
+    "default": "",
+    "_special": "select_provider",
+    "restart_required": true
+  },
+  "WebUI_Settings": {
+    "description": "WebUI 管理控制台配置",
+    "hint": "Wave Memory 现代可视管理台运行端口与密码",
+    "type": "object",
+    "items": {
+      "webui_enabled": {
+        "description": "启用 WebUI 控制台",
+        "hint": "开启后将可以通过浏览器在 9876 端口访问极简 3D 神经控制台",
+        "type": "bool",
+        "default": true,
+        "restart_required": true
+      },
+      "webui_host": {
+        "description": "监听网卡地址",
+        "hint": "127.0.0.1 仅允许本机电脑浏览器打开；0.0.0.0 允许局域网或公网直接IP访问",
+        "type": "string",
+        "default": "0.0.0.0",
+        "restart_required": true
+      },
+      "webui_port": {
+        "description": "控制台访问端口",
+        "hint": "WebUI 端口号，若冲突请修改（默认 9876）",
+        "type": "int",
+        "default": 9876,
+        "restart_required": true
+      },
+      "webui_password": {
+        "description": "访问登录密码",
+        "hint": "建议设置高强度登录密码，保护数据库不被非法盗取。留空则免密进入",
+        "type": "string",
+        "default": ""
+      }
+    }
+  },
+  "Runtime_Settings": {
+    "description": "整机运行能力边界",
+    "hint": "定义 WaveMemory 功能装载级别，防与其他自学习插件冲突",
+    "type": "object",
+    "items": {
+      "runtime_mode": {
+        "description": "系统运行级别",
+        "hint": "full: 激活完整 3D 知识图谱、信念和主动记忆注入能力；memory_only: 纯记忆数据库，不启用高级认知提炼；compat_only: 仅作为 LivingMemory 第三方兼容接口后端，不执行原生主动注入，避免和 SelfLearning / ChatPlus 等同类插件在同一轮聊天中产生重复注入的尴尬现象。",
+        "type": "string",
+        "default": "full",
+        "restart_required": true
+      }
+    }
+  },
+  "Compatibility_Settings": {
+    "description": "第三方插件生态兼容模式",
+    "hint": "针对已有旧记忆风格生态的别名工具适配",
+    "type": "object",
+    "items": {
+      "livingmemory_alias_tools_enabled": {
+        "description": "启用 LivingMemory 别名工具映射",
+        "hint": "开启后会自动注册 recall_long_term_memory 工具别名，供其它已绑定 LivingMemory 工具名的外部 Agent 直接调用。未安装相关插件时请保持关闭以避工具名冲突。",
+        "type": "bool",
+        "default": false,
+        "restart_required": true
+      },
+      "compat_only_auto_inject_enabled": {
+        "description": "兼容模式下强行启用原生注入",
+        "hint": "仅在您确实希望在 compat_only 极简后端级别下，也让本插件在消息流中插入记忆时开启。默认关闭，确保不重复插话。",
+        "type": "bool",
+        "default": false,
+        "restart_required": true
+      }
+    }
+  },
+  "Trace_Settings": {
+    "description": "注入观察台 Trace 存储上限",
+    "hint": "控制注入 Trace 的修剪天数与数据库体积",
+    "type": "object",
+    "items": {
+      "retention_days": {
+        "description": "Trace 历史数据保留天数",
+        "hint": "超过此时限的注入轨迹将被自动擦除，防止日志文件过度膨胀（默认 14 天）",
+        "type": "int",
+        "default": 14,
+        "restart_required": true
+      },
+      "max_rows": {
+        "description": "Trace 最大保留记录条数",
+        "hint": "超过此上限时自动截断旧日志（默认 5000 条）",
+        "type": "int",
+        "default": 5000,
+        "restart_required": true
+      },
+      "max_preview_chars": {
+        "description": "单条消息最大预览字符数",
+        "hint": "为了防止重型上下文撑爆 SQLite 页面，系统对记录在观测台的单次消息预览长度做限制（默认 1200 字）",
+        "type": "int",
+        "default": 1200,
+        "restart_required": true
+      }
+    }
+  },
+  "Query_Settings": {
+    "description": "自适应记忆召回参数",
+    "hint": "调整大模型生成回复前，历史记忆在后台检索和整合的控制参数",
+    "type": "object",
+    "items": {
+      "enable_auto_inject": {
+        "description": "开启自动记忆注入能力",
+        "hint": "每次对话大模型前，后台异步检索关联经历并整合进 context。关闭后机器人将失去一切记忆和主动认知能力！",
+        "type": "bool",
+        "default": true,
+        "obvious_hint": true
+      },
+      "inject_top_k": {
+        "description": "单次最大记忆注入条数",
+        "hint": "召回记忆片段数量上限（推荐 5 条，支持 1~20 条。过大可能撑爆大模型 token 视窗并引发幻觉）",
+        "type": "int",
+        "default": 5
+      },
+      "min_similarity": {
+        "description": "相似度关联召回门限",
+        "hint": "语义空间最低匹配分数（0.0 ~ 1.0）。低于此分数的无关琐碎记忆将绝不注入。建议保持在 0.35 黄金值附近。",
+        "type": "float",
+        "default": 0.35
+      },
+      "injection_format": {
+        "description": "记忆提示词注入模板 (Template)",
+        "hint": "定义记忆在大模型 Context 里的承载标签。可用标签占位符：{content} (记忆内容), {sender} (对方昵称), {time} (发生时间)。建议保留这些标签，让机器人能自然使用“你之前说过...”的亲密口吻。",
+        "type": "string",
+        "default": "<memory from='{sender}' time='{time}'>{content}</memory>"
+      },
+      "enable_spike_routing": {
+        "description": "启用图谱共现脉冲传播 (Spike Routing)",
+        "hint": "当标签覆盖率>20%且图谱构建完成后起效。开启后支持跨实体进行多跳语义联想，机器人思路更加开阔活跃。",
+        "type": "bool",
+        "default": true
+      },
+      "enable_residual_pyramid": {
+        "description": "启用残差多阶金字塔召回 (Residual Pyramid)",
+        "hint": "对复杂长问题在特征空间进行多阶语义残差差分检索，大幅提升多重主语、指代模糊场景下的召回精准度。",
+        "type": "bool",
+        "default": true
+      },
+      "enable_epa": {
+        "description": "启用自省投影距离修正 (EPA)",
+        "hint": "开启后，系统根据用户输入的问题倾向度，动态对记忆向量的绝对欧氏几何距离进行投影自省缩放。推荐开启。",
+        "type": "bool",
+        "default": true
+      },
+      "enable_geodesic_rerank": {
+        "description": "启用非欧流形测地线重排 (Geodesic)",
+        "hint": "利用知识图谱的局部拓扑关联结构对向量空间偏离距离进行拉回校正，极大地抑制大模型向量相似度产生的幻觉关联。",
+        "type": "bool",
+        "default": true
+      },
+      "enable_shotgun": {
+        "description": "启用霰弹枪扫描模式",
+        "hint": "支持多角度、碎片化的快速上下文分割并发查询。开启会略微增加 30ms 响应耗时，但在大群活跃吹水场景下体验极佳。",
+        "type": "bool",
+        "default": false
+      }
+    }
+  },
+  "Cross_Group_Settings": {
+    "description": "广域跨群记忆漫游",
+    "hint": "跨群好感度与记忆贯通规则",
+    "type": "object",
+    "items": {
+      "cross_group_enabled": {
+        "description": "开启广域跨群记忆共享",
+        "hint": "开启后机器人共享同一个大脑知识，在A群聊过的事B群也认识。关闭后每个QQ群的记忆完全沙盒硬隔离，宛若独立Bot。",
+        "type": "bool",
+        "default": true
+      },
+      "cross_group_persona_merge": {
+        "description": "开启跨群用户画像合并",
+        "hint": "在不同群遇到的同一个人（根据QQ号主键），其好感度分值、交友大事记和性格标签自动打通聚合。推荐开启。",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "Lifecycle_Settings": {
+    "description": "心智与心境灵魂系统",
+    "hint": "信念演进、情绪、生理生物钟心境和记忆自省整合参数",
+    "type": "object",
+    "items": {
+      "enable_persona_evolution": {
+        "description": "开启社交画像自然沉淀",
+        "hint": "根据互动次数和 facts 事实自动组装对每个人的人格侧写（如：喜欢打电动、常熬夜），并在聊天时自然使用这些认知。无需独立 LLM 提炼，对 CPU/显卡零负载。",
+        "type": "bool",
+        "default": true
+      },
+      "enable_mood": {
+        "description": "启用生理心境系统 (Bot Mood)",
+        "hint": "根据消息密度与情感 tag 的输入速率，动态在 Energetic / Cheerful / Concerned 情绪轨道间滑动跃迁。",
+        "type": "bool",
+        "default": true
+      },
+      "mood_duration_hours": {
+        "description": "情绪状态自然半衰退天数",
+        "hint": "情绪突发后，在没有后续高强度互动刺激下，多少小时后平复并重置为平静温和状态（默认 2.0 小时）",
+        "type": "float",
+        "default": 2.0
+      },
+      "mood_msg_threshold": {
+        "description": "情绪爆发活跃消息门限",
+        "hint": "群友在 30 分钟内消息数超过该值时，自动触发机器人处于活跃开朗心境下（默认 30 条）",
+        "type": "int",
+        "default": 30
+      },
+      "positive_emotion_threshold": {
+        "description": "CHEERFUL 喜悦触发临界值",
+        "hint": "对话中喜悦情感标签占比超过此比例时，情绪自动偏向 CHEERFUL（0.0 ~ 1.0）",
+        "type": "float",
+        "default": 0.6
+      },
+      "negative_emotion_threshold": {
+        "description": "CONCERNED 悲伤触发临界值",
+        "hint": "对话中负面、关切、悲伤情感占比超过此比例时，情绪自动偏向 CONCERNED（0.0 ~ 1.0）",
+        "type": "float",
+        "default": 0.4
+      },
+      "relationship_single_delta_cap": {
+        "description": "单次互动关系变化极大值",
+        "hint": "单次对话中好感度等关系事件波动最大绝对值。防止一次夸奖好感拉满，或者一次失误好感清零（默认 5.0 分）",
+        "type": "float",
+        "default": 5.0
+      },
+      "relationship_daily_delta_cap": {
+        "description": "每日好感度变化累计上限",
+        "hint": "防刷分机制：同一个人一天内累计好感度变化的绝对值上限（默认 15.0 分）。超过上限后当天的互动将保持稳定。",
+        "type": "float",
+        "default": 15.0
+      },
+      "relationship_hostility_delta_cap": {
+        "description": "单次辱骂敌意增加上限",
+        "hint": "单次检测到辱骂或恶意调戏时，敌意/敌对值正向拉升的最大限值（默认 8.0 分）。达到 3 次后自动进入保护性冷却。",
+        "type": "float",
+        "default": 8.0
+      },
+      "enable_dream": {
+        "description": "启用深夜做梦引擎 (Dreaming)",
+        "hint": "后台自动执行：对零散记忆进行三层“时间线涟漪浪潮”重组，并在历史经历中搭建“共振桥梁”发现潜在相关联，形成长期的逻辑事实和心智。推荐开启。",
+        "type": "bool",
+        "default": true
+      },
+      "dream_interval_hours": {
+        "description": "做梦引擎触发自省间隔",
+        "hint": "每隔多少小时执行一次深夜记忆合并（推荐在夜间执行，默认 6.0 小时）",
+        "type": "float",
+        "default": 6.0
+      },
+      "dream_recent_seeds": {
+        "description": "近期种子记忆数",
+        "hint": "做梦自省时近期涟漪抽取的基础种子记忆数量（默认 3 条）",
+        "type": "int",
+        "default": 3
+      },
+      "dream_recent_k": {
+        "description": "近期记忆联想召回深度",
+        "hint": "每个做梦种子在后台模糊关联出的最相关的历史经历条数（默认 5 条）",
+        "type": "int",
+        "default": 5
+      },
+      "dream_mid_seeds": {
+        "description": "中期经历种子数",
+        "type": "int",
+        "default": 2
+      },
+      "dream_mid_k": {
+        "description": "中期经历联想召回深度",
+        "type": "int",
+        "default": 3
+      },
+      "enable_consolidation": {
+        "description": "启用定时长语篇摘要整合",
+        "hint": "调用 LLM 定时扫描原始对话快照，将长篇大论的消息流提炼成极其精简的结构化知识三元组（Subject-Predicate-Object），并持久化写回图谱。极其推荐开启，这是沉淀“生平大事记”的唯一源头。",
+        "type": "bool",
+        "default": true
+      },
+      "consolidation_interval_hours": {
+        "description": "长语篇摘要整合间隔",
+        "hint": "每隔多少小时触发一次大篇幅聊天记录整合（默认 4.0 小时）",
+        "type": "float",
+        "default": 4.0
+      },
+      "consolidation_topic_backfill": {
+        "description": "摘要话题自动回写",
+        "hint": "整合出来的核心事实标签，自动写入 `memory_tags` 与知识库。推荐开启。",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "Message_Filter": {
+    "description": "无意义闲聊消息清洗过滤器",
+    "hint": "控制哪些群消息不被无意义地写入记忆库，保护特征空间不被污染",
+    "type": "object",
+    "items": {
+      "min_message_length": {
+        "description": "记忆录入最小字符长度",
+        "hint": "短于此长度的消息（如：'好'、'1'、'@xxx'）会被自动过滤，绝不写进长期记忆，保护大模型不被垃圾数据撑爆（默认 4 字）",
+        "type": "int",
+        "default": 4
+      },
+      "max_message_length": {
+        "description": "记忆录入最大字符长度",
+        "hint": "单条消息记录的最大物理上限，超过此限制的超长篇幅文本将截断后记录（默认 2000 字）",
+        "type": "int",
+        "default": 2000
+      },
+      "ignore_bot_messages": {
+        "description": "忽略机器人自身回复记忆",
+        "hint": "开启后，大模型自己生成的回复话语将不写进记忆。关闭后，机器人自己的话也会写进长期记忆。推荐关闭（即：机器人也需要记住自己说过的话）",
+        "type": "bool",
+        "default": false
+      },
+      "group_whitelist": {
+        "description": "群记忆功能激活白名单",
+        "hint": "仅记录这些群组的消息。格式：逗号分隔的群号。留空则表示对全部群生效。",
+        "type": "string",
+        "default": ""
+      },
+      "group_blacklist": {
+        "description": "群记忆功能禁止黑名单",
+        "hint": "格式：逗号分隔的群号。此名单中的群消息绝不记录。",
+        "type": "string",
+        "default": ""
+      }
+    }
+  },
+  "Tag_Settings": {
+    "description": "自省标签（Tag）提取参数",
+    "hint": "控制 AI 异步提取标签时的批量大小与屏蔽设置",
+    "type": "object",
+    "items": {
+      "tag_extraction_enabled": {
+        "description": "启用标签特征分析",
+        "hint": "关闭后将不再对聊天提炼标签，无法使用 3D 神经云图、同好社区共现和 EPA 重排能力。推荐开启。",
+        "type": "bool",
+        "default": true
+      },
+      "max_tags_per_message": {
+        "description": "单条消息最大标签数",
+        "hint": "LLM 每次从聊天片段中分析提炼出的人物、话题、事实等最大标签数（默认 10 个）",
+        "type": "int",
+        "default": 10
+      },
+      "tag_batch_size": {
+        "description": "标签提炼实时队列批次大小",
+        "hint": "当聊天缓冲区积累到多少条有效记忆时，自动触发一次 LLM 标签并行分析队列（默认 5 条）",
+        "type": "int",
+        "default": 5
+      },
+      "tag_backfill_batch_size": {
+        "description": "后台标签补填任务处理大小",
+        "hint": "当管理员在控制台点击“一键提取全量Tag”时，后台每批处理的记忆块大小（默认 50 条），防止撑爆 LLM 并发流",
+        "type": "int",
+        "default": 50
+      },
+      "tag_blacklist": {
+        "description": "全局标签屏蔽词",
+        "hint": "逗号分隔。这些词即使大模型分析提炼出来，也会在入库前被彻底剔除。防止无意义杂词污染图谱。",
+        "type": "string",
+        "default": ""
+      },
+      "consolidation_skip_topics": {
+        "description": "话题回写全局过滤黑名单",
+        "hint": "逗号分隔。摘要话题回写到知识库时自动过滤包含这些无意义闲聊词汇的条目（默认已过滤：日常灌水、闲聊等）",
+        "type": "string",
+        "default": "日常闲聊,日常灌水,闲聊,灌水,群聊,聊天,日常"
+      }
+    }
+  },
+  "MetaThinking_Bot1": {
+    "description": "第一个 Bot 身份配置（需配置 qq_id 以启用灵魂子系统）",
+    "hint": "配置第一个绑定在本插件上的机器人身份。qq_id 是机器人的标识，name 是显示名称。必须配置至少一个 bot 才能启用 StudyService/SelfReflect/BeliefEngine 等灵魂子系统。",
+    "type": "object",
+    "items": {
+      "qq_id": {
+        "description": "Bot 标识",
+        "hint": "填写机器人标识如 yushu。必填，留空则忽略该 bot。",
+        "type": "string",
+        "default": ""
+      },
+      "name": {
+        "description": "Bot 显示名称",
+        "type": "string",
+        "default": ""
+      },
+      "db_id": {
+        "description": "数据库标识（选填）",
+        "type": "string",
+        "default": ""
+      },
+      "aliases": {
+        "description": "别名（逗号分隔）",
+        "type": "string",
+        "default": ""
+      },
+      "meta_prompt": {
+        "description": "自定义 MetaThinking Prompt（选填）",
+        "type": "string",
+        "default": ""
+      },
+      "proactive_enabled": {
+        "description": "启用主动发言",
+        "type": "bool",
+        "default": true
+      },
+      "proactive_interval_seconds": {
+        "description": "主动发言最小间隔（秒）",
+        "type": "int",
+        "default": 600
+      },
+      "proactive_max_per_hour": {
+        "description": "每小时主动发言上限",
+        "type": "int",
+        "default": 3
+      },
+      "exclude_sources": {
+        "description": "排除的记忆来源（逗号分隔）",
+        "type": "string",
+        "default": ""
+      },
+      "interest_keywords": {
+        "description": "兴趣关键词（逗号分隔）",
+        "type": "string",
+        "default": ""
+      }
+    }
+  },
+  "MetaThinking_Bot2": {
+    "description": "第二个 Bot 身份配置（选填）",
+    "type": "object",
+    "items": {
+      "qq_id": {
+        "description": "Bot 标识",
+        "type": "string",
+        "default": ""
+      },
+      "name": {
+        "description": "Bot 显示名称",
+        "type": "string",
+        "default": ""
+      },
+      "db_id": {
+        "description": "数据库标识（选填）",
+        "type": "string",
+        "default": ""
+      },
+      "aliases": {
+        "description": "别名（逗号分隔）",
+        "type": "string",
+        "default": ""
+      },
+      "meta_prompt": {
+        "description": "自定义 MetaThinking Prompt（选填）",
+        "type": "string",
+        "default": ""
+      },
+      "proactive_enabled": {
+        "description": "启用主动发言",
+        "type": "bool",
+        "default": true
+      },
+      "proactive_interval_seconds": {
+        "description": "主动发言最小间隔（秒）",
+        "type": "int",
+        "default": 600
+      },
+      "proactive_max_per_hour": {
+        "description": "每小时主动发言上限",
+        "type": "int",
+        "default": 3
+      },
+      "exclude_sources": {
+        "description": "排除的记忆来源（逗号分隔）",
+        "type": "string",
+        "default": ""
+      },
+      "interest_keywords": {
+        "description": "兴趣关键词（逗号分隔）",
+        "type": "string",
+        "default": ""
+      }
+    }
+  }
+}

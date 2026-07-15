@@ -1,0 +1,117 @@
+{
+  "v我50": {
+    "meaning": "长篇铺垫或煽情叙述后突然索要 50 元，常关联疯狂星期四，用来制造荒诞转折。",
+    "category": "catchphrase",
+    "source": "curated/core",
+    "kind": "curated_phrase",
+    "confidence": 0.98,
+    "safety_level": "safe_reference",
+    "layer": "catchphrase",
+    "reference_only": true,
+    "runtime_match": true
+  },
+  "叠甲": {
+    "meaning": "提前声明立场、限制讨论范围或自我免责，以避免被攻击或误解。",
+    "category": "internet-culture",
+    "source": "curated/core",
+    "kind": "curated_phrase",
+    "confidence": 0.96,
+    "safety_level": "safe_reference",
+    "layer": "catchphrase",
+    "reference_only": true,
+    "runtime_match": true
+  },
+  "不是哥们": {
+    "meaning": "面对离谱、荒谬或难以接受的内容时使用的吐槽起手式，语气偏惊讶和无语。",
+    "category": "catchphrase",
+    "source": "curated/core",
+    "kind": "curated_phrase",
+    "confidence": 0.95,
+    "safety_level": "safe_reference",
+    "layer": "catchphrase",
+    "reference_only": true,
+    "runtime_match": true
+  },
+  "差不多得了": {
+    "meaning": "用于制止过度复读、争论、玩梗或情绪输出，意思是提醒对方适可而止。",
+    "category": "catchphrase",
+    "source": "curated/core",
+    "kind": "curated_phrase",
+    "confidence": 0.95,
+    "safety_level": "safe_reference",
+    "layer": "catchphrase",
+    "reference_only": true,
+    "runtime_match": true
+  },
+  "疯狂星期四": {
+    "meaning": "肯德基星期四促销梗，常出现在长篇故事结尾并转向借钱或求 V 的荒诞文案。",
+    "category": "copypasta",
+    "source": "curated/core",
+    "kind": "curated_phrase",
+    "confidence": 0.96,
+    "safety_level": "safe_reference",
+    "layer": "catchphrase",
+    "reference_only": true,
+    "runtime_match": true
+  },
+  "你说得对，但是": {
+    "meaning": "常见反串或复制粘贴起手式，表面认可对方，随后突然切入夸张传教或长文。",
+    "category": "copypasta",
+    "source": "curated/core",
+    "kind": "curated_phrase",
+    "confidence": 0.9,
+    "safety_level": "safe_reference",
+    "layer": "catchphrase",
+    "reference_only": true,
+    "runtime_match": true
+  },
+  "动了XX的蛋糕": {
+    "meaning": "把失败或冲突荒诞地归因于触碰了某个群体利益，用于反串阴谋化解释。",
+    "category": "abstract-rhetoric",
+    "source": "curated/core",
+    "kind": "curated_phrase",
+    "confidence": 0.86,
+    "safety_level": "safe_reference",
+    "layer": "catchphrase",
+    "reference_only": true,
+    "runtime_match": true
+  },
+  "别急": {
+    "meaning": "常用于让对方不要急于反应或破防，也可作为轻度调侃式安抚。",
+    "category": "catchphrase",
+    "source": "curated/core",
+    "kind": "curated_phrase",
+    "confidence": 0.9,
+    "safety_level": "safe_reference",
+    "layer": "catchphrase",
+    "reference_only": true,
+    "runtime_match": true
+  },
+  "那咋了": {
+    "meaning": "用冷处理方式回应指责或质疑，表达不在乎、反问或摆烂态度。",
+    "category": "catchphrase",
+    "source": "curated/core",
+    "kind": "curated_phrase",
+    "confidence": 0.9,
+    "safety_level": "safe_reference",
+    "layer": "catchphrase",
+    "reference_only": true,
+    "runtime_match": true
+  },
+  "又幻想了": {
+    "meaning": "用于调侃过度脑补、自我代入或不现实的想象。",
+    "category": "catchphrase",
+    "source": "curated/core",
+    "kind": "curated_phrase",
+    "confidence": 0.9,
+    "safety_level": "safe_reference",
+    "layer": "catchphrase",
+    "reference_only": true,
+    "runtime_match": true
+  },
+  "_content_count": 10,
+  "_content_hash": "28fbfd9f32b0876c",
+  "_version": "sync-20260705-152431",
+  "_update_time": 1783236271,
+  "_remote_commit_version": "2026-05-26-c5bb18e"
+}

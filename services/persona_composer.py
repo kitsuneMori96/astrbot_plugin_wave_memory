@@ -1,0 +1,271 @@
+"""Self persona composer for layered prompt injection.
+
+This module keeps bot self-persona orchestration out of ``main.py`` and out of
+``MetaThinking``.  It builds small, ordered blocks:
+
+1. stable self persona
+2. active beliefs
+3. selected lived experiences
+4. healthy style examples
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+from typing import Any
+
+from astrbot.api import logger
+
+from .identity_safety import is_identity_contamination
+
+_EXPERIENCE_STYLE_CONTAMINATION_RE = re.compile(r"(猫耳|猫耳朵|兽耳|尾巴|小爪子|飞机耳|本真君|小鱼干|灵鱼干|喵)")
+
+
+def default_recall_sources() -> list[str]:
+    """Sources for ordinary memory recall; lived bzz sources are composer-owned."""
+    return ["core", "evolution", "experience", "lore", "book_lore"]
+
+
+def build_layered_injection_parts(
+    *,
+    self_persona_text: str = "",
+    belief_text: str = "",
+    self_experience_text: str = "",
+    persona_text: str = "",
+    timeline_text: str = "",
+    facts_text: str = "",
+    lore_text: str = "",
+    concern_summary: str = "",
+    mood_text: str = "",
+    mood_traj_text: str = "",
+    jargon_text: str = "",
+    fewshot_text: str = "",
+    memories_text: str = "",
+) -> list[str]:
+    """Return prompt blocks in persona-first order."""
+    ordered = [
+        self_persona_text,
+        belief_text,
+        self_experience_text,
+        persona_text,
+        timeline_text,
+        facts_text,
+        lore_text,
+        concern_summary,
+        mood_text,
+        mood_traj_text,
+        jargon_text,
+        fewshot_text,
+        memories_text,
+    ]
+    return [part for part in ordered if part]
+
+
+class PersonaComposer:
+    """Build layered self-persona context for the current bot."""
+
+    def __init__(
+        self,
+        *,
+        db: Any,
+        belief_engine: Any = None,
+        query_engine: Any = None,
+        few_shot_service: Any = None,
+        bot_profiles: dict[str, Any] | None = None,
+        default_bot_db_id: str = "",
+        max_experiences: int = 3,
+        max_experience_chars: int = 700,
+    ):
+        self.db = db
+        self.belief_engine = belief_engine
+        self.query_engine = query_engine
+        self.few_shot_service = few_shot_service
+        self.bot_profiles = bot_profiles or {}
+        self.default_bot_db_id = default_bot_db_id or "bot"
+        self.max_experiences = max(1, int(max_experiences or 3))
+        self.max_experience_chars = max(120, int(max_experience_chars or 700))
+
+    async def build_self_persona(
+        self,
+        *,
+        bot_id: str,
+        group_id: str,
+        sender_id: str,
+        sender_name: str,
+        message: str,
+        recent_context: list[str] | None,
+    ) -> dict[str, Any]:
+        """Return persona/belief/experience/style blocks plus compact debug data."""
+
+        profile = self._get_profile(bot_id)
+        bot_name = self._profile_value(profile, "name", None) or "当前 bot"
+        bot_db_id = self._profile_value(profile, "db_id", None) or self.default_bot_db_id
+        aliases = self._profile_value(profile, "aliases", []) or []
+
+        persona_block = self._build_persona_block(bot_name=bot_name, bot_db_id=bot_db_id, aliases=aliases)
+        belief_block, belief_debug = self._build_belief_block(
+            bot_db_id=bot_db_id,
+            sender_id=sender_id,
+            message=message,
+        )
+        experience_block, experience_ids = await self._build_experience_block(
+            message=message,
+            group_id=group_id,
+            bot_db_id=bot_db_id,
+        )
+        style_block, style_ids = self._build_style_block(bot_id=bot_id)
+
+        return {
+            "persona_block": persona_block,
+            "belief_block": belief_block,
+            "experience_block": experience_block,
+            "style_block": style_block,
+            "debug": {
+                "persona_sources": ["bot_profile"],
+                "belief_ids": belief_debug.get("belief_ids", []),
+                "belief_source": belief_debug.get("source", ""),
+                "experience_ids": experience_ids,
+                "style_ids": style_ids,
+            },
+        }
+
+    def _get_profile(self, bot_id: str) -> Any:
+        if bot_id and bot_id in self.bot_profiles:
+            return self.bot_profiles[bot_id]
+        if self.bot_profiles:
+            return next(iter(self.bot_profiles.values()))
+        return None
+
+    @staticmethod
+    def _profile_value(profile: Any, key: str, default: Any = None) -> Any:
+        if profile is None:
+            return default
+        if isinstance(profile, dict):
+            return profile.get(key, default)
+        return getattr(profile, key, default)
+
+    def _build_persona_block(self, *, bot_name: str, bot_db_id: str, aliases: list[str]) -> str:
+        alias_text = "、".join(str(a) for a in aliases if a) or "无"
+        return (
+            "<self_persona>\n"
+            f"当前自我身份：{bot_name}（db_id={bot_db_id}，别名：{alias_text}）。\n"
+            "人格优先级最高：先保持稳定自我、事实判断和边界感，再参考记忆与经历。\n"
+            "经历只提供素材，不能覆盖当前人格；信念提供长期立场，不能变成攻击性模板。\n"
+            "遇到挑衅或辱骂时，可以冷处理、拒绝或简短设边界，但不要把攻击性当作默认风格。\n"
+            "</self_persona>"
+        )
+
+    def _build_belief_block(self, *, bot_db_id: str, sender_id: str, message: str) -> tuple[str, dict[str, Any]]:
+        if not self.belief_engine:
+            return "", {"source": "none", "belief_ids": []}
+        try:
+            if hasattr(self.belief_engine, "bot_id"):
+                self.belief_engine.bot_id = bot_db_id
+            keywords = self._keywords(message)
+            text = self.belief_engine.get_injection(sender_id=sender_id, keywords=keywords) or ""
+            text = text.strip()
+            if not text or is_identity_contamination(text):
+                return "", {"source": "belief_engine", "belief_ids": []}
+            return text, {"source": "belief_engine", "belief_ids": self._extract_ids(text)}
+        except Exception as e:
+            logger.debug(f"[PersonaComposer] belief block failed: {e}")
+            return "", {"source": "belief_engine_error", "belief_ids": []}
+
+    async def _build_experience_block(self, *, message: str, group_id: str, bot_db_id: str) -> tuple[str, list[int]]:
+        memories = []
+        if self.query_engine:
+            try:
+                memories = await self.query_engine.query(
+                    text=message,
+                    group_id=None,
+                    top_k=max(self.max_experiences * 2, 4),
+                    source_filter=["bzz_experience", "bzz_evolution", "experience"],
+                )
+            except Exception as e:
+                logger.debug(f"[PersonaComposer] query experience failed: {e}")
+                memories = []
+
+        if not memories:
+            memories = self._recent_experience_memories(bot_db_id=bot_db_id, group_id=group_id)
+
+        selected = []
+        seen_content = set()
+        total_chars = 0
+        for item in memories:
+            content = str(item.get("content") or item.get("summary") or "").strip()
+            if not content or not self._is_safe_experience_text(content):
+                continue
+            key = content[:80]
+            if key in seen_content:
+                continue
+            if total_chars + len(content) > self.max_experience_chars and selected:
+                continue
+            selected.append(item)
+            seen_content.add(key)
+            total_chars += len(content)
+            if len(selected) >= self.max_experiences:
+                break
+
+        if not selected:
+            return "", []
+
+        lines = ["<self_experiences>", "以下是少量精选经历素材，只用于补细节，不得覆盖人格："]
+        for item in selected:
+            content = str(item.get("content") or item.get("summary") or "").strip()
+            lines.append(f"- {content[:240]}")
+        lines.append("</self_experiences>")
+        ids = [item.get("id") for item in selected if item.get("id") is not None]
+        return "\n".join(lines), ids
+
+    def _recent_experience_memories(self, *, bot_db_id: str, group_id: str) -> list[dict[str, Any]]:
+        conn = getattr(self.db, "conn", None)
+        if not conn:
+            return []
+        rows = []
+        try:
+            rows.extend(conn.execute(
+                """SELECT id, content, source, group_id FROM memories
+                   WHERE source IN ('bzz_experience','bzz_evolution','experience')
+                   ORDER BY timestamp DESC LIMIT ?""",
+                (max(self.max_experiences * 2, 4),),
+            ).fetchall())
+        except Exception:
+            pass
+        memories = []
+        for row in rows:
+            try:
+                memories.append({"id": row[0], "content": row[1], "source": row[2], "group_id": row[3]})
+            except Exception:
+                continue
+        return memories
+
+    @staticmethod
+    def _is_safe_experience_text(text: str) -> bool:
+        if is_identity_contamination(text):
+            return False
+        if _EXPERIENCE_STYLE_CONTAMINATION_RE.search(text or ""):
+            return False
+        return True
+
+    def _build_style_block(self, *, bot_id: str) -> tuple[str, list[int]]:
+        if not self.few_shot_service:
+            return "", []
+        try:
+            text = self.few_shot_service.get_injection(bot_id=bot_id, max_items=2) or ""
+            text = text.strip()
+            if not text or is_identity_contamination(text):
+                return "", []
+            return text, list(getattr(self.few_shot_service, "_last_injected_ids", []) or [])
+        except Exception as e:
+            logger.debug(f"[PersonaComposer] style block failed: {e}")
+            return "", []
+
+    @staticmethod
+    def _keywords(message: str) -> list[str]:
+        tokens = re.findall(r"[\w\u4e00-\u9fff]{2,}", message or "")
+        return tokens[:5]
+
+    @staticmethod
+    def _extract_ids(text: str) -> list[int]:
+        return [int(x) for x in re.findall(r"ID[:#]?(\d+)", text or "")[:10]]

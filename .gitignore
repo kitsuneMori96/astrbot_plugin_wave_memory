@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.git/
+.engram/
+.kiro/
+.pytest_cache/
+*.db
+*.db-wal
+*.db-shm
+*.hnsw
+*.npz
+*.log
+webui/frontend/node_modules/
+webui/frontend/.vite/

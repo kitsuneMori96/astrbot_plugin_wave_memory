@@ -1,0 +1,73 @@
+{
+  "source": "https://github.com/ykdeso/holyman-skills",
+  "remote_version": "2026-05-26-c5bb18e",
+  "synced_at": "2026-07-05T07:24:31.244097+00:00",
+  "files": [
+    {
+      "path": "README.md",
+      "sha256": "2e4f03472d29fa0f3f2c56b810e18b3b733b56149a4512c0bc734a7abc5722b0",
+      "bytes": 6791,
+      "parse_status": "ok"
+    },
+    {
+      "path": "神人.skill/SKILL.md",
+      "sha256": "6f59dd50c1f5e5367593fbe2b7ae1fc9bc3e7ca603767218f0fad9e8b4332603",
+      "bytes": 4069,
+      "parse_status": "ok"
+    },
+    {
+      "path": "神人.skill/_knowledge/gaming.md",
+      "sha256": "84db30a464d096c0d77908b5e898f36b67739a5bf9926443b1b55f7078e12dad",
+      "bytes": 3062,
+      "parse_status": "ok"
+    },
+    {
+      "path": "神人.skill/_knowledge/internet-culture.md",
+      "sha256": "d81e62aa583233887b2c8b09e279134583a0eb238af719244965c42fbf75d2b1",
+      "bytes": 3488,
+      "parse_status": "ok"
+    },
+    {
+      "path": "神人.skill/_meta/sources.md",
+      "sha256": "aa2c51427a1322b5b6c4180e51ab768e0599b6d4f765dce60fe9b61f8963ad79",
+      "bytes": 1974,
+      "parse_status": "ok"
+    },
+    {
+      "path": "神人.skill/_persona/communication.md",
+      "sha256": "12b906d2a3e2f3b40b3f5877fdf529ad43fd292e867dfacb292740ba840e7343",
+      "bytes": 8128,
+      "parse_status": "ok"
+    },
+    {
+      "path": "神人.skill/_persona/rules.md",
+      "sha256": "445892b8db8027115afb2b62bbfeb7b63fd97e347dc31f0e11c7f1782a0bbea4",
+      "bytes": 7801,
+      "parse_status": "ok"
+    },
+    {
+      "path": "神人.skill/_persona/values.md",
+      "sha256": "c6b793d097fc341f9e9bd8288bc90d783afa6eb51b4ed915d2de9b3b27a622e1",
+      "bytes": 7992,
+      "parse_status": "ok"
+    },
+    {
+      "path": "神人.skill/_quotes/iconic.md",
+      "sha256": "eee0e6619c1b70bbe09b637097e69cafefed6ecd010ca7cb6e5270e5ad29c557",
+      "bytes": 8801,
+      "parse_status": "ok"
+    },
+    {
+      "path": "神人.skill/_quotes/internal.md",
+      "sha256": "69e4447e8afc0d42fb06cbc085affa51e2eaf4d82f3e9939fd5147a88802a44f",
+      "bytes": 3133,
+      "parse_status": "ok"
+    },
+    {
+      "path": "神言.txt",
+      "sha256": "032670e402269d6f37628e0d0a0c901f8d189c46939d89b7a27a41a9d5c2ef6b",
+      "bytes": 320019,
+      "parse_status": "ok"
+    }
+  ]
+}
