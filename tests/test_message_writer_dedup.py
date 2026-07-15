@@ -55,6 +55,21 @@ class FakeEmbedding:
         return [np.ones(3, dtype=np.float32) * (idx + 1) for idx, _ in enumerate(texts)]
 
 
+class HangingEmbedding:
+    async def get_embeddings(self, texts):
+        await asyncio.sleep(1)
+        return [np.ones(3, dtype=np.float32) for _ in texts]
+
+
+class BlockingQualityRepository:
+    def __init__(self):
+        self.calls = 0
+
+    def record(self, proposal, decision):
+        self.calls += 1
+        raise TimeoutError()
+
+
 class FakeWriteGateway:
     def __init__(self):
         self.calls = []
@@ -227,6 +242,61 @@ class MessageWriterDedupTest(unittest.TestCase):
         self.assertNotEqual(hints[0], hints[1])
         self.assertIn("bot-a:group:qq:group:group-1:event-42", hints[0])
         self.assertIn("bot-b:group:qq:group:group-1:event-42", hints[1])
+
+    def test_message_ingress_does_not_wait_for_quality_audit_repository(self):
+        from astrbot_plugin_wave_memory.services.message_writer import MessageWriter
+        from astrbot_plugin_wave_memory.services.quality_gate import QualityGate
+
+        db = FakeDB()
+        repository = BlockingQualityRepository()
+        writer = MessageWriter(
+            db=db,
+            memory_index=FakeIndex(),
+            embedding_service=FakeEmbedding(),
+            bot_keywords=set(),
+            noise_max_length=1,
+            quality_gate=QualityGate(repository=repository),
+        )
+
+        asyncio.run(writer._process_batch([{
+            "scope": _group_scope(),
+            "group_id": "group-1",
+            "sender_id": "user-1",
+            "content": "质量审计不能阻塞基础消息",
+            "timestamp": 3200.0,
+            "source": "core",
+        }]))
+
+        self.assertEqual(repository.calls, 0)
+        self.assertEqual(len(db.added), 1)
+        self.assertEqual(db.added[0]["provenance"]["quality"]["outcome"], "allow")
+
+    def test_embedding_timeout_persists_scoped_message_without_vector(self):
+        from astrbot_plugin_wave_memory.services.message_writer import MessageWriter
+
+        db = FakeDB()
+        writer = MessageWriter(
+            db=db,
+            memory_index=FakeIndex(),
+            embedding_service=HangingEmbedding(),
+            bot_keywords=set(),
+            noise_max_length=1,
+            embedding_timeout=0.01,
+        )
+
+        asyncio.run(writer._process_batch([{
+            "scope": _group_scope(),
+            "group_id": "group-1",
+            "sender_id": "user-1",
+            "content": "向量服务故障时也必须先记住原始消息",
+            "timestamp": 3300.0,
+            "source": "core",
+        }]))
+
+        self.assertEqual(len(db.added), 1)
+        self.assertIsNone(db.added[0]["vector"])
+        self.assertEqual(writer.stats["embedding_timeouts"], 1)
+        self.assertEqual(writer.stats["consecutive_failures"], 0)
 
     def test_scope_payload_rejects_mismatched_or_non_group_legacy_projection(self):
         from astrbot_plugin_wave_memory.services.message_writer import MessageScopeError

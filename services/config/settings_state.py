@@ -72,7 +72,13 @@ def build_field_state(
         reason = "缺失" if not saved_present else "为 None"
         error = f"旧配置中的布尔项{reason}，当前按 schema 默认值 {default!r} 解析；显式 False 不会被覆盖。"
 
+    numeric_limits = {
+        key: meta[key]
+        for key in ("min", "max", "minimum", "maximum")
+        if key in meta
+    }
     return {
+        **numeric_limits,
         "default": default,
         "saved": saved_wire,
         "saved_present": saved_present,

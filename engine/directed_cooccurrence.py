@@ -306,52 +306,70 @@ class CooccurrenceScheduler:
         self.cooldown_sec = cooldown_sec
         self.on_rebuild_complete = on_rebuild_complete
         self._accumulated_changes = 0
+        self._change_generation = 0
         self._last_rebuild_ts: float = 0
         self._is_rebuilding = False
+        self._scheduled_task = None
 
     def notify_tag_change(self, count: int = 1):
-        """通知有 Tag 变更。"""
-        self._accumulated_changes += count
+        """Accumulate Tag deltas and schedule at most one background rebuild."""
+        normalized_count = max(int(count), 0)
+        self._accumulated_changes += normalized_count
+        self._change_generation += normalized_count
         total = self.cooccurrence.node_count or 1
         if self._accumulated_changes / total >= self.threshold_pct:
-            # 检查冷却期
             now = time.time()
             if now - self._last_rebuild_ts >= self.cooldown_sec:
                 self._schedule_rebuild()
 
     def _schedule_rebuild(self):
-        """直接触发重建（不用 call_later 防抖）。"""
-        try:
-            loop = asyncio.get_event_loop()
-            asyncio.ensure_future(self._do_rebuild())
-        except RuntimeError:
-            pass
-
-    async def _do_rebuild(self):
-        """执行重建。"""
+        """Schedule one rebuild; repeated notifications only advance generation."""
         if self._is_rebuilding:
             return
-        self._is_rebuilding = True
         try:
-            logger.info("[WaveMemory] CooccurrenceScheduler: starting rebuild...")
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._is_rebuilding = True
+        self._scheduled_task = loop.create_task(self._do_rebuild())
+
+    async def _do_rebuild(self):
+        """Rebuild off the AstrBot event loop and consume a generation snapshot."""
+        generation = self._change_generation
+        try:
+            logger.info(
+                "[WaveMemory] CooccurrenceScheduler: starting rebuild generation=%s pending_changes=%s",
+                generation,
+                self._accumulated_changes,
+            )
             new_matrix = DirectedCooccurrence(
                 self.cooccurrence.db,
                 pair_sim_service=self.cooccurrence.pair_sim_service,
                 residual_map=self.cooccurrence.residual_map,
                 semantic_gain_config=self.cooccurrence.semantic_gain_config,
             )
-            new_matrix.rebuild()
+            await asyncio.to_thread(new_matrix.rebuild)
             self.cooccurrence.forward = new_matrix.forward
             self.cooccurrence.backward = new_matrix.backward
             self.cooccurrence._tag_count = new_matrix._tag_count
-            self._accumulated_changes = 0
+            consumed = min(generation, self._change_generation)
+            self._accumulated_changes = max(0, self._change_generation - consumed)
             self._last_rebuild_ts = time.time()
-            logger.info("[WaveMemory] CooccurrenceScheduler: rebuild complete")
+            logger.info(
+                "[WaveMemory] CooccurrenceScheduler: rebuild complete generation=%s remaining_changes=%s",
+                generation,
+                self._accumulated_changes,
+            )
 
             if self.on_rebuild_complete:
                 await self.on_rebuild_complete()
 
         except Exception as e:
-            logger.error(f"[WaveMemory] CooccurrenceScheduler rebuild error: {e}")
+            logger.error(
+                "[WaveMemory] CooccurrenceScheduler rebuild error type=%s error=%r",
+                type(e).__name__,
+                e,
+            )
         finally:
             self._is_rebuilding = False
+            self._scheduled_task = None

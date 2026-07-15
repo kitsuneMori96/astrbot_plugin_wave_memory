@@ -137,7 +137,7 @@ class QualityGate:
             metadata=metadata or {},
         )
 
-    def evaluate(self, proposal: QualityProposal) -> QualityDecision:
+    def evaluate(self, proposal: QualityProposal, *, record: bool = True) -> QualityDecision:
         if not isinstance(proposal, QualityProposal):
             raise TypeError("QualityGate requires a QualityProposal")
 
@@ -167,7 +167,7 @@ class QualityGate:
             rule_version=self.RULE_VERSION,
             normalized_content=normalized,
         )
-        if self.repository is not None:
+        if record and self.repository is not None:
             self.repository.record(proposal, decision)
         return decision
 

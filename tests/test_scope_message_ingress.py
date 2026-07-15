@@ -307,6 +307,8 @@ class ScopeMessageIngressTest(unittest.TestCase):
         self.assertEqual(payload["sender_id"], "user-event")
         self.assertEqual(payload["content"], "作用域入口测试")
         self.assertEqual(payload["event_id"], "message-event")
+        self.assertFalse(event.stopped)
+        self.assertNotIn(False, event.llm_calls)
 
     def test_self_reflect_receives_event_resolved_scope_without_rederivation(self):
         on_message, _, _ = _load_on_message()

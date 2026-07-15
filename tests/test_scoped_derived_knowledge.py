@@ -110,6 +110,55 @@ def test_migration_is_idempotent_additive_and_never_rewrites_legacy_tables(manag
         for table in LEGACY_TABLES
     }
     assert after == before
+    fact_columns = {
+        row[1] for row in manager.execute_read("PRAGMA table_info(scoped_facts)").fetchall()
+    }
+    relation_columns = {
+        row[1] for row in manager.execute_read("PRAGMA table_info(scoped_tag_relations)").fetchall()
+    }
+    assert "revision" in fact_columns
+    assert {"status", "valid_until", "revision"} <= relation_columns
+
+
+def test_existing_scoped_schema_is_upgraded_idempotently_without_legacy_changes(manager):
+    manager.executescript(
+        """
+        CREATE TABLE scoped_facts (
+            id INTEGER PRIMARY KEY, bot_id TEXT, session_id TEXT, visibility TEXT,
+            subject TEXT, predicate TEXT, object TEXT, confidence REAL, status TEXT,
+            source_memory_id INTEGER, provenance TEXT, valid_from REAL, valid_until REAL,
+            created_at REAL, updated_at REAL,
+            UNIQUE(bot_id, session_id, visibility, subject, predicate, object)
+        );
+        CREATE TABLE scoped_tag_relations (
+            id INTEGER PRIMARY KEY, bot_id TEXT, session_id TEXT, visibility TEXT,
+            source_tag_id INTEGER, target_tag_id INTEGER, relation_type TEXT,
+            weight REAL, confidence REAL, metadata TEXT, created_at REAL, updated_at REAL,
+            UNIQUE(bot_id, session_id, visibility, source_tag_id, target_tag_id, relation_type)
+        );
+        CREATE TABLE facts (id INTEGER PRIMARY KEY, subject TEXT);
+        INSERT INTO facts VALUES (9, 'legacy');
+        INSERT INTO scoped_facts VALUES (
+            1, 'bot-alpha', 'qq:group:g1', 'group', '甲', '喜欢', '猫', 0.5,
+            'reviewed', NULL, '{}', NULL, NULL, 1, 1
+        );
+        INSERT INTO scoped_tag_relations VALUES (
+            2, 'bot-alpha', 'qq:group:g1', 'group', 1, 2, '相关', 1, 0.5, '{}', 1, 1
+        );
+        """
+    )
+    manager.commit()
+
+    ensure_scoped_derived_knowledge_schema(manager)
+    ensure_scoped_derived_knowledge_schema(manager)
+
+    assert manager.execute_read(
+        "SELECT revision FROM scoped_facts WHERE id=1"
+    ).fetchone()[0] == 1
+    assert manager.execute_read(
+        "SELECT status, valid_until, revision FROM scoped_tag_relations WHERE id=2"
+    ).fetchone() == ("active", None, 1)
+    assert manager.execute_read("SELECT * FROM facts").fetchall() == [(9, "legacy")]
 
 
 def test_scoped_repository_isolated_by_exact_bot_and_session_scope(manager):

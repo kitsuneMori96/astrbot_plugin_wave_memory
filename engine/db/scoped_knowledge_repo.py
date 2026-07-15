@@ -182,7 +182,7 @@ class ScopedKnowledgeRepo:
             (*_scope_params(scope), word),
         )
 
-    def list_scoped_jargon(self, scope: RuntimeScope, *, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    def list_scoped_jargon(self, scope: RuntimeScope, *, status: str | None = None, limit: int = 50, include_archived: bool = False) -> list[dict[str, Any]]:
         scope = _require_group_scope(scope)
         if status is not None and not isinstance(status, str):
             raise TypeError("status must be a string when provided")
@@ -193,6 +193,8 @@ class ScopedKnowledgeRepo:
         if status is not None:
             conditions.append("status=?")
             params.append(status)
+        elif not include_archived:
+            conditions.append("status!='archived'")
         rows = self.cm.execute_read(
             f"""SELECT id, word, meaning, status, is_jargon, frequency, confidence, contexts,
                        source_memory_id, source_context, provenance, created_at, updated_at
@@ -238,13 +240,15 @@ class ScopedKnowledgeRepo:
         self.cm.execute_write(
             """INSERT INTO scoped_facts (
                     bot_id, session_id, visibility, subject, predicate, object, confidence, status,
-                    source_memory_id, provenance, valid_from, valid_until, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source_memory_id, provenance, valid_from, valid_until, created_at, updated_at,
+                    revision
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                 ON CONFLICT(bot_id, session_id, visibility, subject, predicate, object) DO UPDATE SET
                     confidence=excluded.confidence, status=excluded.status,
                     source_memory_id=excluded.source_memory_id, provenance=excluded.provenance,
                     valid_from=excluded.valid_from, valid_until=excluded.valid_until,
-                    updated_at=excluded.updated_at""",
+                    updated_at=excluded.updated_at, revision=scoped_facts.revision+1
+                WHERE scoped_facts.status NOT IN ('deleted', 'superseded')""",
             (
                 *_scope_params(scope), subject, predicate, object, float(confidence), status,
                 source_memory_id, _canonical_json(provenance, "provenance"), valid_from,
@@ -264,14 +268,17 @@ class ScopedKnowledgeRepo:
             subject = _require_exact_string(subject, "subject")
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be a positive integer")
-        conditions = ["bot_id=?", "session_id=?", "visibility=?"]
+        conditions = [
+            "bot_id=?", "session_id=?", "visibility=?",
+            "status NOT IN ('deleted', 'superseded')",
+        ]
         params: list[Any] = list(_scope_params(scope))
         if subject is not None:
             conditions.append("subject=?")
             params.append(subject)
         rows = self.cm.execute_read(
             f"""SELECT id, subject, predicate, object, confidence, status, source_memory_id,
-                       provenance, valid_from, valid_until, created_at, updated_at
+                       provenance, valid_from, valid_until, created_at, updated_at, revision
                   FROM scoped_facts WHERE {' AND '.join(conditions)}
                  ORDER BY updated_at DESC, id DESC LIMIT ?""",
             [*params, limit],
@@ -281,7 +288,7 @@ class ScopedKnowledgeRepo:
                 "id": row[0], "subject": row[1], "predicate": row[2], "object": row[3],
                 "confidence": row[4], "status": row[5], "source_memory_id": row[6],
                 "provenance": json.loads(row[7]), "valid_from": row[8], "valid_until": row[9],
-                "created_at": row[10], "updated_at": row[11],
+                "created_at": row[10], "updated_at": row[11], "revision": int(row[12]),
             }
             for row in rows
         ]
@@ -354,22 +361,29 @@ class ScopedKnowledgeRepo:
         weight: float = 1.0,
         confidence: float = 0.0,
         metadata: Mapping[str, Any] | None = None,
+        status: str = "active",
+        valid_until: float | None = None,
     ) -> int:
         scope = _require_group_scope(scope)
         self._tag_in_scope(scope, source_tag_id)
         self._tag_in_scope(scope, target_tag_id)
         relation_type = _require_exact_string(relation_type, "relation_type")
+        if not isinstance(status, str):
+            raise TypeError("status must be a string")
         now = time.time()
         self.cm.execute_write(
             """INSERT INTO scoped_tag_relations (
                     bot_id, session_id, visibility, source_tag_id, target_tag_id, relation_type,
-                    weight, confidence, metadata, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    weight, confidence, metadata, status, valid_until, revision, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                 ON CONFLICT(bot_id, session_id, visibility, source_tag_id, target_tag_id, relation_type)
                 DO UPDATE SET weight=excluded.weight, confidence=excluded.confidence,
-                    metadata=excluded.metadata, updated_at=excluded.updated_at""",
+                    metadata=excluded.metadata, status=excluded.status,
+                    valid_until=excluded.valid_until, updated_at=excluded.updated_at,
+                    revision=scoped_tag_relations.revision+1
+                WHERE scoped_tag_relations.status NOT IN ('deleted', 'superseded')""",
             (*_scope_params(scope), source_tag_id, target_tag_id, relation_type, float(weight),
-             float(confidence), _canonical_json(metadata, "metadata"), now, now),
+             float(confidence), _canonical_json(metadata, "metadata"), status, valid_until, now, now),
         )
         self.cm.commit()
         return self._select_id(

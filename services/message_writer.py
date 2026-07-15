@@ -184,6 +184,7 @@ class MessageWriter:
         dedup_policy: MemoryDedupPolicy | None = None,
         quality_gate: QualityGate | None = None,
         write_gateway: Any | None = None,
+        embedding_timeout: float = 8.0,
     ):
         self.db = db
         self.memory_index = memory_index
@@ -195,6 +196,7 @@ class MessageWriter:
         self.dedup_policy = dedup_policy or MemoryDedupPolicy()
         self.quality_gate = quality_gate or QualityGate()
         self.write_gateway = write_gateway
+        self.embedding_timeout = max(float(embedding_timeout), 0.1)
 
         self._queue: asyncio.Queue = asyncio.Queue()
         self._task: Optional[asyncio.Task] = None
@@ -204,7 +206,15 @@ class MessageWriter:
         self._save_threshold = 100
 
         # 统计
-        self._stats = {"core": 0, "chat": 0, "noise": 0}
+        self._stats = {
+            "core": 0,
+            "chat": 0,
+            "noise": 0,
+            "writer_failures": 0,
+            "consecutive_failures": 0,
+            "embedding_timeouts": 0,
+            "last_success_at": None,
+        }
 
     def start(self, supervisor=None):
         self._running = True
@@ -266,6 +276,13 @@ class MessageWriter:
         }
         if event_id not in {None, ""}:
             provenance["event_id"] = str(event_id)
+        quality_decision = item.get("_quality_decision")
+        if isinstance(quality_decision, QualityDecision):
+            provenance["quality"] = {
+                "outcome": quality_decision.outcome,
+                "reason_code": quality_decision.reason_code,
+                "rule_version": quality_decision.rule_version,
+            }
         if quarantined:
             provenance["quarantine_reason"] = "identity_contamination"
         return provenance
@@ -372,7 +389,15 @@ class MessageWriter:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.warning(f"[WaveMemory] Writer error: {e}")
+                self._stats["writer_failures"] = self._stats.get("writer_failures", 0) + 1
+                self._stats["consecutive_failures"] = self._stats.get("consecutive_failures", 0) + 1
+                logger.warning(
+                    "[WaveMemory] Writer error type=%s error=%r queue_depth=%s consecutive=%s",
+                    type(e).__name__,
+                    e,
+                    self._queue.qsize(),
+                    self._stats["consecutive_failures"],
+                )
                 await asyncio.sleep(2)
 
         # HNSW persistence is owned by the committed-outbox projection barrier.
@@ -409,10 +434,12 @@ class MessageWriter:
                 ),
                 target_scope=raw_scope,
             )
-            # CoordinatorQualityRepository persists synchronously; keep its
-            # transaction and filesystem wait off the AstrBot event loop.
-            decision = await asyncio.to_thread(self.quality_gate.evaluate, proposal)
-            
+            # The synchronous quality decision remains a fast in-memory gate. Its
+            # audit repository shares the production writer and must never be a
+            # prerequisite for recording the raw scoped message.
+            decision = self.quality_gate.evaluate(proposal, record=False)
+            item["_quality_decision"] = decision
+
             if decision.outcome == "reject":
                 continue
             elif decision.outcome == "quarantine" or is_identity_contamination(content_text):
@@ -434,10 +461,26 @@ class MessageWriter:
         need_embed = [item for item in normal_batch if item["source"] != "noise"]
         noise_items = [item for item in normal_batch if item["source"] == "noise"]
 
-        # embed 非 noise 消息
+        # embed 非 noise 消息。Provider 超时不能丢掉原始消息；无向量记录
+        # 仍会正式落库，并由维护/补向量任务恢复派生索引。
         if need_embed:
             texts = [item["content"] for item in need_embed]
-            vectors = await self.embedding.get_embeddings(texts)
+            try:
+                vectors = await asyncio.wait_for(
+                    self.embedding.get_embeddings(texts),
+                    timeout=self.embedding_timeout,
+                )
+            except asyncio.TimeoutError:
+                self._stats["embedding_timeouts"] = self._stats.get("embedding_timeouts", 0) + 1
+                logger.warning(
+                    "[WaveMemory] Embedding timeout after %.1fs batch_size=%s; persisting without vectors",
+                    self.embedding_timeout,
+                    len(need_embed),
+                )
+                vectors = [None] * len(need_embed)
+            vectors = list(vectors or [])
+            if len(vectors) < len(need_embed):
+                vectors = [*vectors, *([None] * (len(need_embed) - len(vectors)))]
         else:
             vectors = []
 
@@ -488,6 +531,9 @@ class MessageWriter:
         if self._write_count >= self._save_threshold:
             self._write_count = 0
             logger.debug("[WaveMemory] Index save deferred to outbox projection barrier")
+
+        self._stats["consecutive_failures"] = 0
+        self._stats["last_success_at"] = time.time()
 
     @property
     def stats(self) -> dict:
