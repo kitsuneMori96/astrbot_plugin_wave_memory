@@ -12,9 +12,11 @@ from ..middleware.auth import require_auth
 try:
     from ...domain.scope import RuntimeScope, ScopeCodec, ScopeValidationError, SessionRef
     from ...engine.db.scoped_knowledge_repo import ScopedKnowledgeScopeError
+    from ...engine.db.scoped_tag_projection import effective_tag_rows
 except ImportError:  # pragma: no cover - plugin root may be imported directly
     from domain.scope import RuntimeScope, ScopeCodec, ScopeValidationError, SessionRef
     from engine.db.scoped_knowledge_repo import ScopedKnowledgeScopeError
+    from engine.db.scoped_tag_projection import effective_tag_rows
 
 
 explore_bp = Blueprint("explore", __name__, url_prefix="/api/explore")
@@ -240,16 +242,25 @@ async def tag_memories(tag_id: int):
         ).fetchone()
         if tag is None:
             return jsonify({"tag": None, "memories": [], "scope": ScopeCodec.to_dict(scope), "read_only": True})
-        rows = conn.execute(
-            """SELECT m.id, m.content, m.sender_name, m.group_id, m.timestamp, m.version
-                 FROM scoped_memory_tags mt
-                 JOIN memories m ON m.id=mt.memory_id
-                  AND m.bot_id=mt.bot_id AND m.session_id=mt.session_id AND m.visibility=mt.visibility
-                WHERE mt.tag_id=? AND mt.bot_id=? AND mt.session_id=? AND mt.visibility=?
-                  AND m.resolution_state='resolved' AND COALESCE(m.quarantine,0)=0
-                ORDER BY m.timestamp DESC LIMIT ?""",
-            (tag_id, *params, limit),
-        ).fetchall()
+        effective = effective_tag_rows(conn, scope=scope)
+        memory_ids = sorted({
+            int(row["memory_id"])
+            for row in effective
+            if int(row["tag_id"]) == int(tag_id)
+        })
+        if memory_ids:
+            placeholders = ",".join("?" for _ in memory_ids)
+            rows = conn.execute(
+                f"""SELECT m.id, m.content, m.sender_name, m.group_id, m.timestamp, m.version
+                      FROM memories m
+                     WHERE m.id IN ({placeholders})
+                       AND m.bot_id=? AND m.session_id=? AND m.visibility=?
+                       AND m.resolution_state='resolved' AND COALESCE(m.quarantine,0)=0
+                     ORDER BY m.timestamp DESC LIMIT ?""",
+                (*memory_ids, *params, limit),
+            ).fetchall()
+        else:
+            rows = []
         return jsonify({
             "tag": {"id": tag[0], "name": tag[1], "type": tag[2], "confidence": tag[3]},
             "memories": [{"id": row[0], "content": row[1] or "", "sender": row[2] or "", "group_id": row[3] or "", "ts": row[4], "revision": row[5]} for row in rows],

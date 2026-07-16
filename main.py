@@ -20,7 +20,7 @@ from .engine.vector_index import VectorIndex
 from .engine.db.outbox_repo import OutboxRepository
 from .engine.db.scoped_learning_projection_repo import CoordinatorScopedProjectionWriter
 from .engine.embedding import EmbeddingService
-from .engine.query_engine import QueryEngine
+from .engine.query_engine import QueryEngine, QueryOptions
 from .engine.directed_cooccurrence import DirectedCooccurrence, CooccurrenceScheduler
 from .engine.spike_routing import SpikeRouter
 from .engine.residual_pyramid import ResidualPyramid
@@ -40,6 +40,7 @@ from .services.derived_projections import (
 )
 from .services.task_supervisor import TaskSupervisor
 from .services.durable_jobs import DurableJobRunner
+from .services.data_governance_jobs import DataGovernancePreviewJobs
 from .services.quality_gate import QualityGate
 from .services.pair_similarity import PairSimilarityService
 from .services.hot_config import HotConfig
@@ -435,6 +436,10 @@ class WaveMemoryPlugin(Star):
         tag_index_path = os.path.join(self.data_dir, "tags.hnsw")
 
         self.db = WaveMemoryDB(db_path, dimension=self.dimension)
+        self.data_governance_jobs = DataGovernancePreviewJobs(
+            source_db_path=self.db.db_path,
+            snapshot_dir=os.path.join(self.data_dir, "data_governance_snapshots"),
+        )
         # facts 时间衰减配置
         self._facts_decay_rate = float(storage_cfg.get("facts_decay_rate", "0.005"))
         self.db.set_facts_decay_rate(self._facts_decay_rate)
@@ -648,17 +653,19 @@ class WaveMemoryPlugin(Star):
         self._task_sequence = 0
         self._initialize_lock = asyncio.Lock()
         self._initialized = False
+        maintenance_handlers = {
+            "maintenance.memory_index.rebuild": self._maintenance_rebuild_memory_index,
+            "maintenance.tag_index.rebuild": self._maintenance_rebuild_tag_index,
+            "maintenance.cooccurrence.rebuild": self._maintenance_rebuild_cooccurrence,
+            "maintenance.pair_similarity.rebuild": self._maintenance_rebuild_pair_similarity,
+            "maintenance.tag_audit.run": self._maintenance_run_tag_audit,
+            "maintenance.tag_backfill.run": self._maintenance_run_tag_backfill,
+            "maintenance.import.run": self._maintenance_run_import,
+        }
+        maintenance_handlers.update(self.data_governance_jobs.handlers())
         self.maintenance_job_runner = DurableJobRunner(
             self.write_gateway.jobs,
-            {
-                "maintenance.memory_index.rebuild": self._maintenance_rebuild_memory_index,
-                "maintenance.tag_index.rebuild": self._maintenance_rebuild_tag_index,
-                "maintenance.cooccurrence.rebuild": self._maintenance_rebuild_cooccurrence,
-                "maintenance.pair_similarity.rebuild": self._maintenance_rebuild_pair_similarity,
-                "maintenance.tag_audit.run": self._maintenance_run_tag_audit,
-                "maintenance.tag_backfill.run": self._maintenance_run_tag_backfill,
-                "maintenance.import.run": self._maintenance_run_import,
-            },
+            maintenance_handlers,
         )
 
         # 服务占位（initialize 中实际创建，防止消息先到时 AttributeError）
@@ -889,6 +896,7 @@ class WaveMemoryPlugin(Star):
                 FewShotChannel(few_shot_service=getattr(self, "few_shot_service", None)),
                 BookLoreChannel(projection_repository=self.db.book_lore_repository),
             ]
+            get_container().injection_channels = list(self.injection_shadow_channels)
             logger.info(f"[WaveMemory] Injection orchestrator shadow ready: {len(self.injection_shadow_channels)} channels")
         except Exception as e:
             logger.warning(f"[WaveMemory] Injection orchestrator shadow init failed: {e}")
@@ -937,14 +945,21 @@ class WaveMemoryPlugin(Star):
             pass
         return realtime_ctx
 
-    def _build_shadow_context_config(self, *, exclude_sources, recent_context: list[str], realtime_ctx: dict) -> dict:
-        config = self.injection_channel_config.to_dict() if getattr(self, "injection_channel_config", None) else {}
-        config["memory_recall"] = {
-            "enable_shotgun": bool(getattr(self, "enable_shotgun", False)),
+    def _effective_injection_config(self, scope: RuntimeScope | None):
+        """按 exact RuntimeScope 解析请求级配置；非法层级 fail closed。"""
+        if not isinstance(scope, RuntimeScope):
+            return None
+        from .services.config.channel_config import build_channel_config_from_plugin_config
+        return build_channel_config_from_plugin_config(self.config, scope=scope)
+
+    def _build_shadow_context_config(self, *, channel_config, exclude_sources, recent_context: list[str], realtime_ctx: dict) -> dict:
+        config = channel_config.to_dict() if channel_config is not None else {}
+        recall = dict(config.get("memory_recall") or {})
+        recall.update({
             "context_messages": recent_context,
             "exclude_sources": exclude_sources,
-            "skip_recent_minutes": getattr(self, "skip_recent_minutes", 30),
-        }
+        })
+        config["memory_recall"] = recall
         config["timeline"] = {"days": 7}
         config["persona"] = {"realtime_ctx": realtime_ctx}
         return config
@@ -973,13 +988,16 @@ class WaveMemoryPlugin(Star):
             from .services.injection.context import InjectionContext
             from .services.injection.shadow import run_injection_shadow
 
+            effective_config = self._effective_injection_config(runtime_scope)
+            if effective_config is None:
+                return
             recent_context = self._get_recent_messages(event, scope=runtime_scope, max_messages=8)
             realtime_ctx = self._build_shadow_persona_realtime_ctx(
                 scope=runtime_scope,
                 sender_id=sender_id,
                 sender_name=sender_name,
             )
-            bot_profile_id = bot_profile.db_id if bot_profile else (bot_id or "bot")
+            bot_profile_id = runtime_scope.bot_id
             trace_id = f"shadow-{time.time_ns()}"
             ctx = InjectionContext(
                 event=event,
@@ -994,9 +1012,16 @@ class WaveMemoryPlugin(Star):
                 recent_context=recent_context,
                 mode=getattr(self, "runtime_mode_name", "full"),
                 config=self._build_shadow_context_config(
+                    channel_config=effective_config,
                     exclude_sources=exclude_sources,
                     recent_context=recent_context,
                     realtime_ctx=realtime_ctx,
+                ),
+                channel_options=effective_config.to_dict()["channels"],
+                query_options=QueryOptions(
+                    touch=True,
+                    stages=effective_config.query_stages,
+                    params=effective_config.query_params,
                 ),
                 now=time.time(),
                 trace_id=trace_id,
@@ -1004,7 +1029,7 @@ class WaveMemoryPlugin(Star):
             result = await run_injection_shadow(
                 ctx=ctx,
                 channels=self.injection_shadow_channels,
-                config=self.injection_channel_config,
+                config=effective_config,
                 trace_store=self.injection_trace_store,
                 old_text=old_text,
             )
@@ -1041,13 +1066,16 @@ class WaveMemoryPlugin(Star):
             from .services.injection.active import run_injection_active
             from .utils.perf import get_perf_tracker
 
+            effective_config = self._effective_injection_config(runtime_scope)
+            if effective_config is None:
+                return False
             recent_context = self._get_recent_messages(event, scope=runtime_scope, max_messages=8)
             realtime_ctx = self._build_shadow_persona_realtime_ctx(
                 scope=runtime_scope,
                 sender_id=sender_id,
                 sender_name=sender_name,
             )
-            bot_profile_id = bot_profile.db_id if bot_profile else (bot_id or "bot")
+            bot_profile_id = runtime_scope.bot_id
             trace_id = f"active-{time.time_ns()}"
             ctx = InjectionContext(
                 event=event,
@@ -1062,9 +1090,16 @@ class WaveMemoryPlugin(Star):
                 recent_context=recent_context,
                 mode=getattr(self, "runtime_mode_name", "full"),
                 config=self._build_shadow_context_config(
+                    channel_config=effective_config,
                     exclude_sources=exclude_sources,
                     recent_context=recent_context,
                     realtime_ctx=realtime_ctx,
+                ),
+                channel_options=effective_config.to_dict()["channels"],
+                query_options=QueryOptions(
+                    touch=True,
+                    stages=effective_config.query_stages,
+                    params=effective_config.query_params,
                 ),
                 now=time.time(),
                 trace_id=trace_id,
@@ -1072,7 +1107,7 @@ class WaveMemoryPlugin(Star):
             result = await run_injection_active(
                 ctx=ctx,
                 channels=self.injection_shadow_channels,
-                config=self.injection_channel_config,
+                config=effective_config,
                 trace_store=getattr(self, "injection_trace_store", None),
             )
 
@@ -1276,6 +1311,7 @@ class WaveMemoryPlugin(Star):
                     writer=self.writer,
                     write_gateway=self.write_gateway,
                     durable_jobs=self.write_gateway.jobs,
+                    data_governance_jobs=self.data_governance_jobs,
                     task_supervisor=self.task_supervisor,
                     host=self.webui_host,
                     port=self.webui_port,
@@ -2614,7 +2650,15 @@ class WaveMemoryPlugin(Star):
 
     async def _on_memory_projection_refresh(self, event) -> None:
         """Invalidate dependent reads and coalesce PairSimilarity rebuild requests."""
-        if event.event_type != "memory.tags_applied":
+        if event.event_type not in {
+            "memory.tags_applied",
+            "memory.tags_corrected",
+            "memory.tags_correction_undone",
+            "tag.merge",
+            "tag.deactivate",
+            "tag.governance.applied",
+            "tag.governance.compensated",
+        }:
             return
         self.pair_sim_service.clear_cache()
         bucket = int(time.time() // 300)
