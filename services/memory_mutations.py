@@ -13,10 +13,12 @@ try:
     from ..domain.scope import RuntimeScope, scope_to_dict
     from ..engine.db.memory_repo import MemoryRepo, MemoryRevisionConflict
     from ..engine.db.outbox_repo import OutboxRepository
+    from ..engine.db.scoped_tag_projection import rebuild_memory_effective_tags
 except ImportError:  # pragma: no cover - focused tests import top-level packages
     from domain.scope import RuntimeScope, scope_to_dict
     from engine.db.memory_repo import MemoryRepo, MemoryRevisionConflict
     from engine.db.outbox_repo import OutboxRepository
+    from engine.db.scoped_tag_projection import rebuild_memory_effective_tags
 
 
 _UNSET = object()
@@ -565,6 +567,12 @@ class MemoryMutationGateway:
                     now,
                 ),
             )
+            projection_revision = rebuild_memory_effective_tags(
+                connection,
+                scope=scope,
+                memory_id=target.memory_id,
+                now=now,
+            )
             record.update(
                 {
                     "correction_id": correction_id,
@@ -577,6 +585,8 @@ class MemoryMutationGateway:
                         "before_tags": preview["before"],
                         "after_tags": preview["after"],
                         "reason": normalized_reason,
+                        "projection_revision": projection_revision,
+                        "projection_status": "ready",
                     },
                 }
             )
@@ -652,6 +662,12 @@ class MemoryMutationGateway:
             )
             if int(cursor.rowcount or 0) != 1:
                 raise MemoryRevisionConflict()
+            projection_revision = rebuild_memory_effective_tags(
+                connection,
+                scope=scope,
+                memory_id=target.memory_id,
+                now=now,
+            )
             record.update(
                 {
                     "correction_id": normalized_id,
@@ -663,6 +679,8 @@ class MemoryMutationGateway:
                         "after_tags": json.loads(str(row[2])),
                         "reason": normalized_reason,
                         "undone_correction_revision": int(correction_revision),
+                        "projection_revision": projection_revision,
+                        "projection_status": "ready",
                     },
                 }
             )
