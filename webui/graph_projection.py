@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from collections import defaultdict, deque
 from dataclasses import asdict, is_dataclass
 from typing import Any, Iterable
 
@@ -12,8 +13,10 @@ import numpy as np
 
 try:
     from ..domain.scope import RuntimeScope, ScopeCodec
+    from ..engine.db.scoped_tag_projection import effective_tag_rows
 except ImportError:  # pragma: no cover - plugin root may be imported directly
     from domain.scope import RuntimeScope, ScopeCodec
+    from engine.db.scoped_tag_projection import effective_tag_rows
 
 
 SUPPORTED_LAYERS = (
@@ -255,33 +258,44 @@ def _project_memories(
     for row in rows:
         _memory_node(graph, row)
 
-    params = _scope_params(graph.scope)
     if {"bot_id", "session_id", "visibility", "memory_id", "tag_id"} <= _columns(conn, "scoped_memory_tags") and {
         "id", "bot_id", "session_id", "visibility", "name"
     } <= _columns(conn, "scoped_tags"):
-        placeholders = ",".join("?" for _ in by_id)
-        if placeholders:
-            sql = f"""SELECT mt.memory_id, mt.tag_id, mt.relevance, mt.created_at,
-                              t.name, t.tag_type, t.confidence, t.description
-                         FROM scoped_memory_tags mt
-                         JOIN scoped_tags t ON t.id=mt.tag_id AND t.bot_id=mt.bot_id
-                          AND t.session_id=mt.session_id AND t.visibility=mt.visibility
-                        WHERE mt.bot_id=? AND mt.session_id=? AND mt.visibility=?
-                          AND mt.memory_id IN ({placeholders})"""
-            for row in _rows(conn, sql, (*params, *by_id.keys())):
-                memory_id = int(row["memory_id"])
-                memory_node = f"memory:{memory_id}"
-                tag_node = _entity_node(
-                    graph, row.get("name"), row.get("tag_type") or "keyword", layer,
-                    tag_id=row.get("tag_id"), description=_clip(row.get("description"), 240),
-                )
-                relevance = float(row.get("relevance") or 0)
-                graph.edge(
-                    f"memory-tag:{memory_id}:{row['tag_id']}", memory_node, tag_node, "标注", layer,
-                    "memory_tag", weight=relevance, confidence=float(row.get("confidence") or relevance),
-                    ts=float(row.get("created_at") or 0), source_type="memory",
-                    target_type=row.get("tag_type") or "keyword", memory_id=memory_id, tag_id=row.get("tag_id"),
-                )
+        effective = [
+            row for row in effective_tag_rows(conn, scope=graph.scope)
+            if int(row["memory_id"]) in by_id and row.get("tag_id") is not None
+        ]
+        tag_ids = sorted({int(row["tag_id"]) for row in effective})
+        tag_by_id: dict[int, dict[str, Any]] = {}
+        if tag_ids:
+            placeholders = ",".join("?" for _ in tag_ids)
+            tag_rows = _rows(
+                conn,
+                f"""SELECT id, name, tag_type, confidence, description
+                       FROM scoped_tags
+                      WHERE bot_id=? AND session_id=? AND visibility=?
+                        AND id IN ({placeholders})""",
+                (*_scope_params(graph.scope), *tag_ids),
+            )
+            tag_by_id = {int(row["id"]): row for row in tag_rows}
+        for link in effective:
+            tag_id = int(link["tag_id"])
+            tag = tag_by_id.get(tag_id)
+            if tag is None:
+                continue
+            memory_id = int(link["memory_id"])
+            memory_node = f"memory:{memory_id}"
+            tag_node = _entity_node(
+                graph, tag.get("name"), tag.get("tag_type") or "keyword", layer,
+                tag_id=tag_id, description=_clip(tag.get("description"), 240),
+            )
+            relevance = float(link.get("relevance") or 0)
+            graph.edge(
+                f"memory-tag:{memory_id}:{tag_id}", memory_node, tag_node, "标注", layer,
+                "memory_tag", weight=relevance, confidence=float(tag.get("confidence") or relevance),
+                ts=0.0, source_type="memory", target_type=tag.get("tag_type") or "keyword",
+                memory_id=memory_id, tag_id=tag_id,
+            )
     else:
         graph.warn(layer, "scoped_memory_tags_unavailable")
 
@@ -624,4 +638,355 @@ def scoped_layer_counts(conn: Any, scope: RuntimeScope) -> dict[str, int | None]
     return result
 
 
-__all__ = ["SUPPORTED_LAYERS", "build_graph_projection", "scoped_layer_counts"]
+TAG_GRAPH_LAYERS = ("cooccurrence", "relations")
+
+
+def _ordinal_potential(position: int, max_position: int) -> float:
+    """与 engine.directed_cooccurrence.ordinal_potential 保持同一序位势能公式。"""
+    if position <= 0 or max_position <= 1:
+        return 0.7
+    return 0.9 - 0.4 * (position - 1) / (max_position - 1)
+
+
+def _active_tag_rows(conn: Any, scope: RuntimeScope) -> list[dict[str, Any]]:
+    columns = _columns(conn, "scoped_tags")
+    required = {"id", "bot_id", "session_id", "visibility", "name"}
+    if not required <= columns:
+        return []
+    selected = [
+        name for name in (
+            "id", "name", "tag_type", "description", "confidence", "metadata",
+            "status", "revision", "created_at", "updated_at",
+        ) if name in columns
+    ]
+    status_filter = " AND status='active'" if "status" in columns else ""
+    return _rows(
+        conn,
+        f"""SELECT {', '.join(selected)} FROM scoped_tags
+              WHERE bot_id=? AND session_id=? AND visibility=?{status_filter}
+              ORDER BY updated_at DESC, id DESC""",
+        _scope_params(scope),
+    )
+
+
+def _live_memory_rows(conn: Any, scope: RuntimeScope, memory_ids: Iterable[int]) -> dict[int, dict[str, Any]]:
+    ids = sorted({int(value) for value in memory_ids})
+    columns = _columns(conn, "memories")
+    required = {"id", "bot_id", "session_id", "visibility", "content", "resolution_state"}
+    if not ids or not required <= columns:
+        return {}
+    selected = [
+        name for name in (
+            "id", "content", "sender_id", "sender_name", "timestamp", "importance",
+            "source", "version", "quarantine", "memory_type",
+        ) if name in columns
+    ]
+    placeholders = ",".join("?" for _ in ids)
+    quarantine = " AND COALESCE(quarantine,0)=0" if "quarantine" in columns else ""
+    lifecycle = (
+        " AND COALESCE(memory_type,'message') NOT IN ('archived','evicted','deleted')"
+        if "memory_type" in columns else ""
+    )
+    rows = _rows(
+        conn,
+        f"""SELECT {', '.join(selected)} FROM memories
+              WHERE id IN ({placeholders})
+                AND bot_id=? AND session_id=? AND visibility=?
+                AND resolution_state='resolved'{quarantine}{lifecycle}""",
+        (*ids, *_scope_params(scope)),
+    )
+    return {int(row["id"]): row for row in rows}
+
+
+def _effective_links(conn: Any, scope: RuntimeScope) -> list[dict[str, Any]]:
+    try:
+        return effective_tag_rows(conn, scope=scope)
+    except Exception:
+        columns = _columns(conn, "scoped_memory_tags")
+        required = {"bot_id", "session_id", "visibility", "memory_id", "tag_id"}
+        if not required <= columns:
+            return []
+        position = "position" if "position" in columns else "0 AS position"
+        relevance = "relevance" if "relevance" in columns else "1.0 AS relevance"
+        return _rows(
+            conn,
+            f"""SELECT bot_id, session_id, visibility, memory_id, tag_id,
+                       {position}, {relevance}, 'automatic' AS source, NULL AS correction_id
+                  FROM scoped_memory_tags
+                 WHERE bot_id=? AND session_id=? AND visibility=?
+                 ORDER BY memory_id, position, tag_id""",
+            _scope_params(scope),
+        )
+
+
+def _pulse_fields(weight: float, latest_ts: float, *, now: float, half_life_hours: float) -> dict[str, float]:
+    if latest_ts <= 0:
+        return {"pulse_energy": 0.0, "pulse_decay": 0.0}
+    half_life_seconds = max(1.0, float(half_life_hours) * 3600.0)
+    age = max(0.0, now - latest_ts)
+    decay = math.exp(-math.log(2.0) * age / half_life_seconds)
+    return {"pulse_energy": round(max(0.0, weight) * decay, 6), "pulse_decay": round(decay, 6)}
+
+
+def build_tag_graph_projection(
+    *, conn: Any, scope: RuntimeScope, layers: Iterable[str] = TAG_GRAPH_LAYERS,
+    min_confidence: float = 0.0, max_nodes: int = 300, include_pulse: bool = False,
+    pulse_half_life_hours: float = 72.0, now: float | None = None,
+) -> dict[str, Any]:
+    """构造严格 Scope 隔离的正式 Tag 神经云图只读投影。"""
+    requested = tuple(dict.fromkeys(str(layer).strip() for layer in layers if str(layer).strip()))
+    invalid = sorted(set(requested) - set(TAG_GRAPH_LAYERS))
+    if invalid:
+        raise ValueError("unsupported_tag_graph_layers:" + ",".join(invalid))
+    _scope_params(scope)
+    generated_at = float(time.time() if now is None else now)
+    if conn is None:
+        return {
+            "nodes": [], "edges": [], "layers": list(requested),
+            "available_layers": list(TAG_GRAPH_LAYERS),
+            "layer_counts": {layer: {"nodes": 0, "edges": 0} for layer in requested},
+            "scope": ScopeCodec.to_dict(scope), "read_only": True, "generated_at": generated_at,
+            "warnings": [{"layer": "all", "reason": "database_unavailable"}],
+            "pulse": {"enabled": bool(include_pulse), "half_life_hours": float(pulse_half_life_hours)},
+        }
+
+    tag_rows = _active_tag_rows(conn, scope)
+    tags = {int(row["id"]): row for row in tag_rows}
+    links = [row for row in _effective_links(conn, scope) if row.get("tag_id") is not None]
+    links = [row for row in links if int(row["tag_id"]) in tags]
+    memories = _live_memory_rows(conn, scope, (int(row["memory_id"]) for row in links))
+    links = [row for row in links if int(row["memory_id"]) in memories]
+
+    links_by_memory: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    links_by_tag: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for link in links:
+        memory_id = int(link["memory_id"])
+        tag_id = int(link["tag_id"])
+        links_by_memory[memory_id].append(link)
+        links_by_tag[tag_id].append(link)
+    for values in links_by_memory.values():
+        values.sort(key=lambda item: (int(item.get("position") or 0), int(item["tag_id"])))
+
+    edges: list[dict[str, Any]] = []
+    layer_counts = {layer: {"nodes": 0, "edges": 0} for layer in requested}
+    if "cooccurrence" in requested:
+        aggregates: dict[tuple[int, int], dict[str, Any]] = {}
+        for memory_id, memory_links in links_by_memory.items():
+            if len(memory_links) < 2:
+                continue
+            max_position = max(int(item.get("position") or 0) for item in memory_links) or len(memory_links)
+            memory = memories[memory_id]
+            memory_ts = float(memory.get("timestamp") or 0.0)
+            for source_link in memory_links:
+                source_id = int(source_link["tag_id"])
+                source_position = int(source_link.get("position") or 0)
+                source_relevance = max(0.0, float(source_link.get("relevance") or 0.0))
+                for target_link in memory_links:
+                    target_id = int(target_link["tag_id"])
+                    if source_id == target_id:
+                        continue
+                    target_position = int(target_link.get("position") or 0)
+                    target_relevance = max(0.0, float(target_link.get("relevance") or 0.0))
+                    key = (source_id, target_id)
+                    item = aggregates.setdefault(key, {
+                        "raw_weight": 0.0, "frequency": 0, "confidence_sum": 0.0,
+                        "latest_ts": 0.0, "memory_ids": [], "source_counts": defaultdict(int),
+                    })
+                    relevance_gain = math.sqrt(source_relevance * target_relevance)
+                    item["raw_weight"] += _ordinal_potential(source_position, max_position) * _ordinal_potential(target_position, max_position) * relevance_gain
+                    item["frequency"] += 1
+                    item["confidence_sum"] += min(source_relevance, target_relevance)
+                    item["latest_ts"] = max(float(item["latest_ts"]), memory_ts)
+                    if len(item["memory_ids"]) < 12:
+                        item["memory_ids"].append(memory_id)
+                    source_kind = "manual" if "manual" in {str(source_link.get("source")), str(target_link.get("source"))} else "automatic"
+                    item["source_counts"][source_kind] += 1
+        max_raw = max((float(item["raw_weight"]) for item in aggregates.values()), default=0.0)
+        for (source_id, target_id), item in aggregates.items():
+            weight = float(item["raw_weight"]) / max_raw if max_raw > 0 else 0.0
+            tag_confidence = min(float(tags[source_id].get("confidence") or 0.0), float(tags[target_id].get("confidence") or 0.0))
+            evidence_confidence = float(item["confidence_sum"]) / max(1, int(item["frequency"]))
+            confidence = min(tag_confidence, evidence_confidence)
+            if confidence < min_confidence:
+                continue
+            edge = {
+                "id": f"cooccurrence:{source_id}:{target_id}",
+                "source": f"tag:{source_id}", "target": f"tag:{target_id}",
+                "layer": "cooccurrence", "kind": "directed_cooccurrence",
+                "type": "ordinal_cooccurrence", "label": "序位共现",
+                "weight": round(weight, 6), "frequency": int(item["frequency"]),
+                "confidence": round(confidence, 6), "latest_ts": float(item["latest_ts"]),
+                "source_kind": "effective_memory_tags",
+                "source_counts": dict(item["source_counts"]),
+                "memory_ids": list(dict.fromkeys(item["memory_ids"])),
+                "read_only": True,
+            }
+            if include_pulse:
+                edge.update(_pulse_fields(weight, float(item["latest_ts"]), now=generated_at, half_life_hours=pulse_half_life_hours))
+            edges.append(edge)
+
+    if "relations" in requested:
+        relation_columns = _columns(conn, "scoped_tag_relations")
+        required = {"id", "bot_id", "session_id", "visibility", "source_tag_id", "target_tag_id", "relation_type"}
+        if required <= relation_columns:
+            selected = [name for name in (
+                "id", "source_tag_id", "target_tag_id", "relation_type", "weight",
+                "confidence", "metadata", "status", "valid_until", "revision", "created_at", "updated_at",
+            ) if name in relation_columns]
+            status_filter = " AND status='active'" if "status" in relation_columns else ""
+            valid_filter = " AND (valid_until IS NULL OR valid_until>?)" if "valid_until" in relation_columns else ""
+            params: tuple[Any, ...] = (*_scope_params(scope), *((generated_at,) if valid_filter else ()))
+            for row in _rows(
+                conn,
+                f"""SELECT {', '.join(selected)} FROM scoped_tag_relations
+                      WHERE bot_id=? AND session_id=? AND visibility=?{status_filter}{valid_filter}
+                      ORDER BY updated_at DESC, id DESC""",
+                params,
+            ):
+                source_id, target_id = int(row["source_tag_id"]), int(row["target_tag_id"])
+                confidence = float(row.get("confidence") or 0.0)
+                if source_id not in tags or target_id not in tags or source_id == target_id or confidence < min_confidence:
+                    continue
+                weight = float(row.get("weight") or 0.0)
+                latest_ts = float(row.get("updated_at") or row.get("created_at") or 0.0)
+                edge = {
+                    "id": f"relation:{row['id']}",
+                    "source": f"tag:{source_id}", "target": f"tag:{target_id}",
+                    "layer": "relations", "kind": "tag_relation",
+                    "type": str(row.get("relation_type") or "relates"),
+                    "label": str(row.get("relation_type") or "关联"),
+                    "weight": round(weight, 6), "frequency": 1,
+                    "confidence": round(confidence, 6), "latest_ts": latest_ts,
+                    "source_kind": "scoped_tag_relations",
+                    "metadata": _json(row.get("metadata"), {}),
+                    "revision": int(row.get("revision") or 1), "read_only": True,
+                }
+                if include_pulse:
+                    edge.update(_pulse_fields(weight, latest_ts, now=generated_at, half_life_hours=pulse_half_life_hours))
+                edges.append(edge)
+
+    degree_score: dict[int, float] = defaultdict(float)
+    for edge in edges:
+        source_id = int(str(edge["source"]).split(":", 1)[1])
+        target_id = int(str(edge["target"]).split(":", 1)[1])
+        degree_score[source_id] += 1.0 + float(edge["weight"])
+        degree_score[target_id] += 1.0 + float(edge["weight"])
+    ranked_ids = sorted(tags, key=lambda tag_id: (len(links_by_tag.get(tag_id, ())), degree_score[tag_id], float(tags[tag_id].get("confidence") or 0.0), tag_id), reverse=True)
+    selected_ids = set(ranked_ids[:max(1, min(10_000, int(max_nodes)))])
+    edges = [edge for edge in edges if int(str(edge["source"]).split(":", 1)[1]) in selected_ids and int(str(edge["target"]).split(":", 1)[1]) in selected_ids]
+
+    incoming: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    outgoing: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for edge in edges:
+        source_id = int(str(edge["source"]).split(":", 1)[1])
+        target_id = int(str(edge["target"]).split(":", 1)[1])
+        outgoing[source_id].append(edge)
+        incoming[target_id].append(edge)
+        layer_counts[edge["layer"]]["edges"] += 1
+
+    nodes: list[dict[str, Any]] = []
+    for tag_id in ranked_ids:
+        if tag_id not in selected_ids:
+            continue
+        row = tags[tag_id]
+        tag_links = links_by_tag.get(tag_id, [])
+        source_counts: dict[str, int] = defaultdict(int)
+        associated: list[dict[str, Any]] = []
+        for link in sorted(tag_links, key=lambda item: float(memories[int(item["memory_id"])].get("timestamp") or 0), reverse=True):
+            source_counts[str(link.get("source") or "automatic")] += 1
+            if len(associated) >= 5:
+                continue
+            memory = memories[int(link["memory_id"])]
+            associated.append({
+                "id": int(memory["id"]), "content": _clip(memory.get("content"), 240),
+                "sender": memory.get("sender_name") or memory.get("sender_id") or "",
+                "timestamp": float(memory.get("timestamp") or 0.0),
+                "importance": float(memory.get("importance") or 0.0),
+                "source": memory.get("source"), "version": int(memory.get("version") or 1),
+                "tag_source": str(link.get("source") or "automatic"),
+                "relevance": float(link.get("relevance") or 0.0),
+            })
+        node = {
+            "id": f"tag:{tag_id}", "locator": tag_id,
+            "name": str(row.get("name") or f"Tag {tag_id}"),
+            "type": str(row.get("tag_type") or "keyword"),
+            "description": _clip(row.get("description"), 500),
+            "confidence": float(row.get("confidence") or 0.0),
+            "metadata": _json(row.get("metadata"), {}),
+            "status": str(row.get("status") or "active"),
+            "revision": int(row.get("revision") or 1),
+            "memory_count": len({int(link["memory_id"]) for link in tag_links}),
+            "frequency": len(tag_links), "source_counts": dict(source_counts),
+            "sources": sorted(source_counts), "associated_memories": associated,
+            "in_degree": len(incoming[tag_id]), "out_degree": len(outgoing[tag_id]),
+            "in_weight": round(sum(float(edge["weight"]) for edge in incoming[tag_id]), 6),
+            "out_weight": round(sum(float(edge["weight"]) for edge in outgoing[tag_id]), 6),
+            "read_only": True,
+        }
+        nodes.append(node)
+        for layer in requested:
+            if any(edge["layer"] == layer for edge in incoming[tag_id] + outgoing[tag_id]):
+                layer_counts[layer]["nodes"] += 1
+
+    warnings: list[dict[str, str]] = []
+    if not tag_rows:
+        warnings.append({"layer": "all", "reason": "scoped_tags_empty_or_unavailable"})
+    return {
+        "nodes": nodes, "edges": edges, "layers": list(requested), "available_layers": list(TAG_GRAPH_LAYERS),
+        "layer_counts": layer_counts, "scope": ScopeCodec.to_dict(scope), "read_only": True,
+        "generated_at": generated_at, "warnings": warnings,
+        "pulse": {"enabled": bool(include_pulse), "half_life_hours": float(pulse_half_life_hours)},
+    }
+
+
+def find_tag_graph_path(
+    graph: dict[str, Any], *, source_id: str, target_id: str,
+    layers: Iterable[str] = TAG_GRAPH_LAYERS, max_depth: int = 6,
+) -> dict[str, Any]:
+    """在当前可见图层上执行严格有向 Tag→Tag BFS。"""
+    visible = tuple(dict.fromkeys(str(layer) for layer in layers if str(layer)))
+    invalid = sorted(set(visible) - set(TAG_GRAPH_LAYERS))
+    if invalid:
+        raise ValueError("unsupported_tag_graph_layers:" + ",".join(invalid))
+    node_by_id = {str(node["id"]): node for node in graph.get("nodes", ())}
+    if source_id not in node_by_id or target_id not in node_by_id:
+        return {"found": False, "path": [], "nodes": [], "edges": [], "layers": list(visible), "read_only": True}
+    adjacency: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for edge in graph.get("edges", ()):
+        if str(edge.get("layer")) in visible:
+            adjacency[str(edge["source"])].append(edge)
+    visited: dict[str, tuple[str | None, dict[str, Any] | None]] = {source_id: (None, None)}
+    queue = deque([(source_id, 0)])
+    depth_limit = max(1, min(12, int(max_depth)))
+    while queue and target_id not in visited:
+        current, depth = queue.popleft()
+        if depth >= depth_limit:
+            continue
+        for edge in sorted(adjacency.get(current, ()), key=lambda item: (float(item.get("weight") or 0), float(item.get("confidence") or 0)), reverse=True):
+            neighbor = str(edge["target"])
+            if neighbor not in visited:
+                visited[neighbor] = (current, edge)
+                queue.append((neighbor, depth + 1))
+    if target_id not in visited:
+        return {"found": False, "path": [], "nodes": [], "edges": [], "layers": list(visible), "read_only": True}
+    node_ids: list[str] = []
+    path_edges: list[dict[str, Any]] = []
+    current: str | None = target_id
+    while current is not None:
+        node_ids.append(current)
+        parent, edge = visited[current]
+        if edge is not None:
+            path_edges.append(edge)
+        current = parent
+    node_ids.reverse()
+    path_edges.reverse()
+    return {
+        "found": True, "path": node_ids, "nodes": [node_by_id[node_id] for node_id in node_ids],
+        "edges": path_edges, "layers": list(visible), "read_only": True,
+    }
+
+
+__all__ = [
+    "SUPPORTED_LAYERS", "TAG_GRAPH_LAYERS", "build_graph_projection",
+    "build_tag_graph_projection", "find_tag_graph_path", "scoped_layer_counts",
+]

@@ -12,6 +12,7 @@ try:
     from .explore import explore_bp
     from .memories import memories_bp
     from .tags import tags_bp
+    from .tag_graph import tag_graph_bp
     from .config import config_bp
     from .system import system_bp
     from .beliefs import beliefs_bp
@@ -50,7 +51,7 @@ except Exception:  # pragma: no cover - 本地单测未安装 Quart 时只导入
     class Blueprint:  # type: ignore[no-redef]
         pass
 
-    auth_bp = pages_bp = explore_bp = memories_bp = tags_bp = config_bp = system_bp = None
+    auth_bp = pages_bp = explore_bp = memories_bp = tags_bp = tag_graph_bp = config_bp = system_bp = None
     beliefs_bp = soul_bp = jargon_bp = kg_bp = knowledge_bp = options_bp = people_bp = maintenance_bp = injection_observatory_bp = channel_config_bp = learning_object_review_bp = agent_feedback_bp = learning_center_bp = compatibility_bp = None
 
 
@@ -63,6 +64,7 @@ def get_blueprints() -> List[Blueprint]:
             explore_bp,
             memories_bp,
             tags_bp,
+            tag_graph_bp,
             config_bp,
             system_bp,
             beliefs_bp,

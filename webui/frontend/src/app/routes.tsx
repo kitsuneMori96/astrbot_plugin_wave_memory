@@ -18,6 +18,7 @@ import { PeoplePage } from '@/pages/people/PeoplePage'
 import { CompatibilityPage } from '@/pages/review/CompatibilityPage'
 import { SettingsPage } from '@/pages/settings/SettingsPage'
 import { SoulPage } from '@/pages/soul/SoulPage'
+import { TagGraphPage } from '@/pages/tags/TagGraphPage'
 import { TagsPage } from '@/pages/tags/TagsPage'
 import { ExplorePage } from '@/pages/PlaceholderPage'
 
@@ -29,6 +30,7 @@ export const appRoutes: AppRoute[] = [
   { path: '/explore', title: '神经云图', description: '3D 交互式高维记忆与关系星图', group: 'overview', icon: CompassIcon, element: ExplorePage },
   { path: '/memories', title: '记忆', description: 'Scoped PageResponse 与 ObjectRef 记忆资源', group: 'data', icon: DatabaseIcon, element: MemoriesPage },
   { path: '/tags', title: 'Tag 浪潮', description: '只读覆盖率、频率、类型与置信度总览', group: 'data', icon: TagsIcon, element: TagsPage },
+  { path: '/tags/graph', title: 'Tag 神经云图', description: 'Scoped 有向共现、来源、脉冲与路径', group: 'data', icon: BrainCircuitIcon, element: TagGraphPage },
   { path: '/import', title: '导入', description: '真实来源预检与 durable import job', group: 'data', icon: DownloadIcon, element: ImportPage },
   { path: '/maintenance', title: '维护任务', description: '可恢复任务、checkpoint、日志与取消语义', group: 'runtime', icon: SlidersIcon, element: MaintenancePage },
   { path: '/observatory', title: '注入观测台', description: '可复现筛选、完整 Trace 与配置 revision', group: 'runtime', icon: ActivityIcon, element: InjectionPage },
