@@ -23,6 +23,17 @@ from ..api_contract import error_payload, mutation_response, not_found_payload, 
 from ..container import get_container
 from ..middleware.auth import require_auth
 
+try:
+    from ...services.data_governance_jobs import (
+        DataGovernancePreviewError,
+        enqueue_preview_job,
+    )
+except ImportError:  # pragma: no cover - focused tests import top-level packages
+    from services.data_governance_jobs import (
+        DataGovernancePreviewError,
+        enqueue_preview_job,
+    )
+
 maintenance_bp = Blueprint("maintenance", __name__, url_prefix="/api/maintenance")
 
 
@@ -100,6 +111,41 @@ async def schedule_rebuild():
     response["request_id"] = job_request.request_id
     response["job_id"] = run.run_id
     return jsonify(response), 202
+
+
+@maintenance_bp.route("/data-governance/preview", methods=["POST"])
+@require_auth
+async def schedule_data_governance_preview():
+    """Schedule the fixed, read-only governance preview on the durable runner."""
+
+    container = get_container()
+    if getattr(container, "data_governance_jobs", None) is None:
+        return jsonify(error_payload(
+            "data_governance_preview_unregistered",
+            "Data-governance preview handler is not registered",
+            retryable=False,
+        )), 503
+    jobs = getattr(container, "durable_jobs", None)
+    if jobs is None:
+        return jsonify(error_payload(
+            "durable_jobs_unavailable",
+            "Durable jobs are unavailable",
+            retryable=True,
+        )), 503
+    body = await request.get_json() or {}
+    try:
+        envelope = await enqueue_preview_job(jobs, body)
+    except DataGovernancePreviewError as exc:
+        code = str(exc)
+        status = 503 if code == "durable_jobs_unavailable" else 400
+        return jsonify(error_payload(code, "Invalid data-governance preview request")), status
+
+    payload = envelope.to_dict() if callable(getattr(envelope, "to_dict", None)) else dict(envelope)
+    job_id = payload.get("job_id") or payload.get("operation", {}).get("id")
+    payload["dry_run"] = True
+    payload["checkpoint_url"] = f"/api/maintenance/jobs/{job_id}/checkpoint"
+    payload["cancel_url"] = f"/api/maintenance/jobs/{job_id}/cancel"
+    return jsonify(payload), 202
 
 
 @maintenance_bp.route("/jobs", methods=["GET"])
