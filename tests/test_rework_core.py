@@ -150,9 +150,16 @@ class ReworkCoreTest(unittest.TestCase):
         self.assertEqual(recent[0]["episode_type"], "bot_reply")
 
     def test_relationship_event_service_applies_caps_and_updates_bot_scoped_profile(self):
+        from engine.db.connection import ConnectionManager
+        from engine.db.migrations.scoped_soul import ensure_scoped_soul_schema
+        from engine.db.scoped_soul_repo import ScopedSoulRepository
         from services.relationship_events import RelationshipEventService
 
-        conn, _ = self._connect()
+        conn, path = self._connect()
+        manager = ConnectionManager(str(path))
+        self.addCleanup(manager.close)
+        ensure_scoped_soul_schema(manager)
+        repository = ScopedSoulRepository(manager)
         conn.executescript("""
             CREATE TABLE user_profiles (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -195,7 +202,12 @@ class ReworkCoreTest(unittest.TestCase):
 
         from domain.scope import RuntimeScope, SessionRef, ScopeValidationError
 
-        svc = RelationshipEventService(conn, single_delta_cap=5, daily_delta_cap=15)
+        svc = RelationshipEventService(
+            conn,
+            repository=repository,
+            single_delta_cap=5,
+            daily_delta_cap=15,
+        )
         scope = RuntimeScope(
             bot_id="yushu",
             visibility="group",
@@ -224,18 +236,40 @@ class ReworkCoreTest(unittest.TestCase):
         yushu = conn.execute("SELECT affection, metadata FROM user_profiles WHERE user_id='u1' AND group_id='g1' AND bot_id='yushu'").fetchone()
         baizz = conn.execute("SELECT affection, metadata FROM user_profiles WHERE user_id='u1' AND group_id='g1' AND bot_id='baizz'").fetchone()
         self.assertEqual(baizz[0], 50)
-        dims = json.loads(yushu[1])["dimensions"]
-        self.assertEqual(dims["fun"], 5)
-        self.assertGreaterEqual(yushu[0], 1)
-        event = conn.execute("SELECT bot_id, dimension, delta, reason FROM relationship_events").fetchone()
+        self.assertEqual(yushu[0], 0)
+        formal_value = conn.execute(
+            """SELECT automatic_value FROM scoped_soul_relationship_values
+                WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=? AND dimension=?""",
+            ("yushu", "test:group:g1", "group", "test:user:u1", "fun"),
+        ).fetchone()
+        self.assertEqual(formal_value[0], 5)
+        formal_relationship = conn.execute(
+            """SELECT affinity, dimensions FROM scoped_soul_relationships
+                WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?""",
+            ("yushu", "test:group:g1", "group", "test:user:u1"),
+        ).fetchone()
+        self.assertGreaterEqual(formal_relationship[0], 1)
+        self.assertEqual(json.loads(formal_relationship[1])["fun"], 5)
+        event = conn.execute(
+            """SELECT bot_id, dimension, delta, reason FROM scoped_soul_relationship_events
+                WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?""",
+            ("yushu", "test:group:g1", "group", "test:user:u1"),
+        ).fetchone()
         self.assertEqual((event[0], event[1], event[2], event[3]), ("yushu", "fun", 5, "用户投喂小蛋糕"))
 
     def test_affinity_update_tool_requires_resolved_scope_and_target_locality(self):
         from domain.scope import RuntimeScope, SessionRef
+        from engine.db.connection import ConnectionManager
+        from engine.db.migrations.scoped_soul import ensure_scoped_soul_schema
+        from engine.db.scoped_soul_repo import ScopedSoulRepository
         from services.relationship_events import RelationshipEventService
         from tools.affinity_update import WaveMemoryAffinityUpdateTool
 
-        conn, _ = self._connect()
+        conn, path = self._connect()
+        manager = ConnectionManager(str(path))
+        self.addCleanup(manager.close)
+        ensure_scoped_soul_schema(manager)
+        repository = ScopedSoulRepository(manager)
         self.addCleanup(conn.close)
         conn.executescript("""
             CREATE TABLE user_profiles (
@@ -293,7 +327,7 @@ class ReworkCoreTest(unittest.TestCase):
             session=SessionRef("test:group:g1", "test", "group", "g1"),
             subject_principal_id="test:user:caller",
         )
-        service = RelationshipEventService(conn)
+        service = RelationshipEventService(conn, repository=repository)
         tool = WaveMemoryAffinityUpdateTool(db=_DB(conn), relationship_events=service)
         missing_ctx = types.SimpleNamespace(context=type("C", (), {"event": _Event()})())
         missing = asyncio.run(tool.call(
@@ -317,9 +351,12 @@ class ReworkCoreTest(unittest.TestCase):
         ))
         self.assertIn("已记录关系事件", recorded)
         event = conn.execute(
-            "SELECT bot_id, group_id, user_id FROM relationship_events"
+            """SELECT bot_id, session_id, visibility, subject_principal_id
+                 FROM scoped_soul_relationship_events
+                WHERE bot_id=? AND session_id=? AND visibility=?""",
+            ("yushu", "test:group:g1", "group"),
         ).fetchone()
-        self.assertEqual(tuple(event), ("yushu", "g1", "u-local"))
+        self.assertEqual(tuple(event), ("yushu", "test:group:g1", "group", "test:user:u-local"))
 
         rejected = asyncio.run(tool.call(
             scoped_ctx,
@@ -330,7 +367,11 @@ class ReworkCoreTest(unittest.TestCase):
             reason="不应跨群",
         ))
         self.assertIn("当前 Bot/群作用域", rejected)
-        self.assertEqual(conn.execute("SELECT COUNT(*) FROM relationship_events").fetchone()[0], 1)
+        self.assertEqual(conn.execute(
+            """SELECT COUNT(*) FROM scoped_soul_relationship_events
+                WHERE bot_id=? AND session_id=? AND visibility=?""",
+            ("yushu", "test:group:g1", "group"),
+        ).fetchone()[0], 1)
 
     def test_lifecycle_routes_scope_by_bot_without_cross_contamination(self):
         from domain.scope import RuntimeScope, SessionRef
@@ -449,64 +490,29 @@ class ReworkCoreTest(unittest.TestCase):
         self.assertEqual(aliases, ["本地名字"])
         self.assertNotIn("泄漏别名", aliases)
 
-    def test_relationship_event_marks_known_bot_target_without_dropping_relation(self):
+    def test_relationship_event_requires_scope_for_known_bot_target(self):
+        from domain.scope import ScopeValidationError
         from services.relationship_events import RelationshipEventService
 
         conn, _ = self._connect()
         self.addCleanup(conn.close)
-        conn.executescript("""
-            CREATE TABLE user_profiles (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT NOT NULL,
-                group_id TEXT NOT NULL,
-                nickname TEXT,
-                affection INTEGER DEFAULT 0,
-                interaction_count INTEGER DEFAULT 0,
-                first_seen REAL,
-                last_seen REAL,
-                personality_tags TEXT,
-                notes TEXT,
-                metadata TEXT,
-                bot_id TEXT DEFAULT 'yushu',
-                UNIQUE(user_id, group_id, bot_id)
-            );
-            CREATE TABLE relationship_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                bot_id TEXT NOT NULL,
-                group_id TEXT NOT NULL,
-                user_id TEXT NOT NULL,
-                event_type TEXT NOT NULL,
-                dimension TEXT NOT NULL,
-                delta REAL NOT NULL,
-                reason TEXT NOT NULL,
-                source_episode_id INTEGER,
-                source_memory_id INTEGER,
-                created_at REAL NOT NULL
-            );
-        """)
-        conn.commit()
-
         svc = RelationshipEventService(
             conn,
             target_profiles={"2500447291": {"db_id": "yushu", "name": "羽书"}},
         )
-        svc.record_event(
-            bot_id="baizz",
-            group_id="g1",
-            user_id="2500447291",
-            event_type="direct_reply",
-            dimension="trust",
-            delta=2,
-            reason="白真真观察到羽书发言",
-            created_at=1234.0,
-        )
 
-        row = conn.execute("SELECT metadata FROM user_profiles WHERE bot_id='baizz' AND user_id='2500447291'").fetchone()
-        meta = json.loads(row[0])
-        self.assertEqual(meta["target_type"], "bot")
-        self.assertEqual(meta["target_bot_id"], "yushu")
-        self.assertEqual(meta["target_name"], "羽书")
-        self.assertIn("dimensions", meta)
+        with self.assertRaises(ScopeValidationError) as missing_scope:
+            svc.record_event(
+                bot_id="baizz",
+                group_id="g1",
+                user_id="2500447291",
+                event_type="direct_reply",
+                dimension="trust",
+                delta=2,
+                reason="白真真观察到羽书发言",
+                created_at=1234.0,
+            )
+        self.assertEqual(missing_scope.exception.reason_code, "scope_required")
 
     def test_memory_repo_excludes_archived_memories_from_recall_candidates(self):
         import numpy as np
