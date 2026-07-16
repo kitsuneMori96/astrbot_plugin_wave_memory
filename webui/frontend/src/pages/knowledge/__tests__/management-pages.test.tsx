@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   getScopedFacts: vi.fn(),
   getLegacyFacts: vi.fn(),
   getPeople: vi.fn(),
+  getRelationships: vi.fn(),
   getLegacyRelationships: vi.fn(),
   getIndexDiagnostics: vi.fn(),
   listJargons: vi.fn(),
@@ -40,7 +41,7 @@ vi.mock('@/api/knowledge', () => ({
   getScopedFacts: mocks.getScopedFacts,
   getLegacyFacts: mocks.getLegacyFacts,
 }))
-vi.mock('@/api/people', () => ({ getPeople: mocks.getPeople, getLegacyRelationships: mocks.getLegacyRelationships }))
+vi.mock('@/api/people', () => ({ getPeople: mocks.getPeople, getRelationships: mocks.getRelationships, getLegacyRelationships: mocks.getLegacyRelationships }))
 vi.mock('@/api/jargon', () => ({ listJargons: mocks.listJargons, listLegacyJargons: mocks.listLegacyJargons, getCatalogAudit: mocks.getCatalogAudit, getJargonEvidence: mocks.getJargonEvidence, batchReviewJargons: mocks.batchReviewJargons, updateJargonMeaning: mocks.updateJargonMeaning, archiveJargon: mocks.archiveJargon, checkHolymanUpdate: mocks.checkHolymanUpdate, previewHolymanSync: mocks.previewHolymanSync, reviewJargon: vi.fn() }))
 vi.mock('@/api/diagnostics', () => ({ getIndexDiagnostics: mocks.getIndexDiagnostics }))
 vi.mock('@/api/options', () => ({
@@ -55,6 +56,7 @@ const page = { total: 1, total_status: 'exact', reason_code: null, limit: 25, of
 beforeEach(() => {
   setViewport(1280)
   mocks.getScopeOptions.mockResolvedValue({ bots: [], sessions: [], channels: [], generated_at: 1, source: { health: 'healthy', reason_code: null } })
+  mocks.getRelationships.mockResolvedValue({ items: [], page: { ...page, total: 0 } })
   mocks.getLegacyRelationships.mockResolvedValue({ items: [], page: { ...page, total: 0 }, legacy: true, readonly: true, scope: null, scope_status: 'legacy_group_key', reason_code: 'bot_and_canonical_session_unavailable' })
   mocks.getLegacyFacts.mockResolvedValue({ items: [], page: { ...page, total: 0 }, legacy: true, readonly: true, scope: null, scope_status: 'unresolved_legacy', reason_code: 'scope_unavailable' })
   mocks.listJargons.mockResolvedValue({ items: [], page, capabilities: { review: { available: false, reason_code: 'readonly' } } })

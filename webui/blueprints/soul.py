@@ -5,17 +5,17 @@ from __future__ import annotations
 import time
 from functools import wraps
 
-from quart import Blueprint, jsonify, request
+from quart import Blueprint, current_app, jsonify, request
 
-from ..api_contract import page_response
+from ..api_contract import current_runtime_scope, error_payload, page_response
 from ..container import get_container
 from ..middleware.auth import require_auth
 
 try:
-    from ...domain.scope import RuntimeScope, ScopeValidationError, SessionRef
+    from ...domain.scope import RuntimeScope, ScopeValidationError
     from ...engine.db.scoped_soul_repo import ScopedSoulScopeError
 except ImportError:  # pragma: no cover - plugin root may be imported directly
-    from domain.scope import RuntimeScope, ScopeValidationError, SessionRef
+    from domain.scope import RuntimeScope, ScopeValidationError
     from engine.db.scoped_soul_repo import ScopedSoulScopeError
 
 soul_bp = Blueprint("soul", __name__, url_prefix="/api")
@@ -59,25 +59,16 @@ def _legacy_soul_mutation_disabled(handler):
 
 
 def _formal_group_scope() -> RuntimeScope:
-    required = ("bot_id", "session_id", "visibility")
-    if any(request.args.get(field) is None for field in required):
-        raise ScopedSoulScopeError("scope_required")
-    bot_id = str(request.args.get("bot_id") or "")
-    session_id = str(request.args.get("session_id") or "")
-    visibility = str(request.args.get("visibility") or "")
-    if visibility != "group":
-        raise ScopedSoulScopeError("soul_scope_visibility_unsupported")
     try:
-        platform_id, kind, conversation_id = session_id.split(":", 2)
-    except ValueError as exc:
-        raise ScopeValidationError("invalid_session_id") from exc
-    subject = request.args.get("subject_principal_id")
-    return RuntimeScope(
-        bot_id,
-        visibility,
-        SessionRef(session_id, platform_id, kind, conversation_id),
-        subject_principal_id=str(subject) if subject is not None else None,
-    )
+        provider = current_app.extensions.get("wave_api_contract", {}).get("request_scope_provider")
+    except RuntimeError:
+        provider = None
+    scope = current_runtime_scope(provider)
+    if scope is None:
+        raise ScopedSoulScopeError("scope_required")
+    if scope.visibility != "group" or scope.session is None:
+        raise ScopedSoulScopeError("soul_scope_visibility_unsupported")
+    return scope
 
 
 def _scope_payload(scope: RuntimeScope) -> dict:
@@ -98,6 +89,13 @@ def _scoped_repo(container):
     if repo is None:
         repo = getattr(getattr(container, "db", None), "scoped_soul", None)
     return repo
+
+
+def _object_refs():
+    try:
+        return current_app.extensions.get("wave_api_contract", {}).get("object_refs")
+    except RuntimeError:
+        return None
 
 
 @soul_bp.route("/soul/state", methods=["GET"])
@@ -128,9 +126,11 @@ async def soul_state():
             "concerns": unavailable_page,
             "timeline": unavailable_page,
             "relationship": {"affinity": None, "state": "unknown", "revision": None,
-                             "evidence": [], "people_ref": scope.subject_principal_id},
+                             "evidence": [], "people_ref": None, "values": None,
+                             "calibration": {"available": False, "reason_code": "relationship_repository_unavailable"}},
             "capabilities": {
-                "mutate": {"available": False, "reason_code": "soul_readonly"},
+                "mutate": {"available": False, "reason_code": "relationship_calibration_unavailable"},
+                "calibration": {"available": False, "reason_code": "relationship_repository_unavailable"},
                 "runtime_refresh": {"available": False, "reason_code": "soul_runtime_refresh_unavailable"},
             },
             "runtime_refresh": {"status": "unavailable", "operation": None, "reason_code": reason},
@@ -149,6 +149,11 @@ async def soul_state():
 
     concerns = state["concerns"]
     timeline = state["timeline"]
+    relationship = dict(state["relationship"])
+    refs = _object_refs()
+    if relationship.get("revision") is not None and relationship.get("people_ref") and refs is not None:
+        ref = refs.issue(kind="relationship", locator=relationship["people_ref"], scope=scope, revision=int(relationship["revision"]))
+        relationship["people_ref"] = {"ref": ref, "kind": "relationship", "locator": relationship["people_ref"], "scope_key": scope.session.id, "version": int(relationship["revision"])}
     return jsonify({
         "scope": _scope_payload(scope),
         "source": {"health": "ready", "reason_code": None},
@@ -163,9 +168,10 @@ async def soul_state():
             **page_response(timeline["items"], total=timeline["total"], limit=limit, offset=offset),
             "revision": timeline.get("revision"),
         },
-        "relationship": state["relationship"],
+        "relationship": relationship,
         "capabilities": {
-            "mutate": {"available": False, "reason_code": "soul_readonly"},
+            "mutate": {"available": bool(relationship.get("calibration", {}).get("available")), "reason_code": None if relationship.get("calibration", {}).get("available") else "relationship_calibration_unavailable"},
+            "calibration": relationship.get("calibration", {"available": False, "reason_code": "relationship_unknown"}),
             "runtime_refresh": {"available": False, "reason_code": "soul_runtime_refresh_unavailable"},
         },
         "runtime_refresh": {"status": "unavailable", "operation": None,

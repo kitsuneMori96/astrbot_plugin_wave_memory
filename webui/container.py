@@ -52,6 +52,7 @@ class ServiceContainer:
         self.scope_options_source: Any = None
         self.request_scope_provider: Any = None
         self.soul_repository: Any = None
+        self.relationship_calibration: Any = None
         self.fewshot_repository: Any = None
         self.book_lore_repository: Any = None
 

@@ -190,20 +190,15 @@ def test_soul_state_reads_scoped_repository_and_legacy_mutations_are_410(monkeyp
 
     monkeypatch.setattr(module, "get_container", lambda: types.SimpleNamespace(soul_repository=Repo()))
     monkeypatch.setattr(module, "jsonify", lambda payload: payload)
+    monkeypatch.setattr(module, "current_runtime_scope", lambda _provider: group_scope(subject="qq:user:u1"))
+    monkeypatch.setattr(module, "current_app", types.SimpleNamespace(extensions={"wave_api_contract": {"request_scope_provider": object(), "object_refs": None}}))
     monkeypatch.setattr(
         module,
         "request",
         types.SimpleNamespace(
-            args={
-                "bot_id": "bot-alpha",
-                "session_id": "qq:group:g1",
-                "visibility": "group",
-                "subject_principal_id": "qq:user:u1",
-                "limit": "25",
-                "offset": "0",
-            },
-            method="POST",
-            path="/api/concerns",
+            args={"limit": "25", "offset": "0"},
+            method="GET",
+            path="/api/soul/state",
         ),
     )
 
@@ -214,6 +209,7 @@ def test_soul_state_reads_scoped_repository_and_legacy_mutations_are_410(monkeyp
     assert payload["relationship"]["affinity"] == 42
     assert payload["capabilities"]["mutate"]["available"] is False
 
+    module.request = types.SimpleNamespace(args={}, method="POST", path="/api/concerns")
     rejected, status = asyncio.run(module._reject_unscoped_soul_mutations())
     assert status == 410
     assert rejected == {"error": {"code": "legacy_mutation_disabled"}}

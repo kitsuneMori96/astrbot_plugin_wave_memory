@@ -7,9 +7,19 @@ from typing import Any
 
 from quart import Blueprint, current_app, jsonify, request
 
-from ..api_contract import current_runtime_scope, error_payload, page_response
+from ..api_contract import current_runtime_scope, error_payload, mutation_response, page_response
 from ..container import get_container
 from ..middleware.auth import require_auth
+
+try:
+    from ...domain.scope import RuntimeScope
+except ImportError:  # pragma: no cover
+    from domain.scope import RuntimeScope
+
+try:
+    from ...services.relationship_calibration import RelationshipCalibrationError, RelationshipCalibrationGateway
+except ImportError:  # pragma: no cover
+    from services.relationship_calibration import RelationshipCalibrationError, RelationshipCalibrationGateway
 
 people_bp = Blueprint("people", __name__, url_prefix="/api")
 
@@ -248,6 +258,130 @@ async def list_legacy_relationships_audit():
         return jsonify(error_payload("invalid_pagination", "Invalid pagination parameters")), 400
     except Exception:
         return jsonify(error_payload("service_unavailable", "Legacy relationship audit is unavailable", retryable=True)), 503
+
+
+def _object_refs():
+    try:
+        return current_app.extensions.get("wave_api_contract", {}).get("object_refs")
+    except RuntimeError:
+        return None
+
+
+def _relationship_gateway(container):
+    configured = getattr(container, "relationship_calibration", None)
+    if configured is not None:
+        return configured
+    write_gateway = getattr(container, "write_gateway", None)
+    repository = getattr(container, "soul_repository", None) or getattr(getattr(container, "db", None), "soul_repository", None)
+    if write_gateway is None or repository is None:
+        return None
+    try:
+        from ...services.relationship_calibration import RelationshipCalibrationGateway
+    except ImportError:  # pragma: no cover
+        from services.relationship_calibration import RelationshipCalibrationGateway
+    try:
+        configured = RelationshipCalibrationGateway(write_gateway, repository)
+    except (TypeError, ValueError):
+        return None
+    container.relationship_calibration = configured
+    return configured
+
+
+def _relationship_error(exc: Exception):
+    code = getattr(exc, "reason_code", None) or getattr(exc, "code", None) or "relationship_calibration_failed"
+    status = 409 if code in {"relationship_revision_conflict", "relationship_manual_layer_unavailable"} else 404 if code in {"object_ref_not_found", "relationship_unknown"} else 422
+    return jsonify(error_payload(str(code), str(exc))), status
+
+
+@people_bp.route("/people/relationships", methods=["GET"])
+@require_auth
+async def list_relationships():
+    try:
+        scope = _request_scope()
+        if scope is None or scope.session is None or scope.visibility != "group":
+            return jsonify(error_payload("scope_required", "A complete group RuntimeScope is required")), 400
+        repository = getattr(get_container(), "soul_repository", None)
+        if repository is None:
+            return jsonify(error_payload("relationship_repository_unavailable", "Scoped relationship repository is unavailable", retryable=True)), 503
+        limit, offset = _page_args()
+        profiles = []
+        conn = _connection()
+        if conn is not None and _table_exists(conn, "user_profiles"):
+            registry = _registry_by_principal(conn)
+            for profile in _table_rows(conn, "user_profiles"):
+                item = _profile_item(profile, registry, scope)
+                if item is not None:
+                    profiles.append(item)
+        relationship_rows = {str(item["subject_principal_id"]): item for item in repository.list_relationships(scope)}
+        refs = _object_refs()
+        items = []
+        for profile in profiles:
+            subject = f"{scope.session.platform_id}:user:{profile['user_id']}"
+            relationship = relationship_rows.get(subject)
+            if relationship is None:
+                item = {"subject_principal_id": subject, "person": profile, "affinity": None, "state": "unknown", "revision": None, "values": None, "evidence": [], "object_ref": None, "calibration": {"available": False, "reason_code": "relationship_unknown"}}
+            else:
+                item = {"subject_principal_id": subject, "person": profile, **relationship}
+                if refs is not None:
+                    ref = refs.issue(kind="relationship", locator=subject, scope=scope, revision=int(relationship["revision"]))
+                    item["object_ref"] = {"ref": ref, "kind": "relationship", "locator": subject, "scope_key": scope.session.id, "version": int(relationship["revision"])}
+            items.append(item)
+        search = str(request.args.get("search") or "").strip().casefold()
+        user_filter = str(request.args.get("user_id") or "").strip()
+        if user_filter:
+            items = [item for item in items if str(item.get("person", {}).get("user_id") or "") == user_filter]
+        if search:
+            items = [item for item in items if search in json.dumps(item.get("person", {}), ensure_ascii=False).casefold()]
+        total = len(items)
+        return jsonify({**page_response(items[offset:offset + limit], total=total, limit=limit, offset=offset), "scope": scope.to_dict()})
+    except (TypeError, ValueError) as exc:
+        return jsonify(error_payload("invalid_relationship_query", str(exc))), 400
+    except Exception as exc:
+        return jsonify(error_payload("relationship_query_unavailable", str(exc), retryable=True)), 503
+
+
+@people_bp.route("/people/relationships/commands/calibrate", methods=["POST"])
+@require_auth
+async def calibrate_relationship():
+    scope = _request_scope()
+    if scope is None or scope.session is None or scope.visibility != "group":
+        return jsonify(error_payload("scope_required", "A complete group RuntimeScope is required")), 400
+    container = get_container()
+    gateway = _relationship_gateway(container)
+    if gateway is None:
+        return jsonify(error_payload("relationship_calibration_unavailable", "Relationship calibration is unavailable", retryable=True)), 503
+    body = await request.get_json(silent=True) or {}
+    refs = _object_refs()
+    try:
+        descriptor = body.get("object_ref") or body.get("ref")
+        ref = descriptor.get("ref") if isinstance(descriptor, dict) else descriptor
+        binding, state = refs.resolve_with_state(ref, kind="relationship", request_scope=scope) if refs is not None else (None, "not-found")
+        if binding is None or state != "ready":
+            raise RelationshipCalibrationError("object_ref_not_found")
+        expected_revision = int(body.get("revision"))
+        if int(binding.revision) != expected_revision:
+            raise RelationshipCalibrationError("relationship_revision_conflict")
+        subject = str(binding.locator)
+        if not subject.startswith(f"{scope.session.platform_id}:user:"):
+            raise RelationshipCalibrationError("scope_subject_mismatch")
+        target_scope = RuntimeScope(scope.bot_id, scope.visibility, scope.session, subject)
+        result = await gateway.calibrate(
+            scope=target_scope,
+            subject_principal_id=subject,
+            expected_revision=expected_revision,
+            action=body.get("action"),
+            dimension=body.get("dimension"),
+            delta=body.get("delta"),
+            value=body.get("value"),
+            reason=body.get("reason"),
+            evidence=body.get("evidence"),
+            object_ref=str(ref),
+        )
+        return jsonify(mutation_response(operation_kind="relationship.calibrate", operation_id=result.operation_id, status=result.status, revision=result.revision, item={"calibration_id": result.calibration_id, "subject_principal_id": result.subject_principal_id, "dimension": result.dimension, "action": result.action, "before": result.before, "after": result.after, "affinity": result.affinity, "state": result.state, "evidence": result.evidence}, include_item=True))
+    except RelationshipCalibrationError as exc:
+        return _relationship_error(exc)
+    except (TypeError, ValueError) as exc:
+        return jsonify(error_payload("relationship_request_invalid", str(exc))), 422
 
 
 @people_bp.route("/people", methods=["GET"])

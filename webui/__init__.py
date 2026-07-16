@@ -74,6 +74,12 @@ class WaveMemoryWebUI:
 
         # 注入所有服务到全局容器
         container = get_container()
+        try:
+            from ..services.relationship_calibration import RelationshipCalibrationGateway
+            calibration = RelationshipCalibrationGateway(write_gateway, db.soul_repository) if write_gateway is not None else None
+        except (ImportError, TypeError, ValueError):
+            calibration = None
+
         container.initialize(
             db=db,
             query_engine=query_engine,
@@ -101,6 +107,7 @@ class WaveMemoryWebUI:
             scope_options_source=scope_options_source,
             request_scope_provider=request_scope_provider,
         )
+        container.relationship_calibration = calibration
 
         self._task_supervisor = task_supervisor
 

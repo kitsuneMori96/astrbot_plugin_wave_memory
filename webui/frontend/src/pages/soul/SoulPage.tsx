@@ -5,7 +5,9 @@ import { Area, AreaChart, Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'rec
 
 import { isRequestCancelled } from '@/api/client'
 import { getScopeOptions, scopeOptionsFor } from '@/api/options'
+import { getRelationships, type RelationshipItem } from '@/api/people'
 import { getLegacySoulSnapshot, getSoulState, type LegacyMoodItem, type LegacySoulSnapshot, type SoulScopeSelection, type SoulStatePayload } from '@/api/soul'
+import { RelationshipCalibrationPanel } from '@/components/relationship/RelationshipCalibrationPanel'
 import { EvidenceList, ObjectDeepLink, PaginationControls, QueryState, ScopeSelect } from '@/components/shared'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -73,6 +75,9 @@ export function SoulPage() {
   const [searchParams] = useSearchParams()
   const [payload, setPayload] = useState<SoulStatePayload | null>(null)
   const [legacy, setLegacy] = useState<LegacySoulSnapshot | null>(null)
+  const [relationshipOptions, setRelationshipOptions] = useState<RelationshipItem[]>([])
+  const [relationshipOptionsLoading, setRelationshipOptionsLoading] = useState(false)
+  const subjectId = searchParams.get('subject_principal_id') ?? ''
   const [status, setStatus] = useState<'loading' | 'success' | 'empty' | 'unknown' | 'error'>('empty')
   const [error, setError] = useState<unknown>()
   const [legacyStatus, setLegacyStatus] = useState<'loading' | 'success' | 'empty' | 'error'>('empty')
@@ -83,12 +88,46 @@ export function SoulPage() {
   const sessionId = searchParams.get('session_id') ?? ''
   useCanonicalScopeDefault({ botId, sessionId, setFilters: pagination.setFilters })
   const scope = useMemo<SoulScopeSelection | null>(() => botId && sessionId ? { bot_id: botId, session_id: sessionId, visibility: 'group' } : null, [botId, sessionId])
+  const relationshipItem = useMemo<RelationshipItem | null>(() => {
+    const relationship = payload?.relationship
+    const ref = relationship?.people_ref
+    if (!relationship || !ref || !relationship.values || relationship.revision === null) return null
+    const locator = String(ref.locator ?? subjectId)
+    const selected = relationshipOptions.find((item) => item.subject_principal_id === locator)
+    if (!selected) return null
+    return {
+      ...selected,
+      affinity: relationship.affinity,
+      state: relationship.state,
+      revision: Number(relationship.revision),
+      values: relationship.values,
+      evidence: relationship.evidence,
+      object_ref: ref,
+      calibration: relationship.calibration ?? { available: false, reason_code: 'relationship_unknown' },
+    }
+  }, [payload, relationshipOptions, subjectId])
 
   const loadBots = useCallback(async () => scopeOptionsFor(await getScopeOptions(), ['bot']), [])
   const loadSessions = useCallback(async () => {
     const options = scopeOptionsFor(await getScopeOptions(), ['session'])
     return botId ? options.filter((option) => option.description?.startsWith(`${botId} ·`)) : options
   }, [botId])
+
+  useEffect(() => {
+    if (!scope) {
+      setRelationshipOptions([])
+      setRelationshipOptionsLoading(false)
+      return
+    }
+    const controller = new AbortController()
+    let active = true
+    setRelationshipOptionsLoading(true)
+    getRelationships({ ...scope, limit: 100, offset: 0 }, controller.signal)
+      .then((value) => { if (active && !controller.signal.aborted) setRelationshipOptions(value.items) })
+      .catch(() => { if (active && !controller.signal.aborted) setRelationshipOptions([]) })
+      .finally(() => { if (active && !controller.signal.aborted) setRelationshipOptionsLoading(false) })
+    return () => { active = false; controller.abort() }
+  }, [scope])
 
   const loadFormal = useCallback(async () => {
     formalRequestRef.current?.abort()
@@ -102,7 +141,7 @@ export function SoulPage() {
     setStatus('loading')
     setError(undefined)
     try {
-      const formal = await getSoulState(scope, pagination.limit, pagination.offset, controller.signal)
+      const formal = await getSoulState({ ...scope, ...(subjectId ? { subject_principal_id: subjectId } : {}) }, pagination.limit, pagination.offset, controller.signal)
       if (formalRequestRef.current !== controller || controller.signal.aborted) return
       setPayload(formal)
       setStatus('success')
@@ -112,7 +151,7 @@ export function SoulPage() {
       setError(reason)
       setStatus('error')
     }
-  }, [pagination.limit, pagination.offset, scope])
+  }, [pagination.limit, pagination.offset, scope, subjectId])
 
   const loadLegacy = useCallback(async () => {
     legacyRequestRef.current?.abort()
@@ -157,7 +196,7 @@ export function SoulPage() {
           <CardTitle>Soul 作用域状态</CardTitle>
           <CardDescription>Mood、Concern、Timeline 与关系仅按真实 Bot + canonical group session 读取；不接受默认 Bot、私聊或伪群作用域。</CardDescription>
         </CardHeader>
-        <CardContent className="grid gap-3 pt-0 md:grid-cols-2"><ScopeSelect value={botId || undefined} loadOptions={loadBots} label="Bot" onValueChange={(value) => pagination.setFilters({ bot_id: value, session_id: null })} /><ScopeSelect value={sessionId || undefined} loadOptions={loadSessions} label="群 / 会话" disabled={!botId} onValueChange={(value) => pagination.setFilters({ session_id: value })} /></CardContent>
+        <CardContent className="grid gap-3 pt-0 md:grid-cols-3"><ScopeSelect value={botId || undefined} loadOptions={loadBots} label="Bot" onValueChange={(value) => pagination.setFilters({ bot_id: value, session_id: null, subject_principal_id: null })} /><ScopeSelect value={sessionId || undefined} loadOptions={loadSessions} label="群 / 会话" disabled={!botId} onValueChange={(value) => pagination.setFilters({ session_id: value, subject_principal_id: null })} /><label className="flex min-w-0 flex-col gap-1.5 text-sm font-medium"><span>群友 principal</span><select className="h-8 min-w-0 rounded-md border bg-background px-2 font-mono text-xs font-normal" value={subjectId} onChange={(event) => pagination.setFilters({ subject_principal_id: event.target.value || null })} disabled={!botId || !sessionId || relationshipOptionsLoading || relationshipOptions.length === 0}><option value="">{relationshipOptionsLoading ? '正在读取当前群友…' : '选择当前群友'}</option>{relationshipOptions.map((item) => <option key={item.subject_principal_id} value={item.subject_principal_id}>{item.person.display_name} · {item.person.user_id}</option>)}{subjectId && !relationshipOptions.some((item) => item.subject_principal_id === subjectId) ? <option value={subjectId}>{subjectId}（当前深链）</option> : null}</select><span className="text-xs font-normal text-muted-foreground">选项来自当前 Bot + canonical 群会话；subject principal 不跨 Scope 复用</span></label></CardContent>
       </Card>
 
       <QueryState status={status} error={error} onRetry={() => void loadFormal()} title={!scope ? '请选择真实 Bot 与群会话' : undefined} description={!scope ? 'Soul 不接受默认 Bot、私聊或伪群作用域。' : undefined}>
@@ -176,7 +215,7 @@ export function SoulPage() {
             <Card className="overflow-hidden border-pink-500/15 bg-gradient-to-br from-card to-pink-500/5">
               <CardHeader className="border-b bg-muted/10 py-4"><div className="flex items-center gap-2"><HeartHandshakeIcon className="size-4 text-pink-500" /><CardTitle className="text-sm">关系投影</CardTitle></div><CardDescription>正式 SoulScope · revision {payload.relationship.revision ?? '未记录'}</CardDescription></CardHeader>
               <CardContent className="flex flex-col gap-4 pt-5">
-                {formalUnavailable ? <SectionUnavailable reason={payload.source.reason_code} /> : <><div className="rounded-xl border bg-background/50 p-4 text-center"><Badge variant={payload.relationship.state === 'known' ? 'secondary' : 'outline'}>{payload.relationship.state}</Badge><p className="mt-3 text-3xl font-bold font-mono">{payload.relationship.affinity ?? '—'}</p><p className="text-xs text-muted-foreground">Affinity</p>{typeof payload.relationship.affinity === 'number' ? <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-pink-500" style={{ width: `${Math.max(0, Math.min(100, payload.relationship.affinity <= 1 ? payload.relationship.affinity * 100 : payload.relationship.affinity))}%` }} /></div> : null}</div><EvidenceList evidence={payload.relationship.evidence} />{payload.relationship.people_ref ? <ObjectDeepLink to="/people" objectRef={payload.relationship.people_ref}>打开当前人物关系</ObjectDeepLink> : null}</>}
+                {formalUnavailable ? <SectionUnavailable reason={payload.source.reason_code} /> : <><div className="rounded-xl border bg-background/50 p-4 text-center"><Badge variant={payload.relationship.state === 'known' ? 'secondary' : 'outline'}>{payload.relationship.state}</Badge><p className="mt-3 text-3xl font-bold font-mono">{payload.relationship.affinity ?? '—'}</p><p className="text-xs text-muted-foreground">Affinity</p>{typeof payload.relationship.affinity === 'number' ? <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-pink-500" style={{ width: `${Math.max(0, Math.min(100, payload.relationship.affinity <= 1 ? payload.relationship.affinity * 100 : payload.relationship.affinity))}%` }} /></div> : null}</div><EvidenceList evidence={payload.relationship.evidence} />{payload.relationship.people_ref ? <ObjectDeepLink to="/people" objectRef={payload.relationship.people_ref}>打开当前人物关系</ObjectDeepLink> : null}{relationshipItem ? <RelationshipCalibrationPanel item={relationshipItem} query={{ bot_id: botId, session_id: sessionId, visibility: 'group', user_id: relationshipItem.person.user_id, subject_principal_id: relationshipItem.subject_principal_id }} onChanged={() => void loadFormal()} /> : <Alert><AlertTitle>当前关系未知</AlertTitle><AlertDescription>请输入当前群友的 canonical subject principal；没有正式关系行时不会创建默认 0，也不会提供校准写入口。</AlertDescription></Alert>}</>}
               </CardContent>
             </Card>
           </div>

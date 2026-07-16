@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { AlertCircleIcon, ChevronDownIcon, EyeIcon, RefreshCwIcon, SearchIcon } from 'lucide-react'
 
 import { getScopeOptions, scopeOptionsFor } from '@/api/options'
-import { getLegacyRelationships, getPeople, type LegacyAuditPage, type LegacyRelationshipEvent, type PersonItem } from '@/api/people'
+import { getLegacyRelationships, getPeople, getRelationships, type LegacyAuditPage, type LegacyRelationshipEvent, type PersonItem, type RelationshipItem } from '@/api/people'
+import { RelationshipCalibrationPanel } from '@/components/relationship/RelationshipCalibrationPanel'
 import { PaginationControls, QueryState, ResponsiveTable, ScopeSelect, usePaginationSearchParams, type PageResponse } from '@/components/shared'
 import { useCanonicalScopeDefault } from '@/hooks/use-pagination-search-params'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -28,12 +29,13 @@ function SummaryTile({ label, value, tone }: { label: string; value: string | nu
   return <div className="min-w-[4.75rem] rounded-lg border bg-muted/20 px-3 py-1.5 text-center text-xs"><div className="text-[10px] text-muted-foreground">{label}</div><div className={`font-semibold ${tone ?? ''}`}>{value}</div></div>
 }
 
-function PersonDetail({ item }: { item: PersonItem }) {
+function PersonDetail({ item, relationship, query, onChanged }: { item: PersonItem; relationship: RelationshipItem | null; query: { bot_id: string; session_id: string; visibility: 'group'; user_id?: string }; onChanged?: () => void }) {
   const aliases = aliasLabels(item.aliases)
   const metadataCount = Object.keys(item.metadata ?? {}).length + Object.keys(item.registry_metadata ?? {}).length
 
-  return <div className="flex flex-col gap-5 text-sm">
-    <div className="flex flex-wrap items-center gap-2"><Badge variant="outline">正式人物画像</Badge><Badge variant="secondary">group Scope</Badge><Badge variant="outline">Affinity 不可用</Badge></div>
+  return     <div className="flex flex-col gap-5 text-sm">
+    <div className="flex flex-wrap items-center gap-2"><Badge variant="outline">正式人物画像</Badge><Badge variant="secondary">group Scope</Badge><Badge variant="outline">关系以正式 projection 为准</Badge></div>
+
 
     <div className="grid gap-3 rounded-lg border bg-muted/10 p-3.5">
       <div><span className="mb-0.5 block text-xs text-muted-foreground">显示名称</span><span className="break-words font-medium">{item.display_name}</span></div>
@@ -47,9 +49,10 @@ function PersonDetail({ item }: { item: PersonItem }) {
       <div className="col-span-2"><span className="mb-1.5 block text-xs text-muted-foreground">登记别名</span><div className="flex flex-wrap gap-1">{aliases.length ? aliases.map((alias) => <Badge key={alias} variant="outline" className="font-normal">{alias}</Badge>) : <span className="text-muted-foreground">未登记别名</span>}</div></div>
     </div>
 
+    {relationship ? <RelationshipCalibrationPanel item={relationship} query={query} onChanged={onChanged} /> : <Alert><AlertCircleIcon /><AlertTitle>当前关系未知</AlertTitle><AlertDescription>当前 Scope 没有正式 relationship projection；不会使用旧 affection 或默认 0 伪造关系。</AlertDescription></Alert>}
     <Alert>
       <AlertCircleIcon />
-      <AlertTitle>为什么没有 Affinity 数值？</AlertTitle>
+      <AlertTitle>为什么没有 Legacy Affinity 数值？</AlertTitle>
       <AlertDescription>{item.affinity_reason_code || '当前没有经过复合作用域验证的 affinity projection。'} 页面不会使用旧 affection、跨群全局值或固定回填值伪装当前关系。</AlertDescription>
     </Alert>
 
@@ -72,6 +75,7 @@ export function PeoplePage() {
 
   const [searchDraft, setSearchDraft] = useState(search)
   const [data, setData] = useState<PageResponse<PersonItem> | null>(null)
+  const [relationshipData, setRelationshipData] = useState<PageResponse<RelationshipItem> | null>(null)
   const [error, setError] = useState<unknown>()
   const [loading, setLoading] = useState(false)
   const [reload, setReload] = useState(0)
@@ -89,13 +93,16 @@ export function PeoplePage() {
 
   useEffect(() => { setSearchDraft(search) }, [search])
   useEffect(() => {
-    if (!botId || !sessionId) { setData(null); setLoading(false); setError(undefined); return }
+    if (!botId || !sessionId) { setData(null); setRelationshipData(null); setLoading(false); setError(undefined); return }
     let active = true
     setLoading(true)
     setError(undefined)
-    getPeople({ bot_id: botId, session_id: sessionId, visibility: 'group', search: search || undefined, limit: pagination.limit, offset: pagination.offset })
-      .then((value) => { if (active) setData(value) })
-      .catch((reason: unknown) => { if (active) { setData(null); setError(reason) } })
+    Promise.all([
+      getPeople({ bot_id: botId, session_id: sessionId, visibility: 'group', search: search || undefined, limit: pagination.limit, offset: pagination.offset }),
+      getRelationships({ bot_id: botId, session_id: sessionId, visibility: 'group', search: search || undefined, limit: pagination.limit, offset: pagination.offset }).catch(() => null),
+    ])
+      .then(([people, relationships]) => { if (active) { setData(people); setRelationshipData(relationships) } })
+      .catch((reason: unknown) => { if (active) { setData(null); setRelationshipData(null); setError(reason) } })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
   }, [botId, pagination.limit, pagination.offset, reload, search, sessionId])
@@ -225,7 +232,7 @@ export function PeoplePage() {
     <Sheet open={detailOpen} onOpenChange={setDetailOpen}>
       <SheetContent className="w-[min(94vw,34rem)] sm:max-w-xl">
         <SheetHeader className="border-b pr-12"><SheetTitle>人物画像详情</SheetTitle><SheetDescription>只读查看复合作用域内的身份、别名、互动与 Affinity 可用性。</SheetDescription></SheetHeader>
-        <div className="min-h-0 flex-1 overflow-y-auto p-4">{selectedPerson ? <PersonDetail item={selectedPerson} /> : null}</div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">{selectedPerson ? <PersonDetail item={selectedPerson} relationship={relationshipData?.items.find((entry) => entry.person.user_id === selectedPerson.user_id) ?? null} query={{ bot_id: botId, session_id: sessionId, visibility: 'group', user_id: selectedPerson.user_id }} onChanged={() => setReload((value) => value + 1)} /> : null}</div>
       </SheetContent>
     </Sheet>
   </div>

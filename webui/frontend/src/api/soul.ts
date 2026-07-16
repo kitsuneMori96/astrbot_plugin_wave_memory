@@ -5,6 +5,7 @@ export interface SoulScopeSelection {
   bot_id: string
   session_id: string
   visibility: 'group'
+  subject_principal_id?: string
 }
 
 export interface SoulRecord {
@@ -14,6 +15,21 @@ export interface SoulRecord {
   policy_version: string | null
   evidence: EvidenceRef[]
   object_ref: ObjectRefDescriptor | null
+}
+
+export interface RelationshipCalibrationPayload {
+  object_ref: string | { ref: string }
+  revision: number
+  action: 'adjust' | 'override' | 'clear_override' | 'restore_auto'
+  dimension: string
+  delta?: number
+  value?: number
+  reason: string
+  evidence: unknown[]
+}
+
+export function calibrateSoulRelationship(scope: SoulScopeSelection, payload: RelationshipCalibrationPayload): Promise<{ ok: boolean; operation: { kind: string; status: string; id?: string }; revision: number; item?: Record<string, unknown> }> {
+  return fetchJson(`/api/people/relationships/commands/calibrate?${scopeQuery(scope)}`, { method: 'POST', body: JSON.stringify(payload) })
 }
 
 export interface SoulStatePayload {
@@ -31,10 +47,13 @@ export interface SoulStatePayload {
   timeline: PageResponse<SoulRecord>
   relationship: {
     affinity: number | null
-    state: 'known' | 'unknown'
+    state: 'known' | 'unknown' | string
     revision: number | string | null
     evidence: EvidenceRef[]
-    people_ref: ObjectRefDescriptor | null
+    people_ref: (ObjectRefDescriptor & { kind: 'relationship' }) | null
+    dimensions?: Record<string, number> | null
+    values?: Record<string, { dimension: string; automatic_value: number; manual_adjustment: number | null; manual_override: number | null; effective_value: number; relationship_revision: number; evidence: unknown[] }> | null
+    calibration?: { available: boolean; reason_code: string | null }
   }
   capabilities: {
     mutate: { available: boolean; reason_code: string | null }
@@ -87,7 +106,7 @@ export interface LegacySoulSnapshot {
 }
 
 function scopeQuery(scope: SoulScopeSelection, extra: Record<string, string> = {}): string {
-  return new URLSearchParams({ bot_id: scope.bot_id, session_id: scope.session_id, visibility: scope.visibility, ...extra }).toString()
+  return new URLSearchParams({ bot_id: scope.bot_id, session_id: scope.session_id, visibility: scope.visibility, ...(scope.subject_principal_id ? { subject_principal_id: scope.subject_principal_id } : {}), ...extra }).toString()
 }
 
 export function getSoulState(scope: SoulScopeSelection, limit: 25 | 50 | 100, offset: number, signal?: AbortSignal): Promise<SoulStatePayload> {

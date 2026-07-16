@@ -1,5 +1,5 @@
 import { fetchJson } from './client'
-import type { PageResponse, PageSize } from '@/components/shared/types'
+import type { ObjectRefDescriptor, PageResponse, PageSize } from '@/components/shared/types'
 
 export interface PeopleQuery {
   limit?: PageSize
@@ -9,6 +9,7 @@ export interface PeopleQuery {
   session_id: string
   visibility: 'group'
   user_id?: string
+  subject_principal_id?: string
 }
 
 export interface PersonScope {
@@ -61,6 +62,58 @@ export interface LegacyRelationshipEvent {
   scope: null
   scope_status: 'legacy_group_key'
   scope_reason: string
+}
+
+export interface RelationshipValue {
+  dimension: string
+  automatic_value: number
+  manual_adjustment: number | null
+  manual_override: number | null
+  effective_value: number
+  relationship_revision: number
+  evidence: unknown[]
+}
+
+export interface RelationshipItem {
+  subject_principal_id: string
+  person: PersonItem
+  affinity: number | null
+  state: 'known' | 'unknown' | string
+  revision: number | null
+  values: Record<string, RelationshipValue> | null
+  evidence: unknown[]
+  object_ref: (ObjectRefDescriptor & { kind: 'relationship' }) | null
+  calibration: { available: boolean; reason_code: string | null }
+}
+
+export interface RelationshipQuery extends PeopleQuery {
+  user_id?: string
+}
+
+export interface RelationshipCalibrationPayload {
+  object_ref: string | { ref: string }
+  revision: number
+  action: 'adjust' | 'override' | 'clear_override' | 'restore_auto'
+  dimension: string
+  delta?: number
+  value?: number
+  reason: string
+  evidence: unknown[]
+}
+
+export interface RelationshipCalibrationResponse {
+  ok: boolean
+  operation: { kind: string; status: string; id?: string }
+  revision: number
+  item?: Record<string, unknown>
+}
+
+export function getRelationships(query: RelationshipQuery, signal?: AbortSignal): Promise<PageResponse<RelationshipItem>> {
+  return fetchJson<PageResponse<RelationshipItem>>(`/api/people/relationships${queryString(query)}`, { signal })
+}
+
+export function calibrateRelationship(query: PeopleQuery, payload: RelationshipCalibrationPayload): Promise<RelationshipCalibrationResponse> {
+  return fetchJson<RelationshipCalibrationResponse>(`/api/people/relationships/commands/calibrate${queryString(query)}`, { method: 'POST', body: JSON.stringify(payload) })
 }
 
 export interface LegacyAuditPage<T> extends PageResponse<T> {

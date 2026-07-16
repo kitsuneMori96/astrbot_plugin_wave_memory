@@ -20,6 +20,7 @@ from .db.migrations.scoped_memory_tag_corrections import (
     ensure_scoped_memory_tag_correction_schema,
 )
 from .db.migrations.scoped_tag_governance import ensure_scoped_tag_governance_schema
+from .db.migrations.scoped_relationship_calibration import ensure_scoped_relationship_calibration_schema
 from .db.migrations.scoped_soul import ensure_scoped_soul_schema
 from .db.scoped_knowledge_repo import ScopedKnowledgeRepo
 from .db.scoped_learning_projection_repo import (
@@ -60,6 +61,7 @@ class WaveMemoryDB:
             ensure_scoped_memory_tag_correction_schema(self._cm)
             ensure_scoped_tag_governance_schema(self._cm)
             ensure_scoped_soul_schema(self._cm)
+            ensure_scoped_relationship_calibration_schema(self._cm)
             ensure_scoped_learning_projection_schema(self._cm)
             self._scoped_knowledge_repo = ScopedKnowledgeRepo(self._cm)
             self._soul_repository = ScopedSoulRepository(self._cm)

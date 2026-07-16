@@ -3,26 +3,41 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Callable
 
 try:
+    from ...domain.relationship_policy import (
+        DIMENSION_RANGES,
+        DIMENSION_WEIGHTS,
+        attitude_level,
+        cap_automatic_delta,
+        cap_manual_adjustment_delta,
+        clamp_dimension,
+        compute_affinity,
+        validate_event,
+    )
     from ...domain.scope import RuntimeScope
 except ImportError:  # pragma: no cover
+    from domain.relationship_policy import (
+        DIMENSION_RANGES,
+        DIMENSION_WEIGHTS,
+        attitude_level,
+        cap_automatic_delta,
+        cap_manual_adjustment_delta,
+        clamp_dimension,
+        compute_affinity,
+        validate_event,
+    )
     from domain.scope import RuntimeScope
 
 from .connection import ConnectionManager
 
 
-_DIMENSION_WEIGHTS = {"familiarity": 0.25, "trust": 0.30, "fun": 0.20, "depth": 0.25}
-_DIMENSION_RANGES = {
-    "familiarity": (0.0, 100.0),
-    "trust": (-50.0, 100.0),
-    "fun": (0.0, 80.0),
-    "hostility": (0.0, 100.0),
-    "depth": (0.0, 80.0),
-}
+_DIMENSION_WEIGHTS = DIMENSION_WEIGHTS
+_DIMENSION_RANGES = DIMENSION_RANGES
 
 
 class ScopedSoulScopeError(ValueError):
@@ -73,21 +88,11 @@ def _json_evidence(value: Sequence[Mapping[str, Any]] | None) -> str:
 
 
 def _state_for_affinity(affinity: int) -> str:
-    if affinity >= 60:
-        return "intimate"
-    if affinity >= 30:
-        return "friendly"
-    if affinity >= 0:
-        return "neutral"
-    if affinity >= -30:
-        return "cold"
-    return "hostile"
+    return attitude_level(affinity)
 
 
 def _compute_affinity(dimensions: Mapping[str, float]) -> int:
-    score = sum(float(dimensions.get(key, 0)) * weight for key, weight in _DIMENSION_WEIGHTS.items())
-    score -= float(dimensions.get("hostility", 0)) * 0.5
-    return int(max(-100, min(100, score)))
+    return compute_affinity(dimensions)
 
 
 class ScopedSoulRepository:
@@ -97,6 +102,14 @@ class ScopedSoulRepository:
         if not isinstance(cm, ConnectionManager):
             raise TypeError("cm must be a ConnectionManager")
         self.cm = cm
+        # Direct repository users (including focused tests) receive the same idempotent
+        # additive schema as the production DB facade.
+        try:
+            from .migrations.scoped_relationship_calibration import ensure_scoped_relationship_calibration_schema
+            ensure_scoped_relationship_calibration_schema(cm)
+        except ImportError:  # pragma: no cover - top-level repository imports
+            from engine.db.migrations.scoped_relationship_calibration import ensure_scoped_relationship_calibration_schema
+            ensure_scoped_relationship_calibration_schema(cm)
 
     def _write(self, callback: Callable[[Any], Any], connection=None):
         if connection is not None:
@@ -245,6 +258,85 @@ class ScopedSoulRepository:
 
         return int(self._write(persist, connection))
 
+    def _relationship_row(self, tx, scope: RuntimeScope, subject: str):
+        return tx.execute(
+            """SELECT affinity, state, dimensions, revision, evidence, updated_at
+                 FROM scoped_soul_relationships
+                WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?""",
+            (*_scope_params(scope), subject),
+        ).fetchone()
+
+    @staticmethod
+    def _relationship_revision(tx, scope: RuntimeScope, subject: str) -> int:
+        row = tx.execute(
+            """SELECT revision FROM scoped_soul_revisions
+                WHERE bot_id=? AND session_id=? AND visibility=?
+                  AND component='relationship' AND subject_principal_id=?""",
+            (*_scope_params(scope), subject),
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
+
+    def _value_rows(self, tx, scope: RuntimeScope, subject: str) -> dict[str, dict[str, Any]]:
+        rows = tx.execute(
+            """SELECT dimension, automatic_value, manual_adjustment, manual_override,
+                      effective_value, relationship_revision, evidence, updated_at
+                 FROM scoped_soul_relationship_values
+                WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?""",
+            (*_scope_params(scope), subject),
+        ).fetchall()
+        return {
+            str(row[0]): {
+                "dimension": str(row[0]),
+                "automatic_value": float(row[1]),
+                "manual_adjustment": None if row[2] is None else float(row[2]),
+                "manual_override": None if row[3] is None else float(row[3]),
+                "effective_value": float(row[4]),
+                "relationship_revision": int(row[5]),
+                "evidence": json.loads(str(row[6] or "[]")),
+                "updated_at": float(row[7]),
+            }
+            for row in rows
+        }
+
+    @staticmethod
+    def _effective_value(automatic: float, adjustment: float | None, override: float | None, dimension: str) -> float:
+        if override is not None:
+            return clamp_dimension(dimension, override)
+        return clamp_dimension(dimension, automatic + (adjustment or 0.0))
+
+    def _ensure_formal_values(self, tx, scope: RuntimeScope, subject: str, now: float) -> dict[str, dict[str, Any]]:
+        rows = self._value_rows(tx, scope, subject)
+        relationship = self._relationship_row(tx, scope, subject)
+        if relationship is None:
+            return rows
+        try:
+            dimensions = json.loads(str(relationship[2] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise ScopedSoulScopeError("relationship_projection_invalid")
+        revision = int(relationship[3] or self._relationship_revision(tx, scope, subject))
+        evidence = json.loads(str(relationship[4] or "[]"))
+        for dimension, value in dimensions.items():
+            if dimension not in _DIMENSION_RANGES or isinstance(value, bool):
+                continue
+            try:
+                automatic = float(value)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(automatic):
+                continue
+            current = rows.get(dimension)
+            if current is None:
+                tx.execute(
+                    """INSERT INTO scoped_soul_relationship_values(
+                           bot_id, session_id, visibility, subject_principal_id, dimension,
+                           automatic_value, manual_adjustment, manual_override, effective_value,
+                           relationship_revision, evidence, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)""",
+                    (*_scope_params(scope), subject, dimension, clamp_dimension(dimension, automatic),
+                     clamp_dimension(dimension, automatic), revision, _json_evidence(evidence), now),
+                )
+        return self._value_rows(tx, scope, subject)
+
     def upsert_relationship(
         self,
         scope: RuntimeScope,
@@ -261,23 +353,56 @@ class ScopedSoulRepository:
         if scope.subject_principal_id is not None and scope.subject_principal_id != subject:
             raise ScopedSoulScopeError("scope_subject_mismatch")
         affinity = int(max(-100, min(100, int(affinity))))
-        encoded_dimensions = _json_mapping(dimensions)
         encoded_evidence = _json_evidence(evidence)
+        normalized_dimensions = {
+            str(key): clamp_dimension(str(key), float(value))
+            for key, value in dict(dimensions or {}).items()
+            if str(key) in _DIMENSION_RANGES and not isinstance(value, bool)
+        }
 
         def persist(tx):
             now = time.time()
+            existing = self._relationship_row(tx, scope, subject)
+            existing_values = self._ensure_formal_values(tx, scope, subject, now)
             revision = self._next_revision(tx, scope, "relationship", subject, now)
+            tx.execute(
+                "UPDATE scoped_soul_relationship_values SET relationship_revision=? WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?",
+                (revision, *_scope_params(scope), subject),
+            )
+            for dimension, value in normalized_dimensions.items():
+                current = existing_values.get(dimension)
+                adjustment = None if current is None else current["manual_adjustment"]
+                override = None if current is None else current["manual_override"]
+                effective = self._effective_value(value, adjustment, override, dimension)
+                tx.execute(
+                    """INSERT INTO scoped_soul_relationship_values(
+                           bot_id, session_id, visibility, subject_principal_id, dimension,
+                           automatic_value, manual_adjustment, manual_override, effective_value,
+                           relationship_revision, evidence, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(bot_id, session_id, visibility, subject_principal_id, dimension)
+                       DO UPDATE SET automatic_value=excluded.automatic_value,
+                           effective_value=excluded.effective_value, relationship_revision=excluded.relationship_revision,
+                           evidence=excluded.evidence, updated_at=excluded.updated_at""",
+                    (*_scope_params(scope), subject, dimension, value, adjustment, override, effective,
+                     revision, encoded_evidence, now),
+                )
+            if normalized_dimensions:
+                effective_dimensions = {key: row["effective_value"] for key, row in self._value_rows(tx, scope, subject).items()}
+            else:
+                effective_dimensions = {key: row["effective_value"] for key, row in existing_values.items()}
+            final_affinity = affinity if existing is None else (_compute_affinity(effective_dimensions) if effective_dimensions else affinity)
             tx.execute(
                 """INSERT INTO scoped_soul_relationships
                        (bot_id, session_id, visibility, subject_principal_id, affinity, state,
                         dimensions, revision, evidence, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(bot_id, session_id, visibility, subject_principal_id) DO UPDATE SET
-                       affinity=excluded.affinity, state=excluded.state,
-                       dimensions=excluded.dimensions, revision=excluded.revision,
-                       evidence=excluded.evidence, updated_at=excluded.updated_at""",
-                (*_scope_params(scope), subject, affinity, state or _state_for_affinity(affinity),
-                 encoded_dimensions, revision, encoded_evidence, now),
+                       affinity=excluded.affinity, state=excluded.state, dimensions=excluded.dimensions,
+                       revision=excluded.revision, evidence=excluded.evidence, updated_at=excluded.updated_at""",
+                (*_scope_params(scope), subject, final_affinity,
+                 state or _state_for_affinity(final_affinity), _json_mapping(effective_dimensions),
+                 revision, encoded_evidence, now),
             )
             return revision
 
@@ -300,64 +425,266 @@ class ScopedSoulRepository:
         subject = scope.subject_principal_id
         if subject is None:
             raise ScopedSoulScopeError("scope_subject_required")
-        if dimension not in _DIMENSION_RANGES:
-            raise ValueError(f"invalid relationship dimension: {dimension}")
-        reason = _exact_string(reason, "reason")
-        requested_delta = float(delta)
+        try:
+            normalized_event, dimension, reason, requested_delta = validate_event(event_type, dimension, reason, delta)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
         now = float(created_at or time.time())
 
         def persist(tx):
-            row = tx.execute(
-                """SELECT affinity, dimensions FROM scoped_soul_relationships
-                   WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?""",
-                (*_scope_params(scope), subject),
-            ).fetchone()
+            row = self._relationship_row(tx, scope, subject)
             before = int(row[0] or 0) if row else 0
-            dimensions = json.loads(row[1]) if row and row[1] else {}
-            for key in _DIMENSION_RANGES:
-                dimensions.setdefault(key, 0.0)
-            lo, hi = _DIMENSION_RANGES[dimension]
-            dimensions[dimension] = max(lo, min(hi, float(dimensions[dimension]) + requested_delta))
-            after = _compute_affinity(dimensions)
-            revision = self._next_revision(tx, scope, "relationship", subject, now)
-            cur = tx.execute(
-                """INSERT INTO scoped_soul_relationship_events
-                       (bot_id, session_id, visibility, subject_principal_id, event_type,
-                        dimension, delta, reason, source_episode_id, source_memory_id,
-                        revision, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (*_scope_params(scope), subject, str(event_type), dimension, requested_delta,
-                 reason, source_episode_id, source_memory_id, revision, now),
+            existing_values = self._ensure_formal_values(tx, scope, subject, now)
+            current = existing_values.get(dimension)
+            daily_row = tx.execute(
+                """SELECT COALESCE(SUM(delta), 0) FROM scoped_soul_relationship_events
+                    WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?
+                      AND dimension=? AND created_at>=?""",
+                (*_scope_params(scope), subject, dimension, now - 86400),
+            ).fetchone()
+            applied_delta = cap_automatic_delta(
+                dimension=dimension,
+                requested_delta=requested_delta,
+                daily_total=float(daily_row[0] or 0.0),
             )
-            event_id = int(getattr(cur, "lastrowid", 0) or 0)
-            evidence = [{"relationship_event_id": event_id}]
+            if current is None:
+                automatic = clamp_dimension(dimension, applied_delta)
+                adjustment = None
+                override = None
+            else:
+                automatic = clamp_dimension(dimension, current["automatic_value"] + applied_delta)
+                adjustment = current["manual_adjustment"]
+                override = current["manual_override"]
+            revision = self._next_revision(tx, scope, "relationship", subject, now)
+            tx.execute(
+                "UPDATE scoped_soul_relationship_values SET relationship_revision=? WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?",
+                (revision, *_scope_params(scope), subject),
+            )
+            evidence = [{"dimension": dimension, "value_layer": "automatic"}]
             if source_episode_id is not None:
                 evidence.append({"episode_id": source_episode_id})
             if source_memory_id is not None:
                 evidence.append({"memory_id": source_memory_id})
+            encoded_evidence = _json_evidence(evidence)
+            effective = self._effective_value(automatic, adjustment, override, dimension)
             tx.execute(
-                """INSERT INTO scoped_soul_relationships
-                       (bot_id, session_id, visibility, subject_principal_id, affinity, state,
-                        dimensions, revision, evidence, updated_at)
+                """INSERT INTO scoped_soul_relationship_values(
+                       bot_id, session_id, visibility, subject_principal_id, dimension,
+                       automatic_value, manual_adjustment, manual_override, effective_value,
+                       relationship_revision, evidence, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(bot_id, session_id, visibility, subject_principal_id, dimension)
+                   DO UPDATE SET automatic_value=excluded.automatic_value, effective_value=excluded.effective_value,
+                       relationship_revision=excluded.relationship_revision, evidence=excluded.evidence,
+                       updated_at=excluded.updated_at""",
+                (*_scope_params(scope), subject, dimension, automatic, adjustment, override, effective,
+                 revision, encoded_evidence, now),
+            )
+            values = self._value_rows(tx, scope, subject)
+            dimensions = {key: item["effective_value"] for key, item in values.items()}
+            after = _compute_affinity(dimensions)
+            cur = tx.execute(
+                """INSERT INTO scoped_soul_relationship_events(
+                       bot_id, session_id, visibility, subject_principal_id, event_type,
+                       dimension, delta, reason, source_episode_id, source_memory_id,
+                       revision, created_at, operation_id, evidence, value_layer)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'automatic')""",
+                (*_scope_params(scope), subject, normalized_event, dimension, applied_delta,
+                 reason, source_episode_id, source_memory_id, revision, now, encoded_evidence),
+            )
+            event_id = int(getattr(cur, "lastrowid", 0) or 0)
+            relationship_evidence = [{"relationship_event_id": event_id}, *evidence]
+            tx.execute(
+                """INSERT INTO scoped_soul_relationships(
+                       bot_id, session_id, visibility, subject_principal_id, affinity, state,
+                       dimensions, revision, evidence, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(bot_id, session_id, visibility, subject_principal_id) DO UPDATE SET
-                       affinity=excluded.affinity, state=excluded.state,
-                       dimensions=excluded.dimensions, revision=excluded.revision,
-                       evidence=excluded.evidence, updated_at=excluded.updated_at""",
+                       affinity=excluded.affinity, state=excluded.state, dimensions=excluded.dimensions,
+                       revision=excluded.revision, evidence=excluded.evidence, updated_at=excluded.updated_at""",
                 (*_scope_params(scope), subject, after, _state_for_affinity(after),
-                 _json_mapping(dimensions), revision, _json_evidence(evidence), now),
+                 _json_mapping(dimensions), revision, _json_evidence(relationship_evidence), now),
             )
             return {
                 "event_id": event_id,
                 "dimension": dimension,
                 "requested_delta": requested_delta,
-                "applied_delta": requested_delta,
+                "applied_delta": applied_delta,
                 "before_affinity": before,
                 "after_affinity": after,
                 "reason": reason,
+                "revision": revision,
+                "value_layer": "automatic",
             }
 
         return dict(self._write(persist, connection))
+
+    def calibrate_relationship(
+        self,
+        scope: RuntimeScope,
+        *,
+        subject_principal_id: str,
+        expected_revision: int,
+        action: str,
+        dimension: str,
+        delta: float | None = None,
+        value: float | None = None,
+        reason: str,
+        evidence: Sequence[Mapping[str, Any]],
+        operation_id: str,
+        created_at: float | None = None,
+        connection=None,
+    ) -> dict[str, Any]:
+        """Apply one manual layer transition inside an existing writer transaction."""
+        scope = _require_scope(scope)
+        subject = _exact_string(subject_principal_id, "subject_principal_id")
+        if scope.subject_principal_id is not None and scope.subject_principal_id != subject:
+            raise ScopedSoulScopeError("scope_subject_mismatch")
+        normalized_action = str(action or "").strip().lower()
+        if normalized_action not in {"adjust", "override", "clear_override", "restore_auto"}:
+            raise ValueError("relationship_action_invalid")
+        if dimension not in _DIMENSION_RANGES:
+            raise ValueError("relationship_dimension_unknown")
+        reason = _exact_string(reason, "reason")
+        if not isinstance(evidence, Sequence) or isinstance(evidence, (str, bytes)) or not evidence:
+            raise ValueError("relationship_evidence_required")
+        encoded_evidence = _json_evidence(evidence)
+        now = float(created_at or time.time())
+        expected_revision = int(expected_revision)
+
+        def persist(tx):
+            relationship = self._relationship_row(tx, scope, subject)
+            if relationship is None:
+                raise ScopedSoulScopeError("relationship_unknown")
+            current_revision = int(relationship[3] or 0)
+            if current_revision != expected_revision:
+                raise ScopedSoulScopeError("relationship_revision_conflict")
+            values = self._ensure_formal_values(tx, scope, subject, now)
+            current = values.get(dimension)
+            if current is None:
+                raise ScopedSoulScopeError("relationship_automatic_value_unavailable")
+            before = dict(current)
+            lo, hi = _DIMENSION_RANGES[dimension]
+            adjustment = current["manual_adjustment"]
+            override = current["manual_override"]
+            if normalized_action == "adjust":
+                if delta is None or isinstance(delta, bool):
+                    raise ValueError("relationship_delta_invalid")
+                applied_delta = cap_manual_adjustment_delta(delta)
+                adjustment = (adjustment or 0.0) + applied_delta
+                adjustment = max(-(hi - lo), min(hi - lo, adjustment))
+                if adjustment == 0.0:
+                    adjustment = None
+            elif normalized_action == "override":
+                if value is None or isinstance(value, bool) or not math.isfinite(float(value)):
+                    raise ValueError("relationship_value_invalid")
+                if float(value) < lo or float(value) > hi:
+                    raise ValueError("relationship_value_out_of_range")
+                override = float(value)
+            elif normalized_action == "clear_override":
+                if override is None:
+                    raise ScopedSoulScopeError("relationship_manual_layer_unavailable")
+                override = None
+            else:
+                adjustment = None
+                override = None
+            effective = self._effective_value(current["automatic_value"], adjustment, override, dimension)
+            revision = self._next_revision(tx, scope, "relationship", subject, now)
+            if revision != expected_revision + 1:
+                raise ScopedSoulScopeError("relationship_revision_conflict")
+            tx.execute(
+                "UPDATE scoped_soul_relationship_values SET relationship_revision=? WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?",
+                (revision, *_scope_params(scope), subject),
+            )
+            tx.execute(
+                """UPDATE scoped_soul_relationship_values
+                      SET manual_adjustment=?, manual_override=?, effective_value=?,
+                          relationship_revision=?, evidence=?, updated_at=?
+                    WHERE bot_id=? AND session_id=? AND visibility=?
+                      AND subject_principal_id=? AND dimension=?""",
+                (adjustment, override, effective, revision, encoded_evidence, now,
+                 *_scope_params(scope), subject, dimension),
+            )
+            values_after = self._value_rows(tx, scope, subject)
+            dimensions = {key: item["effective_value"] for key, item in values_after.items()}
+            affinity = _compute_affinity(dimensions)
+            relationship_evidence = [{"calibration_operation_id": operation_id}, *list(evidence)]
+            tx.execute(
+                """UPDATE scoped_soul_relationships
+                      SET affinity=?, state=?, dimensions=?, revision=?, evidence=?, updated_at=?
+                    WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?
+                      AND revision=?""",
+                (affinity, _state_for_affinity(affinity), _json_mapping(dimensions), revision,
+                 _json_evidence(relationship_evidence), now, *_scope_params(scope), subject, expected_revision),
+            )
+            after = dict(values_after[dimension])
+            return {
+                "subject_principal_id": subject,
+                "dimension": dimension,
+                "action": normalized_action,
+                "before": before,
+                "after": after,
+                "affinity": affinity,
+                "state": _state_for_affinity(affinity),
+                "revision": revision,
+                "evidence": list(evidence),
+            }
+
+        return dict(self._write(persist, connection))
+
+    def list_relationships(self, scope: RuntimeScope, *, subject_principal_id: str | None = None) -> list[dict[str, Any]]:
+        scope = _require_scope(scope)
+        subject = subject_principal_id or scope.subject_principal_id
+        params: list[Any] = [*_scope_params(scope)]
+        predicate = "bot_id=? AND session_id=? AND visibility=?"
+        if subject is not None:
+            subject = _exact_string(subject, "subject_principal_id")
+            if scope.subject_principal_id is not None and scope.subject_principal_id != subject:
+                raise ScopedSoulScopeError("scope_subject_mismatch")
+            predicate += " AND subject_principal_id=?"
+            params.append(subject)
+        rows = self.cm.execute_read(
+            f"""SELECT subject_principal_id, affinity, state, dimensions, revision, evidence, updated_at
+                   FROM scoped_soul_relationships WHERE {predicate}
+                  ORDER BY subject_principal_id""",
+            params,
+        ).fetchall()
+        result = []
+        for row in rows:
+            subject_id = str(row[0])
+            value_rows = self.cm.execute_read(
+                """SELECT dimension, automatic_value, manual_adjustment, manual_override,
+                          effective_value, relationship_revision, evidence, updated_at
+                     FROM scoped_soul_relationship_values
+                    WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?
+                    ORDER BY dimension""",
+                (*_scope_params(scope), subject_id),
+            ).fetchall()
+            values = {
+                str(item[0]): {
+                    "dimension": str(item[0]),
+                    "automatic_value": float(item[1]),
+                    "manual_adjustment": None if item[2] is None else float(item[2]),
+                    "manual_override": None if item[3] is None else float(item[3]),
+                    "effective_value": float(item[4]),
+                    "relationship_revision": int(item[5]),
+                    "evidence": json.loads(str(item[6] or "[]")),
+                    "updated_at": float(item[7]),
+                }
+                for item in value_rows
+            }
+            result.append({
+                "subject_principal_id": subject_id,
+                "affinity": int(row[1]),
+                "state": str(row[2]),
+                "dimensions": json.loads(str(row[3] or "{}")),
+                "revision": int(row[4]),
+                "evidence": json.loads(str(row[5] or "[]")),
+                "updated_at": float(row[6]),
+                "values": values,
+                "calibration": {"available": bool(values), "reason_code": None if values else "relationship_values_unknown"},
+            })
+        return result
 
     def get_state(
         self,
@@ -433,7 +760,8 @@ class ScopedSoulRepository:
         } for row in timeline_rows]
 
         relationship = {"affinity": None, "state": "unknown", "revision": None,
-                        "evidence": [], "people_ref": subject, "dimensions": None}
+                        "evidence": [], "people_ref": None, "dimensions": None,
+                        "values": None, "calibration": {"available": False, "reason_code": "relationship_unknown"}}
         if subject is not None:
             row = self.cm.execute_read(
                 """SELECT affinity, state, dimensions, revision, evidence, updated_at
@@ -442,10 +770,32 @@ class ScopedSoulRepository:
                 (*params, subject),
             ).fetchone()
             if row:
+                value_rows = self.cm.execute_read(
+                    """SELECT dimension, automatic_value, manual_adjustment, manual_override,
+                              effective_value, relationship_revision, evidence, updated_at
+                         FROM scoped_soul_relationship_values
+                        WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?
+                        ORDER BY dimension""",
+                    (*params, subject),
+                ).fetchall()
+                values = {
+                    str(item[0]): {
+                        "dimension": str(item[0]),
+                        "automatic_value": float(item[1]),
+                        "manual_adjustment": None if item[2] is None else float(item[2]),
+                        "manual_override": None if item[3] is None else float(item[3]),
+                        "effective_value": float(item[4]),
+                        "relationship_revision": int(item[5]),
+                        "evidence": json.loads(str(item[6] or "[]")),
+                        "updated_at": float(item[7]),
+                    }
+                    for item in value_rows
+                }
                 relationship = {
-                    "affinity": row[0], "state": row[1], "dimensions": json.loads(row[2]),
-                    "revision": row[3], "evidence": json.loads(row[4]),
-                    "updated_at": row[5], "people_ref": subject,
+                    "affinity": row[0], "state": row[1], "dimensions": json.loads(str(row[2] or "{}")),
+                    "revision": row[3], "evidence": json.loads(str(row[4] or "[]")),
+                    "updated_at": row[5], "people_ref": subject, "values": values,
+                    "calibration": {"available": bool(values), "reason_code": None if values else "relationship_values_unknown"},
                 }
 
         revision_params: list[Any] = list(params)
