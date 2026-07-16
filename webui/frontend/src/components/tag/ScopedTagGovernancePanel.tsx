@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 
 import { getScopeOptions, scopeOptionsFor } from '@/api/options'
 import {
+  compensateScopedTagSuggestion,
   createScopedTagSuggestion,
   getScopedTags,
   getScopedTagSuggestions,
@@ -33,6 +34,7 @@ export function ScopedTagGovernancePanel() {
   const scope = useMemo<ScopedGovernanceScope | null>(() => botId && sessionId ? { bot_id: botId, session_id: sessionId, visibility: 'group' } : null, [botId, sessionId])
   const [tags, setTags] = useState<ScopedTagItem[]>([])
   const [suggestions, setSuggestions] = useState<ScopedTagSuggestion[]>([])
+  const [approvedSuggestions, setApprovedSuggestions] = useState<ScopedTagSuggestion[]>([])
   const [loading, setLoading] = useState(false)
   const [action, setAction] = useState<GovernanceAction>('merge')
   const [selectedRefs, setSelectedRefs] = useState<string[]>([])
@@ -57,9 +59,14 @@ export function ScopedTagGovernancePanel() {
     if (!scope) return
     setLoading(true)
     try {
-      const [tagPayload, suggestionPayload] = await Promise.all([getScopedTags(scope), getScopedTagSuggestions(scope)])
+      const [tagPayload, suggestionPayload, approvedPayload] = await Promise.all([
+        getScopedTags(scope),
+        getScopedTagSuggestions(scope),
+        getScopedTagSuggestions(scope, 'approved'),
+      ])
       setTags(tagPayload.items)
       setSuggestions(suggestionPayload.items)
+      setApprovedSuggestions(approvedPayload.items)
       setPreviews({})
     } catch (failure) {
       toast.error(failure instanceof Error ? failure.message : 'scoped Tag 治理数据加载失败')
@@ -122,6 +129,22 @@ export function ScopedTagGovernancePanel() {
     }
   }
 
+  async function compensate(item: ScopedTagSuggestion) {
+    if (!scope) return
+    if (!reason.trim()) { toast.warning('请填写补偿理由'); return }
+    setBusy(true)
+    try {
+      await compensateScopedTagSuggestion(scope, { suggestion_ref: item.ref, revision: item.revision, reason: reason.trim() })
+      toast.success('治理补偿已提交并记录审计')
+      setReason('')
+      await load()
+    } catch (failure) {
+      toast.error(failure instanceof Error ? failure.message : '治理补偿失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function previewAll() {
     if (!scope || !suggestions.length) return
     setBusy(true)
@@ -170,6 +193,7 @@ export function ScopedTagGovernancePanel() {
         </div>
         <div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="font-medium">待审建议</h3><p className="text-xs text-muted-foreground" aria-live="polite">{suggestions.length} 条 pending suggestion · {Object.keys(previews).length} 条已预检</p></div><div className="flex flex-wrap gap-2"><Button type="button" size="sm" variant="outline" disabled={busy || !suggestions.length} onClick={() => void previewAll()}><EyeIcon data-icon="inline-start" />预检当前页</Button><Button type="button" size="sm" disabled={busy || !suggestions.length} onClick={() => void resolveAll('approve')}><CheckIcon data-icon="inline-start" />批量批准</Button><Button type="button" size="sm" variant="outline" disabled={busy || !suggestions.length} onClick={() => void resolveAll('reject')}>批量拒绝</Button><Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => void load()}><RefreshCwIcon data-icon="inline-start" />刷新</Button></div></div>
         {suggestions.length ? <div className="grid gap-3">{suggestions.map((item) => { const itemPreview = previews[item.ref]; return <article key={item.ref} className="flex min-w-0 flex-col gap-3 rounded-lg border p-3"><div className="flex flex-wrap items-center justify-between gap-2"><div className="flex flex-wrap items-center gap-2"><Badge variant={item.action === 'deactivate' ? 'destructive' : 'secondary'}>{actionLabels[item.action]}</Badge><span className="font-mono text-xs text-muted-foreground">revision {item.revision}</span></div><Badge variant="outline">{item.status}</Badge></div><p className="break-words text-sm">{item.reason}</p><div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-3"><span>影响记忆：{itemPreview ? itemPreview.preview.impact.memory_count : '未预检'}</span><span>关系边：{itemPreview ? itemPreview.preview.impact.relation_count : '未预检'}</span><span>目标 Tag：{item.target_name || item.target_tag_id || '当前选择'}</span><span className="break-words">相关 Tag：{itemPreview?.preview.impact.related_tags?.join('、') || '未预检'}</span><span>索引：{itemPreview?.preview.impact.index_refresh === 'outbox_pending' ? '待 outbox 刷新' : '未预检'}</span></div><div className="flex flex-wrap gap-2"><Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void preview(item)}><EyeIcon data-icon="inline-start" />预检</Button><Button type="button" size="sm" disabled={busy || !itemPreview} onClick={() => void resolve(item, 'approve')}><CheckIcon data-icon="inline-start" />批准并应用</Button><Button type="button" size="sm" variant="outline" disabled={busy || !itemPreview} onClick={() => void resolve(item, 'reject')}>拒绝</Button></div></article> })}</div> : <p className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">当前 Scope 没有待审 scoped 建议。</p>}
+        {approvedSuggestions.length ? <div className="flex flex-col gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4"><div><h3 className="font-medium">已批准治理操作</h3><p className="text-xs text-muted-foreground">补偿会创建新的审计 operation；不会删除原批准记录。服务端会在状态变化时拒绝部分恢复。</p></div>{approvedSuggestions.map((item) => <article key={`approved:${item.ref}`} className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-background p-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><Badge variant="secondary">{actionLabels[item.action]}</Badge><Badge variant="outline">approved</Badge><span className="font-mono text-xs text-muted-foreground">revision {item.revision}</span></div><p className="mt-1 break-words text-sm">{item.reason}</p></div><Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void compensate(item)}>申请补偿</Button></article>)}</div> : null}
       </> : null}
     </CardContent>
   </Card>

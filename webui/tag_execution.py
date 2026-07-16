@@ -7,8 +7,10 @@ from typing import Any
 
 try:
     from ..domain.scope import RuntimeScope
+    from ..engine.db.scoped_tag_projection import effective_tag_rows
 except ImportError:
     from domain.scope import RuntimeScope
+    from engine.db.scoped_tag_projection import effective_tag_rows
 
 TAG_WRITE_POLICIES = {"missing_only", "append", "replace"}
 
@@ -132,10 +134,11 @@ async def tag_memory_batch(
             continue
         if tag_write_policy == "missing_only":
             if write_gateway is not None:
-                has_tags = conn.execute(
-                    "SELECT 1 FROM scoped_memory_tags WHERE memory_id = ? LIMIT 1",
-                    (memory_id,),
-                ).fetchone() is not None
+                scope_payload = item.get("scope")
+                if not isinstance(scope_payload, dict):
+                    raise ValueError("runtime_scope_required_for_tag_extraction")
+                scope = RuntimeScope.from_dict(scope_payload)
+                has_tags = bool(effective_tag_rows(conn, scope=scope, memory_id=memory_id))
             else:
                 has_tags = _memory_has_tags(conn, memory_id)
             if has_tags:

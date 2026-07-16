@@ -7,7 +7,9 @@ from types import SimpleNamespace
 import pytest
 
 from domain.scope import RuntimeScope, SessionRef
+from engine.db.migrations.scoped_memory_tag_corrections import ensure_scoped_memory_tag_correction_schema_connection
 from engine.db.migrations.scoped_tag_governance import ensure_scoped_tag_governance_schema_connection
+from engine.db.migrations.scoped_tag_projection import ensure_scoped_tag_projection_schema_connection
 from engine.db.outbox_repo import OutboxRepository
 from services.tag_governance import TagGovernanceError, TagGovernanceGateway
 
@@ -73,6 +75,8 @@ def connection() -> sqlite3.Connection:
         """
     )
     ensure_scoped_tag_governance_schema_connection(conn)
+    ensure_scoped_memory_tag_correction_schema_connection(conn)
+    ensure_scoped_tag_projection_schema_connection(conn)
     s = scope()
     for name, tag_type in (("旧名称", "topic"), ("新名称", "topic"), ("第三标签", "keyword")):
         conn.execute(
@@ -138,6 +142,17 @@ async def test_scoped_tag_governance_preview_then_merge_is_audited_and_idempoten
         reason="人工确认同义合并",
     )
     assert repeated.operation_id == resolved.operation_id
+    compensated = await gateway.compensate(
+        scope=s,
+        suggestion_id=created.suggestion_id,
+        expected_revision=resolved.revision or 2,
+        reason="撤销同义合并",
+    )
+    assert compensated.status == "compensated"
+    assert conn.execute("SELECT COUNT(*) FROM scoped_tags").fetchone()[0] == 3
+    assert conn.execute("SELECT name FROM scoped_tags ORDER BY id").fetchall() == [("旧名称",), ("新名称",), ("第三标签",)]
+    assert conn.execute("SELECT COUNT(*) FROM scoped_memory_tags WHERE tag_id=?", (ids[0],)).fetchone()[0] == 1
+    assert conn.execute("SELECT event_type FROM domain_outbox WHERE operation_id=?", (compensated.operation_id,)).fetchone()[0] == "tag.governance.compensated"
 
 
 @pytest.mark.asyncio

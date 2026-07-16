@@ -12,9 +12,11 @@ from typing import Any, Mapping, Sequence
 try:
     from ..domain.scope import RuntimeScope, scope_to_dict
     from ..engine.db.outbox_repo import OutboxRepository
+    from ..engine.db.scoped_tag_projection import rebuild_scope_effective_tags
 except ImportError:  # pragma: no cover
     from domain.scope import RuntimeScope, scope_to_dict
     from engine.db.outbox_repo import OutboxRepository
+    from engine.db.scoped_tag_projection import rebuild_scope_effective_tags
 
 
 _ACTIONS = frozenset({"merge", "retype", "alias", "deactivate"})
@@ -90,6 +92,139 @@ def _normalize_action(action: Any) -> str:
     if value not in _ACTIONS:
         raise TagGovernanceError("invalid_tag_governance_action", "unsupported scoped Tag governance action")
     return value
+
+
+def _table_rows(connection, table: str, predicate: str, params: Sequence[Any]) -> list[dict[str, Any]]:
+    cursor = connection.execute(f"SELECT * FROM {table} WHERE {predicate}", tuple(params))
+    columns = [str(item[0]) for item in cursor.description or ()]
+    return [dict(zip(columns, tuple(row))) for row in cursor.fetchall()]
+
+
+def _tag_governance_snapshot(connection, *, scope: RuntimeScope, tag_ids: Sequence[int]) -> dict[str, list[dict[str, Any]]]:
+    bot_id, session_id, visibility = _scope_params(scope)
+    ids = tuple(sorted({int(value) for value in tag_ids}))
+    placeholders = ",".join("?" for _ in ids)
+    if not ids:
+        raise TagGovernanceError("tags_required")
+    return {
+        "scoped_tags": _table_rows(
+            connection,
+            "scoped_tags",
+            f"bot_id=? AND session_id=? AND visibility=? AND id IN ({placeholders})",
+            (bot_id, session_id, visibility, *ids),
+        ),
+        "scoped_memory_tags": _table_rows(
+            connection,
+            "scoped_memory_tags",
+            f"bot_id=? AND session_id=? AND visibility=? AND tag_id IN ({placeholders})",
+            (bot_id, session_id, visibility, *ids),
+        ),
+        "scoped_tag_relations": _table_rows(
+            connection,
+            "scoped_tag_relations",
+            f"bot_id=? AND session_id=? AND visibility=? AND (source_tag_id IN ({placeholders}) OR target_tag_id IN ({placeholders}))",
+            (bot_id, session_id, visibility, *ids, *ids),
+        ),
+    }
+
+
+def _store_tag_governance_snapshot(
+    connection,
+    *,
+    operation_id: str,
+    suggestion_id: str,
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+    now: float,
+) -> None:
+    sequence = 0
+    for entity_kind in ("scoped_tags", "scoped_memory_tags", "scoped_tag_relations"):
+        connection.execute(
+            """INSERT INTO scoped_tag_governance_changes(
+                   operation_id, suggestion_id, sequence, entity_kind, entity_key,
+                   before_json, after_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                operation_id,
+                suggestion_id,
+                sequence,
+                entity_kind,
+                f"{suggestion_id}:{entity_kind}",
+                _json(list(before.get(entity_kind) or ())),
+                _json(list(after.get(entity_kind) or ())),
+                now,
+            ),
+        )
+        sequence += 1
+
+
+def _snapshot_equal(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    return _json(left) == _json(right)
+
+
+def _load_tag_governance_snapshot(connection, *, operation_id: str, suggestion_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    rows = connection.execute(
+        """SELECT entity_kind, before_json, after_json
+             FROM scoped_tag_governance_changes
+            WHERE suggestion_id=?
+            ORDER BY created_at ASC, sequence ASC""",
+        (str(suggestion_id),),
+    ).fetchall()
+    if not rows:
+        raise TagGovernanceError("governance_snapshot_missing")
+    before: dict[str, Any] = {}
+    after: dict[str, Any] = {}
+    for row in rows:
+        try:
+            before[str(row[0])] = json.loads(str(row[1] or "[]"))
+            after[str(row[0])] = json.loads(str(row[2] or "[]"))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise TagGovernanceError("governance_snapshot_invalid") from exc
+    return before, after
+
+
+def _insert_snapshot_rows(connection, table: str, rows: Sequence[Mapping[str, Any]]) -> None:
+    if not rows:
+        return
+    columns = tuple(str(key) for key in rows[0])
+    placeholders = ",".join("?" for _ in columns)
+    column_sql = ",".join(columns)
+    for row in rows:
+        connection.execute(
+            f"INSERT INTO {table} ({column_sql}) VALUES ({placeholders})",
+            tuple(row.get(column) for column in columns),
+        )
+
+
+def _restore_tag_governance_snapshot(
+    connection,
+    *,
+    scope: RuntimeScope,
+    tag_ids: Sequence[int],
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> None:
+    current = _tag_governance_snapshot(connection, scope=scope, tag_ids=tag_ids)
+    if not _snapshot_equal(current, after):
+        raise TagGovernanceError("compensation_conflict", "governed Tag state changed after approval")
+    bot_id, session_id, visibility = _scope_params(scope)
+    ids = tuple(sorted({int(value) for value in tag_ids}))
+    placeholders = ",".join("?" for _ in ids)
+    connection.execute(
+        f"DELETE FROM scoped_tag_relations WHERE bot_id=? AND session_id=? AND visibility=? AND (source_tag_id IN ({placeholders}) OR target_tag_id IN ({placeholders}))",
+        (bot_id, session_id, visibility, *ids, *ids),
+    )
+    connection.execute(
+        f"DELETE FROM scoped_memory_tags WHERE bot_id=? AND session_id=? AND visibility=? AND tag_id IN ({placeholders})",
+        (bot_id, session_id, visibility, *ids),
+    )
+    connection.execute(
+        f"DELETE FROM scoped_tags WHERE bot_id=? AND session_id=? AND visibility=? AND id IN ({placeholders})",
+        (bot_id, session_id, visibility, *ids),
+    )
+    _insert_snapshot_rows(connection, "scoped_tags", list(before.get("scoped_tags") or ()))
+    _insert_snapshot_rows(connection, "scoped_memory_tags", list(before.get("scoped_memory_tags") or ()))
+    _insert_snapshot_rows(connection, "scoped_tag_relations", list(before.get("scoped_tag_relations") or ()))
 
 
 class TagGovernanceGateway:
@@ -198,7 +333,7 @@ class TagGovernanceGateway:
                     "target": {"id": normalized_target, "name": normalized_name, "type": normalized_type},
                     "removed_tag_ids": source_ids,
                 },
-                "impact": {"memory_count": memory_count, "relation_count": relation_count, "removed_tags": len(source_ids), "related_tag_ids": list(ids), "related_tags": [row["name"] for row in rows.values()], "index_refresh": "outbox_pending"},
+                "impact": {"memory_count": memory_count, "relation_count": relation_count, "removed_tags": len(source_ids), "removed_tag_ids": list(source_ids), "related_tag_ids": list(ids), "related_tags": [row["name"] for row in rows.values()], "index_refresh": "outbox_pending"},
             }
         target = normalized_target or ids[0]
         if target not in rows or len(ids) != 1:
@@ -528,7 +663,43 @@ class TagGovernanceGateway:
             impact = preview["impact"] if decision == "approve" else {}
             event_type = "tag.governance.rejected"
             if decision == "approve":
+                before_snapshot = _tag_governance_snapshot(
+                    connection,
+                    scope=scope,
+                    tag_ids=suggestion["tag_ids"],
+                )
                 impact = self._apply_preview(connection, scope=scope, suggestion=suggestion, preview=preview, now=now)
+                affected_memory_ids = {
+                    int(row["memory_id"])
+                    for row in before_snapshot.get("scoped_memory_tags", ())
+                    if row.get("memory_id") is not None
+                }
+                affected_memory_ids.update(
+                    int(row["memory_id"])
+                    for row in _tag_governance_snapshot(connection, scope=scope, tag_ids=suggestion["tag_ids"]).get("scoped_memory_tags", ())
+                    if row.get("memory_id") is not None
+                )
+                if affected_memory_ids:
+                    rebuild_scope_effective_tags(
+                        connection,
+                        scope=scope,
+                        memory_ids=affected_memory_ids,
+                        now=now,
+                    )
+                impact = {**impact, "projection_status": "ready"}
+                after_snapshot = _tag_governance_snapshot(
+                    connection,
+                    scope=scope,
+                    tag_ids=suggestion["tag_ids"],
+                )
+                _store_tag_governance_snapshot(
+                    connection,
+                    operation_id=operation_id,
+                    suggestion_id=suggestion_id,
+                    before=before_snapshot,
+                    after=after_snapshot,
+                    now=now,
+                )
                 event_type = f"tag.{suggestion['action']}"
             new_status = "approved" if decision == "approve" else "rejected"
             cursor = connection.execute(
@@ -544,6 +715,136 @@ class TagGovernanceGateway:
             return TagGovernanceResult(operation_id=operation_id, suggestion_id=suggestion_id, revision=int(expected_revision) + 1, status=new_status, impact=impact)
 
         return await self._commit(scope=scope, command_type=f"tags.governance.{decision}.v1", request_shape=request_shape, mutate=mutate)
+
+    async def compensate(
+        self,
+        *,
+        scope: RuntimeScope,
+        suggestion_id: str,
+        expected_revision: int,
+        reason: str,
+    ) -> TagGovernanceResult:
+        normalized_reason = str(reason or "").strip()
+        if not normalized_reason:
+            raise TagGovernanceError("reason_required")
+        suggestion_id = str(suggestion_id or "").strip()
+        if not suggestion_id:
+            raise TagGovernanceError("suggestion_required")
+        request_shape = {
+            "scope": scope_to_dict(scope),
+            "suggestion_id": suggestion_id,
+            "expected_revision": int(expected_revision),
+            "reason": normalized_reason,
+        }
+
+        def mutate(connection, operation_id, now):
+            row = self._suggestion_row(connection, scope=scope, suggestion_id=suggestion_id)
+            suggestion = self._suggestion_from_row(row)
+            if int(suggestion["revision"]) != int(expected_revision):
+                raise TagGovernanceError("suggestion_revision_conflict")
+            if suggestion["status"] != "approved":
+                raise TagGovernanceError("suggestion_not_compensable")
+            existing = connection.execute(
+                """SELECT status, operation_id FROM scoped_tag_governance_compensations
+                    WHERE suggestion_id=? ORDER BY created_at DESC LIMIT 1""",
+                (suggestion_id,),
+            ).fetchone()
+            if existing is not None and str(existing[0]) == "committed":
+                raise TagGovernanceError("suggestion_already_compensated")
+            before, after = _load_tag_governance_snapshot(
+                connection,
+                operation_id=suggestion["operation_id"],
+                suggestion_id=suggestion_id,
+            )
+            tag_ids = suggestion["tag_ids"]
+            compensation_id = f"tag-compensation:{uuid.uuid5(uuid.NAMESPACE_URL, operation_id).hex}"
+            try:
+                _restore_tag_governance_snapshot(
+                    connection,
+                    scope=scope,
+                    tag_ids=tag_ids,
+                    before=before,
+                    after=after,
+                )
+            except TagGovernanceError as exc:
+                if exc.code != "compensation_conflict":
+                    raise
+                connection.execute(
+                    """INSERT INTO scoped_tag_governance_compensations(
+                           compensation_id, operation_id, suggestion_id, bot_id, session_id,
+                           visibility, expected_revision, status, reason, created_at, resolved_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, 'conflict', ?, ?, ?)""",
+                    (compensation_id, operation_id, suggestion_id, *_scope_params(scope), int(expected_revision), normalized_reason, now, now),
+                )
+                self._event(
+                    connection,
+                    operation_id=operation_id,
+                    index=0,
+                    aggregate_kind="tag_audit_suggestion",
+                    aggregate_id=suggestion_id,
+                    version=int(expected_revision),
+                    event_type="tag.governance.compensation_conflict",
+                    payload={
+                        "suggestion_id": suggestion_id,
+                        "reason": normalized_reason,
+                        "scope": scope_to_dict(scope),
+                    },
+                    now=now,
+                )
+                return TagGovernanceResult(
+                    operation_id=operation_id,
+                    suggestion_id=suggestion_id,
+                    revision=int(expected_revision),
+                    status="conflict",
+                    impact={},
+                )
+            rebuild_scope_effective_tags(
+                connection,
+                scope=scope,
+                now=now,
+            )
+            connection.execute(
+                """INSERT INTO scoped_tag_governance_compensations(
+                       compensation_id, operation_id, suggestion_id, bot_id, session_id,
+                       visibility, expected_revision, status, reason, created_at, resolved_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'committed', ?, ?, ?)""",
+                (compensation_id, operation_id, suggestion_id, *_scope_params(scope), int(expected_revision), normalized_reason, now, now),
+            )
+            impact = {
+                "related_tag_ids": list(tag_ids),
+                "index_refresh": "outbox_pending",
+                "projection_status": "ready",
+            }
+            self._event(
+                connection,
+                operation_id=operation_id,
+                index=0,
+                aggregate_kind="tag_audit_suggestion",
+                aggregate_id=suggestion_id,
+                version=int(expected_revision) + 1,
+                event_type="tag.governance.compensated",
+                payload={
+                    "suggestion_id": suggestion_id,
+                    "reason": normalized_reason,
+                    "impact": impact,
+                    "scope": scope_to_dict(scope),
+                },
+                now=now,
+            )
+            return TagGovernanceResult(
+                operation_id=operation_id,
+                suggestion_id=suggestion_id,
+                revision=int(expected_revision) + 1,
+                status="compensated",
+                impact=impact,
+            )
+
+        return await self._commit(
+            scope=scope,
+            command_type="tags.governance.compensate.v1",
+            request_shape=request_shape,
+            mutate=mutate,
+        )
 
     async def resolve_batch(self, *, scope: RuntimeScope, items: Sequence[Mapping[str, Any]], decision: str, reason: str) -> TagGovernanceResult:
         decision = str(decision or "").strip().lower()
@@ -573,11 +874,30 @@ class TagGovernanceGateway:
                 if suggestion["expires_at"] is not None and suggestion["expires_at"] < now:
                     raise TagGovernanceError("batch_validation_failed", "one or more suggestions expired")
                 validated.append((suggestion, preview))
-            total_impact: dict[str, Any] = {"suggestions": len(validated), "memory_count": 0, "relation_count": 0, "removed_tags": 0, "related_tag_ids": [], "related_tags": [], "index_refresh": "outbox_pending"}
+            total_impact: dict[str, Any] = {"suggestions": len(validated), "memory_count": 0, "relation_count": 0, "removed_tags": 0, "removed_tag_ids": [], "related_tag_ids": [], "related_tags": [], "index_refresh": "outbox_pending"}
             for index, (suggestion, preview) in enumerate(validated):
+                before_snapshot = (
+                    _tag_governance_snapshot(connection, scope=scope, tag_ids=suggestion["tag_ids"])
+                    if decision == "approve" else None
+                )
                 impact = self._apply_preview(connection, scope=scope, suggestion=suggestion, preview=preview, now=now) if decision == "approve" else {}
+                if decision == "approve":
+                    after_snapshot = _tag_governance_snapshot(
+                        connection,
+                        scope=scope,
+                        tag_ids=suggestion["tag_ids"],
+                    )
+                    _store_tag_governance_snapshot(
+                        connection,
+                        operation_id=operation_id,
+                        suggestion_id=suggestion["suggestion_id"],
+                        before=before_snapshot or {},
+                        after=after_snapshot,
+                        now=now,
+                    )
                 for key in ("memory_count", "relation_count", "removed_tags"):
                     total_impact[key] += int(impact.get(key, 0))
+                total_impact["removed_tag_ids"].extend(int(value) for value in impact.get("removed_tag_ids", ()))
                 total_impact["related_tag_ids"].extend(int(value) for value in impact.get("related_tag_ids", ()))
                 total_impact["related_tags"].extend(str(value) for value in impact.get("related_tags", ()))
                 status = "approved" if decision == "approve" else "rejected"

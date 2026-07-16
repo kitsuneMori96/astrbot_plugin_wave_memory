@@ -179,7 +179,17 @@ def _resolve_ref(refs, value, *, kind: str, scope):
 
 
 def _governance_error(exc: TagGovernanceError):
-    status = 409 if exc.code in {"suggestion_revision_conflict", "suggestion_already_processed", "suggestion_expired", "preflight_token_invalid", "batch_validation_failed"} else 400
+    status = 409 if exc.code in {
+        "suggestion_revision_conflict",
+        "suggestion_already_processed",
+        "suggestion_expired",
+        "preflight_token_invalid",
+        "batch_validation_failed",
+        "compensation_conflict",
+        "suggestion_not_compensable",
+        "suggestion_already_compensated",
+        "governance_snapshot_missing",
+    } else 400
     return jsonify(error_payload(exc.code, str(exc))), status
 
 
@@ -284,6 +294,38 @@ async def resolve_scoped_governance_suggestion():
         binding = _resolve_ref(_object_refs(), body.get("suggestion_ref"), kind="tag_audit_suggestion", scope=scope)
         result = await gateway.resolve(scope=scope, suggestion_id=str(binding.locator), expected_revision=int(body.get("revision", binding.revision)), decision=body.get("decision"), preview_token=body.get("preflight_token"), reason=body.get("reason"))
         return jsonify(mutation_response(operation_kind="tags.governance.resolve", operation_id=result.operation_id, status="succeeded", revision=result.revision, item={"suggestion_id": result.suggestion_id, "status": result.status, "impact": result.impact}, include_item=True))
+    except TagGovernanceError as exc:
+        return _governance_error(exc)
+
+
+@tags_bp.route("/governance/suggestions/compensate", methods=["POST"])
+@require_auth
+async def compensate_scoped_governance_suggestion():
+    scope, failure = _require_governance_scope()
+    if failure:
+        return failure
+    c = get_container()
+    gateway = _governance_gateway(c)
+    if gateway is None:
+        return jsonify(error_payload("tag_governance_unavailable", "scoped Tag governance is unavailable")), 503
+    body = await request.get_json(silent=True) or {}
+    try:
+        binding = _resolve_ref(_object_refs(), body.get("suggestion_ref"), kind="tag_audit_suggestion", scope=scope)
+        result = await gateway.compensate(
+            scope=scope,
+            suggestion_id=str(binding.locator),
+            expected_revision=int(body.get("revision", binding.revision)),
+            reason=body.get("reason"),
+        )
+        status = "succeeded" if result.status == "compensated" else result.status
+        return jsonify(mutation_response(
+            operation_kind="tags.governance.compensate",
+            operation_id=result.operation_id,
+            status=status,
+            revision=result.revision,
+            item={"suggestion_id": result.suggestion_id, "status": result.status, "impact": result.impact},
+            include_item=True,
+        ))
     except TagGovernanceError as exc:
         return _governance_error(exc)
 

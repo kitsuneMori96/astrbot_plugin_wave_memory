@@ -97,6 +97,7 @@ export interface ScopedTagItem {
 
 export type GovernanceAction = 'merge' | 'retype' | 'alias' | 'deactivate'
 export type GovernanceSuggestionStatus = 'pending' | 'approved' | 'rejected' | 'conflict' | 'expired'
+export type GovernanceCompensationStatus = 'committed' | 'conflict'
 export interface ScopedTagSuggestion {
   suggestion_id: string
   operation_id: string
@@ -119,7 +120,7 @@ export interface ScopedTagSuggestion {
   ref: string
   object_ref?: ObjectRefDescriptor
 }
-export interface GovernanceImpact { memory_count: number; relation_count: number; removed_tags: number; related_tag_ids?: number[]; related_tags?: string[]; index_refresh?: string }
+export interface GovernanceImpact { memory_count: number; relation_count: number; removed_tags: number; removed_tag_ids?: number[]; related_tag_ids?: number[]; related_tags?: string[]; index_refresh?: string; projection_status?: string }
 export interface GovernancePreview { suggestion: ScopedTagSuggestion; preview: { action: GovernanceAction; tag_ids: number[]; target_tag_id?: number; target_name?: string | null; target_type?: string | null; aliases: string[]; before: Record<string, unknown>; after: Record<string, unknown>; impact: GovernanceImpact }; preflight_token: string; expires_at?: number | null }
 export interface GovernanceMutationResult { ok: boolean; operation: { kind: string; status: string; id?: string }; revision: number | null; item?: { suggestion_id?: string | null; status: string; impact: GovernanceImpact } }
 
@@ -220,4 +221,8 @@ export function resolveScopedTagSuggestion(scope: ScopedGovernanceScope, payload
 
 export function resolveScopedTagSuggestionBatch(scope: ScopedGovernanceScope, items: Array<{ suggestion_ref: string; revision: number; preflight_token: string }>, decision: 'approve' | 'reject', reason: string): Promise<GovernanceMutationResult> {
   return fetchJson(`/api/tags/governance/suggestions/resolve-batch?${governanceQuery(scope)}`, { method: 'POST', body: JSON.stringify({ items, decision, reason }) })
+}
+
+export function compensateScopedTagSuggestion(scope: ScopedGovernanceScope, payload: { suggestion_ref: string; revision: number; reason: string }): Promise<GovernanceMutationResult> {
+  return fetchJson(`/api/tags/governance/suggestions/compensate?${governanceQuery(scope)}`, { method: 'POST', body: JSON.stringify(payload) })
 }

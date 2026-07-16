@@ -38,6 +38,36 @@ CREATE INDEX IF NOT EXISTS idx_scoped_tag_audit_suggestions_scope_status
     ON scoped_tag_audit_suggestions (bot_id, session_id, visibility, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_scoped_tag_audit_suggestions_operation
     ON scoped_tag_audit_suggestions (operation_id);
+
+CREATE TABLE IF NOT EXISTS scoped_tag_governance_changes (
+    operation_id TEXT NOT NULL,
+    suggestion_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    entity_kind TEXT NOT NULL,
+    entity_key TEXT NOT NULL,
+    before_json TEXT NOT NULL,
+    after_json TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (operation_id, suggestion_id, sequence)
+);
+CREATE INDEX IF NOT EXISTS idx_scoped_tag_governance_changes_suggestion
+    ON scoped_tag_governance_changes (suggestion_id, operation_id);
+
+CREATE TABLE IF NOT EXISTS scoped_tag_governance_compensations (
+    compensation_id TEXT PRIMARY KEY,
+    operation_id TEXT NOT NULL UNIQUE,
+    suggestion_id TEXT NOT NULL,
+    bot_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    visibility TEXT NOT NULL CHECK (visibility = 'group'),
+    expected_revision INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('committed', 'conflict')),
+    reason TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    resolved_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_scoped_tag_governance_compensations_suggestion
+    ON scoped_tag_governance_compensations (suggestion_id, created_at DESC);
 """
 
 
