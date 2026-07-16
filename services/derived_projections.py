@@ -130,10 +130,33 @@ class TagIndexProjection:
         self.withheld_count = 0
 
     async def __call__(self, event: OutboxEvent) -> None:
-        if event.event_type == "memory.tags_applied":
-            self.withheld_count += len(event.payload.get("tag_ids") or ())
+        if event.event_type in {
+            "memory.tags_applied",
+            "memory.tags_corrected",
+            "memory.tags_correction_undone",
+        }:
+            self.withheld_count += len(event.payload.get("tag_ids") or event.payload.get("after_tags") or ())
             return
-        if event.aggregate_kind not in {"tag", "scoped_tag"}:
+        governance_event = (
+            event.aggregate_kind == "tag_audit_suggestion"
+            and event.event_type in {
+                "tag.merge",
+                "tag.deactivate",
+                "tag.governance.applied",
+                "tag.governance.compensated",
+            }
+        )
+        if event.aggregate_kind not in {"tag", "scoped_tag"} and not governance_event:
+            return
+        if governance_event:
+            impact = event.payload.get("impact") if isinstance(event.payload, dict) else {}
+            removed = impact.get("removed_tag_ids") if isinstance(impact, dict) else ()
+            if removed:
+                async with self._lock:
+                    await asyncio.to_thread(self.index.mark_deleted, [int(value) for value in removed])
+                    self._dirty = True
+            else:
+                self.withheld_count += len(impact.get("related_tag_ids") or ()) if isinstance(impact, dict) else 1
             return
         tag_id = int(event.payload.get("tag_id") or event.aggregate_id)
         async with self._lock:
@@ -174,11 +197,17 @@ class CooccurrenceProjection:
     async def __call__(self, event: OutboxEvent) -> None:
         if event.event_type not in {
             "memory.tags_applied",
+            "memory.tags_corrected",
+            "memory.tags_correction_undone",
             "memory.deleted",
             "memory.archived",
             "memory.evicted",
             "tag.deleted",
             "tag.merged",
+            "tag.merge",
+            "tag.deactivate",
+            "tag.governance.applied",
+            "tag.governance.compensated",
         }:
             return
         async with self._lock:

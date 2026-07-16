@@ -8,9 +8,14 @@ from collections import defaultdict
 from itertools import groupby
 from typing import Optional
 
-from astrbot.api import logger
+try:
+    from astrbot.api import logger
+except ImportError:  # pragma: no cover - focused repository tests without AstrBot
+    import logging
+    logger = logging.getLogger(__name__)
 
 from .database import WaveMemoryDB
+from .db.scoped_tag_projection import effective_tag_rows
 from .semantic_gain import bell_gain, SemanticGainConfig
 
 
@@ -49,20 +54,27 @@ class DirectedCooccurrence:
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='scoped_memory_tags'"
         ).fetchone()
         if has_scoped:
-            rows = self.db.conn.execute(
-                """SELECT smt.memory_id, smt.tag_id, smt.position
-                     FROM scoped_memory_tags smt
-                     JOIN memories m
-                       ON m.id=smt.memory_id AND m.bot_id=smt.bot_id
-                      AND m.session_id=smt.session_id AND m.visibility=smt.visibility
-                    WHERE m.resolution_state='resolved' AND COALESCE(m.quarantine, 0)=0
-                      AND COALESCE(m.memory_type, 'message') NOT IN ('archived','evicted','deleted')
-                    ORDER BY smt.memory_id, smt.position"""
-            ).fetchall()
+            effective_rows = effective_tag_rows(self.db.conn)
+            rows = [
+                (
+                    row["bot_id"],
+                    row["session_id"],
+                    row["visibility"],
+                    int(row["memory_id"]),
+                    int(row["tag_id"]),
+                    int(row["position"]),
+                )
+                for row in effective_rows
+                if row["tag_id"] is not None
+            ]
+            rows.sort(key=lambda row: (row[0], row[1], row[2], row[3], row[5], row[4]))
         else:
-            rows = self.db.conn.execute(
-                "SELECT memory_id, tag_id, position FROM memory_tags ORDER BY memory_id, position"
-            ).fetchall()
+            rows = [
+                (None, None, None, int(row[0]), int(row[1]), int(row[2]))
+                for row in self.db.conn.execute(
+                    "SELECT memory_id, tag_id, position FROM memory_tags ORDER BY memory_id, position"
+                ).fetchall()
+            ]
 
         if not rows:
             self.forward = new_forward
@@ -71,9 +83,10 @@ class DirectedCooccurrence:
             logger.info("[WaveMemory] DirectedCooccurrence: no data")
             return
 
-        # 按 memory_id 分组
-        for mem_id, group in groupby(rows, key=lambda r: r[0]):
-            tags = [(r[1], r[2]) for r in group]
+        # 按完整 Scope + memory_id 分组，避免不同 Scope 的同号对象混合。
+        for memory_key, group in groupby(rows, key=lambda r: (r[0], r[1], r[2], r[3])):
+            del memory_key
+            tags = [(r[4], r[5]) for r in group]
             if len(tags) < 2:
                 continue
 
