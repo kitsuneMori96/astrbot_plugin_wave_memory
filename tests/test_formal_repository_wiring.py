@@ -155,6 +155,8 @@ def test_coordinator_writer_and_fewshot_service_share_formal_repository_with_sco
             candidate={"id": 41, "content": "先核实事实，再简短回应。"},
             evidence_refs=(ref,),
             evidence_bindings=(binding,),
+            source_tags=({"tag_id": 1, "name": "事实"},),
+            query_trace_id="trace:formal-1",
             content="先核实事实，再简短回应。",
             score=0.9,
             traits=("克制",),
