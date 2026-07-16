@@ -4,23 +4,25 @@ import { AlertCircleIcon, CheckCircle2Icon, FileEditIcon, Loader2Icon, RefreshCw
 import { toast } from 'sonner'
 
 import {
-  addMemoryTag,
   batchDeleteMemories,
+  correctMemoryTags,
   deleteMemory,
-  deleteMemoryTag,
   getMemoryDetail,
+  getMemoryTagState,
   getSimilarMemories,
   listLegacyMemories,
   listMemories,
   memoryBatchStreamUrl,
   reEmbedMemory,
   runPostStream,
+  undoMemoryTagCorrection,
   updateMemory,
   type LegacyMemoriesResponse,
   type MemoryDetail,
   type MemoryItem,
   type MemoryRefInput,
   type MemoryScope,
+  type MemoryTagState,
   type SimilarMemoryItem,
   type StreamProgress,
 } from '@/api/memories'
@@ -119,6 +121,8 @@ export function MemoriesPage() {
   const [similarLoading, setSimilarLoading] = useState(false)
   const [similarItems, setSimilarItems] = useState<SimilarMemoryItem[]>([])
   const [newTagName, setNewTagName] = useState('')
+  const [tagReason, setTagReason] = useState('')
+  const [tagState, setTagState] = useState<MemoryTagState | null>(null)
   const resolvedRef = useRef('')
   const detailRequest = useRef(0)
   const listRequest = useRef(0)
@@ -183,6 +187,8 @@ export function MemoriesPage() {
     setDetail(null)
     setContent('')
     setSimilarItems([])
+    setTagState(null)
+    setTagReason('')
     setDetailLoading(true)
     setSimilarLoading(true)
     try {
@@ -193,6 +199,12 @@ export function MemoriesPage() {
       setContent(result.item.content)
       setImportance(Number(result.item.importance ?? 0))
       setDeepLinkStatus('ready')
+      try {
+        const tags = await getMemoryTagState(result.item)
+        if (request === detailRequest.current) setTagState(tags.item)
+      } catch {
+        if (request === detailRequest.current) setTagState(null)
+      }
       try {
         const similar = await getSimilarMemories(result.item)
         if (request === detailRequest.current) setSimilarItems(similar.items ?? [])
@@ -253,6 +265,8 @@ export function MemoriesPage() {
     setDetailLoading(false)
     setSimilarLoading(false)
     setSimilarItems([])
+    setTagState(null)
+    setTagReason('')
     resolvedRef.current = ''
     setParams((current) => {
       const next = new URLSearchParams(current)
@@ -371,30 +385,56 @@ export function MemoriesPage() {
     }
   }
 
-  async function addTag(event: FormEvent) {
-    event.preventDefault()
+  async function applyTagCorrection(operation: 'add' | 'remove', name: string) {
     if (!detail) return
-    const name = newTagName.trim()
-    if (!name) return
-    if ((detail.tags ?? []).some((tag) => tag.name.toLowerCase() === name.toLowerCase())) { toast.warning('该标签已关联'); return }
+    const reason = tagReason.trim()
+    if (!reason) { toast.warning('请先填写校准理由'); return }
+    setSaving(true)
     try {
-      await addMemoryTag(detail, name)
-      setDetail({ ...detail, tags: [...(detail.tags ?? []), { name, type: 'custom' }] })
+      const result = await correctMemoryTags(detail, operation, [name], reason)
+      if (!result.ok || result.operation.status !== 'succeeded' || !result.item) throw new Error('服务端未确认 Tag 校准成功')
+      setDetail({ ...detail, ...result.item.memory })
+      setTagState(result.item.tags)
+      resolvedRef.current = result.item.memory.ref
+      setParams((current) => {
+        const next = new URLSearchParams(current)
+        next.set('ref', result.item!.memory.ref)
+        next.set('object_id', String(result.item!.memory.id))
+        return next
+      })
       setNewTagName('')
-      toast.success(`已关联标签“${name}”`)
-    } catch (reason) {
-      toast.error(reason instanceof Error ? reason.message : '标签关联失败')
+      setTagReason('')
+      toast.success(operation === 'add' ? `已人工纳入 Tag“${name}”` : `已人工排除 Tag“${name}”`)
+    } catch (failure) {
+      toast.error(failure instanceof Error ? failure.message : 'Tag 校准失败')
+    } finally {
+      setSaving(false)
     }
   }
 
-  async function removeTag(name: string) {
-    if (!detail) return
+  async function undoTagCorrection() {
+    if (!detail || !tagState?.manual) return
+    const reason = tagReason.trim()
+    if (!reason) { toast.warning('请先填写撤销理由'); return }
+    setSaving(true)
     try {
-      await deleteMemoryTag(detail, name)
-      setDetail({ ...detail, tags: (detail.tags ?? []).filter((tag) => tag.name !== name) })
-      toast.success(`已移除标签“${name}”`)
-    } catch (reason) {
-      toast.error(reason instanceof Error ? reason.message : '标签移除失败')
+      const result = await undoMemoryTagCorrection(detail, tagState.manual.ref, reason)
+      if (!result.ok || result.operation.status !== 'succeeded' || !result.item) throw new Error('服务端未确认撤销成功')
+      setDetail({ ...detail, ...result.item.memory })
+      setTagState(result.item.tags)
+      resolvedRef.current = result.item.memory.ref
+      setParams((current) => {
+        const next = new URLSearchParams(current)
+        next.set('ref', result.item!.memory.ref)
+        next.set('object_id', String(result.item!.memory.id))
+        return next
+      })
+      setTagReason('')
+      toast.success('已撤销当前人工 Tag 校准')
+    } catch (failure) {
+      toast.error(failure instanceof Error ? failure.message : '撤销 Tag 校准失败')
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -549,13 +589,13 @@ export function MemoriesPage() {
       </Card>
 
       <Sheet open={detailOpen} onOpenChange={(openValue) => { if (!openValue) closeDetail() }}>
-        <SheetContent className="w-full gap-0 sm:max-w-2xl">
+        <SheetContent className="w-full gap-0 overflow-hidden sm:max-w-2xl">
           <SheetHeader className="border-b pr-12"><SheetTitle>记忆明细</SheetTitle><SheetDescription>{detail ? `${detail.bot_id} · ${detail.session_id} · revision ${detail.version}` : '正在按 ObjectRef 读取'}</SheetDescription></SheetHeader>
           <ScrollArea className="flex-1"><div className="flex flex-col gap-5 p-4">
             {detailLoading ? <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2Icon className="animate-spin" />正在加载详情与相似记忆</div> : detail ? <>
               <Field><FieldLabel htmlFor="memory-content">内容</FieldLabel><Textarea id="memory-content" className="min-h-36" value={content} onChange={(event) => setContent(event.target.value)} /><FieldDescription>保存会推进 revision，并回读新的 ObjectRef。</FieldDescription></Field>
               <div className="grid gap-3 rounded-lg border bg-muted/20 p-3 text-xs sm:grid-cols-2"><div><span className="text-muted-foreground">发送者：</span>{detail.sender_name ?? detail.sender_id}</div><div><span className="text-muted-foreground">来源：</span>{detail.source ?? '未记录'}</div><div><span className="text-muted-foreground">重要度：</span><Input type="number" min="0" max="1" step="0.01" className="ml-2 inline-flex h-8 w-24" value={importance} onChange={(event) => setImportance(Number(event.target.value))} /></div><div><span className="text-muted-foreground">向量：</span><Badge variant={detail.has_vector ? 'secondary' : 'destructive'}>{detail.has_vector ? '已入库' : '缺失'}</Badge></div><div><span className="text-muted-foreground">创建时间：</span>{formatTime(detail.timestamp)}</div><div><span className="text-muted-foreground">访问次数：</span>{detail.access_count ?? '未记录'}</div></div>
-              <Field><FieldLabel>关联标签 (Tags)</FieldLabel><div className="flex flex-col gap-3 rounded-lg border bg-muted/10 p-3">{detail.tags === undefined ? <Alert><AlertCircleIcon /><AlertTitle>已有标签清单 unavailable</AlertTitle><AlertDescription>当前 scoped 详情契约未返回已有标签；这里不会伪装为空。仍可安全新增标签，本次页面已确认的标签会显示在下方。</AlertDescription></Alert> : null}<div className="flex min-h-7 flex-wrap gap-1.5">{(detail.tags ?? []).map((tag, index) => <Badge key={`${tag.name}-${index}`} className={`${tagBadgeClass(tag.type)} flex items-center gap-1 pr-1`}>{tag.name}<button type="button" className="rounded px-1 hover:bg-foreground/10" aria-label={`移除标签 ${tag.name}`} onClick={() => setConfirmAction({ title: `移除标签“${tag.name}”？`, description: '仅移除当前 ObjectRef 与该标签的关联，不删除标签字典项。', label: '确认移除', destructive: true, run: () => removeTag(tag.name) })}>×</button></Badge>)}</div><form className="flex gap-2" onSubmit={addTag}><Input className="h-8 max-w-xs text-xs" placeholder="输入自定义标签" value={newTagName} onChange={(event) => setNewTagName(event.target.value)} /><Button type="submit" size="sm">关联</Button></form></div></Field>
+              <Field><FieldLabel>Tag 精确校准</FieldLabel><div className="flex flex-col gap-3 rounded-lg border bg-muted/10 p-3">{tagState ? <><div className="flex flex-col gap-2"><span className="text-xs text-muted-foreground">自动基线</span><div className="flex min-h-7 flex-wrap gap-1.5">{tagState.automatic.length ? tagState.automatic.map((tag, index) => <Badge key={`automatic-${tag.name}-${index}`} variant="outline" className={tagBadgeClass(tag.tag_type ?? tag.type)}>{tag.name}</Badge>) : <span className="text-xs text-muted-foreground">无自动 Tag</span>}</div></div><div className="flex flex-col gap-2"><span className="text-xs text-muted-foreground">当前 effective</span><div className="flex min-h-7 flex-wrap gap-1.5">{tagState.effective.map((tag, index) => <Badge key={`effective-${tag.name}-${index}`} className={`${tagBadgeClass(tag.tag_type ?? tag.type)} flex items-center gap-1 pr-1`}>{tag.name}<Button type="button" variant="ghost" size="icon-xs" className="size-8" aria-label={`人工排除 Tag ${tag.name}`} onClick={() => setConfirmAction({ title: `人工排除 Tag“${tag.name}”？`, description: '自动基线会保留，本次变更将作为有理由、可撤销的 scoped 人工校准。', label: '确认排除', destructive: true, run: () => applyTagCorrection('remove', tag.name) })}>×</Button></Badge>)}</div></div>{tagState.manual ? <Alert><TagIcon /><AlertTitle>人工校准生效中</AlertTitle><AlertDescription>{tagState.manual.reason} · revision {tagState.manual.revision}</AlertDescription></Alert> : null}</> : <Alert><AlertCircleIcon /><AlertTitle>Tag 状态 unavailable</AlertTitle><AlertDescription>未能读取 automatic/manual/effective 投影，页面不会把未知状态伪装为空。</AlertDescription></Alert>}<Field><FieldLabel htmlFor="memory-tag-reason">校准理由</FieldLabel><Textarea id="memory-tag-reason" name="memory-tag-reason" autoComplete="off" maxLength={1000} value={tagReason} onChange={(event) => setTagReason(event.target.value)} placeholder="例如：自动提取遗漏了本条记忆的核心主题…" /></Field><div className="flex flex-col gap-2 sm:flex-row sm:items-end"><Field className="min-w-0 flex-1"><FieldLabel htmlFor="memory-tag-name">人工纳入 Tag</FieldLabel><Input id="memory-tag-name" name="memory-tag-name" autoComplete="off" maxLength={200} className="w-full text-xs" placeholder="例如：项目决策…" value={newTagName} onChange={(event) => setNewTagName(event.target.value)} /></Field><Button type="button" size="sm" disabled={saving || !newTagName.trim()} onClick={() => void applyTagCorrection('add', newTagName.trim())}>人工纳入</Button>{tagState?.manual ? <Button type="button" size="sm" variant="outline" disabled={saving} onClick={() => setConfirmAction({ title: '撤销当前 Tag 人工校准？', description: '将恢复上一层人工校准；若不存在上一层，则恢复自动基线。', label: '确认撤销', run: undoTagCorrection })}>撤销校准</Button> : null}</div></div></Field>
               <Card className="border-primary/20 bg-primary/5"><CardHeader className="py-3"><CardTitle className="text-sm">相似记忆</CardTitle><CardDescription>由当前 ObjectRef 对应向量查询；结果未签发新 ObjectRef，因此仅只读展示，不使用裸 ID 穿透。</CardDescription></CardHeader><CardContent className="flex flex-col gap-2 pt-0">{similarLoading ? <div className="flex items-center gap-2 text-xs text-muted-foreground"><Loader2Icon className="animate-spin" />计算中</div> : similarItems.length ? similarItems.map((item) => <div key={item.id} className="rounded-lg border bg-background/50 p-2.5"><div className="flex justify-between gap-2 text-[10px] font-mono text-muted-foreground"><span>#{item.id} · {item.source || '未记录'}</span><span className="font-semibold text-primary">相似度 {item.similarity}%</span></div><p className="mt-1 line-clamp-2 text-xs leading-relaxed">{item.content}</p></div>) : <p className="py-3 text-center text-xs text-muted-foreground">未找到相似记录，或当前记忆没有可用向量。</p>}</CardContent></Card>
               <div className="flex flex-wrap gap-2 border-t pt-4"><Button disabled={saving} onClick={() => void saveDetail()}>{saving ? <Loader2Icon className="animate-spin" /> : <SaveIcon />}保存并回读 revision</Button><Button disabled={saving} variant="outline" onClick={() => setConfirmAction({ title: '重新向量化当前记忆？', description: '将重算向量并触发索引修复，不修改正文 revision。', label: '确认 re-embed', run: reEmbedDetail })}><RefreshCwIcon />re-embed</Button><Button disabled={saving} variant="destructive" className="ml-auto" onClick={() => setConfirmAction({ title: `永久删除记忆 #${detail.id}？`, description: '将按当前 ObjectRef 删除记忆，操作不可撤销。', label: '确认删除', destructive: true, run: removeDetail })}><Trash2Icon />删除当前 ObjectRef</Button></div>
             </> : <Alert variant="destructive"><AlertTitle>详情 unavailable</AlertTitle><AlertDescription>无法读取当前 ObjectRef。</AlertDescription></Alert>}

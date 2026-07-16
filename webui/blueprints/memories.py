@@ -33,10 +33,18 @@ from ..tag_execution import normalize_tag_execution_options
 
 try:
     from ...engine.db.memory_repo import MemoryRevisionConflict
-    from ...services.memory_mutations import MemoryMutationGateway, MemoryMutationTarget
+    from ...services.memory_mutations import (
+        MemoryMutationGateway,
+        MemoryMutationTarget,
+        read_memory_tag_state,
+    )
 except ImportError:  # pragma: no cover - focused tests import top-level packages
     from engine.db.memory_repo import MemoryRevisionConflict
-    from services.memory_mutations import MemoryMutationGateway, MemoryMutationTarget
+    from services.memory_mutations import (
+        MemoryMutationGateway,
+        MemoryMutationTarget,
+        read_memory_tag_state,
+    )
 
 memories_bp = Blueprint("memories", __name__, url_prefix="/api")
 
@@ -1264,10 +1272,43 @@ async def get_similar_memories(memory_id: int):
     return jsonify({"items": items})
 
 
-@memories_bp.route("/memories/<int:memory_id>/tags", methods=["POST"])
+def _memory_tag_state_payload(conn, *, scope, memory_id: int) -> dict:
+    state = read_memory_tag_state(conn, scope=scope, memory_id=memory_id)
+    manual = state.get("manual")
+    refs = _api_composition().get("object_refs")
+    if isinstance(manual, dict) and refs is not None:
+        correction_ref = refs.issue(
+            kind="memory_tag_correction",
+            locator=manual["correction_id"],
+            scope=scope,
+            revision=int(manual["revision"]),
+        )
+        manual["ref"] = correction_ref
+        manual["object_ref"] = {
+            "ref": correction_ref,
+            "kind": "memory_tag_correction",
+            "locator": manual["correction_id"],
+            "scope_key": scope.session.id if scope.session else scope.bot_id,
+            "version": int(manual["revision"]),
+        }
+    return state
+
+
+@memories_bp.route("/memories/<int:memory_id>/tags", methods=["GET"])
 @require_auth
-async def add_memory_tag(memory_id: int):
-    """手动往单条记忆绑定一个标签。若该标签不存在，则在 tags 字典表一秒自动建标。"""
+async def get_memory_tag_state(memory_id: int):
+    c = get_container()
+    if not request.args.get("ref"):
+        return jsonify(error_payload("object_ref_required", "Object reference is required")), 400
+    binding, item = _resolve_memory_ref(c.db.conn, memory_id)
+    if binding is None or item is None:
+        return jsonify(not_found_payload()), 404
+    return jsonify({"item": _memory_tag_state_payload(c.db.conn, scope=binding.scope, memory_id=memory_id)})
+
+
+@memories_bp.route("/memories/<int:memory_id>/tags/correction", methods=["POST"])
+@require_auth
+async def correct_memory_tags(memory_id: int):
     c = get_container()
     if not request.args.get("ref"):
         return jsonify(error_payload("object_ref_required", "Object reference is required")), 400
@@ -1275,55 +1316,89 @@ async def add_memory_tag(memory_id: int):
     if binding is None or item is None:
         return jsonify(not_found_payload()), 404
     body = await request.get_json(silent=True) or {}
-    tag_name = str(body.get("tag_name") or "").strip()
-    if not tag_name:
-        return jsonify({"error": "tag_name required"}), 400
+    try:
+        result = await _memory_mutation_gateway(c).correct_memory_tags(
+            scope=binding.scope,
+            target=MemoryMutationTarget(memory_id=memory_id, revision=int(binding.revision)),
+            operation=body.get("operation"),
+            tags=body.get("tags") if isinstance(body.get("tags"), list) else (),
+            reason=body.get("reason"),
+        )
+    except ValueError as exc:
+        return jsonify(error_payload("invalid_memory_tag_correction", str(exc))), 400
+    except MemoryRevisionConflict:
+        return jsonify(not_found_payload()), 404
+    refreshed = _memory_row(c.db.conn, memory_id)
+    if refreshed is None:
+        return jsonify(not_found_payload()), 404
+    state = _memory_tag_state_payload(c.db.conn, scope=binding.scope, memory_id=memory_id)
+    return jsonify(mutation_response(
+        operation_kind="memory.tags.correct",
+        operation_id=result.operation_id,
+        status="succeeded",
+        revision=result.revision,
+        item={"memory": _memory_ref_item(refreshed), "tags": state},
+        include_item=True,
+    ))
 
-    # 1. 查找或在 tags 中插入新标签
-    tag_row = c.db.conn.execute("SELECT id FROM tags WHERE name=?", (tag_name,)).fetchone()
-    if tag_row:
-        tag_id = tag_row[0]
-    else:
-        cursor = c.db.conn.execute("INSERT INTO tags (name, category) VALUES (?, 'custom')", (tag_name,))
-        tag_id = cursor.lastrowid
 
-    # 2. 在 memory_tags 中做主键幂等绑定
-    c.db.conn.execute(
-        "INSERT OR IGNORE INTO memory_tags (memory_id, tag_id, relevance) VALUES (?, ?, 1.0)",
-        (memory_id, tag_id)
-    )
-    c.db.conn.commit()
-    return jsonify({"ok": True})
-
-
-@memories_bp.route("/memories/<int:memory_id>/tags/<tag_name>", methods=["DELETE"])
+@memories_bp.route("/memories/<int:memory_id>/tags/correction/undo", methods=["POST"])
 @require_auth
-async def delete_memory_tag(memory_id: int, tag_name: str):
-    """物理移除单条记忆与指定标签的关联关系。"""
+async def undo_memory_tag_correction(memory_id: int):
     c = get_container()
-    if not request.args.get("ref"):
-        return jsonify(error_payload("object_ref_required", "Object reference is required")), 400
-    binding, item = _resolve_memory_ref(c.db.conn, memory_id)
+    memory_ref = request.args.get("ref")
+    if not memory_ref:
+        return jsonify(error_payload("object_ref_required", "Memory object reference is required")), 400
+    binding, item = _resolve_memory_ref(c.db.conn, memory_id, ref=memory_ref)
     if binding is None or item is None:
         return jsonify(not_found_payload()), 404
-    tag_name = str(tag_name).strip()
-    if not tag_name:
-        return jsonify({"error": "tag_name required"}), 400
+    body = await request.get_json(silent=True) or {}
+    correction_ref = body.get("correction_ref")
+    refs = _api_composition().get("object_refs")
+    correction_binding, _correction_state = refs.resolve_with_state(
+        correction_ref,
+        kind="memory_tag_correction",
+        request_scope=binding.scope,
+    ) if refs is not None else (None, "not-found")
+    if correction_binding is None:
+        return jsonify(not_found_payload()), 404
+    try:
+        result = await _memory_mutation_gateway(c).undo_memory_tag_correction(
+            scope=binding.scope,
+            target=MemoryMutationTarget(memory_id=memory_id, revision=int(binding.revision)),
+            correction_id=str(correction_binding.locator),
+            correction_revision=int(correction_binding.revision),
+            reason=body.get("reason"),
+        )
+    except ValueError as exc:
+        return jsonify(error_payload("invalid_memory_tag_correction_undo", str(exc))), 400
+    except MemoryRevisionConflict:
+        return jsonify(not_found_payload()), 404
+    refreshed = _memory_row(c.db.conn, memory_id)
+    if refreshed is None:
+        return jsonify(not_found_payload()), 404
+    state = _memory_tag_state_payload(c.db.conn, scope=binding.scope, memory_id=memory_id)
+    return jsonify(mutation_response(
+        operation_kind="memory.tags.undo",
+        operation_id=result.operation_id,
+        status="succeeded",
+        revision=result.revision,
+        item={"memory": _memory_ref_item(refreshed), "tags": state},
+        include_item=True,
+    ))
 
-    # 1. 查询对应 tag_id
-    tag_row = c.db.conn.execute("SELECT id FROM tags WHERE name=?", (tag_name,)).fetchone()
-    if not tag_row:
-        return jsonify({"ok": True, "message": "tag not associated"})
 
-    tag_id = tag_row[0]
-
-    # 2. 移除绑定
-    c.db.conn.execute(
-        "DELETE FROM memory_tags WHERE memory_id=? AND tag_id=?",
-        (memory_id, tag_id)
-    )
-    c.db.conn.commit()
-    return jsonify({"ok": True})
+@memories_bp.route("/memories/<int:memory_id>/tags", methods=["POST"])
+@memories_bp.route("/memories/<int:memory_id>/tags/<tag_name>", methods=["DELETE"])
+@require_auth
+async def legacy_memory_tag_mutation(memory_id: int, tag_name: str | None = None):
+    del memory_id, tag_name
+    if not request.args.get("ref"):
+        return jsonify(error_payload("object_ref_required", "Object reference is required")), 400
+    return jsonify(error_payload(
+        "memory_tag_correction_required",
+        "Legacy direct Tag mutation was removed; use the scoped correction endpoint with reason and ObjectRefs",
+    )), 410
 
 
 @memories_bp.route("/memories/import/sources", methods=["GET"])

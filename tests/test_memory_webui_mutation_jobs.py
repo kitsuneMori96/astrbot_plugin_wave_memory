@@ -10,9 +10,16 @@ import pytest
 from domain.scope import RuntimeScope, SessionRef
 from engine.db.outbox_repo import OutboxRepository
 from engine.db.memory_repo import MemoryRepo, MemoryRevisionConflict
+from engine.db.migrations.scoped_memory_tag_corrections import (
+    ensure_scoped_memory_tag_correction_schema_connection,
+)
 from services.durable_jobs import DurableJobEnvelope, DurableJobService
 from services.memory_jobs import MemoryDurableJobHandlers
-from services.memory_mutations import MemoryMutationGateway, MemoryMutationTarget
+from services.memory_mutations import (
+    MemoryMutationGateway,
+    MemoryMutationTarget,
+    read_memory_tag_state,
+)
 from webui.blueprints import memories
 
 
@@ -50,11 +57,36 @@ def _connection() -> sqlite3.Connection:
             version INTEGER NOT NULL DEFAULT 1
         );
         CREATE TABLE memory_tags(memory_id INTEGER, tag_id INTEGER);
-        CREATE TABLE scoped_memory_tags(memory_id INTEGER, tag_id INTEGER);
+        CREATE TABLE scoped_tags (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bot_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            visibility TEXT NOT NULL,
+            name TEXT NOT NULL,
+            tag_type TEXT NOT NULL DEFAULT 'keyword',
+            description TEXT NOT NULL DEFAULT '',
+            confidence REAL NOT NULL DEFAULT 0.0,
+            metadata TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            UNIQUE (bot_id, session_id, visibility, name)
+        );
+        CREATE TABLE scoped_memory_tags (
+            bot_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            visibility TEXT NOT NULL,
+            memory_id INTEGER NOT NULL,
+            tag_id INTEGER NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0,
+            relevance REAL NOT NULL DEFAULT 1.0,
+            created_at REAL NOT NULL,
+            PRIMARY KEY (bot_id, session_id, visibility, memory_id, tag_id)
+        );
         CREATE TABLE facts(id INTEGER PRIMARY KEY, source_memory_id INTEGER);
         """
     )
     OutboxRepository.migrate(connection)
+    ensure_scoped_memory_tag_correction_schema_connection(connection)
     connection.execute(
         """INSERT INTO memories(
                id, group_id, content, vector, importance, bot_id, session_id,
@@ -170,6 +202,122 @@ async def test_memory_mutation_gateway_commits_revision_and_outbox_together():
         connection.close()
 
 
+@pytest.mark.asyncio
+async def test_memory_tag_correction_preserves_automatic_baseline_and_is_undoable():
+    connection = _connection()
+    coordinator = _Coordinator(connection)
+    gateway = MemoryMutationGateway(SimpleNamespace(coordinator=coordinator), clock=_Clock())
+    scope = _scope()
+    try:
+        cursor = connection.execute(
+            """INSERT INTO scoped_tags(
+                   bot_id, session_id, visibility, name, tag_type, description,
+                   confidence, metadata, created_at, updated_at
+               ) VALUES (?, ?, ?, '自动标签', 'topic', '', 0.9, '{}', 1, 1)""",
+            (scope.bot_id, scope.session.id, scope.visibility),
+        )
+        connection.execute(
+            """INSERT INTO scoped_memory_tags(
+                   bot_id, session_id, visibility, memory_id, tag_id,
+                   position, relevance, created_at
+               ) VALUES (?, ?, ?, 1, ?, 1, 0.9, 1)""",
+            (scope.bot_id, scope.session.id, scope.visibility, int(cursor.lastrowid)),
+        )
+        connection.commit()
+
+        result = await gateway.correct_memory_tags(
+            scope=scope,
+            target=MemoryMutationTarget(memory_id=1, revision=7),
+            operation="add",
+            tags=["人工标签"],
+            reason="自动提取遗漏关键主题",
+        )
+        assert result.revision == 8
+        assert result.correction is not None
+        assert result.correction.status == "active"
+        state = read_memory_tag_state(connection, scope=scope, memory_id=1)
+        assert [item["name"] for item in state["automatic"]] == ["自动标签"]
+        assert [item["name"] for item in state["effective"]] == ["自动标签", "人工标签"]
+        assert state["manual"]["reason"] == "自动提取遗漏关键主题"
+        correction_row = connection.execute(
+            """SELECT operation_id, before_tags_json, after_tags_json, actor, reason,
+                      memory_revision_before, memory_revision_after
+                 FROM scoped_memory_tag_corrections WHERE correction_id=?""",
+            (result.correction.correction_id,),
+        ).fetchone()
+        assert correction_row == (
+            result.operation_id,
+            '["自动标签"]',
+            '["自动标签","人工标签"]',
+            "webui.memory.tags.correct",
+            "自动提取遗漏关键主题",
+            7,
+            8,
+        )
+        event_payload = connection.execute(
+            "SELECT payload_json FROM domain_outbox WHERE operation_id=?",
+            (result.operation_id,),
+        ).fetchone()[0]
+        assert '"reason":"自动提取遗漏关键主题"' in event_payload
+
+        repeated = await gateway.correct_memory_tags(
+            scope=scope,
+            target=MemoryMutationTarget(memory_id=1, revision=7),
+            operation="add",
+            tags=["人工标签"],
+            reason="自动提取遗漏关键主题",
+        )
+        assert repeated.operation_id == result.operation_id
+        assert connection.execute(
+            "SELECT COUNT(*) FROM scoped_memory_tag_corrections"
+        ).fetchone() == (1,)
+
+        undone = await gateway.undo_memory_tag_correction(
+            scope=scope,
+            target=MemoryMutationTarget(memory_id=1, revision=8),
+            correction_id=result.correction.correction_id,
+            correction_revision=1,
+            reason="复核后恢复自动基线",
+        )
+        assert undone.revision == 9
+        assert undone.correction is not None
+        assert undone.correction.status == "undone"
+        state = read_memory_tag_state(connection, scope=scope, memory_id=1)
+        assert state["manual"] is None
+        assert [item["name"] for item in state["effective"]] == ["自动标签"]
+        assert connection.execute(
+            """SELECT status, correction_revision, undone_by_operation_id
+                 FROM scoped_memory_tag_corrections WHERE correction_id=?""",
+            (result.correction.correction_id,),
+        ).fetchone() == ("undone", 2, undone.operation_id)
+    finally:
+        connection.close()
+
+
+@pytest.mark.asyncio
+async def test_memory_tag_correction_rejects_stale_revision_without_partial_writes():
+    connection = _connection()
+    coordinator = _Coordinator(connection)
+    gateway = MemoryMutationGateway(SimpleNamespace(coordinator=coordinator))
+    try:
+        with pytest.raises(MemoryRevisionConflict):
+            await gateway.correct_memory_tags(
+                scope=_scope(),
+                target=MemoryMutationTarget(memory_id=1, revision=99),
+                operation="replace",
+                tags=["错误写入"],
+                reason="验证 revision 冲突",
+            )
+        assert connection.execute("SELECT version FROM memories WHERE id=1").fetchone() == (7,)
+        assert connection.execute("SELECT COUNT(*) FROM scoped_tags").fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM scoped_memory_tag_corrections"
+        ).fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM write_operations").fetchone() == (0,)
+    finally:
+        connection.close()
+
+
 class _Clock:
     @staticmethod
     def now():
@@ -280,6 +428,63 @@ class _Jobs:
             kind=kwargs["kind"],
             status="queued",
         )
+
+
+@pytest.mark.asyncio
+async def test_undo_tag_route_resolves_opaque_correction_ref_without_bare_locator(monkeypatch):
+    scope = _scope()
+    memory_binding = _Binding(scope=scope, revision=8)
+    calls = []
+
+    class Refs:
+        def resolve_with_state(self, ref, *, kind, request_scope, locator=None):
+            calls.append((ref, kind, request_scope, locator))
+            return SimpleNamespace(locator="correction-1", revision=1), "ready"
+
+    class Gateway:
+        async def undo_memory_tag_correction(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(operation_id="undo-operation", revision=9)
+
+    row = {
+        "id": 1,
+        "content": "before",
+        "group_id": "group-alpha",
+        "bot_id": scope.bot_id,
+        "session_id": scope.session.id,
+        "visibility": scope.visibility,
+        "resolution_state": "resolved",
+        "version": 9,
+    }
+    monkeypatch.setattr(memories, "get_container", lambda: SimpleNamespace(db=SimpleNamespace(conn=object())))
+    monkeypatch.setattr(
+        memories,
+        "request",
+        _Request(
+            {"correction_ref": "opaque-correction-ref", "reason": "恢复自动基线"},
+            args={"ref": "opaque-memory-ref"},
+        ),
+    )
+    monkeypatch.setattr(memories, "jsonify", lambda value: value)
+    monkeypatch.setattr(memories, "_resolve_memory_ref", lambda *args, **kwargs: (memory_binding, row))
+    monkeypatch.setattr(memories, "_api_composition", lambda: {"object_refs": Refs()})
+    monkeypatch.setattr(memories, "_memory_mutation_gateway", lambda container: Gateway())
+    monkeypatch.setattr(memories, "_memory_row", lambda conn, memory_id: row)
+    monkeypatch.setattr(
+        memories,
+        "_memory_tag_state_payload",
+        lambda conn, **kwargs: {"automatic": [], "effective": [], "manual": None},
+    )
+    monkeypatch.setattr(memories, "_memory_ref_item", lambda item: item)
+
+    payload = await memories.undo_memory_tag_correction(1)
+
+    assert payload["ok"] is True
+    assert payload["operation"]["id"] == "undo-operation"
+    assert calls[0] == ("opaque-correction-ref", "memory_tag_correction", scope, None)
+    assert calls[1]["correction_id"] == "correction-1"
+    assert calls[1]["correction_revision"] == 1
+    assert calls[1]["target"] == MemoryMutationTarget(memory_id=1, revision=8)
 
 
 @pytest.mark.asyncio

@@ -1,7 +1,21 @@
 import { fetchJson, getStoredToken, toApiPath } from './client'
 import type { ObjectRefDescriptor, PageResponse, PageSize } from '@/components/shared/types'
 
-export interface MemoryTag { name: string; type?: string; [key: string]: unknown }
+export interface MemoryTag { id?: number | null; name: string; type?: string; tag_type?: string; source?: 'automatic' | 'manual'; position?: number; relevance?: number; [key: string]: unknown }
+export interface MemoryTagCorrection {
+  correction_id: string
+  operation: 'add' | 'remove' | 'replace'
+  requested_tags: string[]
+  before: string[]
+  tags: string[]
+  revision: number
+  status: 'active' | 'undone'
+  created_at: number
+  reason: string
+  ref: string
+  object_ref?: ObjectRefDescriptor
+}
+export interface MemoryTagState { automatic: MemoryTag[]; effective: MemoryTag[]; manual: MemoryTagCorrection | null }
 export interface MemoryItem {
   id: number
   content: string
@@ -62,6 +76,7 @@ export interface LegacyMemoriesResponse extends PageResponse<LegacyMemoryItem> {
   reason_code: string
 }
 export interface MemoryMutationResult { ok: boolean; operation: { kind: string; status: string; id?: string }; revision: number | string | null; item?: MemoryItem }
+export interface MemoryTagMutationResult extends Omit<MemoryMutationResult, 'item'> { item?: { memory: MemoryItem; tags: MemoryTagState } }
 export interface MemoryRefInput { id: number; ref: string }
 export interface SimilarMemoryItem { id: number; content: string; source: string; similarity: number }
 
@@ -88,8 +103,9 @@ export function updateMemory(mutationUrl: string, content: string, importance: n
 export function deleteMemory(mutationUrl: string): Promise<MemoryMutationResult> { return fetchJson(mutationUrl, { method: 'DELETE' }) }
 export function reEmbedMemory(item: Pick<MemoryItem, 'mutation_url'>): Promise<Partial<MemoryMutationResult> & { accepted?: boolean; status?: string; error?: string }> { return fetchJson(scopedActionUrl(item, '/re-embed'), { method: 'POST' }) }
 export function getSimilarMemories(item: Pick<MemoryItem, 'mutation_url'>): Promise<{ items: SimilarMemoryItem[]; reason?: string }> { return fetchJson(scopedActionUrl(item, '/similar')) }
-export function addMemoryTag(item: Pick<MemoryItem, 'mutation_url'>, tagName: string): Promise<{ ok: boolean }> { return fetchJson(scopedActionUrl(item, '/tags'), { method: 'POST', body: JSON.stringify({ tag_name: tagName }) }) }
-export function deleteMemoryTag(item: Pick<MemoryItem, 'mutation_url'>, tagName: string): Promise<{ ok: boolean }> { return fetchJson(scopedActionUrl(item, `/tags/${encodeURIComponent(tagName)}`), { method: 'DELETE' }) }
+export function getMemoryTagState(item: Pick<MemoryItem, 'mutation_url'>): Promise<{ item: MemoryTagState }> { return fetchJson(scopedActionUrl(item, '/tags')) }
+export function correctMemoryTags(item: Pick<MemoryItem, 'mutation_url'>, operation: 'add' | 'remove' | 'replace', tags: string[], reason: string): Promise<MemoryTagMutationResult> { return fetchJson(scopedActionUrl(item, '/tags/correction'), { method: 'POST', body: JSON.stringify({ operation, tags, reason }) }) }
+export function undoMemoryTagCorrection(item: Pick<MemoryItem, 'mutation_url'>, correctionRef: string, reason: string): Promise<MemoryTagMutationResult> { return fetchJson(scopedActionUrl(item, '/tags/correction/undo'), { method: 'POST', body: JSON.stringify({ correction_ref: correctionRef, reason }) }) }
 export function batchDeleteMemories(scope: MemoryScope, refs: MemoryRefInput[]): Promise<{ ok: boolean; deleted: number }> { return fetchJson(batchUrl('delete', scope), { method: 'POST', body: JSON.stringify({ refs }) }) }
 export function memoryBatchStreamUrl(action: 're-embed' | 'extract-tags', scope: MemoryScope): string { return batchUrl(action, scope) }
 
