@@ -500,12 +500,31 @@ class TagGovernanceGateway:
                 raise TagGovernanceError("suggestion_revision_conflict")
             if suggestion["status"] != "pending":
                 raise TagGovernanceError("suggestion_already_processed")
-            preview = self._preview_payload(connection, scope=scope, action=suggestion["action"], tag_ids=suggestion["tag_ids"], target_tag_id=suggestion["target_tag_id"], target_name=suggestion["target_name"], target_type=suggestion["target_type"], aliases=suggestion["aliases"])
+
+            def mark_terminal(new_status: str, event_type: str) -> TagGovernanceResult:
+                cursor = connection.execute(
+                    """UPDATE scoped_tag_audit_suggestions
+                          SET status=?, revision=revision+1, resolved_at=?, resolved_by=?, resolution_reason=?
+                        WHERE suggestion_id=? AND bot_id=? AND session_id=? AND visibility=?
+                          AND status='pending' AND revision=?""",
+                    (new_status, now, "webui.tag.governance", normalized_reason, suggestion_id, *_scope_params(scope), int(expected_revision)),
+                )
+                if int(cursor.rowcount or 0) != 1:
+                    raise TagGovernanceError("suggestion_revision_conflict")
+                self._event(connection, operation_id=operation_id, index=0, aggregate_kind="tag_audit_suggestion", aggregate_id=suggestion_id, version=int(expected_revision) + 1, event_type=event_type, payload={"suggestion_id": suggestion_id, "status": new_status, "reason": normalized_reason, "scope": scope_to_dict(scope)}, now=now)
+                return TagGovernanceResult(operation_id=operation_id, suggestion_id=suggestion_id, revision=int(expected_revision) + 1, status=new_status, impact={})
+
+            try:
+                preview = self._preview_payload(connection, scope=scope, action=suggestion["action"], tag_ids=suggestion["tag_ids"], target_tag_id=suggestion["target_tag_id"], target_name=suggestion["target_name"], target_type=suggestion["target_type"], aliases=suggestion["aliases"])
+            except TagGovernanceError as exc:
+                if exc.code in {"tag_scope_mismatch", "tag_not_active", "target_tag_required", "single_tag_required"}:
+                    return mark_terminal("conflict", "tag.governance.conflict")
+                raise
             expected_token = _digest({"suggestion_id": suggestion_id, "revision": suggestion["revision"], "scope": scope_to_dict(scope), "preview": preview})
             if str(preview_token) != expected_token:
-                raise TagGovernanceError("preflight_token_invalid")
+                return mark_terminal("conflict", "tag.governance.conflict")
             if suggestion["expires_at"] is not None and suggestion["expires_at"] < now:
-                raise TagGovernanceError("suggestion_expired")
+                return mark_terminal("expired", "tag.governance.expired")
             impact = preview["impact"] if decision == "approve" else {}
             event_type = "tag.governance.rejected"
             if decision == "approve":

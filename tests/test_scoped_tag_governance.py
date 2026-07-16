@@ -141,6 +141,21 @@ async def test_scoped_tag_governance_preview_then_merge_is_audited_and_idempoten
 
 
 @pytest.mark.asyncio
+async def test_scoped_tag_governance_records_conflict_status_for_stale_preview():
+    conn = connection()
+    gateway = TagGovernanceGateway(SimpleNamespace(coordinator=Coordinator(conn)))
+    s = scope()
+    tag_id = conn.execute("SELECT id FROM scoped_tags ORDER BY id LIMIT 1").fetchone()[0]
+    suggestion = await gateway.create_suggestion(scope=s, action="retype", tag_ids=[tag_id], target_type="entity", reason="修正类型")
+    preview = gateway.preview(conn, scope=s, suggestion_id=suggestion.suggestion_id)
+    conn.execute("UPDATE scoped_tags SET revision=revision+1 WHERE id=?", (tag_id,))
+    conn.commit()
+    result = await gateway.resolve(scope=s, suggestion_id=suggestion.suggestion_id, expected_revision=1, decision="approve", preview_token=preview["preflight_token"], reason="预检已失效")
+    assert result.status == "conflict"
+    assert conn.execute("SELECT status FROM scoped_tag_audit_suggestions WHERE suggestion_id=?", (suggestion.suggestion_id,)).fetchone()[0] == "conflict"
+
+
+@pytest.mark.asyncio
 async def test_scoped_tag_governance_rejects_stale_preview_and_batch_is_all_or_nothing():
     conn = connection()
     gateway = TagGovernanceGateway(SimpleNamespace(coordinator=Coordinator(conn)))
