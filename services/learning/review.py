@@ -17,6 +17,7 @@ except ImportError:  # 兼容独立测试/外部调用 services.learning
     from engine.db.learning_types import ReviewStatus, TargetKind, enum_value
 
 from .dedicated_review import DedicatedReviewBridge, DedicatedReviewResult
+from .fewshot_contract import FEWSHOT_CANDIDATE_TYPE, validate_fewshot_candidate_contract
 
 
 class LearningReviewError(ValueError):
@@ -138,6 +139,11 @@ class LearningReviewService:
             raise LearningReviewError("candidate not found for bot_id")
         if status == ReviewStatus.DELEGATED.value and candidate["candidate_type"] not in self._DEDICATED:
             raise LearningReviewError("only jargon/belief candidates may be delegated")
+        if (
+            candidate["candidate_type"] == FEWSHOT_CANDIDATE_TYPE
+            and status == ReviewStatus.APPROVED.value
+        ):
+            validate_fewshot_candidate_contract(candidate, bot_id=bot_id)
         # 专属审核候选即使点击 approve 也只能进入 delegated，占位状态由领域审核回写。
         dedicated_result = None
         if candidate["candidate_type"] in self._DEDICATED and status in {

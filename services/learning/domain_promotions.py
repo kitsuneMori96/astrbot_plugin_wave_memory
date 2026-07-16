@@ -19,6 +19,7 @@ except ImportError:  # 兼容独立测试/外部调用 services.learning
     from engine.db.book_experience_repo import BookExperienceEpisodeRepository
 
 from .book_experience import BookExperienceEvidenceValidator
+from .fewshot_contract import validate_fewshot_candidate_contract
 from .scope_policy import (
     LearningPromotionScopeError,
     resolve_learning_promotion_scope,
@@ -287,6 +288,14 @@ class FewShotStylePromotionService:
         method = _method(self.service, "write_approved", "add_approved_example")
         if method is None:
             raise ValueError("FewShot formal writer is unavailable")
+        try:
+            contract = validate_fewshot_candidate_contract(candidate, bot_id=bot_id)
+        except ValueError as exc:
+            from .promotion import PromotionTerminalError
+
+            raise PromotionTerminalError(
+                str(exc), code=str(getattr(exc, "reason_code", "invalid_fewshot_contract"))
+            ) from exc
         context = _runtime_promotion_context(
             candidate,
             bot_id,
@@ -303,6 +312,8 @@ class FewShotStylePromotionService:
             candidate=dict(candidate),
             evidence_refs=context.evidence_refs,
             evidence_bindings=context.evidence_bindings,
+            source_tags=contract.source_tags,
+            query_trace_id=contract.query_trace_id,
             content=content,
             score=float(evidence.get("score") or 0.0),
             traits=tuple(evidence.get("traits") or ()),

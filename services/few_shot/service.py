@@ -150,6 +150,8 @@ class FewShotService:
         candidate: Mapping[str, Any],
         evidence_refs: Sequence[EvidenceRef],
         evidence_bindings: Sequence[EvidenceBinding],
+        source_tags: Sequence[Mapping[str, Any]],
+        query_trace_id: str,
         content: str,
         score: float = 0.0,
         traits: Sequence[str] | None = None,
@@ -184,6 +186,8 @@ class FewShotService:
             candidate=candidate,
             evidence_refs=tuple(evidence_refs),
             evidence_bindings=tuple(evidence_bindings),
+            source_tags=tuple(source_tags),
+            query_trace_id=str(query_trace_id or "").strip(),
             content=content,
             score=float(score),
             traits=tuple(traits or ()),
@@ -253,6 +257,18 @@ class FewShotService:
         except Exception:
             pass
         return None
+
+    async def evaluate_reply(self, reply: str) -> Dict:
+        """正式候选入口使用的公开质量评估；缺 LLM 或不安全回复一律失败。"""
+        text = str(reply or "").strip()
+        if not self._enabled or self._llm is None:
+            raise RuntimeError("FewShot quality assessor is unavailable")
+        if not self._is_healthy_example(text):
+            raise ValueError("few-shot reply failed safety validation")
+        result = await self._evaluate_style(text)
+        if not isinstance(result, Mapping):
+            raise ValueError("FewShot quality assessment is invalid")
+        return dict(result)
 
     # ─── 内部方法 ───
 

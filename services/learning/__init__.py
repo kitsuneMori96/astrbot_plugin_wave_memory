@@ -38,6 +38,11 @@ from .config import (
     diagnose_learning_config,
     resolve_learning_config,
 )
+from .fewshot_lifecycle import (
+    FewShotLifecycleError,
+    FewShotReplyCandidateService,
+    FewShotUsageFeedbackService,
+)
 from .job_runner import LearningJobRunResult, LearningJobRunner
 from .promotion import (
     DomainPromotionTarget,
@@ -100,6 +105,9 @@ __all__ = [
     "LearningBotPolicy",
     "LearningCandidateService",
     "LearningConfig",
+    "FewShotLifecycleError",
+    "FewShotReplyCandidateService",
+    "FewShotUsageFeedbackService",
     "LearningJobRunResult",
     "LearningJobRunner",
     "LearningReviewError",

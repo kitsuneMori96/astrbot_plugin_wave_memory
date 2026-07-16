@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Mapping
 
 try:
@@ -14,6 +15,7 @@ except ImportError:  # 兼容独立测试/外部调用 services.learning
     from services.quality_gate import QualityGate, QualityGateError, decode_quality_evidence
 
 from .book_experience import BOOK_EXPERIENCE_CANDIDATE, BookExperienceEvidenceValidator
+from .fewshot_contract import FEWSHOT_CANDIDATE_TYPE, validate_fewshot_candidate_contract
 from .scope_policy import require_learning_bot_id, resolve_learning_promotion_scope
 from .source import LearningSourceItem
 
@@ -59,6 +61,15 @@ class LearningCandidateService:
             if not result.valid:
                 detail = ", ".join(result.missing + result.errors) or "invalid evidence"
                 raise ValueError(f"book_experience_episode evidence is insufficient: {detail}")
+        if str(candidate_type) == FEWSHOT_CANDIDATE_TYPE:
+            validate_fewshot_candidate_contract(
+                {
+                    "candidate_type": FEWSHOT_CANDIDATE_TYPE,
+                    "content": str(content),
+                    "evidence": evidence,
+                },
+                bot_id=stable_bot_id,
+            )
         if str(candidate_type) == CORRECTION_LEARNING_CANDIDATE:
             required = ("bot_reply", "user_correction", "message_ref", "book_lore_hits", "generated_text")
             missing = [field for field in required if field not in evidence or evidence[field] in (None, "")]
@@ -111,6 +122,13 @@ class LearningCandidateService:
         decision = self.quality_gate.evaluate(proposal)
         if (commitment == "high" and not decision.allowed) or not decision.writable:
             raise QualityGateError(decision)
+        if str(candidate_type) == FEWSHOT_CANDIDATE_TYPE:
+            evidence = dict(evidence)
+            source_reply = dict(evidence.get("source_reply") or {})
+            source_reply["normalized_content_hash"] = "sha256:" + hashlib.sha256(
+                decision.normalized_content.encode("utf-8")
+            ).hexdigest()
+            evidence["source_reply"] = source_reply
         quality_metadata = dict(metadata or {})
         quality_metadata["quality_decision"] = decision.to_dict()
         return self.repositories.candidates.create(

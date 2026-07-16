@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 from types import SimpleNamespace
@@ -120,7 +121,58 @@ def _evidence(candidate_type, *, group_id="group-1", user_id="user-1"):
             "extraction_method": "quote",
         }
     if candidate_type == "few_shot_style":
-        return {**common, "score": 0.92, "traits": ["克制"]}
+        from services.learning.fewshot_contract import (
+            FEWSHOT_BINDING_POLICY,
+            FEWSHOT_CONTRACT_VERSION,
+            FEWSHOT_DERIVATION_CHAIN,
+        )
+
+        target = RuntimeScope.from_dict(scope)
+        reply_ref = EvidenceRef(
+            kind="bot_reply_memory",
+            id="memory:41",
+            content_hash="sha256:" + hashlib.sha256(
+                b"approved few_shot_style"
+            ).hexdigest(),
+            captured_at=100.0,
+            source_scope=target,
+            available=True,
+        )
+        trace_ref = EvidenceRef(
+            kind="query_trace",
+            id="trace:trace-fewshot-41",
+            content_hash="sha256:trace-41",
+            captured_at=99.0,
+            source_scope=target,
+            available=True,
+        )
+        refs = (reply_ref, trace_ref)
+        bindings = tuple(EvidenceBinding(
+            evidence_id=ref.id,
+            target_scope=target,
+            derivation_chain=FEWSHOT_DERIVATION_CHAIN,
+            policy_version=FEWSHOT_BINDING_POLICY,
+        ) for ref in refs)
+        return {
+            "contract_version": FEWSHOT_CONTRACT_VERSION,
+            "group_id": group_id,
+            "user_id": user_id,
+            "scope": scope,
+            "target_scope": scope,
+            "source_reply": {"memory_id": 41, "content_hash": reply_ref.content_hash},
+            "source_tags": [{
+                "tag_id": 7,
+                "name": "克制表达",
+                "tag_type": "style",
+                "position": 1,
+                "relevance": 0.95,
+            }],
+            "query_trace_id": "trace-fewshot-41",
+            "score": 0.92,
+            "traits": ["克制"],
+            "evidence_refs": [ref.to_dict() for ref in refs],
+            "evidence_bindings": [binding.to_dict() for binding in bindings],
+        }
     if candidate_type == "fact":
         return {**common, "subject": "user-1", "predicate": "likes", "object": "tea"}
     if candidate_type == "relationship":
@@ -289,6 +341,8 @@ def test_fewshot_uses_approved_domain_path_and_reuses_cache_refresh(promotion_co
     assert domain.calls[0]["scope"].session.conversation_id == "group-1"
     assert domain.calls[0]["evidence_refs"]
     assert domain.calls[0]["evidence_bindings"]
+    assert domain.calls[0]["source_tags"][0]["name"] == "克制表达"
+    assert domain.calls[0]["query_trace_id"] == "trace-fewshot-41"
     assert domain.refresh_calls[0]["target_id"] == "202"
     repeated = orchestrator.promote_candidate(candidate_id, bot_id="bot-a")[0]
     assert repeated["target_id"] == "202"

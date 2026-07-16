@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import sqlite3
 from types import SimpleNamespace
 
@@ -75,18 +76,60 @@ def _catalog_projection_evidence(target: RuntimeScope):
 
 
 def _fewshot_candidate(scope: RuntimeScope) -> dict:
-    ref, binding = _runtime_evidence(scope)
+    from services.learning.fewshot_contract import (
+        FEWSHOT_BINDING_POLICY,
+        FEWSHOT_CONTRACT_VERSION,
+        FEWSHOT_DERIVATION_CHAIN,
+    )
+
+    content = "先核实事实，再用简短而克制的方式回应。"
+    reply_ref = EvidenceRef(
+        kind="bot_reply_memory",
+        id="memory:41",
+        content_hash="sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        captured_at=100.0,
+        source_scope=scope,
+        available=True,
+    )
+    trace_ref = EvidenceRef(
+        kind="query_trace",
+        id="trace:trace-fewshot-41",
+        content_hash="sha256:trace-41",
+        captured_at=99.0,
+        source_scope=scope,
+        available=True,
+    )
+    bindings = [
+        EvidenceBinding(
+            evidence_id=ref.id,
+            target_scope=scope,
+            derivation_chain=FEWSHOT_DERIVATION_CHAIN,
+            policy_version=FEWSHOT_BINDING_POLICY,
+        )
+        for ref in (reply_ref, trace_ref)
+    ]
     return {
         "id": 11,
         "candidate_type": "few_shot_style",
-        "content": "先核实事实，再用简短而克制的方式回应。",
+        "content": content,
         "evidence": {
+            "contract_version": FEWSHOT_CONTRACT_VERSION,
             "scope": scope.to_dict(),
             "target_scope": scope.to_dict(),
+            "source_reply": {"memory_id": 41, "content_hash": reply_ref.content_hash},
+            "source_tags": [{
+                "tag_id": 7,
+                "name": "克制表达",
+                "tag_type": "style",
+                "position": 1,
+                "relevance": 0.95,
+                "source": "automatic",
+            }],
+            "query_trace_id": "trace-fewshot-41",
             "score": 0.92,
             "traits": ["克制"],
-            "evidence_refs": [ref.to_dict()],
-            "evidence_bindings": [binding.to_dict()],
+            "evidence_refs": [ref.to_dict() for ref in (reply_ref, trace_ref)],
+            "evidence_bindings": [binding.to_dict() for binding in bindings],
         },
     }
 
@@ -130,13 +173,25 @@ def test_scoped_projection_migration_is_idempotent_and_does_not_create_raw_catal
     }
     conn.close()
 
-    assert {"scoped_few_shot_examples", "reviewed_book_lore_projections"} <= tables
+    assert {
+        "scoped_few_shot_examples",
+        "scoped_few_shot_usage_events",
+        "scoped_few_shot_feedback_events",
+        "reviewed_book_lore_projections",
+    } <= tables
     assert "book_communities" not in tables
     assert {
         "runtime_scope_json",
         "evidence_refs_json",
         "evidence_bindings_json",
         "candidate_json",
+        "source_tags_json",
+        "query_trace_id",
+        "usage_count",
+        "positive_feedback_count",
+        "negative_feedback_count",
+        "retired_at",
+        "retirement_reason",
         "status",
         "revision",
     } <= fewshot_columns
@@ -150,6 +205,56 @@ def test_scoped_projection_migration_is_idempotent_and_does_not_create_raw_catal
         "status",
         "revision",
     } <= book_columns
+
+
+def test_scoped_fewshot_migration_upgrades_existing_projection_without_data_loss():
+    from engine.db.migrations.scoped_learning_projections import (
+        ensure_scoped_learning_projection_schema,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """CREATE TABLE scoped_few_shot_examples (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               runtime_scope_key TEXT NOT NULL,
+               runtime_scope_json TEXT NOT NULL,
+               content TEXT NOT NULL,
+               score REAL NOT NULL DEFAULT 0,
+               traits_json TEXT NOT NULL DEFAULT '[]',
+               candidate_json TEXT NOT NULL,
+               evidence_refs_json TEXT NOT NULL,
+               evidence_bindings_json TEXT NOT NULL,
+               status TEXT NOT NULL,
+               revision INTEGER NOT NULL DEFAULT 1,
+               source_candidate_id INTEGER,
+               idempotency_key TEXT NOT NULL,
+               created_at REAL NOT NULL,
+               updated_at REAL NOT NULL,
+               approved_at REAL NOT NULL
+           )"""
+    )
+    conn.execute(
+        """INSERT INTO scoped_few_shot_examples(
+               runtime_scope_key, runtime_scope_json, content, candidate_json,
+               evidence_refs_json, evidence_bindings_json, status, idempotency_key,
+               created_at, updated_at, approved_at)
+           VALUES ('scope-key', '{}', '旧样例', '{}', '[]', '[]', 'approved',
+                   'candidate:old', 1, 1, 1)"""
+    )
+    conn.commit()
+
+    ensure_scoped_learning_projection_schema(conn)
+    ensure_scoped_learning_projection_schema(conn)
+
+    row = conn.execute(
+        """SELECT content, source_tags_json, query_trace_id, usage_count,
+                  positive_feedback_count, negative_feedback_count
+             FROM scoped_few_shot_examples WHERE id=1"""
+    ).fetchone()
+    assert row == ("旧样例", "[]", "", 0, 0, 0)
+    assert conn.execute("SELECT COUNT(*) FROM scoped_few_shot_usage_events").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM scoped_few_shot_feedback_events").fetchone()[0] == 0
+    conn.close()
 
 
 def test_fewshot_repository_is_exact_scope_and_legacy_table_is_audit_only():
@@ -176,13 +281,16 @@ def test_fewshot_repository_is_exact_scope_and_legacy_table_is_audit_only():
     scope = _runtime_scope()
     other_scope = _runtime_scope("group-2")
     candidate = _fewshot_candidate(scope)
-    ref, binding = _runtime_evidence(scope)
+    refs = tuple(EvidenceRef.from_dict(item) for item in candidate["evidence"]["evidence_refs"])
+    bindings = tuple(EvidenceBinding.from_dict(item) for item in candidate["evidence"]["evidence_bindings"])
 
     example_id = repository.write_approved(
         scope=scope,
         candidate=candidate,
-        evidence_refs=(ref,),
-        evidence_bindings=(binding,),
+        evidence_refs=refs,
+        evidence_bindings=bindings,
+        source_tags=candidate["evidence"]["source_tags"],
+        query_trace_id=candidate["evidence"]["query_trace_id"],
         content=candidate["content"],
         score=0.92,
         traits=("克制",),
@@ -198,8 +306,10 @@ def test_fewshot_repository_is_exact_scope_and_legacy_table_is_audit_only():
     assert row["scope"].bot_id == scope.bot_id
     assert row["scope"].session == scope.session
     assert row["scope"].subject_principal_id is None
-    assert row["evidence_refs"][0] == ref
-    assert row["evidence_bindings"][0] == binding
+    assert row["evidence_refs"] == refs
+    assert row["evidence_bindings"] == bindings
+    assert row["source_tags"][0]["name"] == "克制表达"
+    assert row["query_trace_id"] == "trace-fewshot-41"
     assert row["candidate"]["id"] == 11
     assert row["status"] == "approved"
     assert row["revision"] == 1
@@ -274,13 +384,16 @@ def test_coordinator_writer_owns_transaction_and_repository_never_commits_extern
     )
     scope = _runtime_scope()
     candidate = _fewshot_candidate(scope)
-    ref, binding = _runtime_evidence(scope)
+    refs = tuple(EvidenceRef.from_dict(item) for item in candidate["evidence"]["evidence_refs"])
+    bindings = tuple(EvidenceBinding.from_dict(item) for item in candidate["evidence"]["evidence_bindings"])
 
     example_id = writer.write_approved(
         scope=scope,
         candidate=candidate,
-        evidence_refs=(ref,),
-        evidence_bindings=(binding,),
+        evidence_refs=refs,
+        evidence_bindings=bindings,
+        source_tags=candidate["evidence"]["source_tags"],
+        query_trace_id=candidate["evidence"]["query_trace_id"],
         content=candidate["content"],
         score=0.92,
         traits=("克制",),
@@ -484,6 +597,14 @@ async def test_webui_lists_only_formal_projections_for_exact_runtime_scope():
             candidate={"id": candidate_id},
             evidence_refs=(ref,),
             evidence_bindings=(binding,),
+            source_tags=[{
+                "tag_id": candidate_id,
+                "name": "测试风格",
+                "tag_type": "style",
+                "position": 1,
+                "relevance": 1.0,
+            }],
+            query_trace_id=f"trace:{candidate_id}",
             content=content,
             score=0.9,
             traits=("克制",),
