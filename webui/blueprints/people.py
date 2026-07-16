@@ -18,8 +18,11 @@ except ImportError:  # pragma: no cover
 
 try:
     from ...services.relationship_calibration import RelationshipCalibrationError, RelationshipCalibrationGateway
-except ImportError:  # pragma: no cover
+    from ...services.evidence_resolver import EvidenceResolutionError, resolve_relationship_evidence
+except ImportError:  # pragma: no cover - focused tests import webui as top-level
+    from domain.scope import RuntimeScope, ScopeValidationError
     from services.relationship_calibration import RelationshipCalibrationError, RelationshipCalibrationGateway
+    from services.evidence_resolver import EvidenceResolutionError, resolve_relationship_evidence
 
 people_bp = Blueprint("people", __name__, url_prefix="/api")
 
@@ -374,12 +377,18 @@ async def calibrate_relationship():
             delta=body.get("delta"),
             value=body.get("value"),
             reason=body.get("reason"),
-            evidence=body.get("evidence"),
+            evidence=resolve_relationship_evidence(
+                _connection(),
+                scope=target_scope,
+                values=body.get("evidence"),
+            ),
             object_ref=str(ref),
         )
         return jsonify(mutation_response(operation_kind="relationship.calibrate", operation_id=result.operation_id, status=result.status, revision=result.revision, item={"calibration_id": result.calibration_id, "subject_principal_id": result.subject_principal_id, "dimension": result.dimension, "action": result.action, "before": result.before, "after": result.after, "affinity": result.affinity, "state": result.state, "evidence": result.evidence}, include_item=True))
     except RelationshipCalibrationError as exc:
         return _relationship_error(exc)
+    except EvidenceResolutionError as exc:
+        return jsonify(error_payload(exc.code, str(exc))), 422
     except (TypeError, ValueError) as exc:
         return jsonify(error_payload("relationship_request_invalid", str(exc))), 422
 

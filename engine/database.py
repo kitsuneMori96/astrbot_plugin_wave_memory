@@ -9,7 +9,11 @@ import time
 from typing import Any, Optional
 
 import numpy as np
-from astrbot.api import logger
+try:
+    from astrbot.api import logger
+except ImportError:  # pragma: no cover - focused repository tests without AstrBot
+    import logging
+    logger = logging.getLogger(__name__)
 
 from .db.connection import ConnectionManager
 from .db.memory_repo import MemoryRepo
@@ -42,9 +46,10 @@ from .metrics_store import InjectionMetricStore
 class WaveMemoryDB:
     """SQLite 数据库 Facade —— 组合 5 个 Repo，对外接口不变。"""
 
-    def __init__(self, db_path: str, dimension: int = 1024):
+    def __init__(self, db_path: str, dimension: int = 1024, soul_context_provider=None):
         self.db_path = db_path
         self.dimension = dimension
+        self._soul_context_provider = soul_context_provider
 
         # 核心连接管理器；后续任一初始化失败都必须释放自身创建的连接。
         self._cm = ConnectionManager(db_path)
@@ -68,7 +73,10 @@ class WaveMemoryDB:
             ensure_scoped_fact_history_schema(self._cm)
             ensure_scoped_learning_projection_schema(self._cm)
             self._scoped_knowledge_repo = ScopedKnowledgeRepo(self._cm)
-            self._soul_repository = ScopedSoulRepository(self._cm)
+            self._soul_repository = ScopedSoulRepository(
+                self._cm,
+                soul_context_provider=self._soul_context_provider,
+            )
             self._fewshot_repository = ScopedFewShotRepository(self._cm, ensure_schema=False)
             self._book_lore_repository = ReviewedBookLoreProjectionRepository(
                 self._cm, ensure_schema=False
@@ -109,10 +117,23 @@ class WaveMemoryDB:
     def transition_scoped_fact_observation(self, scope, observation_id, **kwargs):
         return self._scoped_knowledge_repo.transition_scoped_fact_observation(scope, observation_id, **kwargs)
 
+    def list_scoped_memory_tags(self, scope, memory_ids):
+        return self._scoped_knowledge_repo.list_scoped_memory_tags(scope, memory_ids)
+
     @property
     def soul_repository(self) -> ScopedSoulRepository:
         """正式 Scoped Soul 仓储。"""
         return self._soul_repository
+
+    @property
+    def soul_context_provider(self):
+        return self._soul_context_provider
+
+    @soul_context_provider.setter
+    def soul_context_provider(self, provider) -> None:
+        self._soul_context_provider = provider
+        if hasattr(self, "_soul_repository"):
+            self._soul_repository.set_soul_context_provider(provider)
 
     @property
     def fewshot_repository(self) -> ScopedFewShotRepository:

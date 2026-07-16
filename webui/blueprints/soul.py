@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
+from collections.abc import Mapping, Sequence
 from functools import wraps
+from typing import Any
 
 from quart import Blueprint, current_app, jsonify, request
 
@@ -98,6 +102,139 @@ def _object_refs():
         return None
 
 
+def _scope_key(scope: RuntimeScope) -> str:
+    assert scope.session is not None
+    return f"{scope.bot_id}:{scope.session.id}:{scope.visibility}"
+
+
+def _memory_evidence(connection, *, scope: RuntimeScope, memory_id: Any, refs) -> dict[str, Any]:
+    try:
+        normalized_id = int(memory_id)
+    except (TypeError, ValueError):
+        return {
+            "type": "memory",
+            "id": str(memory_id),
+            "content_hash": None,
+            "captured_at": None,
+            "source_scope": _scope_key(scope),
+            "availability": "unknown",
+            "object_ref": None,
+        }
+    if connection is None:
+        row = None
+    else:
+        row = connection.execute(
+            """SELECT content, timestamp, version, resolution_state, COALESCE(quarantine, 0)
+                 FROM memories
+                WHERE id=? AND bot_id=? AND session_id=? AND visibility=?""",
+            (normalized_id, scope.bot_id, scope.session.id, scope.visibility),
+        ).fetchone()
+    if row is None:
+        return {
+            "type": "memory",
+            "id": str(normalized_id),
+            "content_hash": None,
+            "captured_at": None,
+            "source_scope": _scope_key(scope),
+            "availability": "unavailable",
+            "object_ref": None,
+        }
+    content = str(row[0] or "")
+    available = str(row[3] or "") == "resolved" and not bool(row[4])
+    object_ref = None
+    if available and refs is not None:
+        ref = refs.issue(kind="memory", locator=normalized_id, scope=scope, revision=int(row[2] or 1))
+        object_ref = {
+            "ref": ref,
+            "kind": "memory",
+            "locator": normalized_id,
+            "scope_key": scope.session.id,
+            "version": int(row[2] or 1),
+        }
+    return {
+        "type": "memory",
+        "id": str(normalized_id),
+        "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "captured_at": row[1],
+        "source_scope": _scope_key(scope),
+        "availability": "available" if available else "quarantined",
+        "object_ref": object_ref,
+        "summary": content[:240] if available else None,
+    }
+
+
+def _normalize_evidence_items(connection, *, scope: RuntimeScope, values: Any, refs) -> list[dict[str, Any]]:
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for raw in values:
+        if not isinstance(raw, Mapping):
+            continue
+        memory_id = raw.get("memory_id")
+        if memory_id is None and str(raw.get("kind") or raw.get("type") or "").strip().lower() == "memory":
+            memory_id = raw.get("id")
+        if memory_id is not None:
+            item = _memory_evidence(connection, scope=scope, memory_id=memory_id, refs=refs)
+            supplied_hash = str(raw.get("content_hash") or "").strip()
+            if supplied_hash and item.get("content_hash") and supplied_hash != item["content_hash"]:
+                item["availability"] = "unavailable"
+                item["object_ref"] = None
+            normalized.append(item)
+            continue
+        evidence_type = str(raw.get("type") or raw.get("kind") or "evidence").strip() or "evidence"
+        evidence_id = str(raw.get("id") or raw.get(f"{evidence_type}_id") or "").strip()
+        if not evidence_id:
+            continue
+        item = {
+            "type": evidence_type,
+            "id": evidence_id,
+            "content_hash": raw.get("content_hash"),
+            "captured_at": raw.get("captured_at"),
+            "source_scope": _scope_key(scope),
+            "availability": "unknown",
+            "object_ref": None,
+            "summary": raw.get("summary"),
+        }
+        if evidence_type in {"relationship_event", "relationship_calibration"} and refs is not None:
+            ref = refs.issue(kind=evidence_type, locator=evidence_id, scope=scope, revision=int(raw.get("revision") or 1))
+            item["object_ref"] = {
+                "ref": ref,
+                "kind": evidence_type,
+                "locator": evidence_id,
+                "scope_key": scope.session.id,
+                "version": int(raw.get("revision") or 1),
+            }
+        normalized.append(item)
+    return normalized
+
+
+def _normalize_soul_state_evidence(state: dict[str, Any], *, scope: RuntimeScope, connection, refs) -> dict[str, Any]:
+    normalized = dict(state)
+    for key in ("mood", "relationship"):
+        if isinstance(normalized.get(key), Mapping):
+            normalized[key] = {**normalized[key], "evidence": _normalize_evidence_items(connection, scope=scope, values=normalized[key].get("evidence", []), refs=refs)}
+    for collection_name in ("concerns", "timeline"):
+        collection = normalized.get(collection_name)
+        if isinstance(collection, Mapping):
+            collection = dict(collection)
+            collection["items"] = [
+                {**item, "evidence": _normalize_evidence_items(connection, scope=scope, values=item.get("evidence", []), refs=refs)}
+                if isinstance(item, Mapping) else item
+                for item in collection.get("items", [])
+            ]
+            normalized[collection_name] = collection
+    history = normalized.get("relationship_history")
+    if isinstance(history, Mapping):
+        history = dict(history)
+        history["items"] = [
+            {**item, "evidence": _normalize_evidence_items(connection, scope=scope, values=item.get("evidence", []), refs=refs)}
+            if isinstance(item, Mapping) else item
+            for item in history.get("items", [])
+        ]
+        normalized["relationship_history"] = history
+    return normalized
+
+
 @soul_bp.route("/soul/state", methods=["GET"])
 @require_auth
 async def soul_state():
@@ -158,6 +295,14 @@ async def soul_state():
         code = getattr(exc, "reason_code", None) or getattr(exc, "code", None) or str(exc)
         return jsonify({"error": {"code": code}}), 400
 
+    container = get_container()
+    connection = getattr(getattr(container, "db", None), "conn", None)
+    state = _normalize_soul_state_evidence(
+        state,
+        scope=scope,
+        connection=connection,
+        refs=_object_refs(),
+    )
     concerns = state["concerns"]
     timeline = state["timeline"]
     relationship_history = state.get("relationship_history", {"items": [], "total": 0, "revision": None})

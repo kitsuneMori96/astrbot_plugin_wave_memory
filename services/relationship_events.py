@@ -157,21 +157,28 @@ class RelationshipEventService:
         source_memory_id: int | None = None,
         created_at: float | None = None,
     ) -> RelationshipEventResult:
+        if scope is None:
+            raise ScopeValidationError(
+                "scope_required",
+                "relationship event writes require a canonical RuntimeScope",
+            )
+        if self.repository is None:
+            raise ScopeValidationError(
+                "scoped_repository_required",
+                "relationship event writes require the scoped repository",
+            )
         legacy_bot_id = (bot_id or "").strip()
         legacy_group_id = (group_id or "").strip()
         legacy_user_id = (user_id or "").strip()
-        if scope is not None:
-            scoped_bot_id, scoped_group_id, scoped_user_id = _project_group_subject_scope(scope)
-            supplied = (legacy_bot_id, legacy_group_id, legacy_user_id)
-            projected = (scoped_bot_id, scoped_group_id, scoped_user_id)
-            if any(value for value in supplied) and supplied != projected:
-                raise ScopeValidationError(
-                    "scope_legacy_mismatch",
-                    "relationship legacy keys must match the supplied RuntimeScope",
-                )
-            bot_id, group_id, user_id = projected
-        else:
-            bot_id, group_id, user_id = legacy_bot_id, legacy_group_id, legacy_user_id
+        scoped_bot_id, scoped_group_id, scoped_user_id = _project_group_subject_scope(scope)
+        supplied = (legacy_bot_id, legacy_group_id, legacy_user_id)
+        projected = (scoped_bot_id, scoped_group_id, scoped_user_id)
+        if any(value for value in supplied) and supplied != projected:
+            raise ScopeValidationError(
+                "scope_legacy_mismatch",
+                "relationship legacy keys must match the supplied RuntimeScope",
+            )
+        bot_id, group_id, user_id = projected
         event_type = (event_type or "").strip()
         dimension = (dimension or "").strip()
         reason = (reason or "").strip()
@@ -186,108 +193,34 @@ class RelationshipEventService:
 
         now = float(created_at or time.time())
         requested_delta = float(delta)
-        if self.repository is not None and scope is not None:
-            kwargs = {
-                "event_type": event_type,
-                "dimension": dimension,
-                "delta": requested_delta,
-                "reason": reason,
-                "source_episode_id": source_episode_id,
-                "source_memory_id": source_memory_id,
-                "created_at": now,
-            }
-            if self.coordinator is not None:
-                stored = self.coordinator.transaction_blocking(
-                    lambda connection: self.repository.record_relationship_event(
-                        scope, connection=connection, **kwargs
-                    )
+        kwargs = {
+            "event_type": event_type,
+            "dimension": dimension,
+            "delta": requested_delta,
+            "reason": reason,
+            "source_episode_id": source_episode_id,
+            "source_memory_id": source_memory_id,
+            "created_at": now,
+        }
+        if self.coordinator is not None:
+            stored = self.coordinator.transaction_blocking(
+                lambda connection: self.repository.record_relationship_event(
+                    scope, connection=connection, **kwargs
                 )
-            else:
-                stored = self.repository.record_relationship_event(scope, **kwargs)
-            return RelationshipEventResult(
-                event_id=int(stored["event_id"]),
-                bot_id=bot_id,
-                group_id=group_id,
-                user_id=user_id,
-                dimension=str(stored["dimension"]),
-                requested_delta=float(stored["requested_delta"]),
-                applied_delta=float(stored["applied_delta"]),
-                before_affection=int(stored["before_affinity"]),
-                after_affection=int(stored["after_affinity"]),
-                reason=str(stored["reason"]),
             )
-        applied_delta = self._constrain_delta(
-            bot_id=bot_id,
-            group_id=group_id,
-            user_id=user_id,
-            dimension=dimension,
-            event_type=event_type,
-            delta=requested_delta,
-            now=now,
-        )
-
-        dims, before_affection, existing_meta = self._load_dimensions(user_id, group_id, bot_id)
-        dims[dimension] = dims.get(dimension, 0) + applied_delta
-        lo, hi = DIM_RANGES[dimension]
-        dims[dimension] = _clamp(dims[dimension], lo, hi)
-        after_affection = compute_affection(dims)
-
-        cur = self.conn.execute(
-            """INSERT INTO relationship_events
-               (bot_id, group_id, user_id, event_type, dimension, delta, reason,
-                source_episode_id, source_memory_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                bot_id,
-                group_id,
-                user_id,
-                event_type,
-                dimension,
-                applied_delta,
-                reason,
-                source_episode_id,
-                source_memory_id,
-                now,
-            ),
-        )
-        event_id = int(getattr(cur, "lastrowid", 0) or 0)
-
-        existing_meta["dimensions"] = {k: round(float(v), 2) for k, v in dims.items()}
-        existing_meta["attitude_level"] = get_attitude_level(after_affection)
-        existing_meta["last_relationship_event_at"] = now
-        existing_meta["last_relationship_event_reason"] = reason
-        target_profile = self.target_profiles.get(user_id)
-        if target_profile:
-            existing_meta["target_type"] = "bot"
-            existing_meta["target_bot_id"] = target_profile.get("db_id") or user_id
-            existing_meta["target_name"] = target_profile.get("name") or target_profile.get("db_id") or user_id
         else:
-            existing_meta.setdefault("target_type", "user")
-        meta_str = json.dumps(existing_meta, ensure_ascii=False)
-        self.conn.execute(
-            """INSERT INTO user_profiles
-               (user_id, group_id, nickname, affection, interaction_count, first_seen, last_seen,
-                personality_tags, notes, metadata, bot_id)
-               VALUES (?, ?, '', ?, 0, ?, ?, '', '', ?, ?)
-               ON CONFLICT(user_id, group_id, bot_id) DO UPDATE SET
-                 affection = excluded.affection,
-                 last_seen = excluded.last_seen,
-                 metadata = excluded.metadata""",
-            (user_id, group_id, after_affection, now, now, meta_str, bot_id),
-        )
-        self.conn.commit()
-
+            stored = self.repository.record_relationship_event(scope, **kwargs)
         return RelationshipEventResult(
-            event_id=event_id,
+            event_id=int(stored["event_id"]),
             bot_id=bot_id,
             group_id=group_id,
             user_id=user_id,
-            dimension=dimension,
-            requested_delta=requested_delta,
-            applied_delta=applied_delta,
-            before_affection=before_affection,
-            after_affection=after_affection,
-            reason=reason,
+            dimension=str(stored["dimension"]),
+            requested_delta=float(stored["requested_delta"]),
+            applied_delta=float(stored["applied_delta"]),
+            before_affection=int(stored["before_affinity"]),
+            after_affection=int(stored["after_affinity"]),
+            reason=str(stored["reason"]),
         )
 
     def recent_events(self, bot_id: str, user_id: str, group_id: str, limit: int = 5) -> list[dict[str, Any]]:

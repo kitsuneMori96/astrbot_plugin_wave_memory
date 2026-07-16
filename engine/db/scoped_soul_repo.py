@@ -34,6 +34,10 @@ except ImportError:  # pragma: no cover
     from domain.scope import RuntimeScope
 
 from .connection import ConnectionManager
+try:
+    from ...services.soul_context import resolve_soul_context
+except ImportError:  # pragma: no cover - top-level repository imports
+    from services.soul_context import resolve_soul_context
 
 
 _DIMENSION_WEIGHTS = DIMENSION_WEIGHTS
@@ -98,10 +102,11 @@ def _compute_affinity(dimensions: Mapping[str, float]) -> int:
 class ScopedSoulRepository:
     """以 bot_id + session_id + visibility（关系再加 subject）隔离 Soul。"""
 
-    def __init__(self, cm: ConnectionManager):
+    def __init__(self, cm: ConnectionManager, soul_context_provider: Any | None = None):
         if not isinstance(cm, ConnectionManager):
             raise TypeError("cm must be a ConnectionManager")
         self.cm = cm
+        self.soul_context_provider = soul_context_provider
         # Direct repository users (including focused tests) receive the same idempotent
         # additive schema as the production DB facade.
         try:
@@ -110,6 +115,10 @@ class ScopedSoulRepository:
         except ImportError:  # pragma: no cover - top-level repository imports
             from engine.db.migrations.scoped_relationship_calibration import ensure_scoped_relationship_calibration_schema
             ensure_scoped_relationship_calibration_schema(cm)
+
+    def set_soul_context_provider(self, provider: Any | None) -> None:
+        """设置可选 Soul Context provider；传入 None 即关闭该能力。"""
+        self.soul_context_provider = provider
 
     def _write(self, callback: Callable[[Any], Any], connection=None):
         if connection is not None:
@@ -681,6 +690,21 @@ class ScopedSoulRepository:
         scope_params = (*_scope_params(scope), subject)
         auto_time, auto_times = time_filter("created_at")
         manual_time, manual_times = time_filter("created_at")
+        auto_count = int(self.cm.execute_read(
+            f"""SELECT COUNT(*)
+                    FROM scoped_soul_relationship_events
+                   WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?
+                         {auto_time}""",
+            (*scope_params, *auto_times),
+        ).fetchone()[0])
+        manual_count = int(self.cm.execute_read(
+            f"""SELECT COUNT(*)
+                    FROM scoped_soul_relationship_calibration_events
+                   WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?
+                         {manual_time}""",
+            (*scope_params, *manual_times),
+        ).fetchone()[0])
+        history_window = int(offset + limit)
         auto_rows = self.cm.execute_read(
             f"""SELECT id, event_type, dimension, delta, reason, source_episode_id,
                          source_memory_id, revision, created_at, operation_id, evidence,
@@ -688,8 +712,8 @@ class ScopedSoulRepository:
                     FROM scoped_soul_relationship_events
                    WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?
                          {auto_time}
-                   ORDER BY created_at DESC, id DESC""",
-            (*scope_params, *auto_times),
+                   ORDER BY created_at DESC, id DESC LIMIT ?""",
+            (*scope_params, *auto_times, history_window),
         ).fetchall()
         manual_rows = self.cm.execute_read(
             f"""SELECT calibration_id, operation_id, dimension, action, reason, evidence,
@@ -697,9 +721,23 @@ class ScopedSoulRepository:
                     FROM scoped_soul_relationship_calibration_events
                    WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?
                          {manual_time}
-                   ORDER BY created_at DESC, calibration_id DESC""",
-            (*scope_params, *manual_times),
+                   ORDER BY created_at DESC, calibration_id DESC LIMIT ?""",
+            (*scope_params, *manual_times, history_window),
         ).fetchall()
+        auto_revision = self.cm.execute_read(
+            f"""SELECT MAX(revision)
+                    FROM scoped_soul_relationship_events
+                   WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?
+                         {auto_time}""",
+            (*scope_params, *auto_times),
+        ).fetchone()[0]
+        manual_revision = self.cm.execute_read(
+            f"""SELECT MAX(relationship_revision)
+                    FROM scoped_soul_relationship_calibration_events
+                   WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?
+                         {manual_time}""",
+            (*scope_params, *manual_times),
+        ).fetchone()[0]
 
         def decoded(value: Any) -> Any:
             if value is None:
@@ -774,9 +812,10 @@ class ScopedSoulRepository:
                 "evidence": evidence,
             })
         items.sort(key=lambda item: (float(item.get("timestamp") or 0), str(item.get("id") or "")), reverse=True)
-        total = len(items)
+        total = auto_count + manual_count
+        revision_values = [int(value) for value in (auto_revision, manual_revision) if value is not None]
         return {"items": items[offset:offset + limit], "total": total,
-                "revision": max((int(item["revision"]) for item in items if item.get("revision") is not None), default=None)}
+                "revision": max(revision_values, default=None)}
 
     def list_relationships(self, scope: RuntimeScope, *, subject_principal_id: str | None = None) -> list[dict[str, Any]]:
         scope = _require_scope(scope)
@@ -999,14 +1038,10 @@ class ScopedSoulRepository:
             "timeline": {"items": timeline, "total": timeline_total, "revision": max((item["revision"] for item in timeline), default=None)},
             "relationship": relationship,
             "relationship_history": relationship_history,
-            "soul_context": {
-                "status": "unavailable",
-                "reason_code": "formal_soul_context_unavailable",
-                "timezone": None,
-                "circadian": None,
-                "energy": None,
-                "sleepiness": None,
-            },
+            "soul_context": resolve_soul_context(
+                self.soul_context_provider,
+                scope=scope,
+            ),
         }
 
 

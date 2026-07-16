@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 
+import { listMemories, type MemoryItem } from '@/api/memories'
 import { calibrateRelationship, type PeopleQuery, type RelationshipItem } from '@/api/people'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -27,25 +28,35 @@ function displayValue(value: number | null | undefined): string {
 
 type RelationshipCalibrationTarget = Pick<RelationshipItem, 'subject_principal_id' | 'revision' | 'values' | 'object_ref' | 'calibration'>
 
-async function sha256Text(value: string): Promise<string> {
-  const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
-  return `sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')}`
-}
-
 export function RelationshipCalibrationPanel({ item, query, onChanged }: { item: RelationshipCalibrationTarget; query: PeopleQuery; onChanged?: () => void }) {
   const [action, setAction] = useState<(typeof ACTIONS)[number][0]>('adjust')
   const [dimension, setDimension] = useState<(typeof DIMENSIONS)[number][0]>('trust')
   const [amount, setAmount] = useState('')
   const [reason, setReason] = useState('')
   const [evidence, setEvidence] = useState('')
+  const [evidenceMemories, setEvidenceMemories] = useState<MemoryItem[]>([])
+  const [selectedEvidenceId, setSelectedEvidenceId] = useState('')
   const [busy, setBusy] = useState(false)
   const values = item.values ?? {}
   const available = Boolean(item.object_ref?.ref && item.revision !== null && item.calibration.available)
 
+  useEffect(() => {
+    if (!available) {
+      setEvidenceMemories([])
+      setSelectedEvidenceId('')
+      return
+    }
+    let active = true
+    void listMemories({ bot_id: query.bot_id, session_id: query.session_id, visibility: query.visibility, limit: 25, offset: 0 })
+      .then((payload) => { if (active) setEvidenceMemories(payload.items) })
+      .catch(() => { if (active) setEvidenceMemories([]) })
+    return () => { active = false }
+  }, [available, query.bot_id, query.session_id, query.visibility])
+
   async function submit() {
     if (!available || !item.object_ref || item.revision === null) return
     if (!reason.trim()) { toast.warning('请填写人工校准理由'); return }
-    if (!evidence.trim()) { toast.warning('请填写证据说明'); return }
+    if (!selectedEvidenceId) { toast.warning('请选择当前 Scope 内的真实 Memory 证据'); return }
     setBusy(true)
     try {
       const numeric = amount.trim() ? Number(amount) : undefined
@@ -54,14 +65,11 @@ export function RelationshipCalibrationPanel({ item, query, onChanged }: { item:
         return
       }
       const [platformId, , ...conversationParts] = query.session_id.split(':')
-      const evidenceText = evidence.trim()
       const evidencePayload = [{
-        kind: 'webui_note',
-        id: `relationship-note:${item.subject_principal_id}`,
-        content_hash: await sha256Text(evidenceText),
-        captured_at: Date.now() / 1000,
+        kind: 'memory',
+        id: selectedEvidenceId,
+        summary: evidence.trim() || undefined,
         source_scope: { bot_id: query.bot_id, visibility: query.visibility, session: { id: query.session_id, platform_id: platformId, kind: 'group', conversation_id: conversationParts.join(':') }, subject_principal_id: item.subject_principal_id },
-        available: true,
       }]
       await calibrateRelationship(query, {
         object_ref: item.object_ref.ref,
@@ -75,6 +83,7 @@ export function RelationshipCalibrationPanel({ item, query, onChanged }: { item:
       toast.success('关系人工校准已提交并记录审计')
       setReason('')
       setEvidence('')
+      setSelectedEvidenceId('')
       setAmount('')
       onChanged?.()
     } catch (failure) {
@@ -92,7 +101,8 @@ export function RelationshipCalibrationPanel({ item, query, onChanged }: { item:
         <div className="grid gap-3 sm:grid-cols-2"><Field><FieldLabel htmlFor="relationship-action">动作</FieldLabel><select id="relationship-action" className="h-8 rounded-md border bg-background px-2 text-sm" value={action} onChange={(event) => setAction(event.target.value as typeof action)}>{ACTIONS.map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></Field><Field><FieldLabel htmlFor="relationship-dimension">关系维度</FieldLabel><select id="relationship-dimension" className="h-8 rounded-md border bg-background px-2 text-sm" value={dimension} onChange={(event) => setDimension(event.target.value as typeof dimension)}>{DIMENSIONS.map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></Field></div>
         {action === 'adjust' || action === 'override' ? <Field><FieldLabel htmlFor="relationship-amount">数值</FieldLabel><Input id="relationship-amount" inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} placeholder={action === 'adjust' ? '相对变化，例如 2 或 -1' : '绝对值，必须在该维度范围内'} /></Field> : null}
         <Field><FieldLabel htmlFor="relationship-reason">理由</FieldLabel><Textarea id="relationship-reason" maxLength={1000} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="说明为什么需要人工校准…" /></Field>
-        <Field><FieldLabel htmlFor="relationship-evidence">证据说明</FieldLabel><Textarea id="relationship-evidence" value={evidence} onChange={(event) => setEvidence(event.target.value)} placeholder="填写可追溯证据摘要；提交时会绑定当前 Scope…" /><FieldDescription>服务端会再次校验证据 Scope；不会接受裸 ID 或跨群证据。</FieldDescription></Field>
+        <Field><FieldLabel htmlFor="relationship-evidence-memory">真实 Memory 证据</FieldLabel><select id="relationship-evidence-memory" className="h-8 rounded-md border bg-background px-2 text-sm" value={selectedEvidenceId} onChange={(event) => setSelectedEvidenceId(event.target.value)}><option value="">请选择当前 Scope 的 Memory…</option>{evidenceMemories.map((memory) => <option key={memory.id} value={String(memory.id)}>{memory.id} · {(memory.content || '').slice(0, 72)}</option>)}</select><FieldDescription>服务端会重新读取该 Memory、计算 content hash 并校验 Scope；前端不能伪造 available 状态。</FieldDescription></Field>
+        <Field><FieldLabel htmlFor="relationship-evidence">补充证据说明（可选）</FieldLabel><Textarea id="relationship-evidence" value={evidence} onChange={(event) => setEvidence(event.target.value)} placeholder="补充说明这条真实消息为什么支持校准…" /></Field>
         <Button type="button" disabled={busy} onClick={() => void submit()}>{busy ? '提交中…' : '提交人工校准'}</Button>
       </>}
     </CardContent>
