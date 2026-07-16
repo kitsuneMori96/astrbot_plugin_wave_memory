@@ -194,6 +194,75 @@ class ChannelConfigTest(unittest.TestCase):
         self.assertEqual(applied["revision"], preview["preflight_token"])
         self.assertIn("config_revision=", applied["verification_url"])
 
+    def test_layer_patch_is_fully_validated_and_explicit_false_zero_are_preserved(self):
+        from services.config.channel_config import apply_channel_overrides, build_default_channel_config
+
+        base = build_default_channel_config(runtime_mode="full")
+        candidate = apply_channel_overrides(
+            base,
+            {
+                "trace_enabled": False,
+                "recent_dedup_minutes": 0,
+                "channels": {"memory": {"top_k": 0, "enabled": False}},
+                "query_options": {"stages": {"epa": False}, "params": {"pyramid_top_k": 1}},
+                "memory_recall": {"enable_shotgun": False, "skip_recent_minutes": 0},
+            },
+        )
+        self.assertIs(candidate.trace_enabled, False)
+        self.assertEqual(candidate.recent_dedup_minutes, 0)
+        self.assertIs(candidate.channels["memory"].enabled, False)
+        self.assertEqual(candidate.channels["memory"].top_k, 0)
+        self.assertIs(candidate.query_stages["epa"], False)
+        self.assertEqual(candidate.query_params["pyramid_top_k"], 1)
+        self.assertIs(candidate.memory_recall["enable_shotgun"], False)
+
+        for invalid in (
+            {"unknown_root": True},
+            {"channels": {"memory": {"top_k": ""}}},
+            {"channels": {"memory": {"enabled": "not-bool"}}},
+            {"query_options": {"stages": {"unknown": True}}},
+            {"memory_recall": {"unknown": 1}},
+        ):
+            with self.assertRaises(ValueError, msg=str(invalid)):
+                apply_channel_overrides(base, invalid)
+
+    def test_scoped_patch_apply_persists_layer_without_replacing_global_runtime_config(self):
+        from services.config.channel_config import build_default_channel_config
+        from domain.scope import RuntimeScope, SessionRef
+        from webui.blueprints.channel_config import apply_channel_config_patch, validate_channel_config_patch
+
+        scope = RuntimeScope(
+            bot_id="bot-alpha",
+            visibility="group",
+            session=SessionRef("test:group:g1", "test", "group", "g1"),
+            subject_principal_id="test:user:u1",
+        )
+        current = build_default_channel_config(runtime_mode="full")
+        container = SimpleNamespace(
+            plugin_config={},
+            injection_channel_config=current,
+            injection_channel_config_setter=lambda value: self.fail("scoped patch must not replace global runtime config"),
+        )
+        body = {
+            "layer": "session",
+            "scope": scope.to_dict(),
+            "channels": {"memory": {"top_k": 2}},
+        }
+        preview = validate_channel_config_patch({}, body, current, expected_scope=scope)
+        self.assertTrue(preview["ok"])
+        applied = apply_channel_config_patch(container, {
+            **body,
+            "preflight_token": preview["preflight_token"],
+            "confirmation": "apply",
+        })
+
+        self.assertTrue(applied["ok"])
+        self.assertEqual(applied["layer"], "session")
+        self.assertIs(container.injection_channel_config, current)
+        entries = container.plugin_config["Channel_Settings"]["layers"]["session"]
+        self.assertEqual(entries[0]["selector"]["session_id"], "test:group:g1")
+        self.assertEqual(entries[0]["patch"]["channels"]["memory"]["top_k"], 2)
+
     def test_frontend_exposes_channel_config_page(self):
         page = Path("webui/frontend/src/pages/channels/ChannelConfigPage.tsx").read_text(encoding="utf-8")
         table = Path("webui/frontend/src/pages/channels/ChannelConfigTable.tsx").read_text(encoding="utf-8")

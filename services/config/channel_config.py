@@ -5,10 +5,17 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 import hashlib
 import json
 from typing import Any, Mapping
+
+from .effective_config import (
+    EffectiveConfigResult,
+    patches_for_scope,
+    resolve_effective_config,
+    validate_layer_store,
+)
 
 
 KNOWN_MODES = frozenset({"full", "memory_only", "compat_only"})
@@ -29,6 +36,19 @@ KNOWN_CHANNELS = (
 
 _ADVANCED_FULL_ONLY = {"persona", "belief", "jargon", "fewshot", "book_lore", "affinity"}
 _OPTIONAL_MEMORY_ONLY = {"timeline", "facts", "fts5"}
+_QUERY_STAGE_NAMES = frozenset({"epa", "pyramid", "spike", "geodesic"})
+_QUERY_PARAM_LIMITS = {
+    "pyramid_max_levels": (int, 1, 10),
+    "pyramid_top_k": (int, 1, 50),
+    "spike_max_hops": (int, 0, 16),
+    "spike_firing_threshold": (float, 0.0, 1.0),
+    "geodesic_alpha": (float, 0.0, 1.0),
+}
+_ROOT_OVERRIDE_FIELDS = frozenset({"channels", "recent_dedup_minutes", "trace_enabled", "query_options", "memory_recall"})
+_MEMORY_RECALL_FIELDS = frozenset({"enable_shotgun", "skip_recent_minutes", "source_filter", "exclude_sources"})
+_EFFECTIVE_FIELD_METADATA = {
+    "*": {"apply_mode": "hot", "restart_required": False},
+}
 
 
 @dataclass(frozen=True)
@@ -55,12 +75,20 @@ class ChannelConfigSet:
     channels: dict[str, ChannelConfig]
     recent_dedup_minutes: int = 30
     trace_enabled: bool = True
+    query_stages: dict[str, bool] = field(default_factory=dict)
+    query_params: dict[str, int | float] = field(default_factory=dict)
+    memory_recall: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "mode": self.mode,
             "recent_dedup_minutes": self.recent_dedup_minutes,
             "trace_enabled": self.trace_enabled,
+            "query_options": {
+                "stages": dict(self.query_stages),
+                "params": dict(self.query_params),
+            },
+            "memory_recall": dict(self.memory_recall),
             "channels": {name: cfg.to_dict() for name, cfg in self.channels.items()},
         }
 
@@ -91,6 +119,36 @@ def _bool(value: Any, default: bool) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def _strict_bool(value: Any, *, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    raise ValueError(f"{field_name} must be a boolean")
+
+
+def _strict_number(value: Any, *, field_name: str, caster: type[int] | type[float]) -> int | float:
+    if isinstance(value, bool) or value == "" or value is None:
+        raise ValueError(f"{field_name} must be a {caster.__name__}")
+    try:
+        converted = caster(float(value)) if caster is int else caster(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a {caster.__name__}") from exc
+    if caster is int and float(value) != converted:
+        raise ValueError(f"{field_name} must be an integer")
+    return converted
+
+
+def _strict_string_list(value: Any, *, field_name: str) -> list[str]:
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise ValueError(f"{field_name} must be a string array")
+    return list(value)
 
 
 def _modes_for(name: str, mode: str) -> tuple[str, ...]:
@@ -146,7 +204,25 @@ def build_default_channel_config(
         "fts5": ChannelConfig("fts5", _enabled_for("fts5", mode, inject_cfg), priority=85, top_k=10, token_budget=350, timeout_ms=600, min_score=0.0, modes=_modes_for("fts5", mode)),
         "affinity": ChannelConfig("affinity", _enabled_for("affinity", mode, inject_cfg), priority=68, max_items=3, token_budget=180, timeout_ms=120, modes=_modes_for("affinity", mode)),
     }
-    return ChannelConfigSet(mode=mode, channels=defaults, recent_dedup_minutes=recent_dedup, trace_enabled=True)
+    query_stages = {
+        "epa": _bool(query_cfg.get("enable_epa"), True),
+        "pyramid": _bool(query_cfg.get("enable_residual_pyramid"), True),
+        "spike": _bool(query_cfg.get("enable_spike_routing"), True),
+        "geodesic": _bool(query_cfg.get("enable_geodesic_rerank"), True),
+    }
+    memory_recall = {
+        "enable_shotgun": _bool(query_cfg.get("enable_shotgun"), False),
+        "skip_recent_minutes": recent_dedup,
+    }
+    return ChannelConfigSet(
+        mode=mode,
+        channels=defaults,
+        recent_dedup_minutes=recent_dedup,
+        trace_enabled=True,
+        query_stages=query_stages,
+        query_params={},
+        memory_recall=memory_recall,
+    )
 
 
 def _validate_channel_config(name: str, cfg: ChannelConfig) -> None:
@@ -172,9 +248,16 @@ def _validate_channel_config(name: str, cfg: ChannelConfig) -> None:
 
 
 def apply_channel_overrides(base: ChannelConfigSet, overrides: Mapping[str, Any] | None) -> ChannelConfigSet:
-    """校验并应用热配置覆盖；非法值不会部分生效。"""
+    """完整校验并应用请求级覆盖；任意非法字段都会整体拒绝。"""
     overrides = overrides or {}
-    channels_override = overrides.get("channels", {}) or {}
+    if not isinstance(overrides, Mapping):
+        raise ValueError("channel override must be an object")
+    unknown_root = [field for field in overrides if field not in _ROOT_OVERRIDE_FIELDS]
+    if unknown_root:
+        raise ValueError(f"unknown channel override field: {unknown_root[0]}")
+
+    raw_channels = overrides.get("channels", {})
+    channels_override = {} if raw_channels is None else raw_channels
     if not isinstance(channels_override, Mapping):
         raise ValueError("channels override must be an object")
 
@@ -182,6 +265,8 @@ def apply_channel_overrides(base: ChannelConfigSet, overrides: Mapping[str, Any]
     for name, patch in channels_override.items():
         if name not in updated:
             raise ValueError(f"unknown channel: {name}")
+        if patch is None:
+            continue
         if not isinstance(patch, Mapping):
             raise ValueError(f"{name} override must be an object")
         current = updated[name]
@@ -191,23 +276,90 @@ def apply_channel_overrides(base: ChannelConfigSet, overrides: Mapping[str, Any]
             raise ValueError(f"unknown field for {name}: {unknown_fields[0]}")
         values: dict[str, Any] = {}
         for field, value in patch.items():
+            if value is None:
+                continue
+            field_name = f"channels.{name}.{field}"
             if field == "enabled":
-                values[field] = _bool(value, current.enabled)
-            elif field in {"top_k", "max_items"}:
-                values[field] = None if value is None or value == "" else _int(value, getattr(current, field) or 0)
-            elif field in {"priority", "token_budget", "timeout_ms"}:
-                values[field] = _int(value, getattr(current, field) or 0)
+                values[field] = _strict_bool(value, field_name=field_name)
+            elif field in {"top_k", "max_items", "priority", "token_budget", "timeout_ms"}:
+                values[field] = _strict_number(value, field_name=field_name, caster=int)
             elif field == "min_score":
-                values[field] = None if value is None or value == "" else _float(value, current.min_score or 0.0)
+                values[field] = _strict_number(value, field_name=field_name, caster=float)
         candidate = replace(current, **values)
         _validate_channel_config(name, candidate)
         updated[name] = candidate
 
+    recent_dedup = base.recent_dedup_minutes
+    if "recent_dedup_minutes" in overrides and overrides.get("recent_dedup_minutes") is not None:
+        recent_dedup = int(_strict_number(
+            overrides.get("recent_dedup_minutes"),
+            field_name="recent_dedup_minutes",
+            caster=int,
+        ))
+    trace_enabled = base.trace_enabled
+    if "trace_enabled" in overrides and overrides.get("trace_enabled") is not None:
+        trace_enabled = _strict_bool(overrides.get("trace_enabled"), field_name="trace_enabled")
+
+    query_stages = dict(base.query_stages)
+    query_params = dict(base.query_params)
+    raw_query_options = overrides.get("query_options")
+    if raw_query_options is not None:
+        if not isinstance(raw_query_options, Mapping) or any(key not in {"stages", "params"} for key in raw_query_options):
+            raise ValueError("query_options must contain only stages and params")
+        raw_stages = raw_query_options.get("stages")
+        if raw_stages is not None:
+            if not isinstance(raw_stages, Mapping):
+                raise ValueError("query_options.stages must be an object")
+            for name, value in raw_stages.items():
+                if name not in _QUERY_STAGE_NAMES:
+                    raise ValueError(f"unknown query stage: {name}")
+                if value is not None:
+                    query_stages[name] = _strict_bool(value, field_name=f"query_options.stages.{name}")
+        raw_params = raw_query_options.get("params")
+        if raw_params is not None:
+            if not isinstance(raw_params, Mapping):
+                raise ValueError("query_options.params must be an object")
+            for name, value in raw_params.items():
+                limits = _QUERY_PARAM_LIMITS.get(name)
+                if limits is None:
+                    raise ValueError(f"unknown query param: {name}")
+                if value is None:
+                    continue
+                caster, minimum, maximum = limits
+                converted = _strict_number(value, field_name=f"query_options.params.{name}", caster=caster)
+                if converted < minimum or converted > maximum:
+                    raise ValueError(f"query_options.params.{name} must be between {minimum} and {maximum}")
+                query_params[name] = converted
+
+    memory_recall = dict(base.memory_recall)
+    raw_memory_recall = overrides.get("memory_recall")
+    if raw_memory_recall is not None:
+        if not isinstance(raw_memory_recall, Mapping):
+            raise ValueError("memory_recall must be an object")
+        unknown_fields = [field for field in raw_memory_recall if field not in _MEMORY_RECALL_FIELDS]
+        if unknown_fields:
+            raise ValueError(f"unknown memory_recall field: {unknown_fields[0]}")
+        for field, value in raw_memory_recall.items():
+            if value is None:
+                continue
+            if field == "enable_shotgun":
+                memory_recall[field] = _strict_bool(value, field_name=f"memory_recall.{field}")
+            elif field == "skip_recent_minutes":
+                converted = int(_strict_number(value, field_name=f"memory_recall.{field}", caster=int))
+                if converted < 0:
+                    raise ValueError("memory_recall.skip_recent_minutes must be non-negative")
+                memory_recall[field] = converted
+            else:
+                memory_recall[field] = _strict_string_list(value, field_name=f"memory_recall.{field}")
+
     candidate_set = ChannelConfigSet(
         mode=base.mode,
         channels=updated,
-        recent_dedup_minutes=_int(overrides.get("recent_dedup_minutes"), base.recent_dedup_minutes),
-        trace_enabled=_bool(overrides.get("trace_enabled"), base.trace_enabled),
+        recent_dedup_minutes=recent_dedup,
+        trace_enabled=trace_enabled,
+        query_stages=query_stages,
+        query_params=query_params,
+        memory_recall=memory_recall,
     )
     for name, cfg in candidate_set.channels.items():
         _validate_channel_config(name, cfg)
@@ -216,8 +368,82 @@ def apply_channel_overrides(base: ChannelConfigSet, overrides: Mapping[str, Any]
     return candidate_set
 
 
-def build_channel_config_from_plugin_config(plugin_config: Mapping[str, Any] | None) -> ChannelConfigSet:
-    """从插件静态配置和保存的 Channel_Settings 覆盖生成有效通道配置。"""
+def _channel_settings(plugin_config: Mapping[str, Any]) -> Mapping[str, Any]:
+    settings = plugin_config.get("Channel_Settings", {})
+    if settings is None:
+        return {}
+    if not isinstance(settings, Mapping):
+        raise ValueError("Channel_Settings must be an object")
+    return settings
+
+
+def _legacy_system_overrides(settings: Mapping[str, Any]) -> dict[str, Any]:
+    allowed = set(_ROOT_OVERRIDE_FIELDS) | {"layers"}
+    unknown = [field for field in settings if field not in allowed]
+    if unknown:
+        raise ValueError(f"unknown Channel_Settings field: {unknown[0]}")
+    return {field: settings[field] for field in _ROOT_OVERRIDE_FIELDS if field in settings}
+
+
+def _config_set_from_payload(payload: Mapping[str, Any]) -> ChannelConfigSet:
+    if not isinstance(payload, Mapping):
+        raise ValueError("effective channel config must be an object")
+    channels_payload = payload.get("channels")
+    if not isinstance(channels_payload, Mapping) or set(channels_payload) != set(KNOWN_CHANNELS):
+        raise ValueError("effective channel config must contain every known channel")
+    channels: dict[str, ChannelConfig] = {}
+    for name in KNOWN_CHANNELS:
+        raw = channels_payload[name]
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"effective channel {name} must be an object")
+        expected = {"name", "enabled", "priority", "top_k", "max_items", "token_budget", "timeout_ms", "min_score", "modes"}
+        if set(raw) != expected or raw.get("name") != name:
+            raise ValueError(f"effective channel {name} has invalid fields")
+        cfg = ChannelConfig(
+            name=name,
+            enabled=raw["enabled"],
+            priority=raw["priority"],
+            top_k=raw["top_k"],
+            max_items=raw["max_items"],
+            token_budget=raw["token_budget"],
+            timeout_ms=raw["timeout_ms"],
+            min_score=raw["min_score"],
+            modes=tuple(raw["modes"]),
+        )
+        _validate_channel_config(name, cfg)
+        channels[name] = cfg
+    query_options = payload.get("query_options", {})
+    memory_recall = payload.get("memory_recall", {})
+    if not isinstance(query_options, Mapping) or not isinstance(memory_recall, Mapping):
+        raise ValueError("effective query_options and memory_recall must be objects")
+    candidate = ChannelConfigSet(
+        mode=str(payload.get("mode") or ""),
+        channels=channels,
+        recent_dedup_minutes=int(payload.get("recent_dedup_minutes")),
+        trace_enabled=payload.get("trace_enabled"),
+        query_stages=dict(query_options.get("stages") or {}),
+        query_params=dict(query_options.get("params") or {}),
+        memory_recall=dict(memory_recall),
+    )
+    # Reuse the strict validator for non-channel request-level options.
+    validated = apply_channel_overrides(
+        replace(candidate, query_stages={}, query_params={}, memory_recall={}),
+        {
+            "query_options": {"stages": candidate.query_stages, "params": candidate.query_params},
+            "memory_recall": candidate.memory_recall,
+            "recent_dedup_minutes": candidate.recent_dedup_minutes,
+            "trace_enabled": candidate.trace_enabled,
+        },
+    )
+    return replace(validated, channels=channels, mode=candidate.mode)
+
+
+def resolve_effective_channel_config(
+    plugin_config: Mapping[str, Any] | None,
+    *,
+    scope: Any,
+) -> tuple[ChannelConfigSet, EffectiveConfigResult]:
+    """解析 exact RuntimeScope 的通道配置，并返回 provenance/revision。"""
     plugin_config = plugin_config or {}
     try:
         from ..runtime_mode import resolve_runtime_mode
@@ -229,7 +455,55 @@ def build_channel_config_from_plugin_config(plugin_config: Mapping[str, Any] | N
         query_cfg=plugin_config.get("Query_Settings", {}) or {},
         inject_cfg=plugin_config.get("Inject_Settings", {}) or {},
     )
-    return apply_channel_overrides(base, plugin_config.get("Channel_Settings", {}) or {})
+    settings = _channel_settings(plugin_config)
+    system_config = apply_channel_overrides(base, _legacy_system_overrides(settings))
+    layers = settings.get("layers", {})
+    # validate_layer_store checks every layer, including entries unrelated to this Scope.
+    validate_layer_store(layers)
+    selected = patches_for_scope(layers, scope)
+
+    candidate = system_config
+    for layer in ("bot", "session", "user", "relationship"):
+        patch = selected.get(layer)
+        if patch is not None:
+            candidate = apply_channel_overrides(candidate, patch)
+    effective = resolve_effective_config(
+        system_config.to_dict(),
+        scope=scope,
+        bot_config=selected.get("bot"),
+        session_config=selected.get("session"),
+        user_config=selected.get("user"),
+        relationship_config=selected.get("relationship"),
+        field_metadata=_EFFECTIVE_FIELD_METADATA,
+    )
+    reconstructed = _config_set_from_payload(effective.values)
+    if reconstructed.to_dict() != candidate.to_dict():
+        raise ValueError("effective resolver output does not match validated channel candidate")
+    return candidate, effective
+
+
+def build_channel_config_from_plugin_config(
+    plugin_config: Mapping[str, Any] | None,
+    *,
+    scope: Any = None,
+) -> ChannelConfigSet:
+    """兼容旧 Channel_Settings；有 Scope 时叠加严格分层配置。"""
+    plugin_config = plugin_config or {}
+    if scope is not None:
+        return resolve_effective_channel_config(plugin_config, scope=scope)[0]
+    try:
+        from ..runtime_mode import resolve_runtime_mode
+        mode = resolve_runtime_mode(plugin_config).mode
+    except Exception:
+        mode = "full"
+    base = build_default_channel_config(
+        runtime_mode=mode,
+        query_cfg=plugin_config.get("Query_Settings", {}) or {},
+        inject_cfg=plugin_config.get("Inject_Settings", {}) or {},
+    )
+    settings = _channel_settings(plugin_config)
+    validate_layer_store(settings.get("layers", {}))
+    return apply_channel_overrides(base, _legacy_system_overrides(settings))
 
 
 def channel_config_revision(config: ChannelConfigSet) -> str:
@@ -248,6 +522,12 @@ def channel_config_diff(base: ChannelConfigSet, target: ChannelConfigSet) -> lis
 
     add("recent_dedup_minutes", base.recent_dedup_minutes, target.recent_dedup_minutes)
     add("trace_enabled", base.trace_enabled, target.trace_enabled)
+    for stage in sorted(set(base.query_stages) | set(target.query_stages)):
+        add(f"query_options.stages.{stage}", base.query_stages.get(stage), target.query_stages.get(stage))
+    for param in sorted(set(base.query_params) | set(target.query_params)):
+        add(f"query_options.params.{param}", base.query_params.get(param), target.query_params.get(param))
+    for field in sorted(set(base.memory_recall) | set(target.memory_recall)):
+        add(f"memory_recall.{field}", base.memory_recall.get(field), target.memory_recall.get(field))
     for name in KNOWN_CHANNELS:
         before = base.channels.get(name)
         after = target.channels.get(name)

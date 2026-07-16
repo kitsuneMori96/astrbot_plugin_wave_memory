@@ -40,11 +40,13 @@ class ServiceContainer:
         self.writer: Any = None
         self.write_gateway: Any = None
         self.durable_jobs: Any = None
+        self.data_governance_jobs: Any = None
         self.task_supervisor: Any = None
         self.jargon_service: Any = None
         self.plugin_config: dict = {}
         self.injection_channel_config: Any = None
         self.injection_channel_config_setter: Any = None
+        self.injection_channels: list[Any] = []
         self.livingmemory_facade: Any = None
         self.livingmemory_facade_enabled: bool = False
         self.livingmemory_alias_tools_registered: bool = False
@@ -86,6 +88,7 @@ class ServiceContainer:
         writer=None,
         write_gateway=None,
         durable_jobs=None,
+        data_governance_jobs=None,
         task_supervisor=None,
         password: str = "",
         plugin_config: dict = None,
@@ -116,6 +119,7 @@ class ServiceContainer:
         self.writer = writer
         self.write_gateway = write_gateway
         self.durable_jobs = durable_jobs
+        self.data_governance_jobs = data_governance_jobs
         self.task_supervisor = task_supervisor
         self.jargon_service = None
         self.password = password
