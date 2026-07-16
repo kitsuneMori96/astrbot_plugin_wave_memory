@@ -317,6 +317,17 @@ def _require_object_ref(body: dict, *, kind: str, locator: int, scope: RuntimeSc
         raise ScopedKnowledgeScopeError("object_ref_stale")
 
 
+def _query_trace_valid(container, scope: RuntimeScope, body: dict) -> bool:
+    trace_id = str(body.get("query_trace_id") or "").strip()
+    store = getattr(container, "injection_trace_store", None)
+    if not trace_id or store is None:
+        return False
+    try:
+        return store.get_for_scope(trace_id, scope) is not None
+    except Exception:
+        return False
+
+
 def _memory_evidence_available(container, scope: RuntimeScope, source_memory_id) -> bool:
     if source_memory_id is None or scope.session is None:
         return False
@@ -765,11 +776,16 @@ async def batch_review_scoped_jargon():
             _require_object_ref(entry, kind="jargon", locator=jargon_id, scope=scope, item=current)
             if action == "approve" and not _memory_evidence_available(container, scope, current.get("source_memory_id")):
                 raise ScopedKnowledgeScopeError("jargon_anchor_unavailable")
+            if action == "approve" and not _query_trace_valid(container, scope, body):
+                raise ScopedKnowledgeScopeError("query_trace_required")
             validated.append(current)
 
         results = []
         for current in validated:
-            result = review(scope, int(current["id"]), action)
+            try:
+                result = review(scope, int(current["id"]), action, query_trace_id=body.get("query_trace_id"))
+            except TypeError:
+                result = review(scope, int(current["id"]), action)
             results.append({"id": int(result["id"]), "status": result["status"]})
         return jsonify({
             "ok": True,
@@ -911,11 +927,13 @@ async def review_scoped_jargon(jargon_id: int, action: str):
         _require_object_ref(body, kind="jargon", locator=jargon_id, scope=scope, item=current)
         if action == "approve" and not _memory_evidence_available(container, scope, current.get("source_memory_id")):
             return _scope_error("jargon_anchor_unavailable", 422)
+        if action == "approve" and not _query_trace_valid(container, scope, body):
+            return _scope_error("query_trace_required", 422)
         service = getattr(container, "jargon_service", None)
         review = getattr(service, "review", None)
         if not callable(review):
             return _scope_error("jargon_review_command_unavailable", 503)
-        result = review(scope, jargon_id, action)
+        result = review(scope, jargon_id, action, query_trace_id=body.get("query_trace_id"))
         return jsonify(mutation_response(
             operation_kind=f"jargon.{action}",
             status="succeeded",

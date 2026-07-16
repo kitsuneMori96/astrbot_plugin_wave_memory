@@ -112,6 +112,12 @@ class BeliefChannel:
                     "keywords": keywords,
                     "belief_ids": _extract_belief_ids(text),
                     "preview": _preview(text),
+                    "trace_id": getattr(ctx, "trace_id", ""),
+                    "scope": runtime_scope,
+                    "source_channel": "belief",
+                    "evidence": _extract_belief_ids(text),
+                    "rendered_text": text,
+                    "dedupe_key": "belief:" + (":".join(str(i) for i in _extract_belief_ids(text)) or _preview(text, 80)),
                 }],
                 latency_ms=self._latency_ms(started),
             )

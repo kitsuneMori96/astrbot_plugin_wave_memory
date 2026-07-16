@@ -22,6 +22,7 @@ from .db.migrations.scoped_memory_tag_corrections import (
 from .db.migrations.scoped_tag_governance import ensure_scoped_tag_governance_schema
 from .db.migrations.scoped_relationship_calibration import ensure_scoped_relationship_calibration_schema
 from .db.migrations.scoped_soul import ensure_scoped_soul_schema
+from .db.migrations.scoped_fact_history import ensure_scoped_fact_history_schema
 from .db.scoped_knowledge_repo import ScopedKnowledgeRepo
 from .db.scoped_learning_projection_repo import (
     ReviewedBookLoreProjectionRepository,
@@ -62,6 +63,7 @@ class WaveMemoryDB:
             ensure_scoped_tag_governance_schema(self._cm)
             ensure_scoped_soul_schema(self._cm)
             ensure_scoped_relationship_calibration_schema(self._cm)
+            ensure_scoped_fact_history_schema(self._cm)
             ensure_scoped_learning_projection_schema(self._cm)
             self._scoped_knowledge_repo = ScopedKnowledgeRepo(self._cm)
             self._soul_repository = ScopedSoulRepository(self._cm)
@@ -92,6 +94,18 @@ class WaveMemoryDB:
     def scoped_knowledge(self):
         """正式 scoped 派生知识边界；禁止调用方回退 legacy 表。"""
         return self._scoped_knowledge_repo
+
+    def record_scoped_fact_observation(self, scope, **kwargs):
+        return self._scoped_knowledge_repo.record_scoped_fact_observation(scope, **kwargs)
+
+    def list_scoped_fact_history(self, scope, **kwargs):
+        return self._scoped_knowledge_repo.list_scoped_fact_history(scope, **kwargs)
+
+    def review_scoped_fact_observation(self, scope, observation_id, **kwargs):
+        return self._scoped_knowledge_repo.review_scoped_fact_observation(scope, observation_id, **kwargs)
+
+    def transition_scoped_fact_observation(self, scope, observation_id, **kwargs):
+        return self._scoped_knowledge_repo.transition_scoped_fact_observation(scope, observation_id, **kwargs)
 
     @property
     def soul_repository(self) -> ScopedSoulRepository:

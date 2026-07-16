@@ -24,8 +24,9 @@ _ORDINARY_WORDS = {"吃饭", "睡觉", "上班", "下班", "回家", "出门", "
 class JargonService:
     """黑话挖掘与注入门面；任何非群 RuntimeScope 都 fail-closed。"""
 
-    def __init__(self, db: Any, llm_client: Any = None, enabled: bool = True, config: dict | None = None):
+    def __init__(self, db: Any, llm_client: Any = None, enabled: bool = True, config: dict | None = None, trace_store: Any = None):
         self._db, self._enabled, self._config, self._llm = db, enabled, config or {}, llm_client
+        self._trace_store = trace_store or getattr(db, "injection_trace_store", None)
         self._repo = getattr(db, "scoped_knowledge", None)
         self._min_frequency = int(self._config.get("min_frequency", 5))
         self._min_messages = int(self._config.get("min_messages", 10))
@@ -116,7 +117,7 @@ class JargonService:
             return False
         return self._msg_count.get(key, 0) >= self._min_messages and time.time() - self._last_mine.get(key, 0) >= self._mine_cooldown
 
-    async def mine(self, runtime_scope: RuntimeScope | None) -> List[Dict[str, Any]]:
+    async def mine(self, runtime_scope: RuntimeScope | None, query_trace_id: str | None = None) -> List[Dict[str, Any]]:
         """以 (bot_id, session_id, visibility) 独立挖掘和持久化。"""
         scope, key = self._group_scope(runtime_scope), scope_key(runtime_scope)
         if not self._enabled or scope is None or key is None or not self._repository_available():
@@ -138,6 +139,12 @@ class JargonService:
         if not candidates:
             return []
         results: List[Dict[str, Any]] = []
+        trace_status = "pending"
+        if query_trace_id and self._trace_store is not None:
+            try:
+                trace_status = "verified" if self._trace_store.get_for_scope(str(query_trace_id), scope) else "invalid"
+            except Exception:
+                trace_status = "invalid"
         for candidate in candidates:
             word, contexts, now = str(candidate["word"]), candidate.get("contexts") or [], int(time.time())
             source_contexts = candidate.get("source_contexts") or []
@@ -159,18 +166,29 @@ class JargonService:
             status = "confirmed" if is_jargon is True and meaning and confidence >= self._confidence_threshold else ("rejected" if is_jargon is False else "pending")
             if existing and is_jargon is None:
                 meaning, is_jargon, confidence, status = existing.get("meaning", ""), existing.get("is_jargon"), float(existing.get("confidence", 0.0) or 0.0), existing.get("status", "pending")
+            source_tags: list[dict[str, Any]] = []
+            tag_chain_status = "missing"
+            tag_getter = getattr(self._repo, "list_scoped_memory_tags", None)
+            if callable(tag_getter) and source_memory_id is not None:
+                try:
+                    source_tags = list(tag_getter(scope, [int(source_memory_id)]) or [])
+                    tag_chain_status = "complete" if source_tags else "empty"
+                except Exception:
+                    tag_chain_status = "unavailable"
+            if status == "confirmed" and (trace_status != "verified" or tag_chain_status != "complete"):
+                status = "pending"
             self._repo.upsert_scoped_jargon(
                 scope, word=word, meaning=meaning, status=status, is_jargon=is_jargon,
                 frequency=frequency, confidence=confidence, contexts=contexts,
                 source_memory_id=source_memory_id,
                 source_context=source_context,
-                provenance={"source": "wave_memory", "candidate_type": "local_jargon_candidate"},
+                provenance={"source": "wave_memory", "producer": "jargon_mining", "candidate_type": "local_jargon_candidate", "source_tags": source_tags, "evidence": {"memory_ids": [source_memory_id] if source_memory_id is not None else [], "contexts": contexts[:10]}, "scope": scope.session.id if scope.session else scope.bot_id, "query_trace_id": str(query_trace_id or ""), "trace_status": trace_status, "tag_chain_status": tag_chain_status},
             )
             if is_jargon is True and meaning:
                 results.append({"word": word, "meaning": meaning, "confidence": confidence})
         return results
 
-    def review(self, runtime_scope: RuntimeScope, jargon_id: int, action: str) -> dict[str, Any]:
+    def review(self, runtime_scope: RuntimeScope, jargon_id: int, action: str, query_trace_id: str | None = None) -> dict[str, Any]:
         """通过领域服务执行 scoped 候选审核；approve 必须已有同 Scope anchor。"""
         scope = self._group_scope(runtime_scope)
         if scope is None or not self._repository_available():
@@ -185,6 +203,12 @@ class JargonService:
             raise LookupError("scoped_object_not_found")
         if action == "approve" and not current.get("source_memory_id"):
             raise ValueError("jargon_anchor_required")
+        provenance = dict(current.get("provenance") or {})
+        if action == "approve":
+            if not query_trace_id or self._trace_store is None or not self._trace_store.get_for_scope(str(query_trace_id), scope):
+                raise ValueError("jargon_query_trace_required")
+            if not provenance.get("source_tags") or not provenance.get("evidence"):
+                raise ValueError("jargon_evidence_required")
         status = "confirmed" if action == "approve" else "rejected"
         provenance = dict(current.get("provenance") or {})
         provenance.update({"reviewed_by": "webui", "review_action": action})

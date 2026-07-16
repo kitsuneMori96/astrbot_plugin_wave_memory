@@ -193,6 +193,17 @@ def _find_scoped_belief(repo, scope: RuntimeScope, belief_id: int) -> dict:
     raise LookupError("scoped_object_not_found")
 
 
+def _query_trace_valid(container, scope: RuntimeScope, body: dict) -> bool:
+    trace_id = str(body.get("query_trace_id") or "").strip()
+    store = getattr(container, "injection_trace_store", None)
+    if not trace_id or store is None:
+        return False
+    try:
+        return store.get_for_scope(trace_id, scope) is not None
+    except Exception:
+        return False
+
+
 def _memory_evidence_available(container, scope: RuntimeScope, source_memory_id) -> bool:
     if source_memory_id is None or scope.session is None:
         return False
@@ -675,7 +686,9 @@ async def approve_belief(belief_id: int):
         _require_object_ref(body, kind="belief", locator=belief_id, scope=scope, item=current)
         if not _memory_evidence_available(container, scope, current.get("source_memory_id")):
             return _scope_error("belief_anchor_unavailable", 422)
-        result = BeliefLifecycleService(repo).transition(scope, belief_id, "approve")
+        if not _query_trace_valid(container, scope, body):
+            return _scope_error("query_trace_required", 422)
+        result = BeliefLifecycleService(repo, getattr(container, "injection_trace_store", None)).transition(scope, belief_id, "approve", query_trace_id=body.get("query_trace_id"))
         return jsonify(mutation_response(
             operation_kind="belief.approve", status="succeeded", revision=None,
             item=result, include_item=True,
@@ -739,12 +752,14 @@ async def batch_transition_scoped_beliefs():
                     raise ScopedKnowledgeScopeError("invalid_belief_transition")
                 if not _memory_evidence_available(container, scope, current.get("source_memory_id")):
                     raise ScopedKnowledgeScopeError("belief_anchor_unavailable")
+                if not _query_trace_valid(container, scope, body):
+                    raise ScopedKnowledgeScopeError("query_trace_required")
             elif current.get("status") == "archived":
                 raise ScopedKnowledgeScopeError("invalid_belief_transition")
             validated.append(current)
 
-        lifecycle = BeliefLifecycleService(repo)
-        results = [lifecycle.transition(scope, int(current["id"]), action) for current in validated]
+        lifecycle = BeliefLifecycleService(repo, getattr(container, "injection_trace_store", None))
+        results = [lifecycle.transition(scope, int(current["id"]), action, query_trace_id=body.get("query_trace_id")) for current in validated]
         return jsonify({
             "ok": True,
             "operation": {"kind": f"belief.batch.{action}", "status": "succeeded"},

@@ -17,6 +17,10 @@ except ImportError:  # pragma: no cover - repository tests import engine as top-
     from domain.scope import RuntimeScope
 
 from .connection import ConnectionManager
+try:
+    from ...services.facts_conflict import FactConflictClassifier
+except ImportError:  # pragma: no cover
+    from services.facts_conflict import FactConflictClassifier
 
 
 class ScopedKnowledgeScopeError(ValueError):
@@ -391,6 +395,99 @@ class ScopedKnowledgeRepo:
             "bot_id=? AND session_id=? AND visibility=? AND source_tag_id=? AND target_tag_id=? AND relation_type=?",
             (*_scope_params(scope), source_tag_id, target_tag_id, relation_type),
         )
+
+    def list_scoped_memory_tags(self, scope: RuntimeScope, memory_ids: Sequence[int]) -> list[dict[str, Any]]:
+        scope = _require_group_scope(scope)
+        ids = list(memory_ids)
+        if not ids:
+            return []
+        if any(isinstance(i, bool) or not isinstance(i, int) or i <= 0 for i in ids):
+            raise ValueError("memory_ids must contain positive integers")
+        marks = ','.join('?' for _ in ids)
+        rows = self.cm.execute_read(
+            f"""SELECT smt.memory_id, smt.tag_id, st.name, st.tag_type, smt.relevance
+                FROM scoped_memory_tags smt JOIN scoped_tags st ON st.id=smt.tag_id
+                WHERE smt.bot_id=? AND smt.session_id=? AND smt.visibility=? AND smt.memory_id IN ({marks})
+                ORDER BY smt.memory_id, smt.position, smt.tag_id""",
+            [*_scope_params(scope), *ids],
+        ).fetchall()
+        return [{"memory_id": r[0], "tag_id": r[1], "name": r[2], "tag_type": r[3], "relevance": r[4]} for r in rows]
+
+    def record_scoped_fact_observation(
+        self, scope: RuntimeScope, *, subject: str, predicate: str, object: str,
+        confidence: float = 0.0, review_status: str = "pending", status: str | None = None,
+        source_memory_id: int | None = None, provenance: Mapping[str, Any] | None = None,
+        candidate_snapshot: Mapping[str, Any] | None = None, existing_snapshot: Mapping[str, Any] | None = None,
+        evidence: Mapping[str, Any] | None = None, source_tags: Sequence[Any] | None = None,
+        query_trace_id: str = "", query_trace: Mapping[str, Any] | None = None,
+        valid_from: float | None = None, valid_until: float | None = None,
+        idempotency_key: str | None = None, observed_at: float | None = None,
+    ) -> int:
+        scope = _require_group_scope(scope)
+        subject, predicate, object = tuple(_require_exact_string(v, n) for v, n in ((subject, "subject"), (predicate, "predicate"), (object, "object")))
+        if review_status not in {"pending", "approved", "rejected"}:
+            raise ValueError("invalid review_status")
+        self._require_scoped_memory(scope, source_memory_id)
+        candidate = {"subject": subject, "predicate": predicate, "object": object, "valid_from": valid_from, "valid_until": valid_until, "provenance": provenance or {}}
+        existing_rows = self.list_scoped_facts(scope, subject=subject, limit=500)
+        matches = [row for row in existing_rows if row.get("predicate") == predicate] or [None]
+        candidate_fact_id = self.upsert_scoped_fact(scope, subject=subject, predicate=predicate, object=object, confidence=confidence, status=status or "pending", source_memory_id=source_memory_id, provenance=provenance, valid_from=valid_from, valid_until=valid_until)
+        now = observed_at or time.time()
+        first_history_id = None
+        classifier = FactConflictClassifier()
+        for existing in matches:
+            result = classifier.classify(candidate, existing or [])
+            existing_id = existing.get("id") if existing else None
+            key_base = idempotency_key or f"fact-observation:{source_memory_id or 0}:{subject}\x00{predicate}\x00{object}\x00{valid_from}\x00{valid_until}"
+            key = f"{key_base}:existing-{existing_id or 0}"
+            self.cm.execute_write(
+                """INSERT INTO scoped_fact_history
+                (bot_id,session_id,visibility,candidate_fact_id,existing_fact_id,subject,predicate,object,relation,review_status,confidence,candidate_snapshot,existing_snapshot,evidence,source_tags,query_trace_id,source_memory_id,provenance,valid_from,valid_until,supersedes_id,idempotency_key,observed_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(bot_id,session_id,visibility,idempotency_key) DO UPDATE SET evidence=excluded.evidence,source_tags=excluded.source_tags,query_trace_id=excluded.query_trace_id,provenance=excluded.provenance""",
+                (*_scope_params(scope), candidate_fact_id, existing_id, subject, predicate, object, result.relation, review_status, float(confidence), _canonical_json(candidate_snapshot or candidate, "candidate_snapshot"), _canonical_json(existing or {}, "existing_snapshot"), _canonical_json(evidence, "evidence"), _canonical_contexts(source_tags), str(query_trace_id or (query_trace or {}).get("trace_id") or ""), source_memory_id, _canonical_json(provenance, "provenance"), valid_from, valid_until, result.existing_id if result.relation == "supersedes" else None, key, now),
+            )
+            self.cm.commit()
+            history_id = self._select_id("scoped_fact_history", "bot_id=? AND session_id=? AND visibility=? AND idempotency_key=?", (*_scope_params(scope), key))
+            first_history_id = first_history_id or history_id
+        return int(first_history_id or candidate_fact_id)
+
+    def list_scoped_fact_history(self, scope: RuntimeScope, *, subject: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        scope = _require_group_scope(scope); params: list[Any] = list(_scope_params(scope)); where = "bot_id=? AND session_id=? AND visibility=?"
+        if subject is not None: where += " AND subject=?"; params.append(_require_exact_string(subject,"subject"))
+        rows = self.cm.execute_read(f"SELECT id,subject,predicate,object,relation,review_status,confidence,candidate_snapshot,existing_snapshot,evidence,source_tags,query_trace_id,source_memory_id,provenance,valid_from,valid_until,supersedes_id,idempotency_key,observed_at,reviewed_at FROM scoped_fact_history WHERE {where} ORDER BY observed_at DESC,id DESC LIMIT ?", [*params,limit]).fetchall()
+        return [{"id":r[0],"subject":r[1],"predicate":r[2],"object":r[3],"relation":r[4],"review_status":r[5],"confidence":r[6],"candidate_snapshot":json.loads(r[7]),"existing_snapshot":json.loads(r[8]),"evidence":json.loads(r[9]),"source_tags":json.loads(r[10]),"query_trace_id":r[11],"source_memory_id":r[12],"provenance":json.loads(r[13]),"valid_from":r[14],"valid_until":r[15],"supersedes_id":r[16],"idempotency_key":r[17],"observed_at":r[18],"reviewed_at":r[19]} for r in rows]
+
+    def review_scoped_fact_history(self, scope: RuntimeScope, observation_id: int, *, review_status: str, query_trace_id: str = "") -> None:
+        scope = _require_group_scope(scope)
+        if review_status not in {"pending", "approved", "rejected"}:
+            raise ValueError("invalid review_status")
+        row = self.cm.execute_read(
+            "SELECT candidate_fact_id, existing_fact_id, relation, review_status FROM scoped_fact_history WHERE id=? AND bot_id=? AND session_id=? AND visibility=?",
+            (observation_id, *_scope_params(scope)),
+        ).fetchone()
+        if row is None:
+            raise LookupError("scoped_fact_history_not_found")
+        if row[3] != "pending" and review_status != "pending":
+            raise ValueError("invalid_fact_review_transition")
+        candidate_id, existing_id, relation = row[0], row[1], row[2]
+        if review_status == "approved" and candidate_id is not None:
+            candidate_status = "conflict" if relation == "conflicts" else "active"
+            self.cm.execute_write("UPDATE scoped_facts SET status=?, updated_at=? WHERE id=? AND bot_id=? AND session_id=? AND visibility=?", (candidate_status, time.time(), candidate_id, *_scope_params(scope)))
+            if relation == "supersedes" and existing_id is not None:
+                self.cm.execute_write("UPDATE scoped_facts SET status='superseded', updated_at=? WHERE id=? AND bot_id=? AND session_id=? AND visibility=?", (time.time(), existing_id, *_scope_params(scope)))
+        elif review_status == "rejected" and candidate_id is not None:
+            self.cm.execute_write("UPDATE scoped_facts SET status='rejected', updated_at=? WHERE id=? AND bot_id=? AND session_id=? AND visibility=?", (time.time(), candidate_id, *_scope_params(scope)))
+        self.cm.execute_write("UPDATE scoped_fact_history SET review_status=?, query_trace_id=COALESCE(NULLIF(?, ''), query_trace_id), reviewed_at=? WHERE id=? AND bot_id=? AND session_id=? AND visibility=?", (review_status, str(query_trace_id or ""), time.time(), observation_id, *_scope_params(scope)))
+        self.cm.commit()
+
+    def review_scoped_fact_observation(self, scope: RuntimeScope, observation_id: int, *, review_status: str = "pending", status: str | None = None) -> None:
+        self.review_scoped_fact_history(scope, observation_id, review_status=review_status if status is None else status)
+
+    def transition_scoped_fact_observation(self, scope: RuntimeScope, observation_id: int, *, relation: str, review_status: str = "pending", status: str | None = None) -> None:
+        scope = _require_group_scope(scope)
+        if relation not in {"compatible","scoped","conflicts","supersedes"}: raise ValueError("invalid fact relation")
+        self.cm.execute_write("UPDATE scoped_fact_history SET relation=?,review_status=? WHERE id=? AND bot_id=? AND session_id=? AND visibility=?",(relation,review_status,observation_id,*_scope_params(scope))); self.cm.commit()
 
     def upsert_scoped_belief(
         self,

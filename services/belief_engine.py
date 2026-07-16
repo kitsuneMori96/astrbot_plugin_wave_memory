@@ -119,6 +119,8 @@ class BeliefEngine:
         summary: str,
         scope: RuntimeScope,
         source_memory_ids: list[int] | None = None,
+        query_trace_id: str | None = None,
+        trace_store: object | None = None,
     ) -> list[dict]:
         """从同一 RuntimeScope 的 consolidation 摘要中提取 scoped pending 信念。
 
@@ -136,6 +138,21 @@ class BeliefEngine:
             logger.warning("[BeliefEngine] Scoped extraction rejected: verified source ids required")
             return []
         requested_ids = list(dict.fromkeys(source_memory_ids))
+        trace_status = "pending"
+        if query_trace_id and trace_store is not None:
+            try:
+                trace_status = "verified" if trace_store.get_for_scope(str(query_trace_id), scope) else "invalid"
+            except Exception:
+                trace_status = "invalid"
+        tag_chain_status = "missing"
+        source_tags: list[dict] = []
+        tag_getter = getattr(getattr(self.db, "scoped_knowledge", None), "list_scoped_memory_tags", None)
+        if callable(tag_getter):
+            try:
+                source_tags = list(tag_getter(scope, requested_ids) or [])
+                tag_chain_status = "complete" if source_tags else "empty"
+            except Exception:
+                tag_chain_status = "unavailable"
         scoped_memories = self.db.get_memories_by_ids(requested_ids, scope=scope)
         if len(scoped_memories) != len(requested_ids):
             logger.warning("[BeliefEngine] Scoped extraction rejected: source ids are absent or cross-scope")
@@ -182,7 +199,7 @@ class BeliefEngine:
                         strength=min(float(similar["strength"]) + 0.1, 1.0),
                         status=similar["status"],
                         source_memory_id=requested_ids[0] if requested_ids else None,
-                        provenance={"producer": "consolidation", "source_memory_ids": requested_ids[:10]},
+                        provenance={"producer": "consolidation", "source_memory_ids": requested_ids[:10], "source_tags": source_tags, "evidence": {"memory_ids": requested_ids[:10]}, "scope": scope.session.id if scope.session else scope.bot_id, "query_trace_id": str(query_trace_id or ""), "trace_status": trace_status, "tag_chain_status": tag_chain_status},
                     )
                     continue
 
@@ -195,7 +212,7 @@ class BeliefEngine:
                     strength=0.4,
                     status="pending",
                     source_memory_id=requested_ids[0] if requested_ids else None,
-                    provenance={"producer": "consolidation", "source_memory_ids": requested_ids[:10]},
+                    provenance={"producer": "consolidation", "source_memory_ids": requested_ids[:10], "source_tags": source_tags, "evidence": {"memory_ids": requested_ids[:10]}, "scope": scope.session.id if scope.session else scope.bot_id, "query_trace_id": str(query_trace_id or ""), "trace_status": trace_status, "tag_chain_status": tag_chain_status},
                 )
                 new_beliefs.append({"id": belief_id, "content": content, "type": belief_type})
                 existing.append({
@@ -235,6 +252,7 @@ class BeliefEngine:
         beliefs: list[dict] = [
             belief for belief in active_beliefs
             if isinstance(belief, dict) and belief.get("status") == "active"
+            and self._evidence_ready(belief)
         ]
 
         selected: list[dict] = []
@@ -279,6 +297,13 @@ class BeliefEngine:
             lines.append(f"- {strength_label}：{belief['content']}")
         lines.append("</beliefs>")
         return "\n".join(lines)
+
+    @staticmethod
+    def _evidence_ready(belief: dict) -> bool:
+        provenance = belief.get("provenance") if isinstance(belief.get("provenance"), dict) else {}
+        if provenance.get("producer") == "consolidation":
+            return bool(provenance.get("source_tags")) and bool(provenance.get("evidence")) and provenance.get("trace_status") == "verified"
+        return provenance.get("tag_chain_status") in (None, "complete")
 
     def _is_duplicate(self, content: str, existing: list[dict]) -> bool:
         """简单文本相似度去重。"""

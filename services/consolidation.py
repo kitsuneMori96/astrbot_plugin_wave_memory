@@ -340,11 +340,25 @@ class ConsolidationService:
                     or is_identity_contamination(f"{subject} {predicate} {obj}")
                     or (self._bot_identifiers and subject in self._bot_identifiers)):
                 continue
-            self.db.upsert_scoped_fact(
-                scope, subject=subject, predicate=predicate, object=obj,
-                confidence=0.7, status="pending", source_memory_id=source_memory_id,
-                provenance={"producer": "consolidation", "fact_type": classify_fact(subject, predicate, obj)},
-            )
+            trace_id = fact.get("trace_id") if isinstance(fact, dict) else None
+            provenance = {"producer": "consolidation", "fact_type": classify_fact(subject, predicate, obj)}
+            if trace_id:
+                provenance["trace_id"] = str(trace_id)
+            fact_status = "observed" if trace_id else "pending"
+            formal_writer = getattr(self.db.scoped_knowledge, "record_scoped_fact_observation", None)
+            if callable(formal_writer):
+                # formal writer 的异常必须向上抛出，避免静默回退造成双写或丢失审核历史。
+                formal_writer(
+                    scope, subject=subject, predicate=predicate, object=obj,
+                    confidence=0.7, review_status="pending", query_trace_id=str(trace_id or ""),
+                    source_memory_id=source_memory_id, provenance=provenance,
+                )
+            else:
+                self.db.upsert_scoped_fact(
+                    scope, subject=subject, predicate=predicate, object=obj,
+                    confidence=0.7, status="pending", source_memory_id=source_memory_id,
+                    provenance=provenance,
+                )
             written += 1
         return written
 

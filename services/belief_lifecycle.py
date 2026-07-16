@@ -9,10 +9,11 @@ except ImportError:  # pragma: no cover
 
 
 class BeliefLifecycleService:
-    def __init__(self, repository):
+    def __init__(self, repository, trace_store=None):
         self.repository = repository
+        self.trace_store = trace_store
 
-    def transition(self, scope: RuntimeScope, belief_id: int, action: str) -> dict:
+    def transition(self, scope: RuntimeScope, belief_id: int, action: str, query_trace_id: str | None = None) -> dict:
         if action not in {"approve", "archive"}:
             raise ValueError("belief_transition_unavailable")
         current = next(
@@ -22,6 +23,11 @@ class BeliefLifecycleService:
         if current is None:
             raise LookupError("scoped_object_not_found")
         if action == "approve":
+            provenance = current.get("provenance") if isinstance(current.get("provenance"), dict) else {}
+            if not query_trace_id or self.trace_store is None or not self.trace_store.get_for_scope(str(query_trace_id), scope):
+                raise ValueError("belief_query_trace_required")
+            if not provenance.get("source_tags") or not provenance.get("evidence"):
+                raise ValueError("belief_evidence_required")
             if current.get("status") != "pending":
                 raise ValueError("invalid_belief_transition")
             if not current.get("source_memory_id"):

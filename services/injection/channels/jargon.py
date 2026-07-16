@@ -129,7 +129,17 @@ class JargonChannel:
                 }]
                 return result
             items = _service_trace_items(self.jargon_service) or _parse_terms(text)
-            return InjectionResult.hit(self.name, text, items=items, latency_ms=self._latency_ms(started))
+            enriched = []
+            for item in items:
+                item = dict(item)
+                item.setdefault("trace_id", getattr(ctx, "trace_id", ""))
+                item.setdefault("scope", runtime_scope)
+                item.setdefault("source", "jargon")
+                item.setdefault("evidence", item.get("word", ""))
+                item.setdefault("rendered_text", f'{item.get("word", "")} → {item.get("meaning", "")}')
+                item.setdefault("dedupe_key", f'jargon:{item.get("word", "")}')
+                enriched.append(item)
+            return InjectionResult.hit(self.name, text, items=enriched, latency_ms=self._latency_ms(started))
         except Exception as exc:  # pragma: no cover - 防御性错误通道
             result = InjectionResult.error_result(self.name, exc)
             result.latency_ms = self._latency_ms(started)

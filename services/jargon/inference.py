@@ -95,6 +95,7 @@ class JargonInjector:
                 dict(row) for row in self._repo.list_scoped_jargon(scope, status="confirmed", limit=100)
                 if row.get("is_jargon") is True
                 and str(row.get("meaning") or "").strip()
+                and self._evidence_ready(row)
                 and not is_identity_contamination(f"{row.get('word', '')} {row.get('meaning', '')}")
             ]
         except Exception as exc:
@@ -113,6 +114,13 @@ class JargonInjector:
         if re.fullmatch(r"[a-z0-9_+.-]+", word_lower):
             return re.search(rf"(?<![a-z0-9_+.-]){re.escape(word_lower)}(?![a-z0-9_+.-])", text_lower) is not None
         return word_lower in text_lower
+
+    @staticmethod
+    def _evidence_ready(row: Dict[str, Any]) -> bool:
+        provenance = row.get("provenance") if isinstance(row.get("provenance"), dict) else {}
+        if provenance.get("producer") in {"wave_memory", "jargon_mining"}:
+            return bool(provenance.get("source_tags")) and bool(provenance.get("evidence")) and provenance.get("trace_status") == "verified"
+        return provenance.get("tag_chain_status") in (None, "complete")
 
     @staticmethod
     def _trace_item(row: Dict[str, Any]) -> Dict[str, Any]:
