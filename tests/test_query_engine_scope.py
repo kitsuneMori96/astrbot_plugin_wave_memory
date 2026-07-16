@@ -91,6 +91,89 @@ class QueryEngineScopeTest(unittest.TestCase):
         self.assertFalse(memories[0]["_is_cross_group"])
         self.assertEqual(self.db.touched, [[1]])
 
+    def test_debug_options_are_read_only_and_collector_redacts_bounded_payload(self):
+        from engine.query_engine import QueryDebugCollector, QueryOptions
+
+        engine = self._engine()
+        collector = QueryDebugCollector(max_items_per_partition=2, max_total_bytes=4096)
+        options = QueryOptions(touch=False, stages={"epa": False}, params={"pyramid_top_k": 3})
+
+        memories = asyncio.run(engine.query(
+            "敏感关键词",
+            scope=self._scope(),
+            options=options,
+            collector=collector,
+        ))
+
+        self.assertEqual([memory["id"] for memory in memories], [1])
+        self.assertEqual(self.db.touched, [])
+        debug = collector.snapshot()
+        self.assertEqual(debug["query"]["text"], "[REDACTED]")
+        self.assertTrue(debug["trace_meta"]["readonly"])
+        self.assertFalse(debug["trace_meta"]["touch"])
+        self.assertLessEqual(
+            len(__import__("json").dumps(debug, ensure_ascii=False).encode("utf-8")),
+            4096,
+        )
+
+    def test_per_call_stage_options_are_concurrency_isolated(self):
+        from engine.query_engine import QueryDebugCollector, QueryOptions
+
+        class Stage:
+            top_k = 10
+            max_levels = 3
+
+            def analyze(self, query_vec, _vectors=None):
+                seen_top_k = self.top_k
+                import time
+                time.sleep(0.01)
+                return {
+                    "levels": [[{"tag_id": f"tag-{seen_top_k}", "similarity": 0.9, "level": 0}]],
+                    "all_tag_ids": [f"tag-{seen_top_k}"],
+                    "coverage": 0.5,
+                }
+
+        class TagIndex:
+            count = 100
+
+            def search(self, vector, k):
+                return []
+
+        engine = self._engine()
+        engine.tag_index = TagIndex()
+        engine.residual_pyramid = Stage()
+        engine.db.get_tag_vectors_by_ids = lambda ids: {}
+        collectors = [QueryDebugCollector(), QueryDebugCollector()]
+
+        async def run():
+            return await asyncio.gather(
+                engine.query("a", scope=self._scope(), options=QueryOptions(touch=False, params={"pyramid_top_k": 1}), collector=collectors[0]),
+                engine.query("b", scope=self._scope(), options=QueryOptions(touch=False, params={"pyramid_top_k": 7}), collector=collectors[1]),
+            )
+
+        asyncio.run(run())
+        self.assertEqual(collectors[0].snapshot()["pyramid"]["params"]["top_k"], 1)
+        self.assertEqual(collectors[1].snapshot()["pyramid"]["params"]["top_k"], 7)
+        self.assertEqual(engine.residual_pyramid.top_k, 10)
+        self.assertEqual(self.db.touched, [])
+
+    def test_collector_failure_never_breaks_base_query(self):
+        class BrokenCollector:
+            def record(self, *args, **kwargs):
+                raise RuntimeError("collector exploded")
+
+            def warn(self, *args, **kwargs):
+                raise RuntimeError("collector exploded")
+
+        engine = self._engine()
+        memories = asyncio.run(engine.query(
+            "关键词",
+            scope=self._scope(),
+            collector=BrokenCollector(),
+        ))
+        self.assertEqual([memory["id"] for memory in memories], [1])
+        self.assertEqual(self.db.touched, [[1]])
+
     def test_legacy_repository_signature_fails_closed(self):
         class LegacyDb:
             def get_memories_by_ids(self, ids):

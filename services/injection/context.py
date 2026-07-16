@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Mapping
 
 try:
     from ...domain.scope import RuntimeScope
@@ -30,5 +30,11 @@ class InjectionContext:
     recent_context: list[str] = field(default_factory=list)
     mode: str = "full"
     config: dict[str, Any] = field(default_factory=dict)
+    channel_options: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    query_options: Any = None
+    query_collector: Any = None
+    dry_run: bool = False
+    config_revision: str = ""
+    config_provenance: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     now: float = 0.0
     trace_id: str = ""

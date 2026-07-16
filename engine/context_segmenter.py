@@ -5,7 +5,11 @@ from __future__ import annotations
 from typing import Optional
 
 import numpy as np
-from astrbot.api import logger
+try:
+    from astrbot.api import logger
+except ImportError:  # pragma: no cover - focused repository tests without AstrBot
+    import logging
+    logger = logging.getLogger(__name__)
 
 
 class ContextSegmenter:

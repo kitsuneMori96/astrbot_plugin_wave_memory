@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
-from dataclasses import dataclass, field
+import unicodedata
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterable
 
 from .channel_base import InjectionChannel, InjectionResult
@@ -54,8 +56,9 @@ class InjectionOrchestrator:
         injected = False
 
         if final_text:
-            text_part = self._make_text_part(final_text)
-            ctx.req.extra_user_content_parts.append(text_part)
+            if not ctx.dry_run:
+                text_part = self._make_text_part(final_text)
+                ctx.req.extra_user_content_parts.append(text_part)
             injected = True
 
         total_latency_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -66,7 +69,7 @@ class InjectionOrchestrator:
                 SLOW_INJECTION_WARNING_MS,
                 self._channel_breakdown(ordered),
             )
-        if self.trace_store and self.config.trace_enabled:
+        if self.trace_store and self.config.trace_enabled and not ctx.dry_run:
             trace_status, trace_error = self._trace_status_and_error(ordered, injected=injected)
             self.trace_store.safe_record(
                 {
@@ -124,8 +127,12 @@ class InjectionOrchestrator:
         cfg = self.config.channels.get(name)
         timeout_ms = cfg.timeout_ms if cfg else 300
         started = time.perf_counter()
+        channel_options = dict(ctx.channel_options or {})
+        if cfg is not None:
+            channel_options[name] = cfg.to_dict()
+        channel_ctx = replace(ctx, channel_options=channel_options)
         try:
-            result = await asyncio.wait_for(channel.build(ctx), timeout=max(timeout_ms / 1000.0, 0.001))
+            result = await asyncio.wait_for(channel.build(channel_ctx), timeout=max(timeout_ms / 1000.0, 0.001))
         except asyncio.TimeoutError:
             result = InjectionResult.timeout(name, timeout_ms=timeout_ms)
         except Exception as exc:
@@ -162,6 +169,7 @@ class InjectionOrchestrator:
 
     def _compose_final_text(self, results: list[InjectionResult]) -> str:
         parts: list[str] = []
+        seen_semantic_keys: set[str] = set()
         remaining_budget = sum(
             cfg.token_budget for cfg in self.config.channels.values() if cfg.enabled and cfg.name != "safety"
         )
@@ -173,9 +181,36 @@ class InjectionOrchestrator:
             result_tokens = max(result.tokens, 0)
             if result_tokens > remaining_budget:
                 continue
-            parts.append(result.text)
-            remaining_budget -= result_tokens
+            items = [item for item in (result.items or []) if isinstance(item, dict)]
+            item_keys = {str(item.get("dedupe_key")) for item in items if item.get("dedupe_key")}
+            if item_keys:
+                duplicate_items = [item for item in items if item.get("dedupe_key") in seen_semantic_keys]
+                fresh_keys = item_keys - seen_semantic_keys
+                if not fresh_keys:
+                    continue
+                text = result.text
+                for item in duplicate_items:
+                    rendered = str(item.get("rendered_text") or "")
+                    if rendered:
+                        text = re.sub(rf"(?m)^\\s*{re.escape(rendered)}\\s*\\n?", "", text)
+                text = text.strip()
+                if not text:
+                    continue
+                seen_semantic_keys.update(item_keys)
+            else:
+                normalized = self._normalize_dedupe_text(result.text)
+                if normalized in seen_semantic_keys:
+                    continue
+                seen_semantic_keys.add(normalized)
+                text = result.text
+            parts.append(text)
+            remaining_budget -= max(1, result_tokens if text == result.text else len(text) // 4)
         return "\n\n".join(parts)
+
+    @staticmethod
+    def _normalize_dedupe_text(text: str) -> str:
+        normalized = unicodedata.normalize("NFKC", str(text or "")).casefold()
+        return re.sub(r"\\s+", " ", normalized).strip()
 
     def _make_text_part(self, text: str) -> Any:
         if self.text_part_factory:

@@ -1394,6 +1394,15 @@ async function doQuery() {
             }),
         });
         const data = await res.json();
+        if (!res.ok || data?.error) {
+            const code = data?.error?.code || 'query_debug_failed';
+            const message = data?.error?.message || '高级检索调试失败';
+            setEventStatus('error', `${message} (${code})`);
+            renderEventWarnings([{ stage: 'query', reason_code: code, reason: message }]);
+            showLoading(`${message} · ${code}`);
+            setTimeout(hideLoading, 1800);
+            return;
+        }
         if (data.results && data.results.length) {
             const nodes = [{ id: 'query-source', name: q, type: 'source', degree: data.results.length, isSource: true }];
             const edges = [];
@@ -1436,7 +1445,11 @@ async function doQuery() {
             renderGraph(nodes, edges, { layout: 'query' });
             showQueryDetail(q, data);
         } else {
-            showLoading(`「${q}」无相关记忆`);
+            const debug = data.debug || {};
+            const warnings = Array.isArray(debug.warnings) ? debug.warnings : [];
+            renderEventWarnings(warnings);
+            setEventStatus(warnings.length ? 'degraded' : 'ok', warnings.length ? '查询完成：存在降级阶段' : '查询完成：无相关记忆');
+            showLoading(`「${q}」无相关记忆${warnings.length ? '（部分阶段降级）' : ''}`);
             setTimeout(hideLoading, 1500);
             return;
         }
@@ -1465,7 +1478,7 @@ function showQueryDetail(q, data) {
         const enabled = stage.enabled !== false;
         const available = stage.available === true;
         const badge = !enabled ? '关闭' : available ? '可用' : '降级';
-        const reason = stage.reason || stage.error || '';
+        const reason = stage.reason_code || stage.reason || stage.error || '';
         return `<div class="rounded-lg border border-white/5 bg-white/[.03] p-2">
             <div class="flex items-center justify-between gap-2">
                 <span class="text-[10px] font-medium text-slate-200">${label}</span>
@@ -1477,7 +1490,7 @@ function showQueryDetail(q, data) {
     const warnings = Array.isArray(stageDebug.warnings) ? stageDebug.warnings : [];
     renderEventWarnings(stageDebug.warnings);
     setEventStatus(warnings.length ? 'degraded' : 'ok', warnings.length ? '查询完成：存在降级阶段' : '查询完成：高级检索链路正常');
-    const warningHtml = warnings.length ? `<div class="mt-2 text-[10px] text-amber-300">${warnings.map(w => escapeHtml(`${w.stage || 'stage'}: ${w.reason || ''}`)).join(' · ')}</div>` : '';
+    const warningHtml = warnings.length ? `<div class="mt-2 text-[10px] text-amber-300">${warnings.map(w => escapeHtml(`${w.stage || 'stage'}: ${w.reason_code || w.reason || ''}`)).join(' · ')}</div>` : '';
     const shortJson = (value, max=180) => escapeHtml(JSON.stringify(value ?? [], null, 0).slice(0, max));
     const stageTabs = `<div class="mt-3 grid grid-cols-1 gap-2 text-[9px] text-slate-400">
         <div class="rounded-lg bg-white/[.025] border border-white/5 p-2"><span class="text-purple-200 font-medium">总览</span> · stages=${escapeHtml(Object.keys(stageDebug.query?.stages || {}).filter(k => stageDebug.query.stages[k]).join('/') || 'vector')}</div>

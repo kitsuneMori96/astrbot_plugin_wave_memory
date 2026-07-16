@@ -17,6 +17,9 @@ def _mapping(value: Any) -> Mapping[str, Any]:
 
 
 def _get_channel_cfg(ctx: Any) -> Mapping[str, Any]:
+    per_call = _mapping(getattr(ctx, "channel_options", {}))
+    if "memory" in per_call:
+        return _mapping(per_call.get("memory"))
     config = _mapping(getattr(ctx, "config", {}))
     return _mapping(_mapping(config.get("channels", {})).get("memory", {}))
 
@@ -40,6 +43,15 @@ def _as_int(value: Any, default: int) -> int:
         if value is None or value == "":
             return default
         return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_float(value: Any, default: float | None = None) -> float | None:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
     except (TypeError, ValueError):
         return default
 
@@ -83,6 +95,29 @@ def _filter_recent_timestamp(memories: list[dict[str, Any]], ctx: Any, minutes: 
     return kept, filtered
 
 
+def _filter_min_score(
+    memories: list[dict[str, Any]],
+    min_score: float | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if min_score is None:
+        return memories, []
+    kept: list[dict[str, Any]] = []
+    filtered: list[dict[str, Any]] = []
+    for memory in memories:
+        try:
+            score = float(memory.get("similarity", memory.get("score", 0.0)) or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        if score < min_score:
+            item = dict(memory)
+            item["filter_reason"] = "channel_min_score"
+            item["filter_channel"] = "memory"
+            filtered.append(item)
+        else:
+            kept.append(memory)
+    return kept, filtered
+
+
 class MemoryRecallChannel:
     """复用 QueryEngine 的主记忆召回通道。"""
 
@@ -107,13 +142,14 @@ class MemoryRecallChannel:
         try:
             memories = await self._query(ctx, top_k=top_k, recall_cfg=recall_cfg)
             memories = [dict(memory) for memory in memories or []]
+            memories, score_filtered = _filter_min_score(memories, _as_float(channel_cfg.get("min_score")))
             memories, recent_ts_filtered = _filter_recent_timestamp(
                 memories,
                 ctx,
                 _as_int(recall_cfg.get("skip_recent_minutes"), _as_int(_mapping(getattr(ctx, "config", {})).get("recent_dedup_minutes"), 0)),
             )
             memories, safety_filtered = self.safety.filter_items(memories, ctx=ctx)
-            filtered = [_audit_filtered(item) for item in [*recent_ts_filtered, *safety_filtered]]
+            filtered = [_audit_filtered(item) for item in [*score_filtered, *recent_ts_filtered, *safety_filtered]]
             if not memories:
                 return InjectionResult.empty(self.name, latency_ms=self._latency_ms(started), reason="no safe memories")
 
@@ -134,7 +170,19 @@ class MemoryRecallChannel:
 
     async def _query(self, ctx: Any, *, top_k: int, recall_cfg: Mapping[str, Any]) -> list[dict[str, Any]]:
         enable_shotgun = _as_bool(recall_cfg.get("enable_shotgun"), False)
-        if enable_shotgun:
+        query_options = getattr(ctx, "query_options", None)
+        query_collector = getattr(ctx, "query_collector", None)
+        dry_run = bool(getattr(ctx, "dry_run", False))
+        if dry_run and query_options is None:
+            try:
+                from engine.query_engine import QueryOptions
+            except ImportError:  # pragma: no cover - AstrBot 包导入路径
+                from ....engine.query_engine import QueryOptions
+            query_options = QueryOptions(touch=False)
+
+        # shotgun_query 尚无请求级 touch 接口；dry-run 必须走 batch6 正式 query
+        # 的 QueryOptions(touch=False)，不能以访问计数写入换取“更像生产”的假预览。
+        if enable_shotgun and not dry_run:
             context_messages = recall_cfg.get("context_messages") or getattr(ctx, "recent_context", []) or []
             return await self.query_engine.shotgun_query(
                 text=getattr(ctx, "message", ""),
@@ -155,6 +203,8 @@ class MemoryRecallChannel:
             exclude_sources=exclude_sources,
             source_filter=source_filter,
             scope=getattr(ctx, "scope", None),
+            options=query_options,
+            collector=query_collector,
         )
 
     @staticmethod

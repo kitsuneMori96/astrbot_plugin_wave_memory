@@ -4,6 +4,8 @@ import sys
 import types
 import unittest
 
+import numpy as np
+
 
 if "quart" not in sys.modules:
     quart_mod = types.ModuleType("quart")
@@ -30,29 +32,83 @@ class _EmbeddingService:
 
 
 class _MemoryIndex:
+    count = 100
+
     def search(self, query_vec, k=20):
         return [(101, 0.2), (102, 0.4)]
 
 
 class _TagIndex:
+    count = 100
+
     def search(self, query_vec, k=5):
         return [("tag-a", 0.2), ("tag-b", 0.8)]
 
 
 class _DB:
-    def get_memory_brief(self, memory_id):
-        return {"id": memory_id, "content": f"memory-{memory_id}", "tags": []}
+    def __init__(self):
+        self.touched = []
+
+    def get_memories_by_ids(self, ids, *, scope):
+        return [
+            {
+                "id": memory_id,
+                "content": f"memory-{memory_id}",
+                "tags": [],
+                "timestamp": 1,
+                "importance": 1.0,
+                "source": "live",
+            }
+            for memory_id in ids
+        ]
+
+    def get_tag_vectors_by_ids(self, ids):
+        vectors = {
+            "tag-a": np.array([1.0, 0.0, 0.0], dtype=np.float32),
+            "tag-b": np.array([0.0, 1.0, 0.0], dtype=np.float32),
+            "tag-c": np.array([0.0, 0.0, 1.0], dtype=np.float32),
+        }
+        return {item: vectors[item] for item in ids if item in vectors}
+
+    def touch_memories(self, ids):
+        self.touched.append(list(ids))
+
+
+class _Cooccurrence:
+    node_count = 3
 
 
 class _Container:
-    embedding_service = _EmbeddingService()
-    memory_index = _MemoryIndex()
-    tag_index = _TagIndex()
-    spike_router = None
-    geodesic = None
-    epa = None
-    residual_pyramid = None
-    db = _DB()
+    def __init__(self):
+        from engine.query_engine import QueryEngine
+
+        self.embedding_service = _EmbeddingService()
+        self.memory_index = _MemoryIndex()
+        self.tag_index = _TagIndex()
+        self.spike_router = None
+        self.geodesic = None
+        self.epa = None
+        self.residual_pyramid = None
+        self.cooccurrence = _Cooccurrence()
+        self.db = _DB()
+        self.query_engine = QueryEngine(
+            self.db,
+            self.memory_index,
+            self.embedding_service,
+            {"min_similarity": 0.0},
+            tag_index=self.tag_index,
+            cooccurrence=self.cooccurrence,
+            spike_router=self.spike_router,
+            residual_pyramid=self.residual_pyramid,
+            epa=self.epa,
+            geodesic=self.geodesic,
+        )
+
+    def refresh_query_engine(self):
+        self.query_engine.spike_router = self.spike_router
+        self.query_engine.residual_pyramid = self.residual_pyramid
+        self.query_engine.epa = self.epa
+        self.query_engine.geodesic = self.geodesic
 
 
 class _EPA:
@@ -121,13 +177,31 @@ class _Geodesic:
 
 
 class _FullAdvancedContainer(_Container):
-    epa = _EPA()
-    residual_pyramid = _ResidualPyramid()
-    spike_router = _SpikeRouter()
-    geodesic = _Geodesic()
+    def __init__(self):
+        super().__init__()
+        self.epa = _EPA()
+        self.residual_pyramid = _ResidualPyramid()
+        self.spike_router = _SpikeRouter()
+        self.geodesic = _Geodesic()
+        self.refresh_query_engine()
 
 
 class V440QueryDebugContractTest(unittest.TestCase):
+    @staticmethod
+    def _scope():
+        from domain.scope import RuntimeScope, SessionRef
+
+        return RuntimeScope(
+            bot_id="debugger-bot",
+            visibility="group",
+            session=SessionRef(
+                id="qq:group:debug-group",
+                platform_id="qq",
+                kind="group",
+                conversation_id="debug-group",
+            ),
+        )
+
     def test_kg_query_entry_uses_v440_stage_contract(self):
         from pathlib import Path
 
@@ -191,6 +265,7 @@ class V440QueryDebugContractTest(unittest.TestCase):
             "event-status-warning-list",
             "event-status-last-action",
             "stageDebug.warnings",
+            "reason_code",
             "queryConfig.stages",
         ):
             self.assertIn(marker, js)
@@ -247,27 +322,29 @@ class V440QueryDebugContractTest(unittest.TestCase):
             }
 
         old_container = memories.get_container
+        old_scope = memories._request_scope
         old_request = memories.request
         old_jsonify = memories.jsonify
         memories.get_container = lambda: _FullAdvancedContainer()
+        memories._request_scope = lambda: self._scope()
         memories.request = types.SimpleNamespace(get_json=_get_json)
         memories.jsonify = lambda payload: payload
         try:
             payload = asyncio.run(memories.query_test.__wrapped__())
         finally:
             memories.get_container = old_container
+            memories._request_scope = old_scope
             memories.request = old_request
             memories.jsonify = old_jsonify
 
         self.assertEqual([item["id"] for item in payload["results"]], [102, 101])
         debug = payload["debug"]
-        self.assertEqual(debug["epa"]["result"]["dominant_axis"], 2)
+        self.assertNotIn("result", debug["epa"])
         self.assertEqual(debug["epa"]["logic_depth"], 0.75)
         self.assertEqual(debug["epa"]["entropy"], 0.25)
         self.assertEqual(debug["epa"]["dominant_axis"], 2)
         self.assertEqual(debug["epa"]["interpretation"], "focused")
-        self.assertEqual(debug["vector_search"]["used_vector"], "raw")
-        self.assertEqual(debug["vector_search"]["reason"], "no tag context vector available")
+        self.assertEqual(debug["vector_search"]["used_vector"], "wave_boosted")
         self.assertEqual(debug["vector_search"]["top_candidates"][0]["memory_id"], 101)
         self.assertEqual(debug["vector_search"]["top_candidates"][0]["similarity"], 0.8)
         self.assertEqual(debug["pyramid"]["levels"][0][0]["tag_id"], "tag-a")
@@ -279,7 +356,7 @@ class V440QueryDebugContractTest(unittest.TestCase):
         self.assertEqual(debug["spike"]["energy_field_top"][0]["tag_id"], "tag-a")
         self.assertEqual(debug["geodesic"]["before_ids"], [101, 102])
         self.assertEqual(debug["geodesic"]["after_ids"], [102, 101])
-        self.assertEqual(debug["geodesic"]["mode"], "L1")
+        self.assertTrue(debug["geodesic"]["available"])
         self.assertEqual(debug["geodesic"]["reranked"][0]["memory_id"], 102)
         self.assertEqual(debug["geodesic"]["reranked"][0]["rank_before"], 2)
         self.assertEqual(debug["geodesic"]["reranked"][0]["rank_after"], 1)
@@ -287,9 +364,8 @@ class V440QueryDebugContractTest(unittest.TestCase):
         self.assertEqual(debug["final"]["score_breakdown"][0]["memory_id"], 102)
         self.assertIn("similarity", debug["final"]["score_breakdown"][0])
         self.assertIn("score_before_geodesic", debug["final"]["score_breakdown"][0])
-        self.assertIn("geodesic_score", debug["final"]["score_breakdown"][0])
-        self.assertEqual(payload["results"][0]["score_breakdown"]["rank_after"], 1)
-        self.assertEqual(payload["results"][0]["score_breakdown"]["rank_before"], 2)
+        self.assertIn("geo_score", debug["final"]["score_breakdown"][0])
+        self.assertNotIn("score_breakdown", payload["results"][0])
         self.assertEqual(debug["highlights"]["pyramid_tags"][0]["tag_id"], "tag-a")
         self.assertEqual(debug["highlights"]["seed_tags"][0]["tag_id"], "tag-a")
         self.assertEqual(debug["highlights"]["emergent_tags"][0]["tag_id"], "tag-c")
@@ -325,15 +401,18 @@ class V440QueryDebugContractTest(unittest.TestCase):
             }
 
         old_container = memories.get_container
+        old_scope = memories._request_scope
         old_request = memories.request
         old_jsonify = memories.jsonify
         memories.get_container = lambda: container
+        memories._request_scope = lambda: self._scope()
         memories.request = types.SimpleNamespace(get_json=_get_json)
         memories.jsonify = lambda payload: payload
         try:
             payload = asyncio.run(memories.query_test.__wrapped__())
         finally:
             memories.get_container = old_container
+            memories._request_scope = old_scope
             memories.request = old_request
             memories.jsonify = old_jsonify
 
@@ -343,9 +422,9 @@ class V440QueryDebugContractTest(unittest.TestCase):
         self.assertEqual(debug["query"]["params"]["spike_max_hops"], 7)
         self.assertEqual(debug["query"]["params"]["spike_firing_threshold"], 0.42)
         self.assertEqual(debug["query"]["params"]["geodesic_alpha"], 0.7)
-        self.assertEqual(container.residual_pyramid.seen, {"max_levels": 2, "top_k": 1})
-        self.assertEqual(container.spike_router.seen, {"max_hops": 7, "firing_threshold": 0.42})
-        self.assertEqual(container.geodesic.seen, {"alpha": 0.7})
+        self.assertIsNone(container.residual_pyramid.seen)
+        self.assertIsNone(container.spike_router.seen)
+        self.assertIsNone(container.geodesic.seen)
         self.assertEqual(debug["pyramid"]["params"], {"max_levels": 2, "top_k": 1})
         self.assertEqual(debug["spike"]["params"]["max_hops"], 7)
         self.assertEqual(debug["spike"]["params"]["firing_threshold"], 0.42)
@@ -355,6 +434,31 @@ class V440QueryDebugContractTest(unittest.TestCase):
         self.assertEqual(container.spike_router.max_hops, 4)
         self.assertEqual(container.spike_router.firing_threshold, 0.1)
         self.assertEqual(container.geodesic.alpha, 0.3)
+
+    def test_query_debug_requires_canonical_group_scope(self):
+        memories = importlib.import_module("webui.blueprints.memories")
+
+        async def _get_json(silent=True):
+            return {"text": "苹果派是什么", "debug": True}
+
+        old_container = memories.get_container
+        old_scope = memories._request_scope
+        old_request = memories.request
+        old_jsonify = memories.jsonify
+        memories.get_container = lambda: _Container()
+        memories._request_scope = lambda: None
+        memories.request = types.SimpleNamespace(get_json=_get_json)
+        memories.jsonify = lambda payload: payload
+        try:
+            payload, status = asyncio.run(memories.query_test.__wrapped__())
+        finally:
+            memories.get_container = old_container
+            memories._request_scope = old_scope
+            memories.request = old_request
+            memories.jsonify = old_jsonify
+
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["code"], "canonical_group_scope_required")
 
     def test_query_debug_returns_stage_envelope_and_degraded_reasons(self):
         memories = importlib.import_module("webui.blueprints.memories")
@@ -373,15 +477,18 @@ class V440QueryDebugContractTest(unittest.TestCase):
             }
 
         old_container = memories.get_container
+        old_scope = memories._request_scope
         old_request = memories.request
         old_jsonify = memories.jsonify
         memories.get_container = lambda: _Container()
+        memories._request_scope = lambda: self._scope()
         memories.request = types.SimpleNamespace(get_json=_get_json)
         memories.jsonify = lambda payload: payload
         try:
             payload = asyncio.run(memories.query_test.__wrapped__())
         finally:
             memories.get_container = old_container
+            memories._request_scope = old_scope
             memories.request = old_request
             memories.jsonify = old_jsonify
 
@@ -391,16 +498,17 @@ class V440QueryDebugContractTest(unittest.TestCase):
         for key in ("query", "embedding", "epa", "pyramid", "spike", "vector_search", "scoring", "geodesic", "final", "warnings"):
             self.assertIn(key, debug)
 
-        self.assertEqual(debug["query"]["text"], "苹果派是什么")
+        self.assertEqual(debug["query"]["text"], "[REDACTED]")
+        self.assertEqual(debug["query"]["text_length"], 6)
         self.assertEqual(debug["embedding"]["dimension"], 3)
         self.assertEqual(debug["vector_search"]["candidate_count"], 2)
         self.assertIs(debug["epa"]["enabled"], True)
         self.assertIs(debug["epa"]["available"], False)
-        self.assertIn("reason", debug["epa"])
+        self.assertEqual(debug["epa"]["reason_code"], "epa_unavailable")
         self.assertIs(debug["pyramid"]["enabled"], True)
         self.assertIs(debug["pyramid"]["available"], False)
         self.assertIs(debug["spike"]["enabled"], False)
-        self.assertEqual(debug["spike"]["reason"], "disabled by request")
+        self.assertEqual(debug["spike"]["reason_code"], "disabled_by_request")
         self.assertIs(debug["geodesic"]["enabled"], True)
         self.assertIs(debug["geodesic"]["available"], False)
         self.assertGreaterEqual(len(debug["warnings"]), 3)

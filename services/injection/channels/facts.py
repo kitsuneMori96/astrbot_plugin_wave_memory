@@ -84,6 +84,12 @@ def _row_to_fact(row: Mapping[str, Any], *, now: float, decay_rate: float) -> di
         "predicate": str(row.get("predicate") or ""),
         "object": str(row.get("object") or ""),
         "confidence": confidence,
+        "status": row.get("status"),
+        "relation": row.get("relation", "compatible"),
+        "review_status": row.get("review_status", "approved"),
+        "valid_from": row.get("valid_from"),
+        "valid_until": row.get("valid_until"),
+        "provenance": row.get("provenance") if isinstance(row.get("provenance"), Mapping) else {},
         "last_reinforced": row.get("updated_at"),
         "created_at": row.get("created_at"),
         "effective_confidence": confidence * decay,
@@ -98,6 +104,13 @@ def _audit_fact(fact: Mapping[str, Any]) -> dict[str, Any]:
         "object": fact.get("object", ""),
         "confidence": fact.get("confidence"),
         "effective_confidence": fact.get("effective_confidence"),
+        "relation": fact.get("relation"),
+        "review_status": fact.get("review_status"),
+        "source_tags": (fact.get("provenance") or {}).get("source_tags", []),
+        "evidence": (fact.get("provenance") or {}).get("evidence", {}),
+        "query_trace_id": (fact.get("provenance") or {}).get("query_trace_id", ""),
+        "rendered_text": _fact_line(fact),
+        "dedupe_key": "fact|" + "|".join(str(fact.get(key) or "") for key in ("subject", "predicate", "object", "valid_from", "valid_until", "relation")),
         "preview": _fact_line(fact),
     }
 
@@ -188,14 +201,24 @@ class FactsChannel:
         facts = [
             _row_to_fact(row, now=now, decay_rate=self.facts_decay_rate)
             for row in rows
-            if any(
+            if (row.get("status") in (None, "active", "reviewed", "approved")
+            and row.get("review_status") not in ("pending", "rejected")
+            and row.get("relation") not in ("conflicts",)
+            and any(
                 keyword in str(row.get("subject") or "").casefold()
                 or keyword in str(row.get("object") or "").casefold()
                 for keyword in lowered_keywords
-            )
+            ))
         ]
         facts.sort(key=lambda fact: fact.get("effective_confidence", 0.0), reverse=True)
-        return self._filter_identity(facts)
+        unique: list[dict[str, Any]] = []
+        seen: set[tuple[Any, ...]] = set()
+        for fact in facts:
+            key = (fact.get("subject"), fact.get("predicate"), fact.get("object"), fact.get("valid_from"), fact.get("valid_until"), fact.get("relation"))
+            if key not in seen:
+                seen.add(key)
+                unique.append(fact)
+        return self._filter_identity(unique)
 
     def _query_one_hop(
         self,
