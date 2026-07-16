@@ -8,17 +8,62 @@ import math
 import time
 from functools import wraps
 
-from quart import Blueprint, jsonify, request, Response
+from quart import Blueprint, current_app, jsonify, request, Response
 
 from ..container import get_container
 from ..middleware.auth import require_auth
+from ..api_contract import current_runtime_scope, error_payload, mutation_response, page_response
 from ..tag_execution import normalize_tag_execution_options, tag_memory_batch
+
+try:
+    from ...domain.scope import scope_to_dict
+    from ...services.tag_governance import TagGovernanceError, TagGovernanceGateway
+except ImportError:  # pragma: no cover - focused tests import webui as top-level
+    from domain.scope import scope_to_dict
+    from services.tag_governance import TagGovernanceError, TagGovernanceGateway
 
 tags_bp = Blueprint("tags", __name__, url_prefix="/api/tags")
 
 
 def _scope_error(code: str, status: int):
     return jsonify({"error": {"code": code}}), status
+
+
+def _request_scope():
+    try:
+        provider = current_app.extensions.get("wave_api_contract", {}).get("request_scope_provider")
+    except RuntimeError:
+        provider = None
+    return current_runtime_scope(provider)
+
+
+def _object_refs():
+    try:
+        return current_app.extensions.get("wave_api_contract", {}).get("object_refs")
+    except RuntimeError:
+        return None
+
+
+def _governance_gateway(container):
+    configured = getattr(container, "tag_governance", None)
+    if configured is not None:
+        return configured
+    write_gateway = getattr(container, "write_gateway", None)
+    if write_gateway is None:
+        return None
+    try:
+        gateway = TagGovernanceGateway(write_gateway)
+    except (TypeError, ValueError):
+        return None
+    container.tag_governance = gateway
+    return gateway
+
+
+def _require_governance_scope():
+    scope = _request_scope()
+    if scope is None or scope.visibility != "group" or scope.session is None:
+        return None, _scope_error("scope_required", 400)
+    return scope, None
 
 
 def _legacy_mutation_disabled(handler):
@@ -122,6 +167,146 @@ async def list_tags():
         sort=request.args.get("sort", "frequency"),
     )
     return jsonify(payload)
+
+
+def _resolve_ref(refs, value, *, kind: str, scope):
+    if refs is None or not isinstance(value, str) or not value:
+        raise TagGovernanceError("object_ref_required", "a signed ObjectRef is required")
+    binding, state = refs.resolve_with_state(value, kind=kind, request_scope=scope)
+    if binding is None or state != "ready":
+        raise TagGovernanceError("object_ref_not_found", "the signed ObjectRef is not valid for this Scope")
+    return binding
+
+
+def _governance_error(exc: TagGovernanceError):
+    status = 409 if exc.code in {"suggestion_revision_conflict", "suggestion_already_processed", "suggestion_expired", "preflight_token_invalid", "batch_validation_failed"} else 400
+    return jsonify(error_payload(exc.code, str(exc))), status
+
+
+@tags_bp.route("/governance/catalog", methods=["GET"])
+@require_auth
+async def list_scoped_governance_tags():
+    scope, failure = _require_governance_scope()
+    if failure:
+        return failure
+    c = get_container()
+    gateway = _governance_gateway(c)
+    if gateway is None:
+        return jsonify(error_payload("tag_governance_unavailable", "scoped Tag governance is unavailable")), 503
+    try:
+        items, total = gateway.list_scoped_tags(c.db.conn, scope=scope, search=request.args.get("search", ""), limit=int(request.args.get("limit", 100)), offset=int(request.args.get("offset", 0)))
+        refs = _object_refs()
+        for item in items:
+            if refs is not None:
+                ref = refs.issue(kind="tag", locator=item["id"], scope=scope, revision=item["revision"])
+                item["ref"] = ref
+                item["object_ref"] = {"ref": ref, "kind": "tag", "locator": item["id"], "scope_key": scope.session.id, "version": item["revision"]}
+        return jsonify({**page_response(items, total=total, limit=int(request.args.get("limit", 100)), offset=int(request.args.get("offset", 0))), "scope": scope_to_dict(scope)})
+    except (TagGovernanceError, ValueError, TypeError) as exc:
+        return _governance_error(exc if isinstance(exc, TagGovernanceError) else TagGovernanceError("invalid_catalog_request", str(exc)))
+
+
+@tags_bp.route("/governance/suggestions", methods=["GET"])
+@require_auth
+async def list_scoped_governance_suggestions():
+    scope, failure = _require_governance_scope()
+    if failure:
+        return failure
+    c = get_container()
+    gateway = _governance_gateway(c)
+    if gateway is None:
+        return jsonify(error_payload("tag_governance_unavailable", "scoped Tag governance is unavailable")), 503
+    try:
+        limit = int(request.args.get("limit", 50))
+        offset = int(request.args.get("offset", 0))
+        items, total = gateway.list_suggestions(c.db.conn, scope=scope, status=request.args.get("status", "pending"), action=request.args.get("action", ""), limit=limit, offset=offset)
+        refs = _object_refs()
+        if refs is not None:
+            for item in items:
+                item["ref"] = refs.issue(kind="tag_audit_suggestion", locator=item["suggestion_id"], scope=scope, revision=item["revision"])
+                item["object_ref"] = {"ref": item["ref"], "kind": "tag_audit_suggestion", "locator": item["suggestion_id"], "scope_key": scope.session.id, "version": item["revision"]}
+                item["tag_refs"] = [refs.issue(kind="tag", locator=int(tag_id), scope=scope, revision=int((item.get("tag_details") or {}).get(int(tag_id), {}).get("revision", 1))) for tag_id in item["tag_ids"]]
+        return jsonify({**page_response(items, total=total, limit=limit, offset=offset), "scope": scope_to_dict(scope)})
+    except (TagGovernanceError, ValueError, TypeError) as exc:
+        return _governance_error(exc if isinstance(exc, TagGovernanceError) else TagGovernanceError("invalid_suggestion_query", str(exc)))
+
+
+@tags_bp.route("/governance/suggestions", methods=["POST"])
+@require_auth
+async def create_scoped_governance_suggestion():
+    scope, failure = _require_governance_scope()
+    if failure:
+        return failure
+    c = get_container()
+    gateway = _governance_gateway(c)
+    if gateway is None:
+        return jsonify(error_payload("tag_governance_unavailable", "scoped Tag governance is unavailable")), 503
+    body = await request.get_json(silent=True) or {}
+    refs = _object_refs()
+    try:
+        tag_bindings = [_resolve_ref(refs, value, kind="tag", scope=scope) for value in body.get("tag_refs", ())]
+        target_binding = _resolve_ref(refs, body.get("target_tag_ref"), kind="tag", scope=scope) if body.get("target_tag_ref") else None
+        result = await gateway.create_suggestion(scope=scope, action=body.get("action"), tag_ids=[int(binding.locator) for binding in tag_bindings], target_tag_id=None if target_binding is None else int(target_binding.locator), target_name=body.get("target_name"), target_type=body.get("target_type"), aliases=body.get("aliases") if isinstance(body.get("aliases"), list) else (), reason=body.get("reason"), evidence=body.get("evidence") if isinstance(body.get("evidence"), dict) else {})
+        suggestion_ref = refs.issue(kind="tag_audit_suggestion", locator=result.suggestion_id, scope=scope, revision=int(result.revision or 1)) if refs is not None else None
+        item = {"suggestion_id": result.suggestion_id, "ref": suggestion_ref, "revision": result.revision, "status": result.status, "impact": result.impact}
+        return jsonify(mutation_response(operation_kind="tags.governance.suggestion.create", operation_id=result.operation_id, status="succeeded", revision=result.revision, item=item, include_item=True)), 201
+    except TagGovernanceError as exc:
+        return _governance_error(exc)
+
+
+@tags_bp.route("/governance/preview", methods=["POST"])
+@require_auth
+async def preview_scoped_governance_suggestion():
+    scope, failure = _require_governance_scope()
+    if failure:
+        return failure
+    c = get_container()
+    gateway = _governance_gateway(c)
+    body = await request.get_json(silent=True) or {}
+    try:
+        binding = _resolve_ref(_object_refs(), body.get("suggestion_ref"), kind="tag_audit_suggestion", scope=scope)
+        result = gateway.preview(c.db.conn, scope=scope, suggestion_id=str(binding.locator), expected_revision=int(body.get("revision", binding.revision)))
+        return jsonify({"ok": True, **result})
+    except TagGovernanceError as exc:
+        return _governance_error(exc)
+
+
+@tags_bp.route("/governance/suggestions/resolve", methods=["POST"])
+@require_auth
+async def resolve_scoped_governance_suggestion():
+    scope, failure = _require_governance_scope()
+    if failure:
+        return failure
+    c = get_container()
+    gateway = _governance_gateway(c)
+    body = await request.get_json(silent=True) or {}
+    try:
+        binding = _resolve_ref(_object_refs(), body.get("suggestion_ref"), kind="tag_audit_suggestion", scope=scope)
+        result = await gateway.resolve(scope=scope, suggestion_id=str(binding.locator), expected_revision=int(body.get("revision", binding.revision)), decision=body.get("decision"), preview_token=body.get("preflight_token"), reason=body.get("reason"))
+        return jsonify(mutation_response(operation_kind="tags.governance.resolve", operation_id=result.operation_id, status="succeeded", revision=result.revision, item={"suggestion_id": result.suggestion_id, "status": result.status, "impact": result.impact}, include_item=True))
+    except TagGovernanceError as exc:
+        return _governance_error(exc)
+
+
+@tags_bp.route("/governance/suggestions/resolve-batch", methods=["POST"])
+@require_auth
+async def resolve_scoped_governance_batch():
+    scope, failure = _require_governance_scope()
+    if failure:
+        return failure
+    c = get_container()
+    gateway = _governance_gateway(c)
+    body = await request.get_json(silent=True) or {}
+    try:
+        refs = _object_refs()
+        items = []
+        for item in body.get("items", ()):
+            binding = _resolve_ref(refs, item.get("suggestion_ref"), kind="tag_audit_suggestion", scope=scope)
+            items.append({"suggestion_id": str(binding.locator), "revision": int(item.get("revision", binding.revision)), "preflight_token": item.get("preflight_token")})
+        result = await gateway.resolve_batch(scope=scope, items=items, decision=body.get("decision"), reason=body.get("reason"))
+        return jsonify(mutation_response(operation_kind="tags.governance.resolve_batch", operation_id=result.operation_id, status="succeeded", revision=None, item={"status": result.status, "impact": result.impact}, include_item=True))
+    except TagGovernanceError as exc:
+        return _governance_error(exc)
 
 
 @tags_bp.route("/retype", methods=["POST"])

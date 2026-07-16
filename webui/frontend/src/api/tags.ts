@@ -1,4 +1,5 @@
 import { fetchJson } from './client'
+import type { ObjectRefDescriptor, PageResponse } from '@/components/shared/types'
 
 export type TagWritePolicy = 'missing_only' | 'append' | 'replace'
 
@@ -81,6 +82,47 @@ export interface TagRuntimePayload {
   }
 }
 
+export interface ScopedTagItem {
+  id: number
+  name: string
+  type: string
+  confidence: number
+  metadata: Record<string, unknown>
+  revision: number
+  status: 'active' | 'inactive' | string
+  aliases: string[]
+  ref: string
+  object_ref?: ObjectRefDescriptor
+}
+
+export type GovernanceAction = 'merge' | 'retype' | 'alias' | 'deactivate'
+export type GovernanceSuggestionStatus = 'pending' | 'approved' | 'rejected' | 'conflict' | 'expired'
+export interface ScopedTagSuggestion {
+  suggestion_id: string
+  operation_id: string
+  action: GovernanceAction
+  tag_ids: number[]
+  tag_refs?: string[]
+  target_tag_id?: number | null
+  target_name?: string | null
+  target_type?: string | null
+  aliases: string[]
+  reason: string
+  evidence: Record<string, unknown>
+  status: GovernanceSuggestionStatus
+  revision: number
+  created_at: number
+  expires_at?: number | null
+  resolved_at?: number | null
+  resolved_by?: string | null
+  resolution_reason?: string | null
+  ref: string
+  object_ref?: ObjectRefDescriptor
+}
+export interface GovernanceImpact { memory_count: number; relation_count: number; removed_tags: number; related_tag_ids?: number[]; related_tags?: string[]; index_refresh?: string }
+export interface GovernancePreview { suggestion: ScopedTagSuggestion; preview: { action: GovernanceAction; tag_ids: number[]; target_tag_id?: number; target_name?: string | null; target_type?: string | null; aliases: string[]; before: Record<string, unknown>; after: Record<string, unknown>; impact: GovernanceImpact }; preflight_token: string; expires_at?: number | null }
+export interface GovernanceMutationResult { ok: boolean; operation: { kind: string; status: string; id?: string }; revision: number | null; item?: { suggestion_id?: string | null; status: string; impact: GovernanceImpact } }
+
 export interface TagQualityPayload {
   total_tags: number
   total_memories: number
@@ -148,16 +190,34 @@ export function getAuditSuggestions(
   return fetchJson<AuditSuggestionsPayload>(`/api/tags/audit/suggestions?${params.toString()}`)
 }
 
-export function resolveAuditSuggestion(suggestion_id: string | number, decision: 'approve' | 'reject'): Promise<{ ok: boolean; message?: string }> {
-  return fetchJson<{ ok: boolean; message?: string }>('/api/tags/audit/resolve', {
-    method: 'POST',
-    body: JSON.stringify({ suggestion_id, decision }),
-  })
+export interface ScopedGovernanceScope { bot_id: string; session_id: string; visibility: 'group' }
+
+function governanceQuery(scope: ScopedGovernanceScope, extra: Record<string, string | number | undefined> = {}): string {
+  const params = new URLSearchParams({ bot_id: scope.bot_id, session_id: scope.session_id, visibility: scope.visibility })
+  Object.entries(extra).forEach(([key, value]) => { if (value !== undefined && value !== '') params.set(key, String(value)) })
+  return params.toString()
 }
 
-export function resolveAuditBatch(suggestion_ids: Array<string | number>, decision: 'approve' | 'reject'): Promise<{ processed: number; results: any[] }> {
-  return fetchJson<{ processed: number; results: any[] }>('/api/tags/audit/resolve-batch', {
-    method: 'POST',
-    body: JSON.stringify({ suggestion_ids, decision }),
-  })
+export function getScopedTags(scope: ScopedGovernanceScope, search = ''): Promise<PageResponse<ScopedTagItem> & { scope: ScopedGovernanceScope }> {
+  return fetchJson(`/api/tags/governance/catalog?${governanceQuery(scope, { search, limit: 200 })}`)
+}
+
+export function getScopedTagSuggestions(scope: ScopedGovernanceScope, status: GovernanceSuggestionStatus = 'pending', action = ''): Promise<PageResponse<ScopedTagSuggestion> & { scope: ScopedGovernanceScope }> {
+  return fetchJson(`/api/tags/governance/suggestions?${governanceQuery(scope, { status, action, limit: 100 })}`)
+}
+
+export function createScopedTagSuggestion(scope: ScopedGovernanceScope, payload: { action: GovernanceAction; tag_refs: string[]; target_tag_ref?: string; target_name?: string; target_type?: string; aliases?: string[]; reason: string; evidence?: Record<string, unknown> }): Promise<GovernanceMutationResult> {
+  return fetchJson(`/api/tags/governance/suggestions?${governanceQuery(scope)}`, { method: 'POST', body: JSON.stringify(payload) })
+}
+
+export function previewScopedTagSuggestion(scope: ScopedGovernanceScope, suggestionRef: string, revision: number): Promise<GovernancePreview> {
+  return fetchJson(`/api/tags/governance/preview?${governanceQuery(scope)}`, { method: 'POST', body: JSON.stringify({ suggestion_ref: suggestionRef, revision }) })
+}
+
+export function resolveScopedTagSuggestion(scope: ScopedGovernanceScope, payload: { suggestion_ref: string; revision: number; decision: 'approve' | 'reject'; preflight_token: string; reason: string }): Promise<GovernanceMutationResult> {
+  return fetchJson(`/api/tags/governance/suggestions/resolve?${governanceQuery(scope)}`, { method: 'POST', body: JSON.stringify(payload) })
+}
+
+export function resolveScopedTagSuggestionBatch(scope: ScopedGovernanceScope, items: Array<{ suggestion_ref: string; revision: number; preflight_token: string }>, decision: 'approve' | 'reject', reason: string): Promise<GovernanceMutationResult> {
+  return fetchJson(`/api/tags/governance/suggestions/resolve-batch?${governanceQuery(scope)}`, { method: 'POST', body: JSON.stringify({ items, decision, reason }) })
 }

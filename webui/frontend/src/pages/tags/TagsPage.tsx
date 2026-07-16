@@ -4,6 +4,7 @@ import { RefreshCwIcon, SearchIcon, ShieldCheckIcon, TagsIcon } from 'lucide-rea
 import { isRequestCancelled } from '@/api/client'
 import { getTagQuality, getTags, type TagListPayload, type TagQualityPayload } from '@/api/tags'
 import { PaginationControls, QueryState, ResponsiveTable, type PageSize } from '@/components/shared'
+import { ScopedTagGovernancePanel } from '@/components/tag/ScopedTagGovernancePanel'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -89,6 +90,7 @@ export function TagsPage() {
   const pageCount = total ? Math.ceil(total / limit) : 0
 
   return <div className="flex flex-col gap-5" data-page="tags">
+    <ScopedTagGovernancePanel />
     <div className="flex flex-wrap items-start justify-between gap-4">
       <header className="max-w-2xl"><div className="flex items-center gap-2"><TagsIcon className="size-5 text-primary" aria-hidden="true" /><h1 className="text-xl font-bold tracking-tight">Tag 浪潮总览</h1></div><p className="mt-1 text-xs text-muted-foreground">查看真实 Tag 覆盖率、频率、类型与置信度。当前 legacy Tag 投影保持只读。</p></header>
       <Button type="button" size="sm" variant="outline" disabled={loading} onClick={() => setReload((value) => value + 1)}><RefreshCwIcon aria-hidden="true" />刷新</Button>

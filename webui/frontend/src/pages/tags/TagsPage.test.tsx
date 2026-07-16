@@ -3,22 +3,22 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { TagsPage } from './TagsPage'
 
-const getTags = vi.fn()
-const getTagQuality = vi.fn()
+const api = vi.hoisted(() => ({ getTags: vi.fn(), getTagQuality: vi.fn(), getScopeOptions: vi.fn() }))
 let isMobile = false
 
 vi.mock('@/api/tags', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/api/tags')>(),
-  getTags: (...args: unknown[]) => getTags(...args),
-  getTagQuality: (...args: unknown[]) => getTagQuality(...args),
+  getTags: (...args: unknown[]) => api.getTags(...args),
+  getTagQuality: (...args: unknown[]) => api.getTagQuality(...args),
 }))
 
+vi.mock('@/api/options', () => ({ getScopeOptions: api.getScopeOptions, scopeOptionsFor: (payload: { bots: Array<{ db_id: string; name: string }>; }, kinds: string[]) => kinds.includes('bot') ? payload.bots.map((bot) => ({ value: bot.db_id, label: bot.name, kind: 'bot' as const })) : [] }))
 vi.mock('@/hooks/use-mobile', () => ({ useIsMobile: () => isMobile }))
 
 describe('TagsPage', () => {
   beforeEach(() => {
     isMobile = false
-    getTags.mockReset().mockResolvedValue({
+    api.getTags.mockReset().mockResolvedValue({
       items: [{ id: 1, name: '共同记忆', type: 'topic', frequency: 12, confidence: 0.86 }],
       total: 1,
       available_types: ['person', 'topic'],
@@ -26,7 +26,8 @@ describe('TagsPage', () => {
       readonly: true,
       capabilities: { mutation: { available: false, reason_code: 'legacy_mutation_disabled' } },
     })
-    getTagQuality.mockReset().mockResolvedValue({
+    api.getScopeOptions.mockReset().mockResolvedValue({ bots: [], sessions: [], channels: [], generated_at: 1, source: { health: 'empty', reason_code: null } })
+    api.getTagQuality.mockReset().mockResolvedValue({
       total_tags: 1,
       total_memories: 10,
       tagged_memories: 8,
@@ -56,7 +57,7 @@ describe('TagsPage', () => {
     expect(screen.getByText('42 个向量 · generation 7')).toBeVisible()
     expect(screen.getByRole('option', { name: 'person' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /删除|重命名|改类型/ })).not.toBeInTheDocument()
-    expect(getTags).toHaveBeenCalledWith(expect.objectContaining({ limit: 25, offset: 0, sort: 'frequency' }))
+    expect(api.getTags).toHaveBeenCalledWith(expect.objectContaining({ limit: 25, offset: 0, sort: 'frequency' }))
   })
 
   it('窄屏使用完整语义卡片而不是裁切桌面表格', async () => {

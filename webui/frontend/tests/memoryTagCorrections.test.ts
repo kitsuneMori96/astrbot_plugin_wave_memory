@@ -4,6 +4,9 @@ import test from 'node:test'
 
 const apiSource = readFileSync(new URL('../src/api/memories.ts', import.meta.url), 'utf8')
 const pageSource = readFileSync(new URL('../src/pages/memories/MemoriesPage.tsx', import.meta.url), 'utf8')
+const governanceApiSource = readFileSync(new URL('../src/api/tags.ts', import.meta.url), 'utf8')
+const governancePanelSource = readFileSync(new URL('../src/components/tag/ScopedTagGovernancePanel.tsx', import.meta.url), 'utf8')
+const maintainSource = readFileSync(new URL('../src/pages/maintain/MaintainPage.tsx', import.meta.url), 'utf8')
 
 test('记忆 Tag 校准 API 只使用 scoped correction 与 correction ObjectRef 撤销', () => {
   assert.match(apiSource, /\/tags\/correction'/)
@@ -22,6 +25,18 @@ test('记忆详情区分 automatic effective manual 并强制填写理由', () =
   assert.match(pageSource, /tagState\.manual\.ref/)
   assert.match(pageSource, /name="memory-tag-reason"/)
   assert.match(pageSource, /aria-label=\{`人工排除 Tag/)
+})
+
+test('Tag 治理工作台使用 scoped ObjectRef、preview token 和批量全量校验', () => {
+  assert.match(governanceApiSource, /governance\/catalog/)
+  assert.match(governanceApiSource, /governance\/preview/)
+  assert.match(governanceApiSource, /resolve-batch/)
+  assert.match(governancePanelSource, /merge.*retype.*alias.*deactivate/s)
+  assert.match(governancePanelSource, /预检当前页/)
+  assert.match(governancePanelSource, /批量批准/)
+  assert.match(governancePanelSource, /当前 Scope 的 Tag/)
+  assert.doesNotMatch(maintainSource, /resolveAuditSuggestion|resolveAuditBatch/)
+  assert.match(maintainSource, /\/tags\?tab=governance/)
 })
 
 test('Tag mutation 回读新 Memory ObjectRef 并更新 URL 深链', () => {

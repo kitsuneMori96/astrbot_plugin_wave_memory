@@ -19,6 +19,7 @@ from .db.migrations.scoped_learning_projections import ensure_scoped_learning_pr
 from .db.migrations.scoped_memory_tag_corrections import (
     ensure_scoped_memory_tag_correction_schema,
 )
+from .db.migrations.scoped_tag_governance import ensure_scoped_tag_governance_schema
 from .db.migrations.scoped_soul import ensure_scoped_soul_schema
 from .db.scoped_knowledge_repo import ScopedKnowledgeRepo
 from .db.scoped_learning_projection_repo import (
@@ -57,6 +58,7 @@ class WaveMemoryDB:
             # 仅创建新的 scoped_* 正式数据面；绝不回填或改写 legacy 表。
             ensure_scoped_derived_knowledge_schema(self._cm)
             ensure_scoped_memory_tag_correction_schema(self._cm)
+            ensure_scoped_tag_governance_schema(self._cm)
             ensure_scoped_soul_schema(self._cm)
             ensure_scoped_learning_projection_schema(self._cm)
             self._scoped_knowledge_repo = ScopedKnowledgeRepo(self._cm)
