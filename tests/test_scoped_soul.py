@@ -185,6 +185,8 @@ def test_soul_state_reads_scoped_repository_and_legacy_mutations_are_410(monkeyp
                 "mood": {"value": 0.5, "state": "known", "components": {"valence": 0.5, "arousal": 0.2}, "policy_version": "mood/v1", "revision": 2, "evidence": []},
                 "concerns": {"items": [{"topic": "发布"}], "total": 1},
                 "timeline": {"items": [{"event_summary": "完成"}], "total": 1},
+                "relationship_history": {"items": [], "total": 0, "revision": None},
+                "soul_context": {"status": "unavailable", "reason_code": "formal_soul_context_unavailable", "timezone": None, "circadian": None, "energy": None, "sleepiness": None},
                 "relationship": {"affinity": 42, "state": "friendly", "revision": 5, "evidence": [], "people_ref": "qq:user:u1"},
             }
 
@@ -207,6 +209,8 @@ def test_soul_state_reads_scoped_repository_and_legacy_mutations_are_410(monkeyp
     assert payload["mood"]["value"] == 0.5
     assert payload["concerns"]["items"][0]["topic"] == "发布"
     assert payload["relationship"]["affinity"] == 42
+    assert payload["relationship_history"]["page"]["total"] == 0
+    assert payload["soul_context"]["status"] == "unavailable"
     assert payload["capabilities"]["mutate"]["available"] is False
 
     module.request = types.SimpleNamespace(args={}, method="POST", path="/api/concerns")

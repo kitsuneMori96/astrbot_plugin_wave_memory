@@ -436,6 +436,7 @@ class ScopedSoulRepository:
             before = int(row[0] or 0) if row else 0
             existing_values = self._ensure_formal_values(tx, scope, subject, now)
             current = existing_values.get(dimension)
+            before_snapshot = dict(current) if current is not None else None
             daily_row = tx.execute(
                 """SELECT COALESCE(SUM(delta), 0) FROM scoped_soul_relationship_events
                     WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?
@@ -493,6 +494,13 @@ class ScopedSoulRepository:
                  reason, source_episode_id, source_memory_id, revision, now, encoded_evidence),
             )
             event_id = int(getattr(cur, "lastrowid", 0) or 0)
+            after_snapshot = dict(values[dimension])
+            encoded_before = None if before_snapshot is None else json.dumps(before_snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            encoded_after = json.dumps(after_snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            tx.execute(
+                "UPDATE scoped_soul_relationship_events SET before_json=?, after_json=? WHERE id=?",
+                (encoded_before, encoded_after, event_id),
+            )
             relationship_evidence = [{"relationship_event_id": event_id}, *evidence]
             tx.execute(
                 """INSERT INTO scoped_soul_relationships(
@@ -632,6 +640,144 @@ class ScopedSoulRepository:
 
         return dict(self._write(persist, connection))
 
+    def list_relationship_history(
+        self,
+        scope: RuntimeScope,
+        *,
+        subject_principal_id: str | None = None,
+        from_ts: float | None = None,
+        to_ts: float | None = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Return auditable automatic/manual relationship transitions for one subject."""
+        scope = _require_scope(scope)
+        subject = subject_principal_id or scope.subject_principal_id
+        if subject is None:
+            return {"items": [], "total": 0, "revision": None}
+        subject = _exact_string(subject, "subject_principal_id")
+        if scope.subject_principal_id is not None and scope.subject_principal_id != subject:
+            raise ScopedSoulScopeError("scope_subject_mismatch")
+        if limit not in {25, 50, 100} or offset < 0:
+            raise ValueError("invalid_pagination")
+        if from_ts is not None and not math.isfinite(float(from_ts)):
+            raise ValueError("invalid_from_ts")
+        if to_ts is not None and not math.isfinite(float(to_ts)):
+            raise ValueError("invalid_to_ts")
+        if from_ts is not None and to_ts is not None and float(from_ts) > float(to_ts):
+            raise ValueError("invalid_time_range")
+
+        def time_filter(column: str) -> tuple[str, list[Any]]:
+            clauses = []
+            values: list[Any] = []
+            if from_ts is not None:
+                clauses.append(f" AND {column}>=?")
+                values.append(float(from_ts))
+            if to_ts is not None:
+                clauses.append(f" AND {column}<=?")
+                values.append(float(to_ts))
+            return "".join(clauses), values
+
+        scope_params = (*_scope_params(scope), subject)
+        auto_time, auto_times = time_filter("created_at")
+        manual_time, manual_times = time_filter("created_at")
+        auto_rows = self.cm.execute_read(
+            f"""SELECT id, event_type, dimension, delta, reason, source_episode_id,
+                         source_memory_id, revision, created_at, operation_id, evidence,
+                         value_layer, before_json, after_json
+                    FROM scoped_soul_relationship_events
+                   WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?
+                         {auto_time}
+                   ORDER BY created_at DESC, id DESC""",
+            (*scope_params, *auto_times),
+        ).fetchall()
+        manual_rows = self.cm.execute_read(
+            f"""SELECT calibration_id, operation_id, dimension, action, reason, evidence,
+                         relationship_revision, created_at, before_json, after_json, actor
+                    FROM scoped_soul_relationship_calibration_events
+                   WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?
+                         {manual_time}
+                   ORDER BY created_at DESC, calibration_id DESC""",
+            (*scope_params, *manual_times),
+        ).fetchall()
+
+        def decoded(value: Any) -> Any:
+            if value is None:
+                return None
+            try:
+                return json.loads(str(value))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return None
+
+        def source_ids(evidence: Any) -> tuple[Any, Any]:
+            memory_id = None
+            episode_id = None
+            if isinstance(evidence, list):
+                for item in evidence:
+                    if not isinstance(item, Mapping):
+                        continue
+                    if memory_id is None and item.get("memory_id") is not None:
+                        memory_id = item.get("memory_id")
+                    if episode_id is None and item.get("episode_id") is not None:
+                        episode_id = item.get("episode_id")
+            return memory_id, episode_id
+
+        items: list[dict[str, Any]] = []
+        for row in auto_rows:
+            evidence = decoded(row[10])
+            if not isinstance(evidence, list):
+                evidence = []
+            memory_id, episode_id = source_ids(evidence)
+            items.append({
+                "id": f"relationship-event:{row[0]}",
+                "event_id": row[0],
+                "kind": "automatic",
+                "event_type": row[1],
+                "action": None,
+                "dimension": row[2],
+                "delta": row[3],
+                "reason": row[4],
+                "source_episode_id": row[5] if row[5] is not None else episode_id,
+                "source_memory_id": row[6] if row[6] is not None else memory_id,
+                "revision": row[7],
+                "timestamp": row[8],
+                "operation_id": row[9],
+                "actor": None,
+                "value_layer": row[11] or "automatic",
+                "before": decoded(row[12]),
+                "after": decoded(row[13]),
+                "evidence": evidence,
+            })
+        for row in manual_rows:
+            evidence = decoded(row[5])
+            if not isinstance(evidence, list):
+                evidence = []
+            memory_id, episode_id = source_ids(evidence)
+            items.append({
+                "id": f"relationship-calibration:{row[0]}",
+                "event_id": row[0],
+                "kind": "manual",
+                "event_type": "relationship.manual_calibration",
+                "action": row[3],
+                "dimension": row[2],
+                "delta": None,
+                "reason": row[4],
+                "source_episode_id": episode_id,
+                "source_memory_id": memory_id,
+                "revision": row[6],
+                "timestamp": row[7],
+                "operation_id": row[1],
+                "actor": row[10],
+                "value_layer": "manual",
+                "before": decoded(row[8]),
+                "after": decoded(row[9]),
+                "evidence": evidence,
+            })
+        items.sort(key=lambda item: (float(item.get("timestamp") or 0), str(item.get("id") or "")), reverse=True)
+        total = len(items)
+        return {"items": items[offset:offset + limit], "total": total,
+                "revision": max((int(item["revision"]) for item in items if item.get("revision") is not None), default=None)}
+
     def list_relationships(self, scope: RuntimeScope, *, subject_principal_id: str | None = None) -> list[dict[str, Any]]:
         scope = _require_scope(scope)
         subject = subject_principal_id or scope.subject_principal_id
@@ -693,16 +839,40 @@ class ScopedSoulRepository:
         subject_principal_id: str | None = None,
         limit: int = 25,
         offset: int = 0,
+        from_ts: float | None = None,
+        to_ts: float | None = None,
     ) -> dict[str, Any]:
         scope = _require_scope(scope)
         if limit not in {25, 50, 100} or offset < 0:
             raise ValueError("invalid_pagination")
+        if from_ts is not None and not math.isfinite(float(from_ts)):
+            raise ValueError("invalid_from_ts")
+        if to_ts is not None and not math.isfinite(float(to_ts)):
+            raise ValueError("invalid_to_ts")
+        if from_ts is not None and to_ts is not None and float(from_ts) > float(to_ts):
+            raise ValueError("invalid_time_range")
         subject = subject_principal_id or scope.subject_principal_id
         if subject is not None:
             subject = _exact_string(subject, "subject_principal_id")
             if scope.subject_principal_id is not None and scope.subject_principal_id != subject:
                 raise ScopedSoulScopeError("scope_subject_mismatch")
         params = _scope_params(scope)
+        if from_ts is not None and to_ts is not None and float(from_ts) > float(to_ts):
+            raise ValueError("invalid_time_range")
+        concern_time = ""
+        concern_time_params: list[Any] = []
+        timeline_time = ""
+        timeline_time_params: list[Any] = []
+        if from_ts is not None:
+            concern_time += " AND last_triggered>=?"
+            concern_time_params.append(float(from_ts))
+            timeline_time += " AND occurred_at>=?"
+            timeline_time_params.append(float(from_ts))
+        if to_ts is not None:
+            concern_time += " AND last_triggered<=?"
+            concern_time_params.append(float(to_ts))
+            timeline_time += " AND occurred_at<=?"
+            timeline_time_params.append(float(to_ts))
         mood_row = self.cm.execute_read(
             """SELECT valence, arousal, cause, policy_version, revision, evidence, observed_at
                FROM scoped_soul_mood WHERE bot_id=? AND session_id=? AND visibility=?""",
@@ -724,16 +894,16 @@ class ScopedSoulRepository:
                     "policy_version": None, "revision": None, "evidence": []}
 
         concern_total = int(self.cm.execute_read(
-            "SELECT COUNT(*) FROM scoped_soul_concerns WHERE bot_id=? AND session_id=? AND visibility=?",
-            params,
+            f"SELECT COUNT(*) FROM scoped_soul_concerns WHERE bot_id=? AND session_id=? AND visibility=?{concern_time}",
+            (*params, *concern_time_params),
         ).fetchone()[0])
         concern_rows = self.cm.execute_read(
-            """SELECT id, topic, intensity, origin_memory_id, created_at, last_triggered,
+            f"""SELECT id, topic, intensity, origin_memory_id, created_at, last_triggered,
                       revision, evidence
                FROM scoped_soul_concerns
-               WHERE bot_id=? AND session_id=? AND visibility=?
+               WHERE bot_id=? AND session_id=? AND visibility=?{concern_time}
                ORDER BY intensity DESC, last_triggered DESC, id DESC LIMIT ? OFFSET ?""",
-            (*params, limit, offset),
+            (*params, *concern_time_params, limit, offset),
         ).fetchall()
         concerns = [{
             "id": row[0], "topic": row[1], "intensity": row[2],
@@ -742,16 +912,16 @@ class ScopedSoulRepository:
         } for row in concern_rows]
 
         timeline_total = int(self.cm.execute_read(
-            "SELECT COUNT(*) FROM scoped_soul_timeline WHERE bot_id=? AND session_id=? AND visibility=?",
-            params,
+            f"SELECT COUNT(*) FROM scoped_soul_timeline WHERE bot_id=? AND session_id=? AND visibility=?{timeline_time}",
+            (*params, *timeline_time_params),
         ).fetchone()[0])
         timeline_rows = self.cm.execute_read(
-            """SELECT id, subject_principal_id, event_summary, event_type, emotional_weight,
+            f"""SELECT id, subject_principal_id, event_summary, event_type, emotional_weight,
                       occurred_at, revision, evidence
                FROM scoped_soul_timeline
-               WHERE bot_id=? AND session_id=? AND visibility=?
+               WHERE bot_id=? AND session_id=? AND visibility=?{timeline_time}
                ORDER BY occurred_at DESC, id DESC LIMIT ? OFFSET ?""",
-            (*params, limit, offset),
+            (*params, *timeline_time_params, limit, offset),
         ).fetchall()
         timeline = [{
             "id": row[0], "subject_principal_id": row[1], "event_summary": row[2],
@@ -798,6 +968,14 @@ class ScopedSoulRepository:
                     "calibration": {"available": bool(values), "reason_code": None if values else "relationship_values_unknown"},
                 }
 
+        relationship_history = self.list_relationship_history(
+            scope,
+            subject_principal_id=subject,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            limit=limit,
+            offset=offset,
+        )
         revision_params: list[Any] = list(params)
         revision_where = "bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=''"
         if subject is not None:
@@ -820,6 +998,15 @@ class ScopedSoulRepository:
             "concerns": {"items": concerns, "total": concern_total, "revision": max((item["revision"] for item in concerns), default=None)},
             "timeline": {"items": timeline, "total": timeline_total, "revision": max((item["revision"] for item in timeline), default=None)},
             "relationship": relationship,
+            "relationship_history": relationship_history,
+            "soul_context": {
+                "status": "unavailable",
+                "reason_code": "formal_soul_context_unavailable",
+                "timezone": None,
+                "circadian": None,
+                "energy": None,
+                "sleepiness": None,
+            },
         }
 
 

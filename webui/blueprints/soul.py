@@ -106,8 +106,14 @@ async def soul_state():
         scope = _formal_group_scope()
         limit = int(request.args.get("limit", 25))
         offset = int(request.args.get("offset", 0))
+        from_raw = request.args.get("from_ts")
+        to_raw = request.args.get("to_ts")
+        from_ts = None if from_raw in {None, ""} else float(from_raw)
+        to_ts = None if to_raw in {None, ""} else float(to_raw)
         if limit not in {25, 50, 100} or offset < 0:
             raise ValueError("invalid_pagination")
+        if from_ts is not None and to_ts is not None and from_ts > to_ts:
+            raise ValueError("invalid_time_range")
     except (ScopedSoulScopeError, ScopeValidationError, TypeError, ValueError) as exc:
         code = getattr(exc, "reason_code", None) or getattr(exc, "code", None) or str(exc)
         return jsonify({"error": {"code": code}}), 400
@@ -125,9 +131,12 @@ async def soul_state():
                      "policy_version": None, "revision": None, "evidence": []},
             "concerns": unavailable_page,
             "timeline": unavailable_page,
+            "relationship_history": unavailable_page,
             "relationship": {"affinity": None, "state": "unknown", "revision": None,
                              "evidence": [], "people_ref": None, "values": None,
                              "calibration": {"available": False, "reason_code": "relationship_repository_unavailable"}},
+            "soul_context": {"status": "unavailable", "reason_code": "formal_soul_context_unavailable",
+                             "timezone": None, "circadian": None, "energy": None, "sleepiness": None},
             "capabilities": {
                 "mutate": {"available": False, "reason_code": "relationship_calibration_unavailable"},
                 "calibration": {"available": False, "reason_code": "relationship_repository_unavailable"},
@@ -142,6 +151,8 @@ async def soul_state():
             subject_principal_id=scope.subject_principal_id,
             limit=limit,
             offset=offset,
+            from_ts=from_ts,
+            to_ts=to_ts,
         )
     except (ScopedSoulScopeError, ScopeValidationError, TypeError, ValueError) as exc:
         code = getattr(exc, "reason_code", None) or getattr(exc, "code", None) or str(exc)
@@ -149,6 +160,7 @@ async def soul_state():
 
     concerns = state["concerns"]
     timeline = state["timeline"]
+    relationship_history = state.get("relationship_history", {"items": [], "total": 0, "revision": None})
     relationship = dict(state["relationship"])
     refs = _object_refs()
     if relationship.get("revision") is not None and relationship.get("people_ref") and refs is not None:
@@ -168,7 +180,12 @@ async def soul_state():
             **page_response(timeline["items"], total=timeline["total"], limit=limit, offset=offset),
             "revision": timeline.get("revision"),
         },
+        "relationship_history": {
+            **page_response(relationship_history["items"], total=relationship_history["total"], limit=limit, offset=offset),
+            "revision": relationship_history.get("revision"),
+        },
         "relationship": relationship,
+        "soul_context": state.get("soul_context", {"status": "unavailable", "reason_code": "formal_soul_context_unavailable", "timezone": None, "circadian": None, "energy": None, "sleepiness": None}),
         "capabilities": {
             "mutate": {"available": bool(relationship.get("calibration", {}).get("available")), "reason_code": None if relationship.get("calibration", {}).get("available") else "relationship_calibration_unavailable"},
             "calibration": relationship.get("calibration", {"available": False, "reason_code": "relationship_unknown"}),

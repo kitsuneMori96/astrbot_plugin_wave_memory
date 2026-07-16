@@ -9,12 +9,49 @@ export interface SoulScopeSelection {
 }
 
 export interface SoulRecord {
-  id: string
-  summary: string
-  revision: number | string | null
-  policy_version: string | null
+  id: string | number
+  summary?: string
+  topic?: string
+  event_summary?: string
+  event_type?: string
+  emotional_weight?: number | null
+  timestamp?: number | null
+  last_triggered?: number | null
+  revision?: number | string | null
+  policy_version?: string | null
   evidence: EvidenceRef[]
-  object_ref: ObjectRefDescriptor | null
+  object_ref?: ObjectRefDescriptor | null
+}
+
+export interface RelationshipHistorySnapshot {
+  dimension: string
+  automatic_value: number | null
+  manual_adjustment: number | null
+  manual_override: number | null
+  effective_value: number | null
+  relationship_revision?: number | null
+  updated_at?: number | null
+}
+
+export interface RelationshipHistoryItem {
+  id: string
+  event_id: string | number
+  kind: 'automatic' | 'manual' | string
+  event_type: string | null
+  action: string | null
+  dimension: string
+  delta: number | null
+  reason: string | null
+  source_episode_id: number | string | null
+  source_memory_id: number | string | null
+  revision: number | null
+  timestamp: number | null
+  operation_id: string | null
+  actor: string | null
+  value_layer: string | null
+  before: RelationshipHistorySnapshot | null
+  after: RelationshipHistorySnapshot | null
+  evidence: EvidenceRef[]
 }
 
 export interface RelationshipCalibrationPayload {
@@ -44,7 +81,16 @@ export interface SoulStatePayload {
     evidence: EvidenceRef[]
   }
   concerns: PageResponse<SoulRecord>
-  timeline: PageResponse<SoulRecord>
+  timeline: PageResponse<SoulRecord> & { revision?: number | string | null }
+  relationship_history: PageResponse<RelationshipHistoryItem> & { revision?: number | string | null }
+  soul_context: {
+    status: 'available' | 'unknown' | 'unavailable' | string
+    reason_code: string | null
+    timezone: string | null
+    circadian: Record<string, unknown> | string | null
+    energy: number | string | null
+    sleepiness: number | string | null
+  }
   relationship: {
     affinity: number | null
     state: 'known' | 'unknown' | string
@@ -109,8 +155,20 @@ function scopeQuery(scope: SoulScopeSelection, extra: Record<string, string> = {
   return new URLSearchParams({ bot_id: scope.bot_id, session_id: scope.session_id, visibility: scope.visibility, ...(scope.subject_principal_id ? { subject_principal_id: scope.subject_principal_id } : {}), ...extra }).toString()
 }
 
-export function getSoulState(scope: SoulScopeSelection, limit: 25 | 50 | 100, offset: number, signal?: AbortSignal): Promise<SoulStatePayload> {
-  return fetchJson<SoulStatePayload>(`/api/soul/state?${scopeQuery(scope, { limit: String(limit), offset: String(offset) })}`, { signal })
+export function getSoulState(
+  scope: SoulScopeSelection,
+  limit: 25 | 50 | 100,
+  offset: number,
+  signal?: AbortSignal,
+  timeRange: { from_ts?: number; to_ts?: number } = {},
+): Promise<SoulStatePayload> {
+  const extra = {
+    limit: String(limit),
+    offset: String(offset),
+    ...(timeRange.from_ts !== undefined ? { from_ts: String(timeRange.from_ts) } : {}),
+    ...(timeRange.to_ts !== undefined ? { to_ts: String(timeRange.to_ts) } : {}),
+  }
+  return fetchJson<SoulStatePayload>(`/api/soul/state?${scopeQuery(scope, extra)}`, { signal })
 }
 
 async function legacyCollection<T>(request: Promise<{ items: T[] }>): Promise<LegacySoulCollection<T>> {

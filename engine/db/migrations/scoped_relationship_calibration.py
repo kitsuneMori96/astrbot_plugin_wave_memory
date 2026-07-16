@@ -121,6 +121,8 @@ def _apply(connection: sqlite3.Connection) -> None:
             ("operation_id", "TEXT"),
             ("evidence", "TEXT NOT NULL DEFAULT '[]'"),
             ("value_layer", "TEXT NOT NULL DEFAULT 'automatic'"),
+            ("before_json", "TEXT"),
+            ("after_json", "TEXT"),
         ):
             if name not in columns:
                 connection.execute(f"ALTER TABLE scoped_soul_relationship_events ADD COLUMN {name} {definition}")

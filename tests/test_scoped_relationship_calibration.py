@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import types
 
@@ -76,6 +77,65 @@ def test_four_layers_preserve_manual_values_when_automatic_events_continue(tmp_p
         assert trust["manual_override"] is None
         assert trust["effective_value"] == 29
         assert state["relationship"]["revision"] == 3
+    finally:
+        manager.close()
+
+
+def test_relationship_history_merges_real_layers_and_time_scope(tmp_path):
+    manager = ConnectionManager(str(tmp_path / "relationship-history.db"))
+    try:
+        ensure_scoped_soul_schema(manager)
+        repo = ScopedSoulRepository(manager)
+        value_scope = scope()
+        repo.upsert_relationship(value_scope, subject_principal_id=value_scope.subject_principal_id, affinity=20, dimensions={"trust": 20})
+        with manager.write_transaction() as tx:
+            automatic = repo.record_relationship_event(
+                value_scope,
+                event_type="direct_reply",
+                dimension="trust",
+                delta=4,
+                reason="真实消息触发自动变化",
+                source_memory_id=101,
+                created_at=100.0,
+                connection=tx,
+            )
+        assert automatic["event_id"]
+        with manager.write_transaction() as tx:
+            calibrated = repo.calibrate_relationship(
+                value_scope,
+                subject_principal_id="qq:user:u1",
+                expected_revision=2,
+                action="adjust",
+                dimension="trust",
+                delta=5,
+                reason="人工确认该变化",
+                evidence=evidence(value_scope),
+                operation_id="calibration-history",
+                created_at=105.0,
+                connection=tx,
+            )
+            tx.execute(
+                """INSERT INTO scoped_soul_relationship_calibration_events(
+                       calibration_id, operation_id, bot_id, session_id, visibility,
+                       subject_principal_id, dimension, action, before_json, after_json,
+                       reason, evidence, actor, relationship_revision, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("calibration-history", "calibration-history", value_scope.bot_id, value_scope.session.id,
+                 value_scope.visibility, value_scope.subject_principal_id, "trust", "adjust",
+                 json.dumps(calibrated["before"], ensure_ascii=False),
+                 json.dumps(calibrated["after"], ensure_ascii=False), "人工确认该变化",
+                 json.dumps(evidence(value_scope), ensure_ascii=False), "webui", calibrated["revision"], 105.0),
+            )
+        history = repo.get_state(value_scope, subject_principal_id=value_scope.subject_principal_id, from_ts=90.0, to_ts=110.0)["relationship_history"]
+        assert history["total"] == 2
+        assert [item["kind"] for item in reversed(history["items"])] == ["automatic", "manual"]
+        automatic_item = next(item for item in history["items"] if item["kind"] == "automatic")
+        assert automatic_item["source_memory_id"] == 101
+        assert automatic_item["before"]["automatic_value"] == 20
+        assert automatic_item["after"]["automatic_value"] == 24
+        manual_item = next(item for item in history["items"] if item["kind"] == "manual")
+        assert manual_item["after"]["manual_adjustment"] == 5
+        assert repo.get_state(scope("g2"), subject_principal_id="qq:user:u1")["relationship_history"]["total"] == 0
     finally:
         manager.close()
 

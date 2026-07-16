@@ -89,7 +89,9 @@ CREATE TABLE IF NOT EXISTS scoped_soul_relationship_events (
     source_episode_id INTEGER,
     source_memory_id INTEGER,
     revision INTEGER NOT NULL,
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    before_json TEXT,
+    after_json TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_scoped_soul_concerns_scope
