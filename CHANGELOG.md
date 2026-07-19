@@ -1,15 +1,15 @@
 # Changelog
 
-## v4.6.0-rc.1 (2026-07-19)
+## v4.6.0 (2026-07-19)
 
-### Scoped Runtime、治理闭环与受限召回候选版
+### Scoped Runtime、治理闭环与受限召回
 
 - **正式 Scoped Runtime**：记忆、知识、灵魂、关系、学习对象和 Tag 投影统一进入可审计 Scope 边界；写入通过协调器、outbox 和 durable job 执行。
 - **Learning / Tag 治理闭环**：补齐候选、审核、晋升、回滚、有效标签投影、冲突补偿、图谱与诊断接口，管理台不再依赖旧 blackbox 页面。
 - **关系与书设兼容**：恢复五维关系兼容、当前群排行/黑名单边界、staged legacy relationship migration；白真真第一人称书设改为 bot 级注入资产。
 - **受限 HNSW 与 legacy 兼容**：热记忆索引改为 Tag 驱动、有硬上限的热层；正式 Catalog Tag 与 legacy Tag 使用独立索引；legacy 仅可同群冷召回，避免跨 Scope 泄漏。
 - **Timeline 全历史**：`timeline_days=0` 表示全历史，正式 Scope 严格过滤、legacy 行仅同群回退。
-- **验证**：`python -m pytest -q` 通过 767 项、跳过 1 项；WebUI `npm run build` 通过。此版本为 RC，未执行生产数据库迁移 apply。
+- **验证**：`python -m pytest -q` 通过 767 项、跳过 1 项；WebUI lint、测试与 `npm run build` 均通过。未执行生产数据库迁移 apply。
 
 ## v4.5.0 (2026-07-06)
 
