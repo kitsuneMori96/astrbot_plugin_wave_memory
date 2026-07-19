@@ -8,14 +8,12 @@ import { MemoriesPage } from './MemoriesPage'
 
 const api = vi.hoisted(() => ({
   list: vi.fn(),
-  legacy: vi.fn(),
   senders: vi.fn(),
   scopes: vi.fn(),
 }))
 
 vi.mock('@/api/memories', () => ({
   listMemories: api.list,
-  listLegacyMemories: api.legacy,
   listSenders: api.senders,
   getMemoryDetail: vi.fn(),
   getSimilarMemories: vi.fn(),
@@ -43,7 +41,6 @@ const page = { total: 10, total_status: 'exact', reason_code: null, limit: 25, o
 beforeEach(() => {
   api.scopes.mockResolvedValue({ bots: [], sessions: [], channels: [], generated_at: 1, source: { health: 'healthy', reason_code: null } })
   api.list.mockResolvedValue({ items: [], page })
-  api.legacy.mockResolvedValue({ items: [], page: { ...page, total: 0 }, legacy: true, readonly: true, scope: null, scope_status: 'unresolved_legacy', reason_code: 'scope_unavailable' })
   api.senders.mockResolvedValue({ senders: [], source: { status: 'available', reason_code: null } })
 })
 

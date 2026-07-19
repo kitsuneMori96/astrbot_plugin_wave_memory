@@ -36,8 +36,8 @@ beforeEach(() => {
 
 })
 
-describe('MaintainPage legacy 审计边界', () => {
-  it('只提供进入 scoped Tag 工作台的链接，不调用 legacy resolver', async () => {
+describe('MaintainPage Scope 边界', () => {
+  it('只提供进入 scoped Tag 工作台的链接，不调用旧解析器', async () => {
     const user = userEvent.setup()
     render(<MemoryRouter><MaintainPage /></MemoryRouter>)
 

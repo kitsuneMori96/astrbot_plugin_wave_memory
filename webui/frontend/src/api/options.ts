@@ -15,19 +15,12 @@ export interface SessionOptionDto {
   platform_id: string
   kind: string
   conversation_id: string
+  group_name?: string
   label: string
   source?: string
   sources?: string[]
   count?: number
   capabilities?: Record<string, number>
-}
-
-export interface LegacyGroupOptionDto {
-  bot_id: string
-  group_id: string
-  label: string
-  source: string
-  count: number
 }
 
 export interface ChannelOptionDto {
@@ -40,9 +33,8 @@ export interface ChannelOptionDto {
 export interface ScopeOptionsPayload {
   bots: BotOptionDto[]
   sessions: SessionOptionDto[]
-  /** Legacy profile/relationship groups; never canonical sessions. */
-  legacy_groups?: LegacyGroupOptionDto[]
   channels: ChannelOptionDto[]
+
   generated_at: number
   source: {
     health: 'healthy' | 'empty' | 'error'
@@ -67,12 +59,18 @@ export function scopeOptionsFor(payload: ScopeOptionsPayload, kinds: Array<Scope
     })))
   }
   if (kinds.includes('session')) {
-    items.push(...payload.sessions.map((session) => ({
-      value: session.id,
-      label: session.label || session.conversation_id,
-      kind: 'session' as const,
-      description: `${session.bot_id} · ${session.kind} · ${session.source ?? 'runtime'}`,
-    })))
+    items.push(...payload.sessions.map((session) => {
+      const groupName = session.group_name?.trim()
+      const label = session.kind === 'group' && groupName && groupName !== session.conversation_id
+        ? `${groupName}（${session.conversation_id}）`
+        : session.label || session.conversation_id
+      return {
+        value: session.id,
+        label,
+        kind: 'session' as const,
+        description: `${session.bot_id} · ${session.kind} · ${session.source ?? 'runtime'}`,
+      }
+    }))
   }
   if (kinds.includes('channel')) {
     items.push(...payload.channels.map((channel) => ({

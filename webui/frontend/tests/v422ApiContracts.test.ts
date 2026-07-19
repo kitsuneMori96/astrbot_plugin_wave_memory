@@ -33,7 +33,7 @@ test('Scoped Jargon API uses explicit scope and canonical review/catalog routes'
   assert.doesNotMatch(jargonSource, /\/api\/jargon\/toggle_global/)
 })
 
-test('Jargon mutations expose evidence and operation state instead of legacy count fields', () => {
+test('Jargon mutations expose evidence and operation state instead of historical count fields', () => {
   assert.match(jargonSource, /anchors: EvidenceRef\[\]/)
   assert.match(jargonSource, /object_ref: ObjectRefDescriptor \| null/)
   assert.match(jargonSource, /operation: \{ status: string \}/)

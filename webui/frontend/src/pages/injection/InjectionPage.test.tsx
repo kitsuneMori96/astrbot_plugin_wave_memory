@@ -9,7 +9,6 @@ import { InjectionPage } from './InjectionPage'
 const api = vi.hoisted(() => ({
   traces: vi.fn(),
   detail: vi.fn(),
-  feedback: vi.fn(),
   scopes: vi.fn(),
 }))
 
@@ -17,7 +16,6 @@ vi.mock('@/api/injection', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/injection')>()
   return { ...actual, listInjectionTraces: api.traces, getInjectionTrace: api.detail }
 })
-vi.mock('@/api/review', () => ({ getAgentFeedback: api.feedback }))
 vi.mock('@/api/options', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/options')>()
   return { ...actual, getScopeOptions: api.scopes }
@@ -37,7 +35,6 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
-  api.feedback.mockResolvedValue({ feedback_records: [] })
   api.detail.mockResolvedValue({ trace_id: 'trace' })
   api.scopes.mockResolvedValue({
     bots: [{ db_id: 'bot-a', name: 'Bot A', status: 'active' }],
@@ -72,7 +69,7 @@ describe('InjectionPage 异步筛选', () => {
   it('清除私有筛选保留 canonical Scope，并只提交一次规范查询', async () => {
     api.traces.mockResolvedValue(page('result'))
     const user = userEvent.setup()
-    render(<MemoryRouter initialEntries={['/observatory?bot_id=bot-a&session_id=session-a&visibility=group&sender_id=legacy&offset=25']}><InjectionPage /></MemoryRouter>)
+    render(<MemoryRouter initialEntries={['/observatory?bot_id=bot-a&session_id=session-a&visibility=group&sender_id=sender-a&offset=25']}><InjectionPage /></MemoryRouter>)
     await waitFor(() => expect(api.traces).toHaveBeenCalledTimes(1))
 
     await user.click(screen.getByRole('button', { name: '清除筛选' }))
@@ -81,6 +78,16 @@ describe('InjectionPage 异步筛选', () => {
     expect(filters).toMatchObject({ bot_id: 'bot-a', session_id: 'session-a', offset: 0 })
     expect(filters.sender_id).toBeUndefined()
     expect(screen.getByLabelText('发送者 ID')).toHaveValue('')
+  })
+
+  it('只读取 Trace API，不展示反馈记录或旧群组筛选控件', async () => {
+    api.traces.mockResolvedValue(page('trace-only'))
+    render(<MemoryRouter initialEntries={['/observatory?bot_id=bot-a&session_id=session-a&group_id=ignored-group']}><InjectionPage /></MemoryRouter>)
+
+    expect(await screen.findAllByText('trace-only')).not.toHaveLength(0)
+    expect(screen.queryByText('反馈记录')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('群 / 会话 ID')).not.toBeInTheDocument()
+    expect(api.traces.mock.calls[0][0]).not.toHaveProperty('group_id')
   })
 
   it('窄屏将 Trace 摘要改为完整卡片而非裁切宽表', async () => {

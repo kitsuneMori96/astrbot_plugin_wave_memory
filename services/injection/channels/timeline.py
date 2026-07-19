@@ -70,6 +70,10 @@ class TimelineChannel:
         self.db = db
         self.safety = safety_channel or SafetyChannel()
 
+    def _memory_columns(self) -> set[str]:
+        rows = self.db.conn.execute("PRAGMA table_info(memories)").fetchall()
+        return {str(row[1]) for row in rows}
+
     async def build(self, ctx: Any) -> InjectionResult:
         started = time.perf_counter()
         mode = str(getattr(ctx, "mode", "full") or "full")
@@ -111,26 +115,69 @@ class TimelineChannel:
         if scope is None or scope.session is None:
             return []
         cfg = _timeline_cfg(ctx)
-        days = _as_int(cfg.get("days"), 7)
+        days = _as_int(cfg.get("days"), 0)
         now = float(getattr(ctx, "now", 0.0) or time.time())
         sender_name = str(getattr(ctx, "sender_name", "") or "")
         sender_id = str(getattr(ctx, "sender_id", "") or "")
         like_value = f"%{sender_name}%" if sender_name else f"%{sender_id}%"
         try:
+            columns = self._memory_columns()
+            required_columns = {"summary", "timestamp", "sender_id", "content"}
+            if not required_columns.issubset(columns):
+                return []
+
+            scope_columns = {"bot_id", "session_id", "visibility", "resolution_state", "quarantine"}
+            if scope_columns.issubset(columns):
+                formal_scope_clause = """
+                      (bot_id = ? AND session_id = ? AND visibility = ?
+                       AND resolution_state = 'resolved' AND quarantine = 0)"""
+                formal_scope_params: tuple[Any, ...] = (
+                    scope.bot_id,
+                    scope.session.id,
+                    scope.visibility,
+                )
+                if "group_id" in columns:
+                    scope_clause = f"""
+                      AND (
+                          {formal_scope_clause}
+                          OR (
+                              group_id = ?
+                              AND (bot_id IS NULL OR bot_id = '')
+                              AND (session_id IS NULL OR session_id = '')
+                              AND (visibility IS NULL OR visibility = '')
+                              AND (resolution_state IS NULL OR resolution_state = 'resolved')
+                              AND (quarantine IS NULL OR quarantine = 0)
+                          )
+                      )"""
+                    scope_params = (*formal_scope_params, str(getattr(ctx, "group_id", "") or ""))
+                else:
+                    # Formal rows remain safely queryable in reduced schemas that
+                    # do not carry the legacy ``group_id`` compatibility column.
+                    scope_clause = f"AND {formal_scope_clause}"
+                    scope_params = formal_scope_params
+            else:
+                if "group_id" not in columns:
+                    return []
+                scope_clause = "AND group_id = ?"
+                scope_params = (str(getattr(ctx, "group_id", "") or ""),)
+
+            days_clause = "AND timestamp > ?" if days > 0 else ""
+            params = (*scope_params, sender_id, like_value)
+            if days > 0:
+                params = (*params, now - days * 86400)
             rows = self.db.conn.execute(
-                """SELECT summary,
+                f"""SELECT summary,
                           DATE(MAX(timestamp), 'unixepoch', 'localtime') AS day,
                           MAX(timestamp) AS ts
                      FROM memories
                     WHERE summary IS NOT NULL AND summary != '' AND summary != '日常灌水'
-                      AND bot_id = ? AND session_id = ? AND visibility = ?
-                      AND resolution_state = 'resolved' AND quarantine = 0
+                      {scope_clause}
                       AND (sender_id = ? OR content LIKE ?)
-                      AND timestamp > ?
+                      {days_clause}
                     GROUP BY summary
                     ORDER BY MAX(timestamp) DESC
                     LIMIT ?""",
-                (scope.bot_id, scope.session.id, scope.visibility, sender_id, like_value, now - days * 86400, max_items),
+                (*params, max_items),
             ).fetchall()
         except Exception:
             return []

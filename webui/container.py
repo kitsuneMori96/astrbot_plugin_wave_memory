@@ -41,6 +41,7 @@ class ServiceContainer:
         self.write_gateway: Any = None
         self.durable_jobs: Any = None
         self.data_governance_jobs: Any = None
+        self.scope_recovery_jobs: Any = None
         self.task_supervisor: Any = None
         self.jargon_service: Any = None
         self.plugin_config: dict = {}
@@ -89,6 +90,7 @@ class ServiceContainer:
         write_gateway=None,
         durable_jobs=None,
         data_governance_jobs=None,
+        scope_recovery_jobs=None,
         task_supervisor=None,
         password: str = "",
         plugin_config: dict = None,
@@ -120,6 +122,7 @@ class ServiceContainer:
         self.write_gateway = write_gateway
         self.durable_jobs = durable_jobs
         self.data_governance_jobs = data_governance_jobs
+        self.scope_recovery_jobs = scope_recovery_jobs
         self.task_supervisor = task_supervisor
         self.jargon_service = None
         self.password = password

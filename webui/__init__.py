@@ -50,6 +50,7 @@ class WaveMemoryWebUI:
         write_gateway=None,
         durable_jobs=None,
         data_governance_jobs=None,
+        scope_recovery_jobs=None,
         task_supervisor=None,
         host: str = "0.0.0.0",
         port: int = 7890,
@@ -62,6 +63,7 @@ class WaveMemoryWebUI:
         livingmemory_alias_tools_registered: bool = False,
         detected_memory_plugins: list[dict[str, Any]] | None = None,
         bot_registry: dict[str, Any] | None = None,
+        group_name_resolver=None,
     ):
         # 生产 WebUI 只从真实 registry/数据库组合 options，并且只接受请求显式 Scope。
         from .scope_options import ExplicitRequestScopeProvider, RuntimeScopeOptionsSource
@@ -70,6 +72,7 @@ class WaveMemoryWebUI:
             db=db,
             bot_registry=bot_registry,
             channel_config=injection_channel_config,
+            group_name_resolver=group_name_resolver,
         )
         request_scope_provider = ExplicitRequestScopeProvider(bot_registry=bot_registry)
 
@@ -97,6 +100,7 @@ class WaveMemoryWebUI:
             write_gateway=write_gateway,
             durable_jobs=durable_jobs,
             data_governance_jobs=data_governance_jobs,
+            scope_recovery_jobs=scope_recovery_jobs,
             task_supervisor=task_supervisor,
             password=password,
             plugin_config=plugin_config,

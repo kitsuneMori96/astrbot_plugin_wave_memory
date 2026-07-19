@@ -99,7 +99,23 @@ class BookLoreChannel:
             return InjectionResult.empty(self.name, reason="book_lore top_k is zero")
 
         try:
-            rows = self.projection_repository.list_approved(scope=runtime_scope, limit=top_k)
+            searcher = getattr(self.projection_repository, "search_approved", None)
+            if callable(searcher):
+                rows = searcher(
+                    scope=runtime_scope,
+                    query=str(getattr(ctx, "message", "") or ""),
+                    limit=top_k,
+                    min_score=_as_float(cfg.get("min_score"), 0.0),
+                )
+                # A formal repository may have approved projections before its
+                # relevance index has a hit. Keep the old safe projection path as
+                # a bounded fallback; never fall back to raw Catalog/legacy lore.
+                if not rows:
+                    rows = self.projection_repository.list_approved(scope=runtime_scope, limit=top_k)
+            else:
+                # Compatibility doubles may only expose list_approved; real formal
+                # repositories use search_approved and never dump unrelated lore.
+                rows = self.projection_repository.list_approved(scope=runtime_scope, limit=top_k)
             selected: list[dict[str, Any]] = []
             filtered: list[dict[str, Any]] = []
             for row in rows or ():

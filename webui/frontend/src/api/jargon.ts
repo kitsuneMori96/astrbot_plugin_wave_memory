@@ -73,28 +73,6 @@ export interface JargonEvidencePayload {
   used_fallback: boolean
 }
 
-export interface LegacyJargonItem {
-  id: number
-  word: string
-  meaning: string
-  frequency: number
-  confidence: number | null
-  group_id?: string | null
-  status: string
-  source?: string
-  candidate_type?: string
-  created_at?: number
-}
-
-export interface LegacyJargonResponse {
-  items: LegacyJargonItem[]
-  total: number
-  pending_count: number
-  legacy: true
-  readonly: true
-  page: { number: number; page_size: number; total: number; total_status: 'exact'; has_next: boolean }
-}
-
 export type CatalogAssetRecord = Record<string, unknown>
 
 export interface CatalogAuditPayload {
@@ -147,14 +125,6 @@ export function getJargonEvidence(item: JargonItem, scope: JargonScopeSelection,
     after: String(Math.max(0, Math.min(50, Math.trunc(after)))),
   })
   return fetchJson<JargonEvidencePayload>(`/api/jargon/${item.id}/evidence?${params.toString()}`)
-}
-
-export function listLegacyJargons(filters: { group_id?: string; status?: string; search?: string; limit: 25 | 50 | 100; offset: number }): Promise<LegacyJargonResponse> {
-  const params = new URLSearchParams({ limit: String(filters.limit), offset: String(filters.offset) })
-  if (filters.group_id) params.set('group_id', filters.group_id)
-  if (filters.status) params.set('status', filters.status)
-  if (filters.search) params.set('search', filters.search)
-  return fetchJson<LegacyJargonResponse>(`/api/jargon/legacy/audit?${params.toString()}`)
 }
 
 export function reviewJargon(item: JargonItem | number, action: 'approve' | 'reject', scope: JargonScopeSelection) {

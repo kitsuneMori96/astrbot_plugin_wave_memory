@@ -17,12 +17,13 @@ except ImportError:  # pragma: no cover - repository tests import top-level pack
 
 @dataclass(frozen=True)
 class TagWorkItem:
-    """已由 memories v2 字段验证并携带完整 RuntimeScope 的标签任务。"""
+    """Tag work for either a formal Scope or an explicitly unscoped legacy group."""
 
     memory_id: int
     content: str
     sender_name: str | None
-    scope: RuntimeScope
+    scope: RuntimeScope | None
+    legacy_group_id: str = ""
 
 
 class TagWorker:
@@ -45,13 +46,15 @@ class TagWorker:
     ):
         self.db = db
         self.extractor = tag_extractor
-        # 保留注入签名兼容；scoped_tags 不存向量，正式路径不会写 legacy tag_index。
+        # Tag vectors are persisted on the canonical tag_catalog via the write gateway;
+        # this compatibility dependency remains for embedding enrichment and tests.
         self.embedding = embedding_service
         self.tag_index = tag_index
         cfg = config or {}
         self.wake_interval = int(cfg.get("interval_seconds", 300))
         self.batch_size = int(cfg.get("max_batch_per_cycle", cfg.get("tag_worker_batch_size", 100)))
         self.bot_keywords = bot_keywords or set()
+        self.include_recovered_backfill = bool(cfg.get("include_recovered_backfill", False))
         self.write_gateway = write_gateway
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -94,68 +97,109 @@ class TagWorker:
         logger.info("[WaveMemory] TagWorker stopped")
 
     def _fetch_untagged_batch(self) -> list[TagWorkItem]:
-        """仅扫描可证明归属的 v2 group memory，并附带其完整 RuntimeScope。
+        """Fetch missing-tag work from formal and legacy-group lanes.
 
-        ``tag_extraction_status`` 只是 worker 进度，不是标签的正式数据面；此处绝不
-        读取或写入 legacy ``tags`` / ``memory_tags``。SQL 先排除 unresolved、隔离和
-        非 group 行，再在 Python 中复核 canonical SessionRef，拒绝任何不能精确证明
-        ``conversation_id == group_id`` 的记录。
+        Existing legacy ``memory_tags`` are valid semantic evidence and therefore
+        suppress re-extraction. Only no-tag rows (or rows with a retryable failed
+        status) are selected; legacy rows retain their original group_id rather
+        than receiving invented bot/session/visibility values.
         """
-        rows = self.db.conn.execute("""
-            SELECT m.id, m.content, m.sender_name, m.group_id, m.bot_id, m.session_id, m.visibility
-            FROM memories m
-            LEFT JOIN scoped_memory_tags smt
-              ON smt.memory_id = m.id
-             AND smt.bot_id = m.bot_id
-             AND smt.session_id = m.session_id
-             AND smt.visibility = m.visibility
-            WHERE m.resolution_state = 'resolved'
-              AND COALESCE(m.quarantine, 0) = 0
-              AND m.visibility = 'group'
-              AND m.group_id IS NOT NULL AND m.group_id != ''
-              AND m.bot_id IS NOT NULL AND m.bot_id != ''
-              AND m.session_id IS NOT NULL AND m.session_id != ''
-              AND m.id NOT IN (
-                  SELECT memory_id FROM tag_extraction_status
-                  WHERE status IN ('failed', 'skipped')
-              )
-              AND LENGTH(m.content) >= 10
-              AND COALESCE(m.source, '') != 'noise'
-            GROUP BY m.id
-            HAVING COUNT(smt.tag_id) < 2
-            ORDER BY m.id DESC
-            LIMIT ?
-        """, (self.batch_size,)).fetchall()
+        conn = self.db.conn
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(memories)").fetchall()}
+        tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        if not {"id", "content", "group_id"} <= columns:
+            return []
+        select = lambda name, fallback: f"m.{name}" if name in columns else fallback
+        bot_id = select("bot_id", "''")
+        session_id = select("session_id", "''")
+        visibility = select("visibility", "''")
+        sender_name = select("sender_name", "''")
+        active = []
+        if "resolution_state" in columns:
+            active.append("COALESCE(m.resolution_state, '') IN ('', 'resolved')")
+        if "quarantine" in columns:
+            active.append("COALESCE(m.quarantine, 0)=0")
+        if "source" in columns:
+            active.append("COALESCE(m.source, '') != 'noise'")
+        if "provenance" in columns and not self.include_recovered_backfill:
+            active.append("COALESCE(m.provenance, '') NOT LIKE '%classified_legacy_recovery%'")
+        status_filter = "1=1"
+        if "tag_extraction_status" in tables:
+            # failed stays retryable; done/skipped remain terminal only while the
+            # row has an effective link, which is checked separately below.
+            status_filter = "NOT EXISTS (SELECT 1 FROM tag_extraction_status tes WHERE tes.memory_id=m.id AND tes.status IN ('done', 'skipped'))"
+        legacy_link_missing = "1=1"
+        if "memory_tags" in tables:
+            legacy_link_missing = "NOT EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id=m.id)"
+        scoped_link_missing = "1=1"
+        if "scoped_memory_tags" in tables and {"bot_id", "session_id", "visibility"} <= columns:
+            scoped_link_missing = (
+                "NOT EXISTS (SELECT 1 FROM scoped_memory_tags smt WHERE smt.memory_id=m.id "
+                "AND smt.bot_id=m.bot_id AND smt.session_id=m.session_id AND smt.visibility=m.visibility)"
+            )
+        formal_memory_type = (
+            "COALESCE(m.memory_type, 'message') NOT IN ('archived', 'evicted', 'deleted')"
+            if "memory_type" in columns else "1=1"
+        )
+        legacy_memory_type = (
+            "COALESCE(m.memory_type, 'message') NOT IN ('deleted', 'noise')"
+            if "memory_type" in columns else "1=1"
+        )
+        formal = (
+            f"COALESCE({bot_id}, '') != '' AND COALESCE({session_id}, '') != '' "
+            f"AND COALESCE({visibility}, '')='group' AND ({formal_memory_type}) "
+            f"AND {scoped_link_missing} AND {legacy_link_missing}"
+        )
+        legacy = (
+            f"m.group_id IS NOT NULL AND m.group_id != '' AND COALESCE({bot_id}, '')='' "
+            f"AND COALESCE({session_id}, '')='' AND COALESCE({visibility}, '')='' "
+            f"AND ({legacy_memory_type}) AND {legacy_link_missing}"
+        )
+        rows = conn.execute(
+            f"""SELECT m.id, m.content, {sender_name} AS sender_name, m.group_id,
+                       {bot_id} AS bot_id, {session_id} AS session_id, {visibility} AS visibility,
+                       CASE WHEN ({formal}) THEN 'scoped' ELSE 'legacy_group' END AS lane
+                  FROM memories m
+                 WHERE LENGTH(m.content) >= 10
+                   AND ({' AND '.join(active) if active else '1=1'})
+                   AND ({status_filter})
+                   AND (({formal}) OR ({legacy}))
+                 ORDER BY m.id DESC
+                 LIMIT ?""",
+            (self.batch_size,),
+        ).fetchall()
 
         batch: list[TagWorkItem] = []
         rejected_ids: list[int] = []
-        for memory_id, content, sender_name, group_id, bot_id, session_id, visibility in rows:
+        for memory_id, content, raw_sender_name, group_id, raw_bot_id, raw_session_id, raw_visibility, lane in rows:
+            if lane == "legacy_group":
+                batch.append(TagWorkItem(int(memory_id), str(content), raw_sender_name, None, str(group_id)))
+                continue
             try:
                 scope = self._scope_for_memory(
                     group_id=group_id,
-                    bot_id=bot_id,
-                    session_id=session_id,
-                    visibility=visibility,
+                    bot_id=raw_bot_id,
+                    session_id=raw_session_id,
+                    visibility=raw_visibility,
                 )
             except (ScopeValidationError, TypeError, ValueError) as error:
-                # 不从 group_id 推断平台或会话；无法构造 canonical scope 时只记录进度。
-                rejected_ids.append(memory_id)
+                rejected_ids.append(int(memory_id))
                 logger.warning(
                     "[WaveMemory] TagWorker skipped memory %s: invalid RuntimeScope (%s)",
                     memory_id,
                     error,
                 )
                 continue
-            batch.append(TagWorkItem(memory_id, content, sender_name, scope))
+            batch.append(TagWorkItem(int(memory_id), str(content), raw_sender_name, scope))
 
-        if rejected_ids:
+        if rejected_ids and "tag_extraction_status" in tables:
             now = time.time()
-            self.db.conn.executemany(
+            conn.executemany(
                 "INSERT OR REPLACE INTO tag_extraction_status (memory_id, status, updated_at) "
                 "VALUES (?, 'skipped', ?)",
                 [(memory_id, now) for memory_id in rejected_ids],
             )
-            self.db.conn.commit()
+            conn.commit()
         return batch
 
     @staticmethod
@@ -185,21 +229,46 @@ class TagWorker:
         )
 
     async def _process_batch(self, batch: list[TagWorkItem]):
-        """处理一批已验证 Scope 的记忆。"""
+        """Process formal scoped work and explicitly unscoped legacy-group work."""
+        needs_direct_commit = self.write_gateway is None or any(item.scope is None for item in batch)
         messages = [
             {"id": item.memory_id, "content": item.content, "sender": item.sender_name or "unknown"}
             for item in batch
         ]
 
         try:
-            results = await self.extractor.extract_tags_batch(messages)
+            # Formal batches retain Scope-isolated reference vocabularies. Legacy
+            # group batches never masquerade as a RuntimeScope and use no scoped
+            # prompt reference; their output is written back to legacy links.
+            grouped: dict[tuple[str, ...], list[tuple[int, TagWorkItem, dict]]] = {}
+            for message, item in zip(messages, batch):
+                if item.scope is not None and item.scope.session is not None:
+                    key = ("scoped", item.scope.bot_id, item.scope.session.id, item.scope.visibility)
+                else:
+                    key = ("legacy_group", item.legacy_group_id)
+                grouped.setdefault(key, []).append((item.memory_id, item, message))
+            result_by_memory: dict[int, list[dict]] = {}
+            for grouped_items in grouped.values():
+                group_messages = [entry[2] for entry in grouped_items]
+                group_scope = grouped_items[0][1].scope
+                try:
+                    if group_scope is None:
+                        group_results = await self.extractor.extract_tags_batch(group_messages)
+                    else:
+                        group_results = await self.extractor.extract_tags_batch(group_messages, scope=group_scope)
+                except TypeError:
+                    # 兼容旧的测试/扩展 extractor；其结果仍只写回本组 memory。
+                    group_results = await self.extractor.extract_tags_batch(group_messages)
+                for index, (memory_id, _item, _message) in enumerate(grouped_items):
+                    result_by_memory[memory_id] = group_results[index] if index < len(group_results) else []
 
             tag_count = 0
             now = time.time()
 
             for i, item in enumerate(batch):
-                tags = results[i] if i < len(results) else []
-                if self.write_gateway is not None:
+                tags = result_by_memory.get(item.memory_id, [])
+                tags = await self._attach_tag_vectors(tags)
+                if self.write_gateway is not None and item.scope is not None:
                     saved_count = await self.write_gateway.apply_tag_extraction(
                         scope=item.scope,
                         memory_id=item.memory_id,
@@ -217,13 +286,14 @@ class TagWorker:
                         (item.memory_id, now),
                     )
                     # 未注入协调入口的兼容测试路径仍保持原有事务语义。
-                    self._maybe_upgrade_source(item, tags)
+                    if item.scope is not None:
+                        self._maybe_upgrade_source(item, tags)
                 else:
                     self.db.conn.execute(
                         "INSERT OR REPLACE INTO tag_extraction_status (memory_id, status, updated_at) VALUES (?, 'skipped', ?)",
                         (item.memory_id, now),
                     )
-            if self.write_gateway is None:
+            if needs_direct_commit:
                 self.db.conn.commit()
 
             if tag_count > 0 and self.on_tags_written:
@@ -234,15 +304,38 @@ class TagWorker:
         except Exception as e:
             # 任一步写入失败都必须回滚，否则共享连接会一直处于 active
             # transaction，后续学习中心等写接口将被 SQLite 拒绝。
-            if self.write_gateway is None:
+            if needs_direct_commit:
                 try:
                     self.db.conn.rollback()
                 except Exception as rollback_error:
                     logger.warning(f"[WaveMemory] TagWorker rollback failed: {rollback_error}")
             logger.warning(f"[WaveMemory] TagWorker batch error: {e}")
 
+    async def _attach_tag_vectors(self, tags: list) -> list[dict]:
+        """Attach explicit Catalog vectors when an embedding provider is available.
+
+        The vector is carried through the writer command so the outbox projection can
+        update the canonical Tag index after commit.  A missing provider only leaves
+        the semantic index degraded; scoped tag links still persist.
+        """
+        normalized: list[dict] = []
+        for raw in tags or []:
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            name = str(item.get("name") or "").strip()
+            if name and "embedding" not in item and self.embedding is not None:
+                try:
+                    vector = await self.embedding.get_embedding(name)
+                    if vector is not None:
+                        item["embedding"] = [float(value) for value in vector]
+                except Exception:
+                    pass
+            normalized.append(item)
+        return normalized
+
     async def _save_tags(self, item: TagWorkItem, tags: list) -> int:
-        """仅将标签和关联写入 item 自己的 scoped 数据面。"""
+        """Write formal tags to scoped projections or legacy tags to legacy links."""
         saved_count = 0
         for position, tag_info in enumerate(tags, 1):
             if not isinstance(tag_info, dict):
@@ -256,7 +349,31 @@ class TagWorker:
             if not isinstance(tag_type, str):
                 tag_type = "keyword"
 
-            # scoped_tags 没有向量列。不得调用 add_tag_extended，也不得写 legacy tag_index。
+            if item.scope is None:
+                # The legacy lane deliberately persists semantic evidence in the
+                # original tags/memory_tags tables rather than inventing Scope.
+                vector = tag_info.get("embedding")
+                try:
+                    import numpy as np
+                    vector = np.asarray(vector, dtype=np.float32) if vector is not None else None
+                except (TypeError, ValueError):
+                    vector = None
+                tag_id = self.db.add_tag_extended(
+                    name,
+                    tag_type=tag_type,
+                    vector=vector,
+                    confidence=float(confidence),
+                    metadata={"producer": "tag_worker", "memory_id": item.memory_id, "lane": "legacy_group"},
+                )
+                self.db.conn.execute(
+                    "INSERT OR IGNORE INTO memory_tags (memory_id, tag_id, position, relevance) VALUES (?, ?, ?, 1.0)",
+                    (item.memory_id, tag_id, position),
+                )
+                saved_count += 1
+                continue
+
+            # scoped_tags only preserve current Scope links; semantic vectors use
+            # the Catalog index and never the legacy tag-id label space.
             tag_id = self.db.upsert_scoped_tag(
                 item.scope,
                 name=name,
@@ -264,6 +381,14 @@ class TagWorker:
                 confidence=confidence,
                 metadata={"producer": "tag_worker", "memory_id": item.memory_id},
             )
+            catalog_id = getattr(self.db, "get_scoped_tag_catalog_id", lambda *_: None)(item.scope, tag_id)
+            vector = tag_info.get("embedding")
+            if catalog_id is not None and vector is not None:
+                getattr(self.db, "update_tag_catalog_embedding", lambda *_args, **_kwargs: False)(
+                    catalog_id,
+                    vector,
+                    embedding_dim=len(vector) if hasattr(vector, "__len__") else None,
+                )
             self.db.link_scoped_memory_tag(
                 item.scope,
                 memory_id=item.memory_id,

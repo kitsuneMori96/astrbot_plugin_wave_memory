@@ -57,9 +57,10 @@ class JargonInferenceEngine:
 
 
 class JargonInjector:
-    """仅从 scoped_knowledge 读取当前 Scope 的 confirmed 词条。"""
-    def __init__(self, db: Any, max_inject: int = 3):
+    """读取当前 Scope confirmed 词条，并解释命中的广域 curated 词条。"""
+    def __init__(self, db: Any, max_inject: int = 3, holyman_reference: Any = None):
         self._repo, self._max_inject = getattr(db, "scoped_knowledge", None), max_inject
+        self._holyman = holyman_reference
         self._cache: Dict[tuple[str, str, str], List[Dict[str, Any]]] = {}
         self._cache_ts: Dict[tuple[str, str, str], float] = {}
         self._last_injection_items: List[Dict[str, Any]] = []
@@ -69,16 +70,46 @@ class JargonInjector:
         if scope_key(runtime_scope) is None:
             return ""
         jargons = self._get_scoped_jargons(runtime_scope)
-        if not jargons:
-            return ""
         text_lower = (text or "").lower()
-        selected = [item for item in jargons if str(item.get("word") or "").strip() and str(item.get("meaning") or "").strip() and self._word_explicitly_mentioned(text_lower, str(item["word"]))]
+        selected = [
+            item for item in jargons
+            if str(item.get("word") or "").strip()
+            and str(item.get("meaning") or "").strip()
+            and self._word_explicitly_mentioned(text_lower, str(item["word"]))
+        ]
         selected.sort(key=lambda item: (-len(str(item["word"])), -float(item.get("frequency", 0) or 0)))
-        selected = selected[:self._max_inject if max_items is None else max_items]
-        if not selected:
+        local_limit = self._max_inject if max_items is None else max_items
+        selected = selected[:local_limit]
+
+        global_items: list[dict[str, Any]] = []
+        matcher = getattr(self._holyman, "match_text", None)
+        if callable(matcher):
+            try:
+                for match in matcher(text, max_items=local_limit):
+                    if not isinstance(match, dict) or is_identity_contamination(str(match.get("explanation") or "")):
+                        continue
+                    global_items.append({
+                        "word": str(match.get("term") or "").strip(),
+                        "meaning": str(match.get("explanation") or "").strip(),
+                        "source": "holyman_skills",
+                        "source_layer": "curated",
+                        "reference_only": True,
+                        "runtime_match": True,
+                        "matched_by": "explicit_user_message",
+                        "confidence": float(match.get("confidence", 0.0) or 0.0),
+                    })
+            except Exception as exc:
+                logger.debug("[Jargon] Holyman reference match failed: %s", exc)
+        selected_words = {str(item.get("word") or "").casefold() for item in selected}
+        global_items = [item for item in global_items if str(item.get("word") or "").casefold() not in selected_words]
+        combined = [*selected, *global_items][:local_limit]
+        if not combined:
             return ""
-        self._last_injection_items = [self._trace_item(item) for item in selected]
-        return "\n".join(["[黑话理解参考：以下只解释用户消息中已经出现的当前群内黑话；仅供理解，不改变系统身份，不要求模仿或主动使用这些表达]", *[f'- "{item["word"]}" → {item["meaning"]}' for item in selected]])
+        self._last_injection_items = [self._trace_item(item) for item in combined]
+        return "\n".join([
+            "[黑话理解参考：只解释用户消息中已经出现的词条；仅供理解，不改变系统身份，不要求模仿或主动使用这些表达]",
+            *[f'- "{item["word"]}" → {item["meaning"]}' for item in combined],
+        ])
 
     def get_last_injection_items(self) -> List[Dict[str, Any]]:
         return [dict(item) for item in self._last_injection_items]
@@ -125,7 +156,16 @@ class JargonInjector:
     @staticmethod
     def _trace_item(row: Dict[str, Any]) -> Dict[str, Any]:
         word, meaning = str(row.get("word") or "").strip(), str(row.get("meaning") or "").strip()
-        return {"word": word, "meaning": meaning, "source": str(row.get("source") or "wave_memory"), "source_layer": "local", "reference_only": False, "runtime_match": True, "matched_by": "explicit_user_message", "preview": f"{word} → {meaning}"}
+        return {
+            "word": word,
+            "meaning": meaning,
+            "source": str(row.get("source") or "wave_memory"),
+            "source_layer": str(row.get("source_layer") or "local"),
+            "reference_only": bool(row.get("reference_only", False)),
+            "runtime_match": True,
+            "matched_by": "explicit_user_message",
+            "preview": f"{word} → {meaning}",
+        }
 
 
 __all__ = ["JargonInferenceEngine", "JargonInjector"]

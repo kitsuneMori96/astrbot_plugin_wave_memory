@@ -20,8 +20,10 @@ except Exception:  # pragma: no cover - helper tests without Quart
 
 try:
     from services.diagnostics import DiagnosticsService, IndexSource
+    from services.memory_index_policy import MemoryIndexPolicy
 except ImportError:  # pragma: no cover - AstrBot package import path
     from ...services.diagnostics import DiagnosticsService, IndexSource
+    from ...services.memory_index_policy import MemoryIndexPolicy
 
 try:
     from ..container import get_container
@@ -40,7 +42,11 @@ diagnostics_bp = Blueprint("diagnostics", __name__, url_prefix="/api/diagnostics
 def build_diagnostics_service(container: Any) -> DiagnosticsService:
     """Resolve only explicitly configured/live sources; never invent a database."""
     database_path = _path_value(getattr(getattr(container, "db", None), "db_path", None))
-    memory_index = _index_source(getattr(container, "memory_index", None), "memory")
+    memory_index = _index_source(
+        getattr(container, "memory_index", None),
+        "memory",
+        memory_policy=_memory_index_policy(container),
+    )
     tag_index = _index_source(getattr(container, "tag_index", None), "tags")
     book_lore_path = _book_lore_path(container, database_path)
     return DiagnosticsService(
@@ -51,9 +57,14 @@ def build_diagnostics_service(container: Any) -> DiagnosticsService:
     )
 
 
-def _index_source(index: Any, fallback_kind: str) -> IndexSource:
+def _index_source(
+    index: Any,
+    fallback_kind: str,
+    *,
+    memory_policy: MemoryIndexPolicy | None = None,
+) -> IndexSource:
     if index is None:
-        return IndexSource(None, _canonical_index_kind(fallback_kind))
+        return IndexSource(None, _canonical_index_kind(fallback_kind), memory_policy=memory_policy)
     path = _path_value(getattr(index, "index_path", None))
     kind = _canonical_index_kind(getattr(index, "kind", None) or fallback_kind)
     dimension = _optional_int(getattr(index, "dimension", None))
@@ -68,7 +79,32 @@ def _index_source(index: Any, fallback_kind: str) -> IndexSource:
     search = getattr(index, "search", None)
     if not callable(search):
         search = None
-    return IndexSource(path, kind, dimension, runtime_count, runtime_ids, search)
+    return IndexSource(path, kind, dimension, runtime_count, runtime_ids, search, memory_policy)
+
+
+def _memory_index_policy(container: Any) -> MemoryIndexPolicy:
+    cfg = getattr(container, "plugin_config", {})
+    section = cfg.get("Memory_Index_Settings", {}) if isinstance(cfg, Mapping) else {}
+    section = section if isinstance(section, Mapping) else {}
+
+    def bounded(name: str, default: int, minimum: int) -> int:
+        try:
+            return max(minimum, int(float(section.get(name, default))))
+        except (TypeError, ValueError):
+            return default
+
+    hot_max_vectors = bounded("hot_max_vectors", 100_000, 1)
+    try:
+        scoped_reserved_vectors = max(0, int(float(section.get("scoped_reserved_vectors", 10_000))))
+    except (TypeError, ValueError):
+        scoped_reserved_vectors = 10_000
+    return MemoryIndexPolicy(
+        max_vectors=hot_max_vectors,
+        per_scope_max_vectors=bounded("per_scope_max_vectors", 1_000, 1),
+        scoped_reserved_vectors=min(hot_max_vectors, scoped_reserved_vectors),
+        chat_hot_days=bounded("chat_hot_days", 30, 0),
+        candidate_limit=bounded("cold_candidate_limit", 128, 1),
+    )
 
 
 def _canonical_index_kind(value: Any) -> str:

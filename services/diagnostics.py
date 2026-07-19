@@ -18,6 +18,11 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 import numpy as np
 
 try:
+    from .memory_index_policy import MemoryIndexPolicy, select_hot_memory_candidates
+except ImportError:  # pragma: no cover - focused tests import top-level packages
+    from services.memory_index_policy import MemoryIndexPolicy, select_hot_memory_candidates
+
+try:
     from ..engine.index_manifest import (
         ManifestValidationError,
         latest_generation,
@@ -60,6 +65,7 @@ class IndexSource:
     runtime_count: int | None = None
     runtime_ids: Sequence[int] | None = None
     search: Callable[[np.ndarray, int], Sequence[tuple[int, float]]] | None = None
+    memory_policy: MemoryIndexPolicy | None = None
 
 
 class DiagnosticsService:
@@ -568,8 +574,17 @@ class DiagnosticsService:
                 checked_at,
                 {"reason": "runtime_index_probe_not_available", "kind": index.kind},
             )
-        table = "memories" if index.kind == "memory" else "tags" if _is_tag_kind(index.kind) else None
-        if table is None:
+        if index.kind == "memory":
+            table, vector_column = "memories", "vector"
+        elif str(index.kind).strip().lower() == "legacy_tag":
+            table, vector_column = "tags", "vector"
+        elif str(index.kind).strip().lower() == "tag_catalog":
+            table, vector_column = "tag_catalog", "embedding"
+        elif _is_tag_kind(index.kind):
+            table, vector_column = "tags", "vector"
+        else:
+            table = vector_column = None
+        if table is None or vector_column is None:
             return _result(
                 name,
                 "not_configured",
@@ -579,37 +594,56 @@ class DiagnosticsService:
             )
         try:
             with _readonly_connection(self.database_path) as connection:
-                if table not in _existing_tables(connection) or "vector" not in _table_columns(connection, table):
+                if table not in _existing_tables(connection) or vector_column not in _table_columns(connection, table):
                     return _result(
                         name,
                         "not_configured",
                         source,
                         checked_at,
-                        {"reason": "canonical_vector_column_missing", "table": table},
+                        {"reason": "canonical_vector_column_missing", "table": table, "column": vector_column},
                     )
-                where = "vector IS NOT NULL"
-                if table == "memories":
-                    columns = _table_columns(connection, table)
-                    if "resolution_state" in columns:
-                        where += " AND resolution_state='resolved'"
-                    if "quarantine" in columns:
-                        where += " AND COALESCE(quarantine, 0)=0"
-                    if "memory_type" in columns:
-                        where += " AND COALESCE(memory_type, 'message') NOT IN ('archived','evicted','deleted')"
-                canonical_ids = {
-                    int(row[0])
-                    for row in connection.execute(
-                        f"SELECT id FROM {table} WHERE {where}"
+                bounded_memory_policy = table == "memories" and index.memory_policy is not None
+                if bounded_memory_policy:
+                    admitted = select_hot_memory_candidates(
+                        connection,
+                        index.memory_policy,
+                        int(index.dimension or 0),
+                    )
+                    canonical_ids = {int(candidate.memory_id) for candidate in admitted}
+                    sample_rows = [
+                        (int(candidate.memory_id), candidate.vector)
+                        for candidate in admitted[:5]
+                    ]
+                else:
+                    where = f"{vector_column} IS NOT NULL"
+                    if table == "memories":
+                        columns = _table_columns(connection, table)
+                        if "resolution_state" in columns:
+                            where += " AND resolution_state='resolved'"
+                        if "quarantine" in columns:
+                            where += " AND COALESCE(quarantine, 0)=0"
+                        if "memory_type" in columns:
+                            where += " AND COALESCE(memory_type, 'message') NOT IN ('archived','evicted','deleted')"
+                    elif table == "tag_catalog" and "status" in _table_columns(connection, table):
+                        where += " AND status='active'"
+                    canonical_ids = {
+                        int(row[0])
+                        for row in connection.execute(
+                            f"SELECT id FROM {table} WHERE {where}"
+                        ).fetchall()
+                    }
+                    sample_rows = connection.execute(
+                        f"SELECT id, {vector_column} FROM {table} WHERE {where} ORDER BY id LIMIT 5"
                     ).fetchall()
-                }
                 runtime_ids = {int(value) for value in index.runtime_ids}
-                sample_rows = connection.execute(
-                    f"SELECT id, vector FROM {table} WHERE {where} ORDER BY id LIMIT 5"
-                ).fetchall()
 
             recall = []
             for entity_id, vector_blob in sample_rows:
-                vector = np.frombuffer(vector_blob, dtype=np.float32)
+                vector = (
+                    np.frombuffer(vector_blob, dtype=np.float32)
+                    if isinstance(vector_blob, (bytes, bytearray, memoryview))
+                    else np.asarray(vector_blob, dtype=np.float32).reshape(-1)
+                )
                 results = index.search(vector, min(5, max(1, len(runtime_ids))))
                 labels = [int(item[0]) for item in results]
                 recall.append({
@@ -622,6 +656,10 @@ class DiagnosticsService:
                 "kind": index.kind,
                 "canonical_count": len(canonical_ids),
                 "runtime_count": len(runtime_ids),
+                "bounded_hot_policy": bool(bounded_memory_policy),
+                "hot_capacity": None if index.memory_policy is None else index.memory_policy.max_vectors,
+                "per_scope_capacity": None if index.memory_policy is None else index.memory_policy.per_scope_max_vectors,
+                "scoped_reserved_vectors": None if index.memory_policy is None else index.memory_policy.scoped_reserved_vectors,
                 "missing_ids": sorted(canonical_ids - runtime_ids)[:20],
                 "orphan_ids": sorted(runtime_ids - canonical_ids)[:20],
                 "missing_count": len(canonical_ids - runtime_ids),
@@ -738,7 +776,7 @@ def _committed_watermark(connection: sqlite3.Connection) -> int | None:
 
 
 def _is_tag_kind(kind: str) -> bool:
-    return str(kind).strip().lower() in {"tag", "tags"}
+    return str(kind).strip().lower() in {"tag", "tags", "legacy_tag", "tag_catalog"}
 
 
 def _index_kinds_match(expected: str, actual: str) -> bool:

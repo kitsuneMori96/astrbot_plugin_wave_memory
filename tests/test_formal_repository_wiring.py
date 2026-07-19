@@ -231,6 +231,7 @@ def test_main_production_wiring_passes_formal_repositories_writer_and_runtime_sc
     assert "'book_lore': self.scoped_projection_writer" in learning_source
     assert "'few_shot'" in learning_source and "self.scoped_projection_writer" in learning_source
     assert {"FewShotChannel", "BookLoreChannel"} <= set(_call_names(injection))
+    assert "from .webui.container import get_container" in ast.unparse(injection)
     assert "self.concern_tracker.add(topic=topic" in on_message_source
     assert "scope=runtime_scope" in on_message_source
     assert "self.concern_tracker.match(locked_message, scope=runtime_scope)" in on_message_source

@@ -134,6 +134,83 @@
       }
     }
   },
+  "Memory_Index_Settings": {
+    "description": "Tag 驱动的热记忆索引与冷召回",
+    "hint": "HNSW 仅保留受限热记忆；未入热层的正式记忆仍可通过 Scope、Tag 和 FTS5 冷召回。修改容量后重启会排队重建索引。",
+    "type": "object",
+    "items": {
+      "hot_max_vectors": {
+        "description": "热记忆 HNSW 最大向量数",
+        "hint": "硬上限。达到上限时新候选保留在冷层并等待受控重建，绝不自动扩容。",
+        "type": "int",
+        "default": 100000,
+        "restart_required": true
+      },
+      "per_scope_max_vectors": {
+        "description": "单个 Scope 的热记忆上限",
+        "hint": "防止单一 Bot/群会话占满共享热索引。",
+        "type": "int",
+        "default": 1000,
+        "restart_required": true
+      },
+      "scoped_reserved_vectors": {
+        "description": "正式 Scope 热索引保留量",
+        "hint": "Tag 是语义层，Scope 是访问边界。保留给正式 Scope 的热向量数量，剩余容量由 legacy_group 与未入选正式记忆按全局排序竞争；可设为 0。",
+        "type": "int",
+        "default": 10000,
+        "restart_required": true
+      },
+      "chat_hot_days": {
+        "description": "普通聊天热窗口（天）",
+        "hint": "具有有效 Tag 的普通聊天只在此窗口内参与热索引；超期后仍在冷层，不会被删除或标为 evicted。",
+        "type": "int",
+        "default": 30,
+        "restart_required": true
+      },
+      "cold_candidate_limit": {
+        "description": "单次冷召回候选上限",
+        "hint": "Tag/FTS5 缩小后的候选最多数量；主进程只对这个小批量做向量重排。修改后重启生效。",
+        "type": "int",
+        "default": 128,
+        "restart_required": true
+      },
+      "cold_recall_enabled": {
+        "description": "启用 Tag 驱动冷召回",
+        "hint": "关闭后仅使用热 HNSW；显式关闭会保留，不会被默认值覆盖。修改后重启生效。",
+        "type": "bool",
+        "default": true,
+        "restart_required": true
+      },
+      "tag_index_max_vectors": {
+        "description": "正式 Tag Catalog HNSW 最大向量数",
+        "hint": "正式 Catalog 的独立容量上限，不等同于热记忆数量；旧 tags 不使用此标签空间。",
+        "type": "int",
+        "default": 40000,
+        "restart_required": true
+      },
+      "legacy_tag_index_max_vectors": {
+        "description": "旧 Tag HNSW 基础容量",
+        "hint": "legacy_tags.hnsw 只读取旧 tags.vector。实际重建容量始终至少为旧 Tag 行数加一，避免历史 Tag 超出默认值时失败。",
+        "type": "int",
+        "default": 40000,
+        "restart_required": true
+      }
+    }
+  },
+  "Inject_Settings": {
+    "description": "注入通道窗口控制",
+    "hint": "Timeline 保持 token 与条数预算；时间窗口仅决定是否截断历史。",
+    "type": "object",
+    "items": {
+      "timeline_days": {
+        "description": "Timeline 历史窗口（天）",
+        "hint": "0 表示全历史；大于 0 时只读取最近 N 天。timeline_max 和 token 预算仍会限制实际注入量。",
+        "type": "int",
+        "default": 0,
+        "restart_required": false
+      }
+    }
+  },
   "Query_Settings": {
     "description": "自适应记忆召回参数",
     "hint": "调整大模型生成回复前，历史记忆在后台检索和整合的控制参数",

@@ -72,6 +72,7 @@ def test_runtime_scope_options_use_registry_and_real_database_sources():
             db=db,
             bot_registry=_registry(),
             channel_config=build_default_channel_config(),
+            group_name_resolver=lambda bot_id, group_id: "全名群聊" if (bot_id, group_id) == ("bot-alpha", "full-42") else None,
         )
         payload = source.get_scope_options()
     finally:
@@ -88,6 +89,8 @@ def test_runtime_scope_options_use_registry_and_real_database_sources():
     ]
     assert [item["id"] for item in payload["sessions"]] == ["discord:group:full-42", "qq:group:g1"]
     assert payload["sessions"][0]["source"] == "traces"
+    assert payload["sessions"][0]["group_name"] == "全名群聊"
+    assert payload["sessions"][0]["label"] == "全名群聊（full-42）"
     assert payload["sessions"][0]["platform_id"] == "discord"
     assert payload["legacy_groups"] == [
         {"bot_id": "bot-alpha", "group_id": "g1", "label": "g1", "source": "profiles", "count": 1}

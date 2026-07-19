@@ -6,16 +6,20 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
+# 历史关系模型的四个正向维度与一个负向维度。hostility 不能被
+# 当作 trust 的负值折叠：旧账本和现有工具都把它作为独立证据维度。
 DIMENSION_WEIGHTS: Mapping[str, float] = {
     "familiarity": 0.25,
     "trust": 0.30,
     "fun": 0.20,
     "depth": 0.25,
 }
+HOSTILITY_WEIGHT = 0.50
 DIMENSION_RANGES: Mapping[str, tuple[float, float]] = {
     "familiarity": (0.0, 100.0),
     "trust": (-50.0, 100.0),
     "fun": (0.0, 80.0),
+    "hostility": (0.0, 100.0),
     "depth": (0.0, 80.0),
 }
 VALID_DIMENSIONS = frozenset(DIMENSION_RANGES)
@@ -33,6 +37,7 @@ VALID_EVENT_TYPES = frozenset({
     "manual_adjustment",
 })
 SINGLE_DELTA_CAP = 5.0
+HOSTILITY_DELTA_CAP = 8.0
 DAILY_DELTA_CAP = 15.0
 MANUAL_ADJUSTMENT_DELTA_CAP = 20.0
 
@@ -44,6 +49,7 @@ def clamp_dimension(dimension: str, value: float) -> float:
 
 def compute_affinity(dimensions: Mapping[str, float]) -> int:
     score = sum(float(dimensions.get(key, 0.0)) * weight for key, weight in DIMENSION_WEIGHTS.items())
+    score -= float(dimensions.get("hostility", 0.0)) * HOSTILITY_WEIGHT
     return int(max(-100.0, min(100.0, score)))
 
 
@@ -88,8 +94,8 @@ def cap_automatic_delta(
     single_delta_cap: float = SINGLE_DELTA_CAP,
     daily_delta_cap: float = DAILY_DELTA_CAP,
 ) -> float:
-    del dimension
-    delta = max(-abs(single_delta_cap), min(abs(single_delta_cap), float(requested_delta)))
+    cap = HOSTILITY_DELTA_CAP if dimension == "hostility" and float(requested_delta) > 0 else single_delta_cap
+    delta = max(-abs(cap), min(abs(cap), float(requested_delta)))
     if delta > 0:
         remaining = daily_delta_cap - max(float(daily_total), 0.0)
         return round(min(delta, max(0.0, remaining)), 2)
@@ -113,6 +119,8 @@ __all__ = [
     "DAILY_DELTA_CAP",
     "DIMENSION_RANGES",
     "DIMENSION_WEIGHTS",
+    "HOSTILITY_DELTA_CAP",
+    "HOSTILITY_WEIGHT",
     "MANUAL_ADJUSTMENT_DELTA_CAP",
     "SINGLE_DELTA_CAP",
     "VALID_DIMENSIONS",

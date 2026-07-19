@@ -118,7 +118,7 @@ class TagExtractor:
         self.embedding_service = embedding_service
         self.tag_index = tag_index
 
-    def _build_reference_section(self) -> str:
+    def _build_reference_section(self, scope=None) -> str:
         """构建已有 Tag 参考词表，注入 prompt。
 
         从 DB 取关联记忆数 >= 2 的高频 tag，按 type 分组，格式化为紧凑字符串。
@@ -136,15 +136,24 @@ class TagExtractor:
         try:
             conn = self.db.conn if hasattr(self.db, 'conn') else self.db
 
-            # 取关联数 >= 2 的 tag，按关联数降序，每个 type 取 top 30，总计不超过 200
+            # 正式路径只读取当前 Scope 的 scoped Tag 关联；不再把旧 tags/memory_tags
+            # 的词表跨 Bot/跨群注入给 Tag LLM。无 Scope 时安全地不提供参考词表。
+            if scope is None or getattr(scope, "session", None) is None:
+                return ""
             rows = conn.execute("""
-                SELECT t.name, t.tag_type, COUNT(mt.memory_id) as mc
-                FROM tags t JOIN memory_tags mt ON t.id = mt.tag_id
+                SELECT t.name, t.tag_type, COUNT(smt.memory_id) as mc
+                FROM scoped_tags t JOIN scoped_memory_tags smt
+                  ON t.id = smt.tag_id
+                 AND smt.bot_id = t.bot_id
+                 AND smt.session_id = t.session_id
+                 AND smt.visibility = t.visibility
+                WHERE t.bot_id=? AND t.session_id=? AND t.visibility=?
+                  AND COALESCE(t.status, 'active') NOT IN ('inactive', 'deleted', 'archived')
                 GROUP BY t.id
                 HAVING mc >= 2
                 ORDER BY mc DESC
                 LIMIT 300
-            """).fetchall()
+            """, (scope.bot_id, scope.session.id, scope.visibility)).fetchall()
 
             if not rows:
                 return ""
@@ -182,7 +191,7 @@ class TagExtractor:
             logger.debug(f"[WaveMemory] Failed to build reference tags: {e}")
             return ""
 
-    async def _build_rag_reference_section(self, message: str) -> str:
+    async def _build_rag_reference_section(self, message: str, scope=None) -> str:
         """Tag RAG：用消息 embedding 搜索 tag_index，取 top 20 语义相关 tag 注入 prompt。
 
         如果 embedding 不可用或 tag_index 为空，返回空字符串（调用方会 fallback 到静态词表）。
@@ -204,26 +213,24 @@ class TagExtractor:
             if not results:
                 return ""
 
-            # 获取 tag 详情
-            tag_ids = [int(tid) for tid, _ in results]
-            if not self.db:
+            # Tag HNSW 返回 Catalog ids；只有映射回当前 Scope 的 scoped Tag
+            # 才能进入 prompt，避免把其他群的词条当作本群参考。
+            if not self.db or scope is None or not callable(getattr(self.db, "list_scoped_catalog_links", None)):
                 return ""
-
-            conn = self.db.conn if hasattr(self.db, 'conn') else self.db
-            placeholders = ",".join("?" * len(tag_ids))
-            rows = conn.execute(
-                f"SELECT id, name, tag_type FROM tags WHERE id IN ({placeholders})",
-                tag_ids
-            ).fetchall()
-
-            if not rows:
+            tag_ids = [int(tid) for tid, _ in results]
+            links = self.db.list_scoped_catalog_links(scope, tag_ids) or []
+            id_to_info = {
+                int(item["catalog_id"]): (str(item.get("name") or ""), str(item.get("tag_type") or "keyword"))
+                for item in links
+                if isinstance(item, dict) and item.get("catalog_id") is not None
+            }
+            if not id_to_info:
                 return ""
 
             # 按 type 分组，取 top 20
             by_type: dict[str, list[str]] = {}
             total = 0
             # 保持搜索结果的相关性排序
-            id_to_info = {r[0]: (r[1], r[2]) for r in rows}
             for tid, _ in results:
                 tid = int(tid)
                 if tid not in id_to_info:
@@ -295,7 +302,7 @@ class TagExtractor:
 
         return name
 
-    async def extract_tags(self, message: str, sender: str = "") -> list[dict]:
+    async def extract_tags(self, message: str, sender: str = "", scope=None) -> list[dict]:
         """从单条消息提取结构化 Tag。
 
         Returns:
@@ -313,10 +320,10 @@ class TagExtractor:
                 logger.warning(f"[WaveMemory] Tag LLM provider '{self.provider_id}' not found, using fallback")
                 return self._fallback_extract(message)
 
-            reference_section = self._build_reference_section()
+            reference_section = self._build_reference_section(scope)
 
-            # Tag RAG：如果 embedding 可用，追加语义相关 tag
-            rag_section = await self._build_rag_reference_section(message)
+            # Tag RAG：如果 embedding 可用，追加当前 Scope 的语义相关 tag
+            rag_section = await self._build_rag_reference_section(message, scope)
             if rag_section:
                 reference_section = rag_section + reference_section
 
@@ -345,7 +352,7 @@ class TagExtractor:
             logger.warning(f"[WaveMemory] Tag extraction error: {type(e).__name__}: {e}\n{traceback.format_exc()}")
             return self._fallback_extract(message)
 
-    async def extract_tags_batch(self, messages: list[dict]) -> list[list[dict]]:
+    async def extract_tags_batch(self, messages: list[dict], scope=None) -> list[list[dict]]:
         """批量提取多条消息的 Tag（一次 LLM 调用）。
 
         Args:
@@ -383,11 +390,11 @@ class TagExtractor:
             if not provider:
                 return [self._fallback_extract(m.get("content", "")) for m in messages]
 
-            reference_section = self._build_reference_section()
+            reference_section = self._build_reference_section(scope)
 
-            # Tag RAG：用批量消息的拼接文本搜索语义相关 tag
+            # Tag RAG：用批量消息的拼接文本搜索当前 Scope 的语义相关 tag
             combined_text = " ".join(m.get("content", "")[:200] for m in messages)
-            rag_section = await self._build_rag_reference_section(combined_text[:500])
+            rag_section = await self._build_rag_reference_section(combined_text[:500], scope)
             if rag_section:
                 reference_section = rag_section + reference_section
 

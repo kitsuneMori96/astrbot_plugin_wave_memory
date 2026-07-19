@@ -8,7 +8,6 @@ import { BeliefsPage } from './BeliefsPage'
 
 const mocks = vi.hoisted(() => ({
   listBeliefs: vi.fn(),
-  listLegacyBeliefs: vi.fn(),
   getBeliefEvidence: vi.fn(),
   batchTransitionBeliefs: vi.fn(),
   approveBelief: vi.fn(),
@@ -19,7 +18,6 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/api/beliefs', () => ({
   listBeliefs: mocks.listBeliefs,
-  listLegacyBeliefs: mocks.listLegacyBeliefs,
   getBeliefEvidence: mocks.getBeliefEvidence,
   batchTransitionBeliefs: mocks.batchTransitionBeliefs,
   approveBelief: mocks.approveBelief,
@@ -78,11 +76,9 @@ beforeEach(() => {
       create: { available: false, reason_code: 'anchored_belief_command_unavailable' },
       edit: { available: false, reason_code: 'belief_edit_command_unavailable' },
       physical_delete: { available: false, reason_code: 'physical_delete_disabled' },
-      archive_legacy: { available: false, reason_code: 'legacy_mutation_disabled' },
       select_all_matching: { available: false, reason_code: 'object_ref_batch_required' },
     },
   })
-  mocks.listLegacyBeliefs.mockResolvedValue({ items: [], total: 0, pending_count: 0, legacy: true, unresolved_legacy: true, readonly: true, scope: null, page: { number: 1, page_size: 25, total: 0, total_status: 'exact', has_next: false } })
   mocks.getBeliefEvidence.mockResolvedValue({
     ok: true,
     belief: { id: 21, content: belief.content, type: belief.type, revision: 2 },
@@ -132,12 +128,11 @@ describe('BeliefsPage scoped 审核恢复', () => {
     await waitFor(() => expect(mocks.batchTransitionBeliefs).toHaveBeenCalledWith([expect.objectContaining({ id: 21, revision: 2, object_ref: expect.objectContaining({ ref: 'opaque-belief-21' }) })], 'approve', { bot_id: 'bot-real', session_id: 'qq:group:42', visibility: 'group' }))
   })
 
-  it('新建、自由编辑、物理删除与 Legacy 归档保持可见禁用', async () => {
+  it('新建、自由编辑与物理删除保持可见禁用', async () => {
     const user = userEvent.setup()
     renderPage()
 
     expect(await screen.findByRole('button', { name: '新增信念' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: '归档旧遗产' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '编辑信念 21' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '删除信念 21' })).toBeDisabled()
 

@@ -8,9 +8,14 @@ import math
 import re
 import time
 from collections import defaultdict
-from typing import Mapping, Optional
+from typing import Any, Mapping, Optional
 
-from astrbot.api import logger
+try:  # 允许没有 AstrBot 宿主依赖的仓库测试直接导入。
+    from astrbot.api import logger
+except ImportError:  # pragma: no cover - 仅用于独立测试环境
+    import logging
+
+    logger = logging.getLogger(__name__)
 
 try:  # 兼容插件包导入和仓库测试直接导入
     from ..domain.scope import RuntimeScope, ScopeValidationError
@@ -125,8 +130,10 @@ class AffinityEngine:
         bot_db_id: str = "yushu",
         record_relationship_events: bool = True,
         target_profiles: dict[str, dict[str, str]] | None = None,
+        relationship_service: Any | None = None,
     ):
         self.db = db
+        self.relationship_service = relationship_service
         self.bot_qq_id = bot_qq_id
         self.bot_db_id = bot_db_id  # 写 user_profiles 时用的 bot_id 值
         self.record_relationship_events = record_relationship_events
@@ -311,6 +318,29 @@ class AffinityEngine:
                     continue
                 reason = "；".join(reasons.get(dim_name, [])[:3]) or "行为统计关系变化"
                 event_type = "bot_attacked" if dim_name == "hostility" and delta > 0 else "direct_reply"
+                if self.relationship_service is not None and scope is not None:
+                    formal_event_type = "message_seen"
+                    reason_text = str(reason)
+                    if event_type == "bot_attacked":
+                        formal_event_type = "bot_attacked"
+                    elif "正面评价" in reason_text:
+                        formal_event_type = "bot_praised"
+                    elif "玩梗" in reason_text or "趣味" in reason_text:
+                        formal_event_type = "joke"
+                    elif "深度" in reason_text or "深夜" in reason_text:
+                        formal_event_type = "deep_talk"
+                    elif "回复" in reason_text or "@" in reason_text:
+                        formal_event_type = "direct_reply"
+                    try:
+                        self.relationship_service.record_event(
+                            scope=scope,
+                            event_type=formal_event_type,
+                            dimension=dim_name,
+                            delta=round(delta, 2),
+                            reason=reason_text,
+                        )
+                    except Exception as formal_error:
+                        logger.debug(f"[WaveMemory] scoped relationship event skipped: {formal_error}")
                 self.db.conn.execute(
                     """INSERT INTO relationship_events
                        (bot_id, group_id, user_id, event_type, dimension, delta, reason, created_at)
@@ -621,6 +651,7 @@ class LifecycleService:
         run_global_jobs: bool = True,
         target_profiles: dict[str, dict[str, str]] | None = None,
         bot_identities: Mapping[str, str] | None = None,
+        relationship_service: Any | None = None,
     ):
         self.db = db
         identities = {
@@ -636,6 +667,7 @@ class LifecycleService:
                 bot_qq_id=qq_id,
                 bot_db_id=identity,
                 target_profiles=target_profiles,
+                relationship_service=relationship_service,
             )
             for identity, qq_id in identities.items()
         }
@@ -652,6 +684,8 @@ class LifecycleService:
         self.positive_emotion_threshold = positive_emotion_threshold
         self.negative_emotion_threshold = negative_emotion_threshold
         self.run_global_jobs = run_global_jobs
+        self._scoped_mood_scopes: dict[tuple[str, str, str], RuntimeScope] = {}
+        self._last_scoped_mood_update: dict[tuple[str, str, str], float] = {}
 
     def process_scoped_message(
         self,
@@ -667,10 +701,14 @@ class LifecycleService:
         """Route an ingress-resolved message to its exact Bot affinity engine."""
         if not isinstance(scope, RuntimeScope):
             return False
+        if scope.session is None or scope.visibility != "group":
+            return False
+        scope_key = (scope.bot_id, scope.session.id, scope.visibility)
+        self._scoped_mood_scopes[scope_key] = scope
         affinity = self._affinities.get(scope.bot_id)
         if affinity is None:
             return False
-        return affinity.process_message(
+        processed = affinity.process_message(
             content=content,
             emotion_tag_ids=emotion_tag_ids,
             is_reply_to_bot=is_reply_to_bot,
@@ -679,6 +717,91 @@ class LifecycleService:
             hour=hour,
             scope=scope,
         )
+        if processed:
+            self._update_scoped_mood(scope, content=content)
+        return processed
+
+    def _update_scoped_mood(
+        self,
+        scope: RuntimeScope,
+        *,
+        content: str = "",
+        now: float | None = None,
+        force: bool = False,
+    ) -> bool:
+        """根据正式 Scope 最近消息更新正式 Soul mood；绝不回写 Legacy mood。"""
+        if not isinstance(scope, RuntimeScope) or scope.session is None:
+            return False
+        repository = getattr(self.db, "soul_repository", None)
+        if repository is None or not callable(getattr(repository, "upsert_mood", None)):
+            return False
+        timestamp = float(now or time.time())
+        key = (scope.bot_id, scope.session.id, scope.visibility)
+        last_update = self._last_scoped_mood_update.get(key, 0.0)
+        text = str(content or "")[:500]
+        immediate_hits = sum(1 for word in POSITIVE_EMOTION_KW | FUN_EMOTION_KW | NEGATIVE_EMOTION_KW if word in text)
+        if not force and timestamp - last_update < 15.0 and not immediate_hits:
+            return False
+        window = timestamp - 1800.0
+        try:
+            rows = self.db.conn.execute(
+                """SELECT content FROM memories
+                   WHERE bot_id=? AND session_id=? AND visibility=?
+                     AND timestamp>? AND memory_type='message'
+                     AND COALESCE(quarantine, 0)=0
+                   ORDER BY timestamp DESC LIMIT 80""",
+                (scope.bot_id, scope.session.id, scope.visibility, window),
+            ).fetchall()
+        except Exception:
+            rows = []
+        samples = [str(row[0] or "")[:500] for row in rows]
+        if text and text not in samples:
+            samples.insert(0, text)
+        message_count = len(samples)
+        positive_hits = sum(sum(1 for word in POSITIVE_EMOTION_KW if word in sample) for sample in samples)
+        negative_hits = sum(sum(1 for word in NEGATIVE_EMOTION_KW if word in sample) for sample in samples)
+        fun_hits = sum(sum(1 for word in FUN_EMOTION_KW if word in sample) for sample in samples)
+        total_emotion = positive_hits + negative_hits + fun_hits
+        if message_count == 0 and total_emotion == 0:
+            return False
+        if message_count >= self.mood_msg_threshold:
+            cause = "当前群聊互动很密集"
+        elif negative_hits and negative_hits / max(total_emotion, 1) >= self.negative_emotion_threshold:
+            cause = "最近对话中负面情绪较多"
+        elif positive_hits + fun_hits and (positive_hits + fun_hits) / max(total_emotion, 1) >= self.positive_emotion_threshold:
+            cause = "最近对话氛围较积极"
+        else:
+            cause = "最近对话保持平稳"
+        valence = _clamp((positive_hits + fun_hits - negative_hits) / max(total_emotion, 1), -1.0, 1.0)
+        arousal = _clamp(
+            0.2 + min(message_count / max(self.mood_msg_threshold, 1), 1.0) * 0.45
+            + min(fun_hits / max(message_count, 1), 1.0) * 0.2
+            + min(negative_hits / max(message_count, 1), 1.0) * 0.2,
+            0.0,
+            1.0,
+        )
+        try:
+            repository.upsert_mood(
+                scope,
+                valence=round(valence, 3),
+                arousal=round(arousal, 3),
+                cause=cause,
+                evidence=[{
+                    "source": "formal_scoped_memories",
+                    "window_seconds": 1800,
+                    "message_count": message_count,
+                    "positive_hits": positive_hits,
+                    "negative_hits": negative_hits,
+                    "fun_hits": fun_hits,
+                }],
+                policy_version="scoped-mood/v2",
+                observed_at=timestamp,
+            )
+            self._last_scoped_mood_update[key] = timestamp
+            return True
+        except Exception as exc:
+            logger.debug("[WaveMemory] formal scoped mood update skipped: %s", exc)
+            return False
 
     def start(self, supervisor=None):
         if self._running:
@@ -871,83 +994,6 @@ class LifecycleService:
         }
 
     def _update_mood(self, now: float):
-        """根据最近 30 分钟的情感 tag 分布更新 bot 情绪。"""
-        window = now - 1800  # 30 分钟
-
-        # 获取最近活跃的群
-        groups = self.db.conn.execute(
-            """SELECT DISTINCT group_id FROM memories
-               WHERE timestamp > ? AND memory_type = 'message'
-                 AND sender_id != 'bot_self'""",
-            (window,),
-        ).fetchall()
-
-        affinity = self.affinity
-        if affinity is None:
-            return
-        emotion_cache = affinity._get_emotion_classification()
-        if not emotion_cache:
-            return
-
-        for (group_id,) in groups:
-            # 已有活跃情绪则跳过
-            existing = self.db.get_active_mood(group_id)
-            if existing:
-                continue
-
-            # 先检查消息密度（不依赖 tag，解决 TagWorker 积压时 energetic 不触发的问题）
-            msg_count = self.db.conn.execute(
-                "SELECT COUNT(*) FROM memories WHERE group_id = ? AND timestamp > ? AND memory_type = 'message'",
-                (group_id, window),
-            ).fetchone()[0]
-
-            mood_type = None
-            intensity = 0.5
-            description = ""
-
-            if msg_count > self.mood_msg_threshold:
-                # 高密度互动 → energetic（不依赖情感分类）
-                mood_type = "energetic"
-                intensity = min(0.5 + msg_count / 100, 0.9)
-                description = "群里很热闹，大家聊得起劲"
-            else:
-                # 消息密度不够，尝试情感分析（需要 tag 数据）
-                rows = self.db.conn.execute(
-                    """SELECT mt.tag_id FROM memory_tags mt
-                       JOIN memories m ON m.id = mt.memory_id
-                       WHERE m.group_id = ? AND m.timestamp > ?
-                         AND m.sender_id != 'bot_self'""",
-                    (group_id, window),
-                ).fetchall()
-
-                if len(rows) >= 5:
-                    positive = 0
-                    negative = 0
-                    fun = 0
-
-                    for (tag_id,) in rows:
-                        emo_type = emotion_cache.get(tag_id)
-                        if emo_type == "positive":
-                            positive += 1
-                        elif emo_type == "negative":
-                            negative += 1
-                        elif emo_type == "fun":
-                            fun += 1
-
-                    emotion_matched = positive + negative + fun
-                    if emotion_matched > 0:
-                        total_emo = emotion_matched  # 用情感 tag 数作为分母
-                        pos_ratio = (positive + fun) / total_emo
-                        neg_ratio = negative / total_emo
-
-                        if pos_ratio > self.positive_emotion_threshold:
-                            mood_type = "cheerful"
-                            intensity = 0.5 + pos_ratio * 0.3
-                            description = "氛围不错，心情愉快"
-                        elif neg_ratio > self.negative_emotion_threshold:
-                            mood_type = "concerned"
-                            intensity = 0.4 + neg_ratio * 0.3
-                            description = "感觉到一些负面情绪"
-
-            if mood_type:
-                self.db.set_mood(group_id, mood_type, intensity, description, duration_hours=self.mood_duration_hours)
+        """周期性刷新已经见过的正式 Scope 情绪；不再写 Legacy mood 表。"""
+        for scope in tuple(self._scoped_mood_scopes.values()):
+            self._update_scoped_mood(scope, now=now, force=True)

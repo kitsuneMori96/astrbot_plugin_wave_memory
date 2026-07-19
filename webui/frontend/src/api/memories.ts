@@ -50,31 +50,6 @@ export interface MemoriesFilters extends MemoryScope {
   search?: string
 }
 export type MemoriesResponse = PageResponse<MemoryItem>
-export interface LegacyMemoryItem {
-  id: number
-  content: string
-  sender_id?: string
-  sender_name?: string
-  group_id?: string
-  source?: string
-  timestamp?: number
-  bot_id?: string | null
-  session_id?: string | null
-  visibility?: string | null
-  resolution_state?: string | null
-  quarantine?: boolean | number | null
-  legacy: true
-  readonly: true
-  scope_status: 'unresolved_legacy'
-  scope_reason: string
-}
-export interface LegacyMemoriesResponse extends PageResponse<LegacyMemoryItem> {
-  legacy: true
-  readonly: true
-  scope: null
-  scope_status: 'unresolved_legacy'
-  reason_code: string
-}
 export interface MemoryMutationResult { ok: boolean; operation: { kind: string; status: string; id?: string }; revision: number | string | null; item?: MemoryItem }
 export interface MemoryTagMutationResult extends Omit<MemoryMutationResult, 'item'> { item?: { memory: MemoryItem; tags: MemoryTagState } }
 export interface MemoryRefInput { id: number; ref: string }
@@ -96,7 +71,6 @@ function batchUrl(action: string, scope: MemoryScope): string {
 }
 
 export function listMemories(filters: MemoriesFilters): Promise<MemoriesResponse> { return fetchJson(`/api/memories?${query(filters)}`) }
-export function listLegacyMemories(filters: { limit: PageSize; offset: number; search?: string; source?: string }): Promise<LegacyMemoriesResponse> { return fetchJson(`/api/memories/legacy/audit?${query(filters)}`) }
 export function listSenders(scope: MemoryScope): Promise<{ senders: SenderItem[]; source: { status: string; reason_code: string | null } }> { return fetchJson(`/api/memories/senders?${query(scope)}`) }
 export function getMemoryDetail(detailUrl: string): Promise<{ item: MemoryDetail }> { return fetchJson(detailUrl) }
 export function updateMemory(mutationUrl: string, content: string, importance: number): Promise<MemoryMutationResult> { return fetchJson(mutationUrl, { method: 'PUT', body: JSON.stringify({ content, importance }) }) }

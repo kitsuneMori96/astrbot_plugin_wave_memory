@@ -103,31 +103,6 @@ export interface ScopedFactsPage extends PageResponse<ScopedFact> {
   }
 }
 
-export interface LegacyFact {
-  id: number
-  subject: string
-  predicate: string
-  object: string
-  group_id?: string | null
-  source_memory_id?: number | null
-  confidence?: number | null
-  fact_type?: string | null
-  created_at?: number | null
-  legacy: true
-  readonly: true
-  scope: null
-  scope_status: 'unresolved_legacy'
-  scope_reason: string
-  evidence_status: 'unavailable'
-}
-
-export interface LegacyFactsPage extends PageResponse<LegacyFact> {
-  legacy: true
-  readonly: true
-  scope: null
-  scope_status: 'unresolved_legacy'
-  reason_code: string
-}
 
 export interface ApprovedFewShot {
   id: number
@@ -164,10 +139,6 @@ export function getReviewedBookLore(query: KnowledgeListQuery): Promise<Reviewed
 
 export function getScopedFacts(query: KnowledgeListQuery): Promise<ScopedFactsPage> {
   return fetchJson<ScopedFactsPage>(`/api/knowledge/facts${queryString(query)}`)
-}
-
-export function getLegacyFacts(query: Pick<KnowledgeListQuery, 'limit' | 'offset' | 'search'> & { group_id?: string } = {}): Promise<LegacyFactsPage> {
-  return fetchJson<LegacyFactsPage>(`/api/knowledge/facts/legacy/audit${queryString(query)}`)
 }
 
 export type ApprovedFewShotQuery = KnowledgeListQuery & { bot_id: string; session_id: string; visibility: 'group' }

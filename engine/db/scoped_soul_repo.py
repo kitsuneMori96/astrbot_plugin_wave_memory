@@ -902,6 +902,11 @@ class ScopedSoulRepository:
         concern_time_params: list[Any] = []
         timeline_time = ""
         timeline_time_params: list[Any] = []
+        timeline_subject = ""
+        timeline_subject_params: list[Any] = []
+        if subject is not None:
+            timeline_subject = " AND (subject_principal_id IS NULL OR subject_principal_id=?)"
+            timeline_subject_params.append(subject)
         if from_ts is not None:
             concern_time += " AND last_triggered>=?"
             concern_time_params.append(float(from_ts))
@@ -951,16 +956,16 @@ class ScopedSoulRepository:
         } for row in concern_rows]
 
         timeline_total = int(self.cm.execute_read(
-            f"SELECT COUNT(*) FROM scoped_soul_timeline WHERE bot_id=? AND session_id=? AND visibility=?{timeline_time}",
-            (*params, *timeline_time_params),
+            f"SELECT COUNT(*) FROM scoped_soul_timeline WHERE bot_id=? AND session_id=? AND visibility=?{timeline_subject}{timeline_time}",
+            (*params, *timeline_subject_params, *timeline_time_params),
         ).fetchone()[0])
         timeline_rows = self.cm.execute_read(
             f"""SELECT id, subject_principal_id, event_summary, event_type, emotional_weight,
                       occurred_at, revision, evidence
                FROM scoped_soul_timeline
-               WHERE bot_id=? AND session_id=? AND visibility=?{timeline_time}
+               WHERE bot_id=? AND session_id=? AND visibility=?{timeline_subject}{timeline_time}
                ORDER BY occurred_at DESC, id DESC LIMIT ? OFFSET ?""",
-            (*params, *timeline_time_params, limit, offset),
+            (*params, *timeline_subject_params, *timeline_time_params, limit, offset),
         ).fetchall()
         timeline = [{
             "id": row[0], "subject_principal_id": row[1], "event_summary": row[2],

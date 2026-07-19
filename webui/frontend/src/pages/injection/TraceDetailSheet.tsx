@@ -10,7 +10,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
@@ -102,12 +101,13 @@ function objectLinks(detail: TraceDetailPayload): Array<{ label: string; path: s
   })
 }
 
-function DetailGrid({ value, preferredKeys }: { value: unknown; preferredKeys?: string[] }) {
+function DetailGrid({ value, preferredKeys, omitKeys = [] }: { value: unknown; preferredKeys?: string[]; omitKeys?: string[] }) {
   const record = asRecord(value)
   if (!record || Object.keys(record).length === 0) return <p className="text-sm text-muted-foreground">未记录。</p>
+  const visibleKeys = Object.keys(record).filter((key) => !omitKeys.includes(key))
   const keys = preferredKeys?.length
-    ? [...preferredKeys.filter((key) => key in record), ...Object.keys(record).filter((key) => !preferredKeys.includes(key))]
-    : Object.keys(record)
+    ? [...preferredKeys.filter((key) => key in record && !omitKeys.includes(key)), ...visibleKeys.filter((key) => !preferredKeys.includes(key))]
+    : visibleKeys
   return (
     <dl className="grid gap-3 text-sm sm:grid-cols-2">
       {keys.map((key) => (
@@ -176,7 +176,6 @@ export function TraceDetailSheet({
   const links = detail ? objectLinks(detail) : []
   const warnings = detail ? normalizeMessages(detail.warnings) : []
   const errors = detail ? [detail.error, detail.errors, ...channels.filter((channel) => channel.error).map((channel) => `${channelName(channel)}: ${textValue(channel.error)}`)].flatMap(normalizeMessages) : []
-  const feedback = detail ? asRecords(detail.feedback) : []
   const finalText = textValue(detail?.final_text ?? detail?.final_injection_text, '')
   const rawPayload = typeof detail?.raw_payload === 'string' ? detail.raw_payload : undefined
 
@@ -185,7 +184,7 @@ export function TraceDetailSheet({
       <SheetContent data-slot="trace-detail-sheet" className="flex w-full flex-col gap-0 pr-0 sm:max-w-4xl sm:pr-2">
         <SheetHeader className="shrink-0 border-b pb-4 pr-6">
           <SheetTitle>Trace 详情</SheetTitle>
-          <SheetDescription>{detail?.trace_id ? `trace_id: ${detail.trace_id}` : '按需读取请求、预算、通道、命中、过滤、错误、最终文本与反馈。'}</SheetDescription>
+          <SheetDescription>{detail?.trace_id ? `trace_id: ${detail.trace_id}` : '按需读取请求、预算、通道、命中、过滤、错误与最终文本。'}</SheetDescription>
         </SheetHeader>
         <ScrollArea className="flex-1 pr-6">
           <div className="flex flex-col gap-4 py-6">
@@ -197,8 +196,8 @@ export function TraceDetailSheet({
               <>
                 <Alert><AlertTitle>观测与解释边界</AlertTitle><AlertDescription>以下结构化分区用于解释注入链路；对象跳转只使用服务端签发的 opaque ObjectRef。完整载荷仅作为末尾的辅助核对内容。</AlertDescription></Alert>
 
-                <Section title="请求上下文" description="只展示 trace 实际记录的请求与作用域；legacy 缺失字段保持未记录。">
-                  <DetailGrid value={detail.request ?? detail.context} preferredKeys={['bot_profile_id', 'bot_id', 'session_id', 'group_id', 'sender_id', 'scope', 'chat_type', 'message']} />
+                <Section title="请求上下文" description="只展示 trace 实际记录的请求与正式作用域；缺失字段保持未记录。">
+                  <DetailGrid value={detail.request ?? detail.context} preferredKeys={['bot_profile_id', 'bot_id', 'session_id', 'sender_id', 'scope', 'chat_type', 'message']} omitKeys={['group_id']} />
                 </Section>
 
                 <Section title="预算" description="Token、字符、通道预算和截断信息均来自详情载荷。">
@@ -225,9 +224,8 @@ export function TraceDetailSheet({
                   {!errors.length && !warnings.length ? <p className="text-sm text-muted-foreground">未记录错误或警告。</p> : <div className="grid gap-3 md:grid-cols-2"><div><p className="mb-2 text-sm font-medium">错误</p>{errors.length ? <ul className="list-disc space-y-1 pl-5 text-sm text-destructive">{errors.map((message, index) => <li key={`${message}-${index}`}>{message}</li>)}</ul> : <p className="text-sm text-muted-foreground">无</p>}</div><div><p className="mb-2 text-sm font-medium">警告</p>{warnings.length ? <ul className="list-disc space-y-1 pl-5 text-sm">{warnings.map((message, index) => <li key={`${message}-${index}`}>{message}</li>)}</ul> : <p className="text-sm text-muted-foreground">无</p>}</div></div>}
                 </Section>
 
-                <Section title="反馈" description="反馈只读展示；学习候选、审核和晋升在学习中心处理。">
-                  {feedback.length ? <div className="overflow-auto rounded-lg border"><Table><TableHeader><TableRow><TableHead>反馈</TableHead><TableHead>记忆</TableHead><TableHead>原因</TableHead><TableHead>时间</TableHead></TableRow></TableHeader><TableBody>{feedback.map((item, index) => <TableRow key={`${String(item.id ?? index)}-${index}`}><TableCell><Badge variant="secondary">{textValue(item.feedback)}</Badge></TableCell><TableCell className="font-mono text-xs">{textValue(item.memory_id)}</TableCell><TableCell className="max-w-md whitespace-pre-wrap">{textValue(item.reason ?? item.content)}</TableCell><TableCell>{textValue(item.created_at ?? item.timestamp)}</TableCell></TableRow>)}</TableBody></Table></div> : <p className="text-sm text-muted-foreground">暂无反馈。</p>}
-                  <div className="mt-4 flex flex-wrap gap-2"><Button asChild variant="outline" size="sm"><Link to="/learning">查看学习过程<ArrowRightIcon data-icon="inline-end" aria-hidden="true" /></Link></Button><Button asChild variant="outline" size="sm"><Link to="/channels">调整通道配置<ArrowRightIcon data-icon="inline-end" aria-hidden="true" /></Link></Button></div>
+                <Section title="后续处理" description="学习候选、审核和晋升在学习中心处理；通道参数在通道配置中管理。">
+                  <div className="flex flex-wrap gap-2"><Button asChild variant="outline" size="sm"><Link to="/learning">查看学习过程<ArrowRightIcon data-icon="inline-end" aria-hidden="true" /></Link></Button><Button asChild variant="outline" size="sm"><Link to="/channels">调整通道配置<ArrowRightIcon data-icon="inline-end" aria-hidden="true" /></Link></Button></div>
                 </Section>
 
                 <Section title="完整载荷（辅助核对）" description="结构化分区是主要阅读入口；复制与下载仍保留服务端完整内容。">

@@ -28,11 +28,13 @@ try:
         DataGovernancePreviewError,
         enqueue_preview_job,
     )
+    from ...services.scope_recovery import ScopeRecoveryError, enqueue_scope_recovery_preview
 except ImportError:  # pragma: no cover - focused tests import top-level packages
     from services.data_governance_jobs import (
         DataGovernancePreviewError,
         enqueue_preview_job,
     )
+    from services.scope_recovery import ScopeRecoveryError, enqueue_scope_recovery_preview
 
 maintenance_bp = Blueprint("maintenance", __name__, url_prefix="/api/maintenance")
 
@@ -145,6 +147,38 @@ async def schedule_data_governance_preview():
     payload["dry_run"] = True
     payload["checkpoint_url"] = f"/api/maintenance/jobs/{job_id}/checkpoint"
     payload["cancel_url"] = f"/api/maintenance/jobs/{job_id}/cancel"
+    return jsonify(payload), 202
+
+
+@maintenance_bp.route("/scope-recovery/preview", methods=["POST"])
+@require_auth
+async def schedule_scope_recovery_preview():
+    """Schedule a read-only Legacy -> formal Scope projection preview."""
+    container = get_container()
+    if not getattr(container, "scope_recovery_jobs", None):
+        return jsonify(error_payload(
+            "scope_recovery_unregistered",
+            "Scope recovery preview handler is not registered",
+            retryable=False,
+        )), 503
+    jobs = getattr(container, "durable_jobs", None)
+    if jobs is None:
+        return jsonify(error_payload("durable_jobs_unavailable", "Durable jobs are unavailable", retryable=True)), 503
+    body = await request.get_json() or {}
+    try:
+        envelope = await enqueue_scope_recovery_preview(jobs, body)
+    except ScopeRecoveryError as exc:
+        code = str(exc)
+        status = 503 if code == "durable_jobs_unavailable" else 400
+        return jsonify(error_payload(code, "Invalid scope recovery preview request")), status
+    payload = envelope.to_dict() if callable(getattr(envelope, "to_dict", None)) else dict(envelope)
+    job_id = payload.get("job_id") or payload.get("operation", {}).get("id")
+    payload.update({
+        "dry_run": True,
+        "source_business_mutated": False,
+        "checkpoint_url": f"/api/maintenance/jobs/{job_id}/checkpoint",
+        "cancel_url": f"/api/maintenance/jobs/{job_id}/cancel",
+    })
     return jsonify(payload), 202
 
 

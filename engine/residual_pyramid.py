@@ -24,7 +24,13 @@ class ResidualPyramid:
         self.top_k = top_k
         self.min_energy_ratio = min_energy_ratio
 
-    def analyze(self, query_vector: np.ndarray, tag_vectors_by_id: dict[int, np.ndarray] = None) -> dict:
+    def analyze(
+        self,
+        query_vector: np.ndarray,
+        tag_vectors_by_id: dict[int, np.ndarray] = None,
+        *,
+        scope=None,
+    ) -> dict:
         """执行残差金字塔分析。
 
         Args:
@@ -46,9 +52,30 @@ class ResidualPyramid:
             if not results:
                 break
 
-            # 按需取这一层候选 tag 的向量
+            # 按需取这一层候选 Catalog tag 的向量。正式 Scope 路径先把
+            # Catalog ids 映射为 scoped ids，再用 scoped repository 取向量，
+            # 但保留 Catalog id 作为索引输出，交由 QueryEngine 统一映射。
             cand_ids = [tid for tid, _ in results]
-            if tag_vectors_by_id is not None:
+            catalog_to_scoped = {}
+            if scope is not None and self.db is not None and callable(getattr(self.db, "list_scoped_catalog_links", None)):
+                try:
+                    links = self.db.list_scoped_catalog_links(scope, cand_ids) or []
+                    catalog_to_scoped = {
+                        int(item["catalog_id"]): int(item["scoped_tag_id"])
+                        for item in links
+                        if isinstance(item, dict)
+                    }
+                except Exception:
+                    catalog_to_scoped = {}
+                scoped_ids = [catalog_to_scoped[tid] for tid in cand_ids if tid in catalog_to_scoped]
+                scoped_getter = getattr(self.db, "get_scoped_tag_vectors_by_ids", None)
+                scoped_vecs = scoped_getter(scope, scoped_ids) if callable(scoped_getter) else {}
+                level_vecs = {
+                    catalog_id: scoped_vecs.get(scoped_id)
+                    for catalog_id, scoped_id in catalog_to_scoped.items()
+                    if scoped_vecs.get(scoped_id) is not None
+                }
+            elif tag_vectors_by_id is not None:
                 level_vecs = {tid: tag_vectors_by_id[tid] for tid in cand_ids if tid in tag_vectors_by_id}
             elif self.db is not None:
                 level_vecs = self.db.get_tag_vectors_by_ids(cand_ids)

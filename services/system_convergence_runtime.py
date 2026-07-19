@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+import unicodedata
 import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -34,8 +35,16 @@ _APPLY_TAG_EXTRACTION = "tag_extraction.apply.v1"
 _MUTATE_MEMORIES = "memory.mutate.v1"
 
 
+def _json_default(value: Any) -> Any:
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def _canonical_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=_json_default)
 
 
 def _digest(value: Any) -> str:
@@ -159,6 +168,7 @@ def _apply_tag_extraction_handler(connection, command: DomainCommand, now: float
 
     entities: list[EntityChange] = []
     tag_ids: list[int] = []
+    catalog_ids: list[int] = []
     for position, raw_tag in enumerate(payload.get("tags") or (), 1):
         if not isinstance(raw_tag, Mapping):
             continue
@@ -168,24 +178,77 @@ def _apply_tag_extraction_handler(connection, command: DomainCommand, now: float
         tag_type = str(raw_tag.get("type") or "keyword")
         confidence = float(raw_tag.get("confidence", 0.8))
         metadata = _canonical_json({"producer": "tag_worker", "memory_id": memory_id})
-        connection.execute(
-            """INSERT INTO scoped_tags (
-                   bot_id, session_id, visibility, name, tag_type, description, confidence,
-                   metadata, created_at, updated_at
-               ) VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?)
-               ON CONFLICT(bot_id, session_id, visibility, name) DO UPDATE SET
-                   tag_type=excluded.tag_type, confidence=excluded.confidence,
-                   metadata=excluded.metadata, updated_at=excluded.updated_at""",
-            (*_scope_tuple(scope), name, tag_type, confidence, metadata, now, now),
-        )
+        catalog_id = None
+        tag_columns = {str(item[1]) for item in connection.execute("PRAGMA table_info(scoped_tags)").fetchall()}
+        catalog_table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tag_catalog'"
+        ).fetchone()
+        if catalog_table is not None and "catalog_id" in tag_columns:
+            normalized_name = unicodedata.normalize("NFKC", name).strip()
+            connection.execute(
+                """INSERT INTO tag_catalog(
+                       normalized_name, display_name, tag_type, description,
+                       status, created_at, updated_at
+                   ) VALUES (?, ?, ?, '', 'active', ?, ?)
+                   ON CONFLICT(normalized_name, tag_type) DO UPDATE SET
+                       display_name=CASE WHEN tag_catalog.display_name='' THEN excluded.display_name
+                                         ELSE tag_catalog.display_name END,
+                       updated_at=excluded.updated_at""",
+                (normalized_name, name, tag_type, now, now),
+            )
+            catalog_row = connection.execute(
+                "SELECT id FROM tag_catalog WHERE normalized_name=? AND tag_type=?",
+                (normalized_name, tag_type),
+            ).fetchone()
+            catalog_id = int(catalog_row[0]) if catalog_row is not None else None
+            raw_vector = raw_tag.get("embedding")
+            if catalog_id is not None and raw_vector is not None:
+                try:
+                    vector = np.asarray(raw_vector, dtype=np.float32).reshape(-1)
+                    if vector.size:
+                        connection.execute(
+                            """UPDATE tag_catalog SET embedding=?, embedding_dim=?, updated_at=?
+                                WHERE id=? AND status='active'""",
+                            (vector.tobytes(), int(vector.size), now, catalog_id),
+                        )
+                except (TypeError, ValueError):
+                    pass
+
+        if catalog_id is not None:
+            connection.execute(
+                """INSERT INTO scoped_tags (
+                       catalog_id, bot_id, session_id, visibility, name, tag_type, description, confidence,
+                       metadata, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)
+                   ON CONFLICT(bot_id, session_id, visibility, name) DO UPDATE SET
+                       catalog_id=COALESCE(excluded.catalog_id, scoped_tags.catalog_id),
+                       tag_type=excluded.tag_type, confidence=excluded.confidence,
+                       metadata=excluded.metadata, updated_at=excluded.updated_at""",
+                (catalog_id, *_scope_tuple(scope), name, tag_type, confidence, metadata, now, now),
+            )
+        else:
+            connection.execute(
+                """INSERT INTO scoped_tags (
+                       bot_id, session_id, visibility, name, tag_type, description, confidence,
+                       metadata, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?)
+                   ON CONFLICT(bot_id, session_id, visibility, name) DO UPDATE SET
+                       tag_type=excluded.tag_type, confidence=excluded.confidence,
+                       metadata=excluded.metadata, updated_at=excluded.updated_at""",
+                (*_scope_tuple(scope), name, tag_type, confidence, metadata, now, now),
+            )
+        tag_select = "id, catalog_id" if "catalog_id" in tag_columns else "id, NULL"
         tag_row = connection.execute(
-            """SELECT id FROM scoped_tags
+            f"""SELECT {tag_select} FROM scoped_tags
                  WHERE bot_id=? AND session_id=? AND visibility=? AND name=?""",
             (*_scope_tuple(scope), name),
         ).fetchone()
         if tag_row is None:
             raise RuntimeError("scoped tag upsert did not return a row")
         tag_id = int(tag_row[0])
+        catalog_id = int(tag_row[1]) if tag_row[1] is not None else catalog_id
+        if catalog_id is not None:
+            catalog_ids.append(catalog_id)
         connection.execute(
             """INSERT INTO scoped_memory_tags (
                    bot_id, session_id, visibility, memory_id, tag_id, position, relevance, created_at
@@ -232,6 +295,7 @@ def _apply_tag_extraction_handler(connection, command: DomainCommand, now: float
                 payload={
                     "memory_id": memory_id,
                     "tag_ids": tag_ids,
+                    "catalog_ids": sorted(set(catalog_ids)),
                     "status": status,
                     "scope": scope.to_dict(),
                 },

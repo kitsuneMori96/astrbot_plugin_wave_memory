@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
@@ -806,6 +807,42 @@ class ReviewedBookLoreProjectionRepository:
         ).fetchall()
         result = [self._row(row) for row in rows]
         return [item for item in result if _same_runtime_owner(item["target_scope"], scope)]
+
+    def search_approved(
+        self,
+        *,
+        scope: RuntimeScope,
+        query: str,
+        limit: int = 5,
+        min_score: float = 0.0,
+    ) -> list[dict[str, Any]]:
+        """Return relevant reviewed lore for the exact RuntimeScope.
+
+        Projection rows currently do not carry a shared embedding column, so the
+        formal fallback is deterministic token relevance over reviewed content. It
+        is intentionally not a top-k dump: an empty match returns no lore.
+        """
+        query = str(query or "").strip()
+        if not query:
+            return []
+        tokens = [token for token in re.findall(r"[\\w\\u4e00-\\u9fff]{2,}", query.casefold()) if token]
+        if not tokens:
+            return []
+        candidates = self.list_approved(scope=scope, limit=500, offset=0)
+        ranked: list[tuple[float, dict[str, Any]]] = []
+        for item in candidates:
+            haystack = " ".join(
+                str(item.get(field) or "") for field in ("title", "summary", "content", "community_id")
+            ).casefold()
+            hits = sum(1 for token in tokens if token in haystack)
+            if hits <= 0:
+                continue
+            lexical = hits / max(1, len(tokens))
+            score = min(1.0, lexical * 0.75 + min(0.25, float(item.get("rank") or 0.0) * 0.25))
+            if score >= float(min_score):
+                ranked.append((score, item))
+        ranked.sort(key=lambda pair: (pair[0], float(pair[1].get("rank") or 0.0), int(pair[1].get("id") or 0)), reverse=True)
+        return [item for _score, item in ranked[: max(1, min(int(limit), 50))]]
 
     def count_approved(self, *, scope: RuntimeScope, search: str = "") -> int:
         if not isinstance(scope, RuntimeScope):

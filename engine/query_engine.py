@@ -204,12 +204,20 @@ class QueryEngine:
         epa: Optional[EPAModule] = None,
         geodesic: Optional[GeodesicReranker] = None,
         write_gateway: Any | None = None,
+        *,
+        tag_catalog_index: Optional[VectorIndex] = None,
+        legacy_tag_index: Optional[VectorIndex] = None,
     ):
         self.db = db
         self.memory_index = memory_index
         self.embedding = embedding_service
         self.config = config
-        self.tag_index = tag_index
+        # ``tag_index`` remains the public compatibility argument and now means
+        # the formal Catalog index. Legacy tags use an independent physical HNSW
+        # with their own integer label space.
+        self.tag_catalog_index = tag_catalog_index or tag_index
+        self.legacy_tag_index = legacy_tag_index
+        self.tag_index = self.tag_catalog_index
         self.cooccurrence = cooccurrence
         self.spike_router = spike_router
         self.residual_pyramid = residual_pyramid
@@ -254,6 +262,261 @@ class QueryEngine:
             logger.warning("[WaveMemory] Scoped memory candidate filter failed", exc_info=True)
             return []
         return [dict(memory) for memory in memories or [] if isinstance(memory, dict)]
+
+    def _map_catalog_hits_to_scope(
+        self,
+        scope: RuntimeScope | None,
+        catalog_ids: list[Any],
+    ) -> dict[int, int]:
+        """Map global semantic Catalog ids to scoped tag ids before graph use."""
+        if not isinstance(scope, RuntimeScope) or not catalog_ids:
+            return {}
+        mapper = getattr(self.db, "list_scoped_catalog_links", None)
+        if not callable(mapper):
+            return {}
+        try:
+            links = mapper(scope, [int(value) for value in catalog_ids]) or []
+        except Exception:
+            return {}
+        result: dict[int, int] = {}
+        for link in links:
+            if not isinstance(link, Mapping):
+                continue
+            try:
+                result[int(link["catalog_id"])] = int(link["scoped_tag_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+        return result
+
+    def _search_scoped_tags(
+        self,
+        query_vec: np.ndarray,
+        scope: RuntimeScope | None,
+        *,
+        k: int = 10,
+    ) -> list[tuple[int, float]]:
+        """Search the Catalog index, then return only current-Scope tag ids."""
+        catalog_index = self.tag_catalog_index or self.tag_index
+        if not catalog_index:
+            return []
+        raw = catalog_index.search(query_vec, k=max(int(k) * 8, 32))
+        if not isinstance(scope, RuntimeScope):
+            return [(int(tag_id), 1.0 - float(distance)) for tag_id, distance in raw[:k]]
+        mapper = getattr(self.db, "list_scoped_catalog_links", None)
+        if not callable(mapper):
+            # Test/extension doubles without the formal mapper retain their old
+            # contract; the production WaveMemoryDB always exposes the mapper.
+            return [(int(tag_id), 1.0 - float(distance)) for tag_id, distance in raw[:k]]
+        catalog_to_scoped = self._map_catalog_hits_to_scope(scope, [item[0] for item in raw])
+        scoped: list[tuple[int, float]] = []
+        for catalog_id, distance in raw:
+            scoped_id = catalog_to_scoped.get(int(catalog_id))
+            if scoped_id is not None:
+                scoped.append((scoped_id, 1.0 - float(distance)))
+            if len(scoped) >= k:
+                break
+        return scoped
+
+    def _search_legacy_tags(
+        self,
+        query_vec: np.ndarray,
+        *,
+        k: int = 10,
+    ) -> list[tuple[int, float]]:
+        """Search only the legacy tag HNSW; IDs are never fed into Catalog APIs."""
+        if not self.legacy_tag_index:
+            return []
+        try:
+            raw = self.legacy_tag_index.search(query_vec, k=max(int(k) * 4, 24))
+        except Exception:
+            return []
+        result: list[tuple[int, float]] = []
+        for tag_id, distance in raw:
+            try:
+                parsed_id = int(tag_id)
+                similarity = 1.0 - float(distance)
+            except (TypeError, ValueError):
+                continue
+            if parsed_id > 0:
+                result.append((parsed_id, similarity))
+            if len(result) >= int(k):
+                break
+        return result
+
+    def _allow_global_legacy_cold(self) -> bool:
+        value = self.config.get("allow_global_legacy_cold_recall", False)
+        if isinstance(value, str):
+            return value.strip().casefold() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def _load_tag_vectors(self, scope: RuntimeScope | None, tag_ids: list[Any]) -> dict[Any, Any]:
+        scoped_getter = getattr(self.db, "get_scoped_tag_vectors_by_ids", None)
+        if callable(scoped_getter) and isinstance(scope, RuntimeScope):
+            try:
+                return dict(scoped_getter(scope, [int(value) for value in tag_ids]) or {})
+            except Exception:
+                return {}
+        getter = getattr(self.db, "get_tag_vectors_by_ids", None)
+        if not callable(getter):
+            return {}
+        try:
+            return dict(getter([int(value) for value in tag_ids]) or {})
+        except Exception:
+            return {}
+
+    def _cold_recall_enabled(self) -> bool:
+        value = self.config.get("cold_recall_enabled", True)
+        if isinstance(value, str):
+            return value.strip().casefold() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def _cold_candidate_limit(self) -> int:
+        try:
+            return min(512, max(1, int(self.config.get("cold_candidate_limit", 128))))
+        except (TypeError, ValueError):
+            return 128
+
+    def _search_scoped_cold_memories(
+        self,
+        *,
+        tag_query_vec: np.ndarray,
+        score_query_vec: np.ndarray,
+        scope: RuntimeScope | None,
+    ) -> tuple[list[tuple[dict[str, Any], float]], dict[str, Any]]:
+        """Cold-recall from independent Catalog and legacy-tag lanes.
+
+        Catalog hits remain strictly mapped through formal Scope. Legacy tag hits
+        use only the legacy tag HNSW and are then group-filtered by the repository;
+        the two integer ID spaces never cross into each other's APIs.
+        """
+        details: dict[str, Any] = {
+            "enabled": self._cold_recall_enabled(),
+            "available": False,
+            "tag_count": 0,
+            "candidate_count": 0,
+            "accepted_count": 0,
+            "catalog": {"available": False, "tag_count": 0, "candidate_count": 0, "accepted_count": 0},
+            "legacy": {"available": False, "tag_count": 0, "candidate_count": 0, "accepted_count": 0},
+        }
+        if not details["enabled"]:
+            details["reason_code"] = "disabled_by_config"
+            return [], details
+        query = np.asarray(score_query_vec, dtype=np.float32).reshape(-1)
+        query_norm = float(np.linalg.norm(query))
+        if not np.isfinite(query_norm) or query_norm <= 1e-10:
+            details["reason_code"] = "invalid_query_vector"
+            return [], details
+
+        results_by_id: dict[int, tuple[dict[str, Any], float]] = {}
+
+        def rerank(rows: Any, lane: str) -> int:
+            accepted = 0
+            for raw in rows or ():
+                if not isinstance(raw, Mapping):
+                    continue
+                try:
+                    memory_id = int(raw["id"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                vector_raw = raw.get("vector")
+                if isinstance(vector_raw, memoryview):
+                    vector_raw = vector_raw.tobytes()
+                try:
+                    vector = (
+                        np.frombuffer(vector_raw, dtype=np.float32)
+                        if isinstance(vector_raw, bytes)
+                        else np.asarray(vector_raw, dtype=np.float32)
+                    ).reshape(-1)
+                except (TypeError, ValueError):
+                    continue
+                if vector.size != query.size or not np.isfinite(vector).all():
+                    continue
+                denominator = query_norm * float(np.linalg.norm(vector))
+                if not np.isfinite(denominator) or denominator <= 1e-10:
+                    continue
+                similarity = float(np.dot(query, vector) / denominator)
+                candidate = dict(raw)
+                candidate.pop("vector", None)
+                candidate["id"] = memory_id
+                candidate["_retrieval_tier"] = "cold"
+                candidate["_tag_lane"] = lane
+                distance = 1.0 - similarity
+                existing = results_by_id.get(memory_id)
+                if existing is None or distance < existing[1]:
+                    results_by_id[memory_id] = (candidate, distance)
+                accepted += 1
+            return accepted
+
+        # Formal Catalog lane.
+        catalog_getter = getattr(self.db, "list_scoped_cold_memory_candidates", None)
+        catalog_index = self.tag_catalog_index or self.tag_index
+        if isinstance(scope, RuntimeScope) and catalog_index and callable(catalog_getter):
+            catalog = details["catalog"]
+            try:
+                catalog_hits = self._search_scoped_tags(tag_query_vec, scope, k=12)
+                catalog_ids = [int(tag_id) for tag_id, similarity in catalog_hits if float(similarity) > 0.1]
+                catalog["tag_count"] = len(catalog_ids)
+                if catalog_ids:
+                    catalog_rows = catalog_getter(scope, catalog_ids, limit=self._cold_candidate_limit()) or []
+                    catalog["candidate_count"] = len(catalog_rows)
+                    catalog["accepted_count"] = rerank(catalog_rows, "catalog")
+                    catalog["available"] = True
+                else:
+                    catalog["reason_code"] = "no_scoped_semantic_tags"
+            except Exception as exc:
+                catalog["reason_code"] = "catalog_cold_query_failed"
+                catalog["error"] = str(exc)
+        else:
+            details["catalog"]["reason_code"] = "catalog_lane_unavailable"
+
+        # Legacy tags are a separate source and can only yield explicitly
+        # unscoped legacy rows through group_id compatibility filtering.
+        legacy_getter = getattr(self.db, "list_legacy_cold_memory_candidates", None)
+        allow_global_legacy = self._allow_global_legacy_cold()
+        if self.legacy_tag_index and callable(legacy_getter) and (
+            isinstance(scope, RuntimeScope) or allow_global_legacy
+        ):
+            legacy = details["legacy"]
+            try:
+                legacy_hits = self._search_legacy_tags(tag_query_vec, k=12)
+                legacy_ids = [int(tag_id) for tag_id, similarity in legacy_hits if float(similarity) > 0.1]
+                legacy["tag_count"] = len(legacy_ids)
+                if legacy_ids:
+                    try:
+                        legacy_rows = legacy_getter(
+                            scope if isinstance(scope, RuntimeScope) else None,
+                            legacy_ids,
+                            limit=self._cold_candidate_limit(),
+                            allow_unscoped=allow_global_legacy,
+                        ) or []
+                    except TypeError:
+                        # Focused test doubles and older extension facades do not
+                        # expose the optional offline flag.
+                        if isinstance(scope, RuntimeScope):
+                            legacy_rows = legacy_getter(scope, legacy_ids, limit=self._cold_candidate_limit()) or []
+                        else:
+                            legacy_rows = []
+                    legacy["candidate_count"] = len(legacy_rows)
+                    legacy["accepted_count"] = rerank(legacy_rows, "legacy")
+                    legacy["available"] = True
+                else:
+                    legacy["reason_code"] = "no_legacy_semantic_tags"
+            except Exception as exc:
+                legacy["reason_code"] = "legacy_cold_query_failed"
+                legacy["error"] = str(exc)
+        else:
+            details["legacy"]["reason_code"] = "legacy_lane_unavailable"
+
+        details["tag_count"] = int(details["catalog"]["tag_count"]) + int(details["legacy"]["tag_count"])
+        details["candidate_count"] = int(details["catalog"]["candidate_count"]) + int(details["legacy"]["candidate_count"])
+        details["accepted_count"] = len(results_by_id)
+        details["available"] = bool(details["catalog"]["available"] or details["legacy"]["available"])
+        result = sorted(results_by_id.values(), key=lambda item: (item[1], int(item[0]["id"])))
+        if not result and not details["available"]:
+            details["reason_code"] = "cold_lanes_unavailable"
+        elif not result:
+            details["reason_code"] = "no_usable_cold_vectors"
+        return result, details
 
     @staticmethod
     def _trace_record(collector: QueryDebugCollector | None, partition: str, payload: Mapping[str, Any]) -> None:
@@ -356,6 +619,7 @@ class QueryEngine:
 
         search_vec, energy_field = self._wave_boost(
             query_vec,
+            scope=resolved_scope,
             options=call_options,
             collector=collector,
             stage_flags=stage_flags,
@@ -368,28 +632,38 @@ class QueryEngine:
             if collector is None:
                 raise
             self._trace_warning(collector, "vector_search", "vector_search_failed", str(exc))
-            self._trace_record(collector, "vector_search", {"enabled": True, "available": False, "reason_code": "vector_search_failed"})
-            return []
+            raw_candidates = []
         search_ms = (time.perf_counter() - search_start) * 1000
-        if not raw_candidates:
-            self._trace_record(collector, "vector_search", {
-                "enabled": True, "available": True, "candidate_count": 0, "scoped_candidate_count": 0,
-                "k": candidates_k, "used_vector": "wave_boosted" if energy_field else "raw", "latency_ms": round(search_ms, 1),
-            })
-            self._trace_record(collector, "final", {"result_count": 0, "ids": []})
-            return []
 
+        cold_candidates, cold_details = self._search_scoped_cold_memories(
+            tag_query_vec=query_vec,
+            score_query_vec=search_vec,
+            scope=resolved_scope,
+        )
         memory_ids = [item[0] for item in raw_candidates]
-        distances = {item[0]: float(item[1]) for item in raw_candidates}
+        distances = {int(item[0]): float(item[1]) for item in raw_candidates}
         memories = self._get_scoped_memories_by_ids(memory_ids, resolved_scope)
-        scoped_ids = {memory.get("id") for memory in memories}
-        scoped_candidates = [item for item in raw_candidates if item[0] in scoped_ids]
+        for memory in memories:
+            memory["_retrieval_tier"] = "hot"
+        scoped_ids = {int(memory.get("id")) for memory in memories if memory.get("id") is not None}
+        scoped_candidates = [item for item in raw_candidates if int(item[0]) in scoped_ids]
+        known_ids = set(scoped_ids)
+        for cold_memory, cold_distance in cold_candidates:
+            memory_id = int(cold_memory["id"])
+            if memory_id in known_ids:
+                distances[memory_id] = min(distances.get(memory_id, float(cold_distance)), float(cold_distance))
+                continue
+            known_ids.add(memory_id)
+            distances[memory_id] = float(cold_distance)
+            memories.append(cold_memory)
+
         self._trace_record(collector, "vector_search", {
             "enabled": True,
             "available": True,
             "candidate_count": len(raw_candidates),
             "scoped_candidate_count": len(scoped_candidates),
             "filtered_out_count": len(raw_candidates) - len(scoped_candidates),
+            "cold": cold_details,
             "k": candidates_k,
             "used_vector": "wave_boosted" if energy_field else "raw",
             "top_candidates": [
@@ -398,6 +672,9 @@ class QueryEngine:
             ],
             "latency_ms": round(search_ms, 1),
         })
+        if not memories:
+            self._trace_record(collector, "final", {"result_count": 0, "ids": [], "cold": cold_details})
+            return []
 
         normalized_source_filter = [source_filter] if isinstance(source_filter, str) else list(source_filter or [])
         if normalized_source_filter:
@@ -439,8 +716,16 @@ class QueryEngine:
         geodesic_details: list[dict[str, Any]] = []
         if geodesic_enabled and self.geodesic and energy_field and memories:
             geo = self._stage_copy(self.geodesic, {"alpha": call_options.params.get("geodesic_alpha")})
-            candidates_for_rerank = [{"id": memory["id"], "score": memory["score"]} for memory in memories]
+            # The energy graph carries scoped-tag IDs. Never feed legacy-tag
+            # memories into it, because the legacy tag ID space is independent.
+            candidates_for_rerank = [
+                {"id": memory["id"], "score": memory["score"]}
+                for memory in memories
+                if memory.get("_tag_lane") != "legacy"
+            ]
             before_rank = {item["id"]: rank for rank, item in enumerate(candidates_for_rerank, 1)}
+            if not candidates_for_rerank:
+                self._trace_record(collector, "geodesic", {"enabled": True, "available": False, "reason_code": "legacy_tag_lane_only"})
             try:
                 reranked = geo.rerank(candidates_for_rerank, energy_field)
                 rerank_scores = {item["id"]: item["score"] for item in reranked}
@@ -519,6 +804,7 @@ class QueryEngine:
         self,
         query_vec: np.ndarray,
         *,
+        scope: RuntimeScope | None = None,
         options: QueryOptions | None = None,
         collector: QueryDebugCollector | None = None,
         stage_flags: Mapping[str, bool] | None = None,
@@ -577,7 +863,7 @@ class QueryEngine:
                 })
                 try:
                     try:
-                        pyramid_result = pyramid.analyze(query_vec, None)
+                        pyramid_result = pyramid.analyze(query_vec, scope=scope)
                     except TypeError:
                         # Compatibility for focused-test/custom stages with a one-arg contract.
                         pyramid_result = pyramid.analyze(query_vec)
@@ -585,8 +871,11 @@ class QueryEngine:
                     for level_tags in pyramid_result.get("levels", []):
                         compact_level = []
                         for tag_info in level_tags:
-                            tag_id = tag_info.get("tag_id")
+                            raw_tag_id = tag_info.get("tag_id")
                             similarity = float(tag_info.get("similarity", 0))
+                            mapped_ids = self._map_catalog_hits_to_scope(scope, [raw_tag_id]) if raw_tag_id else {}
+                            mapper_available = callable(getattr(self.db, "list_scoped_catalog_links", None)) and isinstance(scope, RuntimeScope)
+                            tag_id = mapped_ids.get(int(raw_tag_id)) if mapper_available and raw_tag_id else raw_tag_id
                             compact = {
                                 "tag_id": tag_id,
                                 "similarity": round(similarity, 4),
@@ -615,8 +904,8 @@ class QueryEngine:
 
         if not matched_tags:
             try:
-                tag_results = self.tag_index.search(query_vec, k=10)
-                matched_tags.extend((tag_id, 1.0 - float(distance)) for tag_id, distance in tag_results if 1.0 - float(distance) > 0.2)
+                tag_results = self._search_scoped_tags(query_vec, scope, k=10)
+                matched_tags.extend((tag_id, float(similarity)) for tag_id, similarity in tag_results if float(similarity) > 0.2)
             except Exception as exc:
                 self._trace_warning(collector, "tag_search", "tag_search_failed", str(exc))
 
@@ -674,7 +963,7 @@ class QueryEngine:
         for tag_id, weight in matched_tags:
             tag_weights[tag_id] = max(weight, tag_weights.get(tag_id, 0))
         try:
-            tag_vecs = self.db.get_tag_vectors_by_ids(list(tag_weights))
+            tag_vecs = self._load_tag_vectors(scope, list(tag_weights))
         except Exception as exc:
             self._trace_warning(collector, "wave_boost", "tag_vector_load_failed", str(exc))
             return query_vec, energy_field
@@ -718,7 +1007,7 @@ class QueryEngine:
         if query_vec is None:
             return []
 
-        search_vec, energy_field = self._wave_boost(query_vec)
+        search_vec, energy_field = self._wave_boost(query_vec, scope=resolved_scope)
         main_results = self.memory_index.search(search_vec, k=top_k * 3)
 
         segment_results = []
@@ -736,15 +1025,31 @@ class QueryEngine:
 
         all_candidates = {}
         for mem_id, dist in main_results:
-            all_candidates[mem_id] = min(all_candidates.get(mem_id, 999), dist)
+            all_candidates[int(mem_id)] = min(all_candidates.get(int(mem_id), 999), float(dist))
         for mem_id, dist in segment_results:
-            all_candidates[mem_id] = min(all_candidates.get(mem_id, 999), dist)
+            all_candidates[int(mem_id)] = min(all_candidates.get(int(mem_id), 999), float(dist))
+        cold_candidates, _cold_details = self._search_scoped_cold_memories(
+            tag_query_vec=np.asarray(query_vec, dtype=np.float32),
+            score_query_vec=np.asarray(search_vec, dtype=np.float32),
+            scope=resolved_scope,
+        )
 
-        if not all_candidates:
-            return []
-
-        memory_ids = list(all_candidates.keys())
+        memory_ids = list(all_candidates)
         memories = self._get_scoped_memories_by_ids(memory_ids, resolved_scope)
+        known_ids = {int(memory["id"]) for memory in memories if memory.get("id") is not None}
+        for mem in memories:
+            mem["_retrieval_tier"] = "hot"
+        for cold_memory, cold_distance in cold_candidates:
+            memory_id = int(cold_memory["id"])
+            if memory_id in known_ids:
+                all_candidates[memory_id] = min(all_candidates.get(memory_id, float(cold_distance)), float(cold_distance))
+                continue
+            known_ids.add(memory_id)
+            all_candidates[memory_id] = float(cold_distance)
+            memories.append(cold_memory)
+
+        if not memories:
+            return []
 
         for mem in memories:
             mem["_is_cross_group"] = False
@@ -755,7 +1060,11 @@ class QueryEngine:
             mem["score"] = mem["similarity"] * mem.get("importance", 1.0)
 
         if self.enable_geodesic and self.geodesic and energy_field:
-            candidates_for_rerank = [{"id": m["id"], "score": m["score"]} for m in memories]
+            candidates_for_rerank = [
+                {"id": m["id"], "score": m["score"]}
+                for m in memories
+                if m.get("_tag_lane") != "legacy"
+            ]
             reranked = self.geodesic.rerank(candidates_for_rerank, energy_field)
             rerank_scores = {c["id"]: c["score"] for c in reranked}
             for mem in memories:

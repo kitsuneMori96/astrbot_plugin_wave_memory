@@ -2,6 +2,7 @@ import json
 import types
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from engine import vector_index as vector_index_module
@@ -38,6 +39,19 @@ class FakeHnswIndex:
 
     def get_current_count(self):
         return self.current_count
+
+    def get_ids_list(self):
+        return list(getattr(self, "ids", ()))
+
+    def add_items(self, vectors, ids):
+        self.ids = list(getattr(self, "ids", ()))
+        for value in ids.tolist():
+            if value not in self.ids:
+                self.ids.append(value)
+        self.current_count = len(self.ids)
+
+    def resize_index(self, max_elements):
+        self.max_elements = max_elements
 
     def save_index(self, path):
         Path(path).write_text(f"count:{self.current_count}", encoding="ascii")
@@ -178,3 +192,61 @@ def test_failed_manifest_replace_is_bounded_and_keeps_old_generation(
     assert generation_path(index_path, 1).is_file()
     assert generation_path(index_path, 2).is_file()
     assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_bounded_hot_index_refuses_legacy_oversized_generation_and_resize(tmp_path):
+    index_path = tmp_path / "memory.hnsw"
+    source = vector_index_module.VectorIndex(
+        dimension=3,
+        max_elements=10,
+        index_path=str(index_path),
+        kind="memory",
+    )
+    source.index.current_count = 5
+    source.save(db_watermark=1)
+
+    bounded = vector_index_module.VectorIndex(
+        dimension=3,
+        max_elements=2,
+        index_path=str(index_path),
+        kind="memory",
+        strict_manifest=False,
+        allow_resize=False,
+    )
+
+    assert bounded.index.loaded_from is None
+    assert "index_capacity_exceeded" in str(bounded.manifest_error)
+    with pytest.raises(vector_index_module.IndexCapacityError, match="capacity reached"):
+        bounded.add([1, 2, 3], np.ones((3, 3), dtype=np.float32))
+
+
+def test_legacy_and_catalog_tag_indexes_have_independent_paths_and_manifests(tmp_path):
+    legacy_source = tmp_path / "tags.hnsw"
+    legacy_source.write_bytes(b"legacy migration input must remain untouched")
+    legacy_path = tmp_path / "legacy_tags.hnsw"
+    catalog_path = tmp_path / "tag_catalog.hnsw"
+
+    legacy = vector_index_module.VectorIndex(
+        dimension=3,
+        max_elements=2,
+        index_path=str(legacy_path),
+        kind="legacy_tag",
+    )
+    catalog = vector_index_module.VectorIndex(
+        dimension=3,
+        max_elements=2,
+        index_path=str(catalog_path),
+        kind="tag_catalog",
+    )
+    legacy.add([101], np.asarray([[1.0, 0.0, 0.0]], dtype=np.float32))
+    catalog.add([1], np.asarray([[0.0, 1.0, 0.0]], dtype=np.float32))
+
+    legacy_manifest = legacy.save(db_watermark=7)
+    catalog_manifest = catalog.save(db_watermark=8)
+
+    assert legacy_manifest is not None and legacy_manifest.kind == "legacy_tag"
+    assert catalog_manifest is not None and catalog_manifest.kind == "tag_catalog"
+    assert legacy_manifest.generation == catalog_manifest.generation == 1
+    assert manifest_path(legacy_path).is_file()
+    assert manifest_path(catalog_path).is_file()
+    assert legacy_source.read_bytes() == b"legacy migration input must remain untouched"

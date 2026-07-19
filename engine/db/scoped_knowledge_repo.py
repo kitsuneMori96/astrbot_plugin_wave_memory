@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import time
+import unicodedata
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -17,6 +18,7 @@ except ImportError:  # pragma: no cover - repository tests import engine as top-
     from domain.scope import RuntimeScope
 
 from .connection import ConnectionManager
+from .scoped_tag_projection import effective_tag_rows
 try:
     from ...services.facts_conflict import FactConflictClassifier
 except ImportError:  # pragma: no cover
@@ -74,6 +76,25 @@ def _canonical_contexts(value: Sequence[Any] | None) -> str:
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
         raise TypeError("contexts must be a non-string sequence when provided")
     return json.dumps(list(value), ensure_ascii=False, separators=(",", ":"))
+
+
+def normalize_tag_name(value: Any) -> str:
+    """Normalize a Tag name for the semantic Catalog without changing display text."""
+    return unicodedata.normalize("NFKC", str(value or "")).strip()
+
+
+def _positive_ints(values: Sequence[Any]) -> list[int]:
+    result: list[int] = []
+    for value in values:
+        if isinstance(value, bool):
+            continue
+        try:
+            converted = int(value)
+        except (TypeError, ValueError):
+            continue
+        if converted > 0:
+            result.append(converted)
+    return result
 
 
 class ScopedKnowledgeRepo:
@@ -297,6 +318,84 @@ class ScopedKnowledgeRepo:
             for row in rows
         ]
 
+    def _table_columns(self, table: str) -> set[str]:
+        try:
+            return {str(row[1]) for row in self.cm.execute_read(f'PRAGMA table_info("{table}")').fetchall()}
+        except Exception:
+            return set()
+
+    def _upsert_tag_catalog(
+        self,
+        *,
+        name: str,
+        tag_type: str,
+        description: str,
+    ) -> int | None:
+        """Return the global semantic catalog id when the additive schema exists."""
+        if not self._table_columns("tag_catalog"):
+            return None
+        normalized_name = normalize_tag_name(name)
+        if not normalized_name:
+            return None
+        now = time.time()
+        try:
+            self.cm.execute_write(
+                """INSERT INTO tag_catalog(
+                       normalized_name, display_name, tag_type, description,
+                       status, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, 'active', ?, ?)
+                   ON CONFLICT(normalized_name, tag_type) DO UPDATE SET
+                       display_name=CASE WHEN tag_catalog.display_name='' THEN excluded.display_name
+                                         ELSE tag_catalog.display_name END,
+                       description=CASE WHEN tag_catalog.description='' THEN excluded.description
+                                        ELSE tag_catalog.description END,
+                       updated_at=excluded.updated_at""",
+                (normalized_name, str(name), str(tag_type or "keyword"), str(description or ""), now, now),
+            )
+            self.cm.commit()
+            row = self.cm.execute_read(
+                "SELECT id FROM tag_catalog WHERE normalized_name=? AND tag_type=?",
+                (normalized_name, str(tag_type or "keyword")),
+            ).fetchone()
+            return int(row[0]) if row is not None else None
+        except Exception:
+            # Focused tests and older read-only fixtures can still expose scoped_tags
+            # without the additive Catalog table.  Their formal scoped writes remain valid.
+            return None
+
+    def list_scoped_catalog_links(
+        self,
+        scope: RuntimeScope,
+        catalog_ids: Sequence[int],
+    ) -> list[dict[str, Any]]:
+        """Map semantic Catalog hits back to scoped Tag IDs before graph/query use."""
+        scope = _require_group_scope(scope)
+        ids = _positive_ints(catalog_ids)
+        if not ids or "catalog_id" not in self._table_columns("scoped_tags"):
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        status_clause = " AND COALESCE(status, 'active') NOT IN ('inactive', 'deleted', 'archived')" if "status" in self._table_columns("scoped_tags") else ""
+        rows = self.cm.execute_read(
+            f"""SELECT id, catalog_id, name, tag_type, confidence
+                   FROM scoped_tags
+                  WHERE bot_id=? AND session_id=? AND visibility=?
+                    AND catalog_id IN ({placeholders})
+                    {status_clause}
+                  ORDER BY id""",
+            [*_scope_params(scope), *ids],
+        ).fetchall()
+        return [
+            {
+                "scoped_tag_id": int(row[0]),
+                "catalog_id": int(row[1]),
+                "name": str(row[2] or ""),
+                "tag_type": str(row[3] or "keyword"),
+                "confidence": float(row[4] or 0.0),
+            }
+            for row in rows
+            if row[1] is not None
+        ]
+
     def upsert_scoped_tag(
         self,
         scope: RuntimeScope,
@@ -312,24 +411,83 @@ class ScopedKnowledgeRepo:
         if not isinstance(tag_type, str) or not isinstance(description, str):
             raise TypeError("tag_type and description must be strings")
         now = time.time()
-        self.cm.execute_write(
-            """INSERT INTO scoped_tags (
-                    bot_id, session_id, visibility, name, tag_type, description, confidence,
-                    metadata, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(bot_id, session_id, visibility, name) DO UPDATE SET
-                    tag_type=excluded.tag_type, description=excluded.description,
-                    confidence=excluded.confidence, metadata=excluded.metadata,
-                    updated_at=excluded.updated_at""",
-            (*_scope_params(scope), name, tag_type, description, float(confidence),
-             _canonical_json(metadata, "metadata"), now, now),
+        catalog_id = self._upsert_tag_catalog(
+            name=name,
+            tag_type=tag_type,
+            description=description,
         )
+        columns = self._table_columns("scoped_tags")
+        if catalog_id is not None and "catalog_id" in columns:
+            self.cm.execute_write(
+                """INSERT INTO scoped_tags (
+                        catalog_id, bot_id, session_id, visibility, name, tag_type, description, confidence,
+                        metadata, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(bot_id, session_id, visibility, name) DO UPDATE SET
+                        catalog_id=COALESCE(excluded.catalog_id, scoped_tags.catalog_id),
+                        tag_type=excluded.tag_type, description=excluded.description,
+                        confidence=excluded.confidence, metadata=excluded.metadata,
+                        updated_at=excluded.updated_at""",
+                (catalog_id, *_scope_params(scope), name, tag_type, description, float(confidence),
+                 _canonical_json(metadata, "metadata"), now, now),
+            )
+        else:
+            # Compatibility path for focused fixtures created before tag_catalog.
+            self.cm.execute_write(
+                """INSERT INTO scoped_tags (
+                        bot_id, session_id, visibility, name, tag_type, description, confidence,
+                        metadata, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(bot_id, session_id, visibility, name) DO UPDATE SET
+                        tag_type=excluded.tag_type, description=excluded.description,
+                        confidence=excluded.confidence, metadata=excluded.metadata,
+                        updated_at=excluded.updated_at""",
+                (*_scope_params(scope), name, tag_type, description, float(confidence),
+                 _canonical_json(metadata, "metadata"), now, now),
+            )
         self.cm.commit()
         return self._select_id(
             "scoped_tags",
             "bot_id=? AND session_id=? AND visibility=? AND name=?",
             (*_scope_params(scope), name),
         )
+
+    def get_scoped_tag_catalog_id(self, scope: RuntimeScope, tag_id: int) -> int | None:
+        scope = _require_group_scope(scope)
+        if "catalog_id" not in self._table_columns("scoped_tags"):
+            return None
+        row = self.cm.execute_read(
+            """SELECT catalog_id FROM scoped_tags
+                WHERE id=? AND bot_id=? AND session_id=? AND visibility=?""",
+            (int(tag_id), *_scope_params(scope)),
+        ).fetchone()
+        return int(row[0]) if row is not None and row[0] is not None else None
+
+    def update_tag_catalog_embedding(
+        self,
+        catalog_id: int,
+        vector: Any,
+        *,
+        embedding_model: str = "",
+        embedding_dim: int | None = None,
+    ) -> bool:
+        """Persist an embedding on the semantic Catalog, never on a legacy tag row."""
+        if "id" not in self._table_columns("tag_catalog"):
+            return False
+        try:
+            import numpy as np
+            array = np.asarray(vector, dtype=np.float32).reshape(-1)
+            if array.size == 0:
+                return False
+            self.cm.execute_write(
+                """UPDATE tag_catalog SET embedding=?, embedding_model=?, embedding_dim=?, updated_at=?
+                    WHERE id=? AND status='active'""",
+                (array.tobytes(), str(embedding_model or ""), int(embedding_dim or array.size), time.time(), int(catalog_id)),
+            )
+            self.cm.commit()
+            return True
+        except Exception:
+            return False
 
     def link_scoped_memory_tag(
         self,
@@ -396,6 +554,40 @@ class ScopedKnowledgeRepo:
             (*_scope_params(scope), source_tag_id, target_tag_id, relation_type),
         )
 
+    def get_scoped_tag_vectors_by_ids(
+        self,
+        scope: RuntimeScope,
+        tag_ids: Sequence[int],
+    ) -> dict[int, Any]:
+        """Load vectors through scoped_tag -> tag_catalog, never legacy ``tags``."""
+        scope = _require_group_scope(scope)
+        ids = [int(value) for value in tag_ids if not isinstance(value, bool) and int(value) > 0]
+        if not ids or "catalog_id" not in self._table_columns("scoped_tags"):
+            return {}
+        try:
+            import numpy as np
+            placeholders = ",".join("?" for _ in ids)
+            rows = self.cm.execute_read(
+                f"""SELECT st.id, tc.embedding, tc.embedding_dim
+                       FROM scoped_tags st JOIN tag_catalog tc ON tc.id=st.catalog_id
+                      WHERE st.bot_id=? AND st.session_id=? AND st.visibility=?
+                        AND st.id IN ({placeholders}) AND tc.status='active'""",
+                [*_scope_params(scope), *ids],
+            ).fetchall()
+            result: dict[int, Any] = {}
+            for row in rows:
+                raw = row[1]
+                if raw is None:
+                    continue
+                if isinstance(raw, memoryview):
+                    raw = raw.tobytes()
+                vector = np.frombuffer(raw, dtype=np.float32).reshape(-1) if isinstance(raw, bytes) else np.asarray(raw, dtype=np.float32).reshape(-1)
+                if vector.size:
+                    result[int(row[0])] = vector
+            return result
+        except Exception:
+            return {}
+
     def list_scoped_memory_tags(self, scope: RuntimeScope, memory_ids: Sequence[int]) -> list[dict[str, Any]]:
         scope = _require_group_scope(scope)
         ids = list(memory_ids)
@@ -412,6 +604,117 @@ class ScopedKnowledgeRepo:
             [*_scope_params(scope), *ids],
         ).fetchall()
         return [{"memory_id": r[0], "tag_id": r[1], "name": r[2], "tag_type": r[3], "relevance": r[4]} for r in rows]
+
+    def list_scoped_cold_memory_candidates(
+        self,
+        scope: RuntimeScope,
+        tag_ids: Sequence[int],
+        *,
+        limit: int = 128,
+    ) -> list[dict[str, Any]]:
+        """Return a bounded exact-Scope cold candidate set for semantic reranking.
+
+        The global Tag catalog is intentionally absent from this API.  Callers
+        must first map catalog hits to this Scope's tag IDs, and this method then
+        uses the effective Tag read model (including manual corrections) before
+        loading a small set of canonical vectors.
+        """
+        scope = _require_group_scope(scope)
+        ids = _positive_ints(tag_ids)
+        if not ids:
+            return []
+        if isinstance(limit, bool):
+            raise ValueError("limit must be a positive integer")
+        try:
+            bounded_limit = min(512, max(1, int(limit)))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("limit must be a positive integer") from exc
+
+        # `effective_tag_rows` deliberately falls back to the canonical automatic
+        # baseline when the materialized projection is not backfilled yet.
+        try:
+            effective = effective_tag_rows(self.cm, scope=scope)
+        except Exception:
+            return []
+        wanted = set(ids)
+        tag_scores: dict[int, tuple[float, int]] = {}
+        for tag in effective:
+            try:
+                tag_id = int(tag["tag_id"])
+                memory_id = int(tag["memory_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if tag_id not in wanted or memory_id <= 0:
+                continue
+            relevance = float(tag.get("relevance", 1.0) or 0.0)
+            prior_score, prior_count = tag_scores.get(memory_id, (0.0, 0))
+            tag_scores[memory_id] = (prior_score + max(0.0, relevance), prior_count + 1)
+        if not tag_scores:
+            return []
+
+        # Limit before the canonical vector fetch so a broad tag can never turn
+        # into an unbounded process-memory or SQLite placeholder allocation.
+        candidate_ids = [
+            memory_id
+            for memory_id, _score in sorted(
+                tag_scores.items(),
+                key=lambda item: (-item[1][0], -item[1][1], item[0]),
+            )[: bounded_limit * 4]
+        ]
+        if not candidate_ids:
+            return []
+        placeholders = ",".join("?" for _ in candidate_ids)
+        memory_columns = self._table_columns("memories")
+        required_columns = {"id", "vector", "bot_id", "session_id", "visibility", "resolution_state", "quarantine"}
+        if not required_columns <= memory_columns:
+            return []
+        source_expression = "COALESCE(source, '')" if "source" in memory_columns else "''"
+        type_expression = "COALESCE(memory_type, 'message')" if "memory_type" in memory_columns else "'message'"
+        importance_expression = "COALESCE(importance, 1.0)" if "importance" in memory_columns else "1.0"
+        access_expression = "COALESCE(access_count, 0)" if "access_count" in memory_columns else "0"
+        timestamp_expression = "COALESCE(timestamp, 0.0)" if "timestamp" in memory_columns else "0.0"
+        sender_id_expression = "COALESCE(sender_id, '')" if "sender_id" in memory_columns else "''"
+        sender_name_expression = "COALESCE(sender_name, '')" if "sender_name" in memory_columns else "''"
+        group_expression = "COALESCE(group_id, '')" if "group_id" in memory_columns else "''"
+        rows = self.cm.execute_read(
+            f"""SELECT id, vector, content, {timestamp_expression}, {importance_expression},
+                       {access_expression}, {source_expression}, {type_expression},
+                       {sender_id_expression}, {sender_name_expression}, {group_expression}
+                  FROM memories
+                 WHERE id IN ({placeholders})
+                   AND bot_id=? AND session_id=? AND visibility=?
+                   AND resolution_state='resolved' AND COALESCE(quarantine, 0)=0
+                   AND {source_expression} != 'noise'
+                   AND {type_expression} NOT IN ('archived', 'evicted', 'deleted')""",
+            [*candidate_ids, *_scope_params(scope)],
+        ).fetchall()
+        by_id = {int(row[0]): row for row in rows if row[1] is not None}
+        result: list[dict[str, Any]] = []
+        for memory_id in candidate_ids:
+            row = by_id.get(memory_id)
+            if row is None:
+                continue
+            tag_score, tag_count = tag_scores[memory_id]
+            result.append(
+                {
+                    "id": memory_id,
+                    "vector": row[1],
+                    "content": str(row[2] or ""),
+                    "timestamp": row[3],
+                    "importance": row[4],
+                    "access_count": row[5],
+                    "source": str(row[6] or ""),
+                    "memory_type": str(row[7] or "message"),
+                    "sender_id": str(row[8] or ""),
+                    "sender_name": str(row[9] or ""),
+                    "group_id": str(row[10] or ""),
+                    "tag_score": tag_score,
+                    "tag_count": tag_count,
+                }
+            )
+            if len(result) >= bounded_limit:
+                break
+        return result
 
     def record_scoped_fact_observation(
         self, scope: RuntimeScope, *, subject: str, predicate: str, object: str,

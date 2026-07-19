@@ -16,7 +16,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 try:
-    from ..domain.scope import RuntimeScope
+    from ...domain.scope import RuntimeScope
 except ImportError:  # pragma: no cover - focused tests import top-level packages
     from domain.scope import RuntimeScope
 

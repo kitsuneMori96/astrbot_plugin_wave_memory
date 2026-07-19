@@ -23,6 +23,20 @@ class ChannelConfigTest(unittest.TestCase):
         self.assertTrue(config.channels["timeline"].enabled)
         self.assertTrue(config.channels["safety"].enabled)
 
+    def test_timeline_days_defaults_to_zero_and_preserves_explicit_zero(self):
+        from services.config.channel_config import build_default_channel_config
+
+        default_config = build_default_channel_config(runtime_mode="full")
+        explicit_zero = build_default_channel_config(
+            runtime_mode="full",
+            inject_cfg={"timeline_days": 0},
+        )
+
+        self.assertEqual(default_config.timeline_days, 0)
+        self.assertEqual(explicit_zero.timeline_days, 0)
+        self.assertEqual(default_config.to_dict()["timeline_days"], 0)
+        self.assertEqual(explicit_zero.to_dict()["timeline_days"], 0)
+
     def test_memory_only_disables_advanced_channels_by_default(self):
         from services.config.channel_config import build_default_channel_config
 
@@ -203,6 +217,7 @@ class ChannelConfigTest(unittest.TestCase):
             {
                 "trace_enabled": False,
                 "recent_dedup_minutes": 0,
+                "timeline_days": 0,
                 "channels": {"memory": {"top_k": 0, "enabled": False}},
                 "query_options": {"stages": {"epa": False}, "params": {"pyramid_top_k": 1}},
                 "memory_recall": {"enable_shotgun": False, "skip_recent_minutes": 0},
@@ -210,6 +225,7 @@ class ChannelConfigTest(unittest.TestCase):
         )
         self.assertIs(candidate.trace_enabled, False)
         self.assertEqual(candidate.recent_dedup_minutes, 0)
+        self.assertEqual(candidate.timeline_days, 0)
         self.assertIs(candidate.channels["memory"].enabled, False)
         self.assertEqual(candidate.channels["memory"].top_k, 0)
         self.assertIs(candidate.query_stages["epa"], False)

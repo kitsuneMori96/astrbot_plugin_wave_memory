@@ -73,6 +73,57 @@ def _canonical_json(value: Mapping[str, Any]) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _column_expression(columns: set[str], name: str, fallback: str) -> str:
+    return name if name in columns else fallback
+
+
+def _legacy_unscoped_predicate(columns: set[str], *, table_alias: str = "") -> str:
+    """Match only rows with no formal Scope fields, never partial scope rows."""
+    prefix = f"{table_alias}." if table_alias else ""
+    fields = ("bot_id", "session_id", "visibility")
+    available = [field for field in fields if field in columns]
+    if not available:
+        return "1=1"
+    return " AND ".join(f"COALESCE({prefix}{field}, '')=''" for field in available)
+
+
+def _memory_type_predicate(
+    columns: set[str],
+    *,
+    table_alias: str = "",
+    legacy_compat: bool = False,
+) -> str:
+    if "memory_type" not in columns:
+        return "1=1"
+    prefix = f"{table_alias}." if table_alias else ""
+    excluded = "'deleted', 'noise'" if legacy_compat else "'archived', 'evicted', 'deleted'"
+    return f"COALESCE({prefix}memory_type, 'message') NOT IN ({excluded})"
+
+
+def _active_memory_predicates(
+    columns: set[str],
+    *,
+    table_alias: str = "",
+    legacy_compat: bool = False,
+    include_memory_type: bool = True,
+) -> list[str]:
+    prefix = f"{table_alias}." if table_alias else ""
+    predicates: list[str] = []
+    if include_memory_type:
+        predicates.append(_memory_type_predicate(
+            columns,
+            table_alias=table_alias,
+            legacy_compat=legacy_compat,
+        ))
+    if "source" in columns:
+        predicates.append(f"COALESCE({prefix}source, '') != 'noise'")
+    if "resolution_state" in columns:
+        predicates.append(f"COALESCE({prefix}resolution_state, '') IN ('', 'resolved')")
+    if "quarantine" in columns:
+        predicates.append(f"COALESCE({prefix}quarantine, 0)=0")
+    return predicates
+
+
 class MemoryRepo:
     """记忆数据仓库；向量唯一真相为 ``memories.vector``。"""
 
@@ -228,49 +279,169 @@ class MemoryRepo:
         ids: list,
         *,
         scope: RuntimeScope | None = None,
+        allow_unscoped: bool = False,
     ) -> list:
-        """获取 HNSW 候选；带 Scope 时严格后过滤，绝不接受跨 Scope 命中。"""
+        """Read hot IDs through the formal Scope boundary plus legacy group fallback.
+
+        A scoped request receives exact modern rows and fully unscoped legacy rows
+        from the same canonical group only. A no-Scope caller must opt in
+        explicitly, and then receives legacy rows only; formal scoped rows never
+        leak through that compatibility path.
+        """
         if not ids:
             return []
-        if not isinstance(scope, RuntimeScope):
-            # This method is the vector/ID recall boundary.  A legacy bare-ID read
-            # cannot prove a Bot/session, so it must not return automatic recall data.
-            return []
-        scope = _require_group_scope(scope, scope.session.conversation_id if scope.session else "")
-
         columns = self._memories_columns()
-        placeholders = ",".join("?" * len(ids))
-        required_v2 = {"bot_id", "session_id", "visibility", "resolution_state", "quarantine"}
-        missing_v2 = required_v2 - columns
-        if missing_v2:
-            raise RuntimeError(f"memories v2 schema is missing columns: {', '.join(sorted(missing_v2))}")
-        # HNSW ID 命中后的最终授权边界：在 SQL 基表层过滤，legacy NULL 和
-        # 任一 Scope 字段不精确的记录都不会离开 repository。
-        rows = self.cm.execute_read(
-            f"""SELECT id, group_id, sender_id, sender_name, content, timestamp, importance,
-                       access_count, source, memory_type, bot_id, session_id, visibility,
-                       resolution_state, quarantine
-                FROM memories
-               WHERE id IN ({placeholders}) AND memory_type = 'message'
-                 AND group_id=? AND bot_id=? AND session_id=? AND visibility=?
-                 AND resolution_state='resolved' AND quarantine=0""",
-            [
-                *ids,
+        if not {"id", "group_id", "content"} <= columns:
+            return []
+        try:
+            normalized_ids = [int(value) for value in ids]
+        except (TypeError, ValueError):
+            return []
+        if not normalized_ids:
+            return []
+        placeholders = ",".join("?" * len(normalized_ids))
+        selected = {
+            "sender_id": _column_expression(columns, "sender_id", "''"),
+            "sender_name": _column_expression(columns, "sender_name", "''"),
+            "timestamp": _column_expression(columns, "timestamp", "0"),
+            "importance": _column_expression(columns, "importance", "1.0"),
+            "access_count": _column_expression(columns, "access_count", "0"),
+            "source": _column_expression(columns, "source", "''"),
+            "memory_type": _column_expression(columns, "memory_type", "'message'"),
+            "bot_id": _column_expression(columns, "bot_id", "''"),
+            "session_id": _column_expression(columns, "session_id", "''"),
+            "visibility": _column_expression(columns, "visibility", "''"),
+            "resolution_state": _column_expression(columns, "resolution_state", "''"),
+            "quarantine": _column_expression(columns, "quarantine", "0"),
+        }
+        where = [
+            f"id IN ({placeholders})",
+            *_active_memory_predicates(columns, include_memory_type=False),
+        ]
+        parameters: list[Any] = list(normalized_ids)
+        legacy_predicate = (
+            f"({_legacy_unscoped_predicate(columns)}) AND "
+            f"({_memory_type_predicate(columns, legacy_compat=True)})"
+        )
+        if isinstance(scope, RuntimeScope):
+            scope = _require_group_scope(scope, scope.session.conversation_id if scope.session else "")
+            assert scope.session is not None
+            if {"bot_id", "session_id", "visibility"} <= columns:
+                formal_predicate = (
+                    "bot_id=? AND session_id=? AND visibility=? AND "
+                    f"({_memory_type_predicate(columns)})"
+                )
+                scope_parameters: list[Any] = [scope.bot_id, scope.session.id, scope.visibility]
+            else:
+                formal_predicate = "0=1"
+                scope_parameters = []
+            where.append(f"group_id=? AND (({formal_predicate}) OR ({legacy_predicate}))")
+            parameters.extend([
                 scope.session.conversation_id,
-                scope.bot_id,
-                scope.session.id,
-                scope.visibility,
-            ],
+                *scope_parameters,
+            ])
+        elif allow_unscoped:
+            where.append(f"({legacy_predicate})")
+        else:
+            return []
+
+        rows = self.cm.execute_read(
+            f"""SELECT id, group_id, {selected['sender_id']} AS sender_id,
+                       {selected['sender_name']} AS sender_name, content,
+                       {selected['timestamp']} AS timestamp, {selected['importance']} AS importance,
+                       {selected['access_count']} AS access_count, {selected['source']} AS source,
+                       {selected['memory_type']} AS memory_type, {selected['bot_id']} AS bot_id,
+                       {selected['session_id']} AS session_id, {selected['visibility']} AS visibility,
+                       {selected['resolution_state']} AS resolution_state,
+                       {selected['quarantine']} AS quarantine
+                  FROM memories WHERE {' AND '.join(where)}""",
+            parameters,
         ).fetchall()
-        return [
-            {
+        result: list[dict[str, Any]] = []
+        for r in rows:
+            lane = "legacy" if not any(str(value or "").strip() for value in r[10:13]) else "catalog"
+            result.append({
                 "id": r[0], "group_id": r[1], "sender_id": r[2], "sender_name": r[3],
                 "content": r[4], "timestamp": r[5], "importance": r[6],
                 "access_count": r[7], "source": r[8], "memory_type": r[9],
                 "bot_id": r[10], "session_id": r[11], "visibility": r[12],
-                "resolution_state": r[13], "quarantine": r[14],
+                "resolution_state": r[13], "quarantine": r[14], "_tag_lane": lane,
+            })
+        return result
+
+    def list_legacy_cold_memory_candidates(
+        self,
+        scope: RuntimeScope | None,
+        tag_ids: list[int],
+        *,
+        limit: int = 128,
+        allow_unscoped: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Fetch a bounded vector-bearing candidate set through legacy tags.
+
+        Legacy tags are global semantic IDs, but legacy memory rows are still
+        filtered by their persisted ``group_id`` when a group RuntimeScope is
+        present. This is a compatibility lane, not a substitute for formal Scope.
+        """
+        if not tag_ids:
+            return []
+        columns = self._memories_columns()
+        tag_columns = {
+            str(row[1]) for row in self.cm.execute_read("PRAGMA table_info(memory_tags)").fetchall()
+        }
+        if not {"id", "group_id", "vector"} <= columns or not {"memory_id", "tag_id"} <= tag_columns:
+            return []
+        try:
+            normalized_tags = sorted({int(tag_id) for tag_id in tag_ids if int(tag_id) > 0})
+            bounded_limit = min(512, max(1, int(limit)))
+        except (TypeError, ValueError):
+            return []
+        if not normalized_tags:
+            return []
+        placeholders = ",".join("?" * len(normalized_tags))
+        relevance = "COALESCE(mt.relevance, 1.0)" if "relevance" in tag_columns else "1.0"
+        selected = {
+            "sender_id": _column_expression(columns, "sender_id", "''"),
+            "sender_name": _column_expression(columns, "sender_name", "''"),
+            "timestamp": _column_expression(columns, "timestamp", "0"),
+            "importance": _column_expression(columns, "importance", "1.0"),
+            "access_count": _column_expression(columns, "access_count", "0"),
+            "source": _column_expression(columns, "source", "''"),
+            "memory_type": _column_expression(columns, "memory_type", "'message'"),
+        }
+        where = [f"mt.tag_id IN ({placeholders})", "m.vector IS NOT NULL", _legacy_unscoped_predicate(columns, table_alias="m")]
+        where.extend(_active_memory_predicates(columns, table_alias="m", legacy_compat=True))
+        parameters: list[Any] = list(normalized_tags)
+        if isinstance(scope, RuntimeScope):
+            scope = _require_group_scope(scope, scope.session.conversation_id if scope.session else "")
+            assert scope.session is not None
+            where.append("m.group_id=?")
+            parameters.append(scope.session.conversation_id)
+        elif not allow_unscoped:
+            return []
+        rows = self.cm.execute_read(
+            f"""SELECT m.id, m.group_id, {selected['sender_id']} AS sender_id,
+                       {selected['sender_name']} AS sender_name, m.content, m.vector,
+                       {selected['timestamp']} AS timestamp, {selected['importance']} AS importance,
+                       {selected['access_count']} AS access_count, {selected['source']} AS source,
+                       {selected['memory_type']} AS memory_type,
+                       SUM({relevance}) AS tag_score, COUNT(*) AS tag_count
+                  FROM memory_tags mt JOIN memories m ON m.id=mt.memory_id
+                 WHERE {' AND '.join(where)}
+                 GROUP BY m.id
+                 ORDER BY tag_score DESC, m.importance DESC, m.timestamp DESC, m.id DESC
+                 LIMIT ?""",
+            [*parameters, bounded_limit],
+        ).fetchall()
+        return [
+            {
+                "id": row[0], "group_id": row[1], "sender_id": row[2], "sender_name": row[3],
+                "content": row[4], "vector": row[5], "timestamp": row[6],
+                "importance": row[7], "access_count": row[8], "source": row[9],
+                "memory_type": row[10], "tag_score": row[11], "tag_count": row[12],
+                "_tag_lane": "legacy",
             }
-            for r in rows
+            for row in rows
         ]
 
     def find_recent_duplicate_memory(

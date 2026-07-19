@@ -13,7 +13,6 @@ import {
   type ChannelDescriptor,
   type ChannelValidationPayload,
 } from '@/api/channels'
-import { getAgentFeedback, reviewConfigSuggestion, type AgentFeedbackPayload } from '@/api/review'
 import { useUnsavedChangesGuard } from '@/app/unsaved-changes'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -76,8 +75,6 @@ export function ChannelConfigPage() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
-  const [configSuggestions, setConfigSuggestions] = useState<Array<Record<string, unknown>>>([])
-  const [suggestionsLoading, setSuggestionsLoading] = useState(false)
 
   const currentPatch = useMemo(() => draft ? serializeChannelPatch(draft) : null, [draft])
   const hasNumericErrors = Object.keys(numericErrors).length > 0
@@ -150,10 +147,7 @@ export function ChannelConfigPage() {
     setLoading(true)
     setError('')
     try {
-      const [payload, feedbackPayload] = await Promise.all([
-        getChannelConfig(),
-        getAgentFeedback().catch((): AgentFeedbackPayload => ({ config_suggestions: [] })),
-      ])
+      const payload = await getChannelConfig()
       if (!payload.current) throw new Error('服务端未返回当前有效通道配置')
       replaceEffectiveConfig(payload.current)
       setRuntime(payload.runtime ?? {})
@@ -163,7 +157,6 @@ export function ChannelConfigPage() {
       setEffectiveSince(payload.effective_since ?? null)
       setVerificationUrl(payload.verification_url ?? '/observatory')
       invalidateValidation()
-      setConfigSuggestions(feedbackPayload.config_suggestions ?? [])
     } catch (err) {
       setError(err instanceof Error ? err.message : '通道配置加载失败')
     } finally {
@@ -252,21 +245,6 @@ export function ChannelConfigPage() {
     }
   }
 
-  async function handleSuggestionReview(id: number, action: 'approve' | 'reject' | 'ignore') {
-    setSuggestionsLoading(true)
-    try {
-      const result = await reviewConfigSuggestion(id, action)
-      if (!result.ok) throw new Error(result.error ?? '配置建议处理失败')
-      toast.success(result.message ?? '配置建议状态已记录；配置不会自动应用')
-      const next = await getAgentFeedback()
-      setConfigSuggestions(next.config_suggestions ?? [])
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '配置建议处理失败')
-    } finally {
-      setSuggestionsLoading(false)
-    }
-  }
-
   useEffect(() => { void load() }, [])
 
   if (loading) return <div className="flex flex-col gap-4"><Skeleton className="h-32 w-full" /><Skeleton className="h-96 w-full" /></div>
@@ -325,25 +303,6 @@ export function ChannelConfigPage() {
             {isDirty ? <Badge variant="secondary" className="animate-pulse"><WandSparklesIcon className="mr-1 size-3" />配置已修改（未保存）</Badge> : null}
             <Button asChild variant="outline"><Link to={verificationUrl}>去注入观测台验证最近 trace<ArrowRightIcon data-icon="inline-end" /></Link></Button>
           </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader><CardTitle>配置建议</CardTitle><CardDescription>配置建议保留在配置域；人工批准只记录状态，不会绕过校验自动应用。</CardDescription></CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          {configSuggestions.length === 0 ? <p className="text-sm text-muted-foreground">暂无待处理配置建议。</p> : configSuggestions.map((suggestion, index) => {
-            const id = Number(suggestion.id)
-            const title = String(suggestion.suggestion ?? suggestion.problem ?? suggestion.title ?? `配置建议 ${index + 1}`)
-            return (
-              <div key={`config-suggestion-${String(suggestion.id ?? index)}`} className="flex flex-col gap-3 rounded-lg border p-3">
-                <div className="flex items-start justify-between gap-3"><span className="font-medium">{title}</span><Badge variant="secondary">待处理</Badge></div>
-                <p className="text-sm text-muted-foreground">范围：{String(suggestion.scope ?? '未指定')} · 通道：{String(suggestion.channel ?? '未指定')}</p>
-                <p className="text-sm leading-relaxed">{String(suggestion.reason ?? suggestion.description ?? '服务端未提供补充说明。')}</p>
-                <details className="text-xs text-muted-foreground"><summary className="cursor-pointer">技术详情</summary><pre className="mt-2 max-h-48 overflow-auto rounded-md bg-muted p-2 font-mono">{JSON.stringify(suggestion, null, 2)}</pre></details>
-                <div className="flex flex-wrap gap-2">{(['approve', 'reject', 'ignore'] as const).map((action) => <Button key={action} size="sm" variant={action === 'approve' ? 'default' : action === 'reject' ? 'destructive' : 'secondary'} disabled={suggestionsLoading || !Number.isFinite(id)} onClick={() => void handleSuggestionReview(id, action)}>{action === 'approve' ? '记录批准' : action === 'reject' ? '拒绝' : '忽略'}</Button>)}</div>
-              </div>
-            )
-          })}
         </CardContent>
       </Card>
 

@@ -4,10 +4,9 @@ import type { PageResponse, PageSize } from '@/components/shared/types'
 export interface TraceFilters {
   from_ts?: number | string
   to_ts?: number | string
-  group_id?: string
   sender_id?: string
   bot_id?: string
-  session_id?: string
+  bot_profile_id?: string
   channel?: string
   status?: string
   has_error?: boolean | string
@@ -32,7 +31,6 @@ export interface InjectionTraceSummary {
   status: string
   session?: TraceSessionDto | null
   session_id?: string
-  group_id?: string
   sender_id?: string
   bot_id?: string
   bot_profile_id?: string
@@ -59,7 +57,6 @@ export interface TraceDetailPayload {
   filtered?: Array<Record<string, unknown>>
   final_text?: string
   final_injection_text?: string
-  feedback?: Array<Record<string, unknown>>
   warnings?: unknown
   errors?: unknown
   error?: string

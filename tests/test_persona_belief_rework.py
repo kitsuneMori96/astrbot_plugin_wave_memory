@@ -63,11 +63,7 @@ class _FakeQueryEngine:
 
     async def query(self, **kwargs):
         self.calls.append(kwargs)
-        return [
-            {"id": 1, "content": "第一次在群里认真解释剑阵，不靠嘴臭压人。", "source": "bzz_experience"},
-            {"id": 2, "content": "（猫耳朵一抖）这种身份污染经历不能注入。", "source": "bzz_evolution"},
-            {"id": 3, "content": "后来学会先判断事实，再给出克制回应。", "source": "bzz_evolution"},
-        ]
+        return []
 
     def format_injection(self, memories):
         return "\n".join(f"[记忆#{m['id']}] {m['content']}" for m in memories)
@@ -98,9 +94,27 @@ class PersonaBeliefReworkTest(unittest.TestCase):
 
     def test_persona_composer_builds_layered_safe_context(self):
         from services.persona_composer import PersonaComposer
+        from engine.db.migrations.book_experience import ensure_book_experience_schema
+
+        conn = self._connect()
+        ensure_book_experience_schema(conn)
+        now = time.time()
+        conn.executemany(
+            """INSERT INTO book_experience_episodes
+               (bot_id, group_id, user_id, content, evidence_json, source_candidate_id,
+                idempotency_key, created_at, updated_at)
+               VALUES (?, ?, NULL, ?, '{}', NULL, ?, ?, ?)""",
+            [
+                ("baizhenzhen", "arc01_炼气高中期", "第一次在群里认真解释剑阵，不靠嘴臭压人。", "k1", now, now),
+                ("baizhenzhen", "arc02_筑基大学期", "（猫耳朵一抖）这种身份污染经历不能注入。", "k2", now, now),
+                ("baizhenzhen", "arc03_金丹大学期", "后来学会先判断事实，再给出克制回应。", "k3", now, now),
+                ("otherbot", "arc01_炼气高中期", "别人的经历不能泄漏。", "k4", now, now),
+            ],
+        )
+        conn.commit()
 
         composer = PersonaComposer(
-            db=SimpleNamespace(conn=self._connect()),
+            db=SimpleNamespace(conn=conn),
             belief_engine=_FakeBeliefEngine(),
             query_engine=_FakeQueryEngine(),
             few_shot_service=SimpleNamespace(get_injection=lambda bot_id="", max_items=None: "<style_examples>\n- 先看事实，再冷淡回应。\n</style_examples>"),
@@ -147,9 +161,33 @@ class PersonaBeliefReworkTest(unittest.TestCase):
         self.assertIn("白真真", result["persona_block"])
         self.assertIn("不喜欢被当成攻击工具", result["belief_block"])
         self.assertIn("认真解释剑阵", result["experience_block"])
+        self.assertIn("先判断事实", result["experience_block"])
         self.assertNotIn("猫耳朵", result["experience_block"])
+        self.assertNotIn("别人的经历", result["experience_block"])
         self.assertEqual(result["style_block"], "")
-        self.assertEqual(result["debug"]["experience_ids"], [1, 3])
+        self.assertEqual(set(result["debug"]["experience_ids"]), {1, 3})
+
+        other_group = RuntimeScope(
+            bot_id="baizhenzhen",
+            visibility="group",
+            session=SessionRef(
+                id="qq:group:g9",
+                platform_id="qq",
+                kind="group",
+                conversation_id="g9",
+            ),
+            subject_principal_id="qq:user:u9",
+        )
+        elsewhere = asyncio.run(composer.build_self_persona(
+            bot_id="1336495069",
+            group_id="g9",
+            sender_id="u9",
+            sender_name="路人",
+            message="随便聊聊",
+            recent_context=[],
+            scope=other_group,
+        ))
+        self.assertIn("认真解释剑阵", elsewhere["experience_block"])
 
     def test_belief_engine_requires_group_scope_and_reads_only_scoped_active_beliefs(self):
         from domain.scope import RuntimeScope, SessionRef

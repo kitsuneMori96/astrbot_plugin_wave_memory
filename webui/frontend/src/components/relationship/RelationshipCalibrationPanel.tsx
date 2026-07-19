@@ -13,6 +13,7 @@ const DIMENSIONS = [
   ['familiarity', '熟悉度'],
   ['trust', '信任'],
   ['fun', '趣味'],
+  ['hostility', '敌意'],
   ['depth', '深度'],
 ] as const
 const ACTIONS = [

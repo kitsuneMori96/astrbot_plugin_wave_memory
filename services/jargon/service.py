@@ -51,7 +51,11 @@ class JargonService:
             candidate_router=self.classify_candidate,
         )
         self._inference = JargonInferenceEngine(llm_client, max_context=self._max_context) if llm_client else None
-        self._injector = JargonInjector(db, max_inject=int(self._config.get("max_inject", 3)))
+        self._injector = JargonInjector(
+            db,
+            max_inject=int(self._config.get("max_inject", 3)),
+            holyman_reference=self._holyman,
+        )
         self._last_mine: Dict[tuple[str, str, str], float] = {}
         self._msg_count: Dict[tuple[str, str, str], int] = {}
 
@@ -291,8 +295,10 @@ class JargonService:
         return {"id": int(jargon_id), "status": "archived", "scope": scope}
 
     def get_injection(self, text: str, runtime_scope: RuntimeScope | None) -> str:
-        if not self._enabled or self._group_scope(runtime_scope) is None or not self._repository_available():
+        if not self._enabled or self._group_scope(runtime_scope) is None:
             return ""
+        # Curated Holyman references remain available even when no local confirmed
+        # jargon exists; local entries still require the scoped repository.
         return self._injector.get_injection(text, runtime_scope)
 
     def get_last_injection_items(self) -> List[Dict[str, Any]]:

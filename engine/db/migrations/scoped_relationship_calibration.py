@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS scoped_soul_relationship_values (
     session_id TEXT NOT NULL,
     visibility TEXT NOT NULL CHECK (visibility = 'group'),
     subject_principal_id TEXT NOT NULL,
-    dimension TEXT NOT NULL CHECK (dimension IN ('familiarity', 'trust', 'fun', 'depth')),
+    dimension TEXT NOT NULL CHECK (dimension IN ('familiarity', 'trust', 'fun', 'hostility', 'depth')),
     automatic_value REAL NOT NULL,
     manual_adjustment REAL,
     manual_override REAL,
@@ -52,6 +52,7 @@ _RANGES = {
     "familiarity": (0.0, 100.0),
     "trust": (-50.0, 100.0),
     "fun": (0.0, 80.0),
+    "hostility": (0.0, 100.0),
     "depth": (0.0, 80.0),
 }
 
@@ -63,6 +64,59 @@ def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
 def _clamp(dimension: str, value: float) -> float:
     lo, hi = _RANGES[dimension]
     return max(lo, min(hi, value))
+
+
+def _relationship_values_support_hostility(connection: sqlite3.Connection) -> bool:
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='scoped_soul_relationship_values'"
+    ).fetchone()
+    return bool(row and "hostility" in str(row[0] or "").casefold())
+
+
+def _upgrade_relationship_values_to_five_dimensions(connection: sqlite3.Connection) -> None:
+    """Rebuild the value table when a prior four-dimension CHECK is present.
+
+    SQLite cannot add a CHECK alternative in place.  The caller already owns the
+    migration transaction, so copying into a temporary table and renaming it is
+    atomic from the plugin's point of view.
+    """
+    if not _columns(connection, "scoped_soul_relationship_values") or _relationship_values_support_hostility(connection):
+        return
+    connection.execute(
+        """CREATE TABLE scoped_soul_relationship_values__five_dimensions (
+               bot_id TEXT NOT NULL,
+               session_id TEXT NOT NULL,
+               visibility TEXT NOT NULL CHECK (visibility = 'group'),
+               subject_principal_id TEXT NOT NULL,
+               dimension TEXT NOT NULL CHECK (dimension IN ('familiarity', 'trust', 'fun', 'hostility', 'depth')),
+               automatic_value REAL NOT NULL,
+               manual_adjustment REAL,
+               manual_override REAL,
+               effective_value REAL NOT NULL,
+               relationship_revision INTEGER NOT NULL,
+               evidence TEXT NOT NULL DEFAULT '[]',
+               updated_at REAL NOT NULL,
+               PRIMARY KEY (bot_id, session_id, visibility, subject_principal_id, dimension)
+           )"""
+    )
+    connection.execute(
+        """INSERT INTO scoped_soul_relationship_values__five_dimensions(
+               bot_id, session_id, visibility, subject_principal_id, dimension,
+               automatic_value, manual_adjustment, manual_override, effective_value,
+               relationship_revision, evidence, updated_at)
+           SELECT bot_id, session_id, visibility, subject_principal_id, dimension,
+                  automatic_value, manual_adjustment, manual_override, effective_value,
+                  relationship_revision, evidence, updated_at
+             FROM scoped_soul_relationship_values"""
+    )
+    connection.execute("DROP TABLE scoped_soul_relationship_values")
+    connection.execute(
+        "ALTER TABLE scoped_soul_relationship_values__five_dimensions RENAME TO scoped_soul_relationship_values"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_scoped_relationship_values_scope_subject "
+        "ON scoped_soul_relationship_values (bot_id, session_id, visibility, subject_principal_id, relationship_revision)"
+    )
 
 
 def _initialize_formal_values(connection: sqlite3.Connection) -> None:
@@ -115,6 +169,7 @@ def _initialize_formal_values(connection: sqlite3.Connection) -> None:
 def _apply(connection: sqlite3.Connection) -> None:
     for statement in (part.strip() for part in _SCHEMA.split(";") if part.strip()):
         connection.execute(statement)
+    _upgrade_relationship_values_to_five_dimensions(connection)
     columns = _columns(connection, "scoped_soul_relationship_events")
     if columns:
         for name, definition in (

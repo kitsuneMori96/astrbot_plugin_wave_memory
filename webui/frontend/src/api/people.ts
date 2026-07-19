@@ -32,36 +32,9 @@ export interface PersonItem {
   metadata: Record<string, unknown>
   registry_metadata: Record<string, unknown>
   person_registry: Record<string, unknown>
-  affinity: null
-  affinity_status: 'unavailable'
+  affinity: number | null
+  affinity_status: 'unavailable' | 'available' | string
   affinity_reason_code: string
-}
-
-export interface LegacyPersonItem extends Omit<PersonItem, 'scope' | 'scope_key' | 'registry_metadata' | 'person_registry'> {
-  legacy: true
-  readonly: true
-  scope: null
-  scope_status: 'legacy_group_key'
-  scope_reason: string
-}
-
-export interface LegacyRelationshipEvent {
-  id: number
-  bot_id: string
-  group_id: string
-  user_id: string
-  event_type: string
-  dimension: string
-  delta: number
-  reason: string
-  source_episode_id?: number | null
-  source_memory_id?: number | null
-  created_at: number
-  legacy: true
-  readonly: true
-  scope: null
-  scope_status: 'legacy_group_key'
-  scope_reason: string
 }
 
 export interface RelationshipValue {
@@ -116,14 +89,6 @@ export function calibrateRelationship(query: PeopleQuery, payload: RelationshipC
   return fetchJson<RelationshipCalibrationResponse>(`/api/people/relationships/commands/calibrate${queryString(query)}`, { method: 'POST', body: JSON.stringify(payload) })
 }
 
-export interface LegacyAuditPage<T> extends PageResponse<T> {
-  legacy: true
-  readonly: true
-  scope: null
-  scope_status: 'legacy_group_key'
-  reason_code: string
-}
-
 function queryString(query: object): string {
   const params = new URLSearchParams()
   Object.entries(query).forEach(([key, value]) => {
@@ -135,12 +100,4 @@ function queryString(query: object): string {
 
 export function getPeople(query: PeopleQuery): Promise<PageResponse<PersonItem>> {
   return fetchJson<PageResponse<PersonItem>>(`/api/people${queryString(query)}`)
-}
-
-export function getLegacyPeople(query: { bot_id?: string; group_id?: string; search?: string; limit?: PageSize; offset?: number }): Promise<LegacyAuditPage<LegacyPersonItem>> {
-  return fetchJson<LegacyAuditPage<LegacyPersonItem>>(`/api/people/legacy/audit${queryString(query)}`)
-}
-
-export function getLegacyRelationships(query: { bot_id?: string; group_id?: string; session_id?: string; user_id?: string; search?: string; limit?: PageSize; offset?: number }): Promise<LegacyAuditPage<LegacyRelationshipEvent>> {
-  return fetchJson<LegacyAuditPage<LegacyRelationshipEvent>>(`/api/people/legacy/relationships${queryString(query)}`)
 }

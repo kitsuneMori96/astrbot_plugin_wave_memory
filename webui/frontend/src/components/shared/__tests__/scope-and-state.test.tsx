@@ -3,6 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 
+import { scopeOptionsFor, type ScopeOptionsPayload } from '@/api/options'
 import { buildObjectDeepLink } from '@/lib/object-deep-link'
 import { ObjectDeepLink } from '../ObjectDeepLink'
 import { QueryState } from '../QueryState'
@@ -26,6 +27,36 @@ describe('ScopeSelect 与 ObjectDeepLink', () => {
 
     expect(onChange).toHaveBeenCalledWith('bot:yushu', options[0])
     expect(screen.queryByRole('option', { name: '白真真' })).not.toBeInTheDocument()
+  })
+
+  it('群会话选项显示群名与群号，无群名时回退到群号', () => {
+    const payload: ScopeOptionsPayload = {
+      bots: [],
+      sessions: [
+        {
+          id: 'qq:group:42',
+          bot_id: 'yushu',
+          platform_id: 'qq',
+          kind: 'group',
+          conversation_id: '42',
+          group_name: '记忆实验群',
+          label: '记忆实验群（42）',
+        },
+        {
+          id: 'qq:group:99',
+          bot_id: 'yushu',
+          platform_id: 'qq',
+          kind: 'group',
+          conversation_id: '99',
+          label: '99',
+        },
+      ],
+      channels: [],
+      generated_at: 0,
+      source: { health: 'healthy', reason_code: null },
+    }
+
+    expect(scopeOptionsFor(payload, ['session']).map((item) => item.label)).toEqual(['记忆实验群（42）', '99'])
   })
 
   it('触发器只显示单行标签，不把下拉说明带进固定高度输入框', async () => {

@@ -29,6 +29,21 @@ class TimelineChannelTest(unittest.TestCase):
         self.addCleanup(conn.close)
         return DBBox(conn)
 
+    def _legacy_db(self):
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            """CREATE TABLE memories (
+                id INTEGER PRIMARY KEY,
+                summary TEXT,
+                timestamp REAL,
+                group_id TEXT,
+                sender_id TEXT,
+                content TEXT
+            )"""
+        )
+        self.addCleanup(conn.close)
+        return DBBox(conn)
+
     @staticmethod
     def _row(memory_id, summary, timestamp, group_id, sender_id, content, *, bot_id="bot-a"):
         return (
@@ -109,6 +124,103 @@ class TimelineChannelTest(unittest.TestCase):
         self.assertNotIn("别的群事件", result.text)
         self.assertEqual([item["summary"] for item in result.items], ["一起调试注入链路", "用户提到黑巧偏好"])
         self.assertTrue(result.items[0]["day"])
+
+    def test_default_days_reads_full_history(self):
+        from services.injection.channels.timeline import TimelineChannel
+
+        db = self._db()
+        now = 1_700_000_000.0
+        db.conn.executemany(
+            """INSERT INTO memories (
+                id, summary, timestamp, group_id, sender_id, content,
+                bot_id, session_id, visibility, resolution_state, quarantine
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                self._row(1, "很久以前一起排查过的问题", now - 90 * 86400, "g1", "u1", "历史事件"),
+                self._row(2, "最近一起完成的任务", now - 3600, "g1", "u1", "近期事件"),
+            ],
+        )
+
+        result = asyncio.run(TimelineChannel(db=db).build(self._ctx(now=now)))
+
+        self.assertEqual(result.status, "hit")
+        self.assertEqual(
+            [item["summary"] for item in result.items],
+            ["最近一起完成的任务", "很久以前一起排查过的问题"],
+        )
+
+    def test_positive_days_limits_timeline_window(self):
+        from services.injection.channels.timeline import TimelineChannel
+
+        db = self._db()
+        now = 1_700_000_000.0
+        db.conn.executemany(
+            """INSERT INTO memories (
+                id, summary, timestamp, group_id, sender_id, content,
+                bot_id, session_id, visibility, resolution_state, quarantine
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                self._row(1, "窗口外历史事件", now - 8 * 86400, "g1", "u1", "历史事件"),
+                self._row(2, "窗口内近期事件", now - 6 * 86400, "g1", "u1", "近期事件"),
+            ],
+        )
+        ctx = self._ctx(now=now, config={
+            "channels": {"timeline": {"max_items": 3}},
+            "timeline": {"days": 7},
+        })
+
+        result = asyncio.run(TimelineChannel(db=db).build(ctx))
+
+        self.assertEqual(result.status, "hit")
+        self.assertIn("窗口内近期事件", result.text)
+        self.assertNotIn("窗口外历史事件", result.text)
+
+    def test_legacy_schema_falls_back_to_current_group(self):
+        from services.injection.channels.timeline import TimelineChannel
+
+        db = self._legacy_db()
+        now = 1_700_000_000.0
+        db.conn.executemany(
+            "INSERT INTO memories (id, summary, timestamp, group_id, sender_id, content) VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (1, "当前群旧事件", now - 180 * 86400, "g1", "u1", "旧数据"),
+                (2, "其他群旧事件", now - 180 * 86400, "g2", "u1", "旧数据"),
+            ],
+        )
+
+        result = asyncio.run(TimelineChannel(db=db).build(self._ctx(now=now)))
+
+        self.assertEqual(result.status, "hit")
+        self.assertIn("当前群旧事件", result.text)
+        self.assertNotIn("其他群旧事件", result.text)
+
+    def test_formal_scope_isolated_with_same_group_legacy_fallback(self):
+        from services.injection.channels.timeline import TimelineChannel
+
+        db = self._db()
+        now = 1_700_000_000.0
+        db.conn.executemany(
+            """INSERT INTO memories (
+                id, summary, timestamp, group_id, sender_id, content,
+                bot_id, session_id, visibility, resolution_state, quarantine
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                self._row(1, "当前正式范围事件", now - 3600, "g1", "u1", "当前范围"),
+                (2, "其他机器人正式范围事件", now - 3500, "g1", "u1", "其他机器人", "bot-b", "qq:group:g1", "group", "resolved", 0),
+                (3, "其他会话正式范围事件", now - 3400, "g1", "u1", "其他会话", "bot-a", "qq:group:g2", "group", "resolved", 0),
+                (4, "当前群旧行回退事件", now - 3300, "g1", "u1", "旧行", None, None, None, None, None),
+                (5, "其他群旧行回退事件", now - 3200, "g2", "u1", "旧行", None, None, None, None, None),
+            ],
+        )
+
+        result = asyncio.run(TimelineChannel(db=db).build(self._ctx(now=now)))
+
+        self.assertEqual(result.status, "hit")
+        self.assertIn("当前正式范围事件", result.text)
+        self.assertIn("当前群旧行回退事件", result.text)
+        self.assertNotIn("其他机器人正式范围事件", result.text)
+        self.assertNotIn("其他会话正式范围事件", result.text)
+        self.assertNotIn("其他群旧行回退事件", result.text)
 
     def test_filters_polluted_and_recent_duplicate_summaries(self):
         from services.injection.channels.timeline import TimelineChannel

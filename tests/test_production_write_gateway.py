@@ -77,7 +77,12 @@ async def test_production_gateway_commits_memory_tags_operation_and_outbox_atomi
         tag_count = await gateway.apply_tag_extraction(
             scope=_scope(),
             memory_id=first_id,
-            tags=[{"name": "topic-a", "type": "topic", "confidence": 0.9}],
+            tags=[{
+                "name": "topic-a",
+                "type": "topic",
+                "confidence": np.float32(0.9),
+                "embedding": [np.float32(0.1), np.float32(0.2)],
+            }],
             status="done",
         )
         assert tag_count == 1

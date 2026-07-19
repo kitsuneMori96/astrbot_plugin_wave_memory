@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
-import { AlertCircleIcon, ChevronDownIcon, EyeIcon, RefreshCwIcon, SearchIcon } from 'lucide-react'
+import { EyeIcon, RefreshCwIcon, SearchIcon } from 'lucide-react'
 
-import { getLegacyFacts, getScopedFacts, type LegacyFactsPage, type ScopedFact, type ScopedFactsPage } from '@/api/knowledge'
+import { getScopedFacts, type ScopedFact, type ScopedFactsPage } from '@/api/knowledge'
 import { getScopeOptions, scopeOptionsFor } from '@/api/options'
 import { EvidenceList, PaginationControls, QueryState, ResponsiveTable, ScopeSelect, usePaginationSearchParams } from '@/components/shared'
 import { useCanonicalScopeDefault } from '@/hooks/use-pagination-search-params'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -69,9 +68,6 @@ export function FactsPage() {
   const [reload, setReload] = useState(0)
   const [selectedFact, setSelectedFact] = useState<ScopedFact | null>(null)
   const [detailOpen, setDetailOpen] = useState(false)
-  const [legacyData, setLegacyData] = useState<LegacyFactsPage | null>(null)
-  const [legacyOffset, setLegacyOffset] = useState(0)
-  const [legacyLoading, setLegacyLoading] = useState(true)
 
   const loadBots = useCallback(async () => scopeOptionsFor(await getScopeOptions(), ['bot']), [])
   const loadSessions = useCallback(async () => {
@@ -99,23 +95,11 @@ export function FactsPage() {
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
   }, [botId, pagination.limit, pagination.offset, reload, search, sessionId, statusFilter])
-  useEffect(() => {
-    let active = true
-    setLegacyLoading(true)
-    getLegacyFacts({ search: search || undefined, limit: 25, offset: legacyOffset })
-      .then((value) => { if (active) setLegacyData(value) })
-      .catch(() => { if (active) setLegacyData(null) })
-      .finally(() => { if (active) setLegacyLoading(false) })
-    return () => { active = false }
-  }, [legacyOffset, search])
-
   const submitSearch = (event: FormEvent) => {
     event.preventDefault()
-    setLegacyOffset(0)
     pagination.setFilters({ search: filterDraft.search.trim() || null, status: filterDraft.status || null })
   }
   const resetFilters = () => {
-    setLegacyOffset(0)
     setFilterDraft({ search: '', status: '' })
     pagination.setFilters({ search: null, status: null })
   }
@@ -128,8 +112,6 @@ export function FactsPage() {
   const evidenceCount = data ? facts.filter((fact) => fact.evidence_status === 'available').length : '—'
   const lowConfidence = data ? facts.filter((fact) => typeof fact.confidence === 'number' && fact.confidence < 0.5).length : '—'
   const total = data?.page.total_status === 'exact' ? data.page.total ?? '—' : '—'
-  const legacyTotal = legacyData?.page.total ?? null
-  const legacyRangeEnd = legacyData ? legacyTotal === null ? legacyOffset + legacyData.items.length : Math.min(legacyOffset + 25, legacyTotal) : legacyOffset
   const status = !botId || !sessionId ? 'unknown' : loading ? 'loading' : error ? 'error' : !facts.length ? 'empty' : 'success'
 
   return <div className="flex flex-col gap-4" data-page="facts">
@@ -179,7 +161,7 @@ export function FactsPage() {
         <Separator />
 
         <div className="flex flex-col gap-3 p-3">
-          <QueryState status={status} error={error} title="Facts 读取失败" description={!botId || !sessionId ? '请从服务端真实选项中选择 Bot 与 canonical 群会话；页面不会读取 Legacy facts 或跨 Bot 汇总。' : '当前 Scope 与筛选条件下没有正式 Facts。'} onRetry={() => setReload((value) => value + 1)}>
+          <QueryState status={status} error={error} title="Facts 读取失败" description={!botId || !sessionId ? '请从服务端真实选项中选择 Bot 与 canonical 群会话；页面不会跨 Bot 汇总。' : '当前 Scope 与筛选条件下没有正式 Facts。'} onRetry={() => setReload((value) => value + 1)}>
             <ResponsiveTable
               label="Facts 关系清单"
               table={<Table>
@@ -206,19 +188,6 @@ export function FactsPage() {
       </CardContent>
     </Card>
 
-    <details className="group overflow-hidden rounded-lg border border-amber-500/15 bg-amber-500/[0.02]">
-      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 marker:content-none">
-        <div className="flex min-w-0 items-center gap-2"><Badge variant="outline" className="border-amber-500/20 bg-amber-500/5 text-amber-600">只读审计</Badge><span className="font-medium">Legacy Facts 历史事实</span><span className="hidden truncate text-xs text-muted-foreground sm:inline">未证实 Bot / canonical session，不混入正式区</span></div>
-        <ChevronDownIcon className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" aria-hidden="true" />
-      </summary>
-      <div className="border-t p-4">
-        <Alert className="mb-4 border-amber-500/15 bg-amber-500/[0.02] text-amber-700 dark:text-amber-500"><AlertCircleIcon className="size-4 text-amber-600" /><AlertTitle>作用域未证实</AlertTitle><AlertDescription className="text-xs">{legacyData ? legacyTotal === null ? 'Legacy facts 总数未提供。' : `共 ${legacyTotal.toLocaleString('zh-CN')} 条 Legacy facts。` : legacyLoading ? '正在读取审计清单。' : 'Legacy 审计接口暂不可用。'} 旧 facts 表没有 Bot / canonical session 列；这里只读核查，不会把 group_id 猜成 qq:group:*，也不会参与正式事实或证据投影。</AlertDescription></Alert>
-        {legacyData?.items.length ? <>
-          <div className="overflow-auto rounded-lg border bg-background"><Table><TableHeader><TableRow className="h-8"><TableHead className="py-1 text-[11px]">ID</TableHead><TableHead className="py-1 text-[11px]">主体</TableHead><TableHead className="py-1 text-[11px]">谓词</TableHead><TableHead className="py-1 text-[11px]">客体</TableHead><TableHead className="py-1 text-[11px]">旧 group_id</TableHead><TableHead className="py-1 text-[11px]">类型</TableHead></TableRow></TableHeader><TableBody>{legacyData.items.map((fact) => <TableRow key={fact.id} className="h-9"><TableCell className="py-1 font-mono text-[11px]">#{fact.id}</TableCell><TableCell className="py-1 text-xs">{fact.subject}</TableCell><TableCell className="py-1"><Badge variant="outline" className="text-[10px]">{fact.predicate}</Badge></TableCell><TableCell className="max-w-sm truncate py-1 text-xs">{fact.object}</TableCell><TableCell className="py-1 font-mono text-[11px] text-muted-foreground">{fact.group_id || '未记录'}</TableCell><TableCell className="py-1 text-xs">{fact.fact_type || '未记录'}</TableCell></TableRow>)}</TableBody></Table></div>
-          <div className="mt-3 flex items-center justify-between text-xs text-muted-foreground"><span>{legacyTotal === null ? `已读取第 ${legacyOffset + 1}-${legacyRangeEnd} 条；总数未提供` : `第 ${legacyOffset + 1}-${legacyRangeEnd} 条`}</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={legacyLoading || legacyOffset === 0} onClick={() => setLegacyOffset(Math.max(0, legacyOffset - 25))}>上一页</Button><Button size="sm" variant="outline" disabled={legacyLoading || !legacyData.page.has_more} onClick={() => setLegacyOffset(legacyOffset + 25)}>下一页</Button></div></div>
-        </> : !legacyLoading ? <p className="py-4 text-center text-xs text-muted-foreground">没有未归属的 Legacy facts。</p> : null}
-      </div>
-    </details>
 
     <Sheet open={detailOpen} onOpenChange={setDetailOpen}>
       <SheetContent className="w-[min(94vw,34rem)] sm:max-w-xl">

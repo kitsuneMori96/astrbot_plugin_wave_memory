@@ -54,18 +54,22 @@ class AgentFeedbackWebUITest(unittest.TestCase):
         self.assertIn("不会自动应用", approved["message"])
         self.assertEqual(rejected["review_status"], "rejected")
 
-    def test_frontend_removes_agent_feedback_route_but_keeps_configuration_compatibility_api(self):
-        api = Path("webui/frontend/src/api/review.ts").read_text(encoding="utf-8")
+    def test_frontend_removes_agent_feedback_route_and_compatibility_client(self):
+        api = Path("webui/frontend/src/api/review.ts")
+        agent_feedback_page = Path("webui/frontend/src/pages/review/AgentFeedbackPage.tsx")
         routes = Path("webui/frontend/src/app/routes.tsx").read_text(encoding="utf-8")
         sidebar = Path("webui/frontend/src/components/layout/WaveSidebar.tsx").read_text(encoding="utf-8")
         channel_config = Path("webui/frontend/src/pages/channels/ChannelConfigPage.tsx").read_text(encoding="utf-8")
-        self.assertIn("/api/agent-feedback", api)
-        self.assertIn("config-suggestions", api)
-        self.assertNotIn("review-candidates", api)
+        injection = Path("webui/frontend/src/pages/injection/InjectionPage.tsx").read_text(encoding="utf-8")
+        self.assertFalse(api.exists())
+        self.assertFalse(agent_feedback_page.exists())
         self.assertNotIn("/agent-feedback", routes)
         self.assertNotIn("/agent-feedback", sidebar)
-        self.assertIn("getAgentFeedback", channel_config)
-        self.assertIn("reviewConfigSuggestion", channel_config)
+        self.assertNotIn("getAgentFeedback", channel_config)
+        self.assertNotIn("reviewConfigSuggestion", channel_config)
+        self.assertNotIn("config_suggestions", channel_config)
+        self.assertNotIn("feedback_records", injection)
+        self.assertNotIn("group_id", injection)
 
 
 if __name__ == "__main__":

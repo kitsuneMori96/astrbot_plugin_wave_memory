@@ -7,10 +7,30 @@
 
 from __future__ import annotations
 
+import time
+import unicodedata
+
 from ..connection import ConnectionManager
 
 
 _SCOPED_DERIVED_KNOWLEDGE_SCHEMA = """
+/* tag_catalog is a global semantic vocabulary only. It never stores memory content
+   and is joined back to scoped_tags before any memory/query operation. */
+CREATE TABLE IF NOT EXISTS tag_catalog (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    normalized_name TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    tag_type TEXT NOT NULL DEFAULT 'keyword',
+    description TEXT NOT NULL DEFAULT '',
+    embedding BLOB,
+    embedding_model TEXT,
+    embedding_dim INTEGER,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    UNIQUE (normalized_name, tag_type)
+);
+
 CREATE TABLE IF NOT EXISTS scoped_jargon (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     bot_id TEXT NOT NULL,
@@ -53,6 +73,7 @@ CREATE TABLE IF NOT EXISTS scoped_facts (
 
 CREATE TABLE IF NOT EXISTS scoped_tags (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    catalog_id INTEGER,
     bot_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
     visibility TEXT NOT NULL CHECK (visibility = 'group'),
@@ -127,6 +148,8 @@ CREATE TABLE IF NOT EXISTS scoped_consolidation_cursors (
     PRIMARY KEY (bot_id, session_id, visibility, cursor_name)
 );
 
+CREATE INDEX IF NOT EXISTS idx_tag_catalog_status
+    ON tag_catalog (status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_scoped_jargon_scope_status
     ON scoped_jargon (bot_id, session_id, visibility, status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_scoped_facts_scope_subject
@@ -160,6 +183,50 @@ def ensure_scoped_derived_knowledge_schema(cm: ConnectionManager) -> None:
     with cm.migration_transaction() as tx:
         for statement in statements:
             tx.execute(statement)
+
+        # Older scoped databases predate the canonical semantic Tag catalog.  The
+        # column is additive and nullable during recovery; formal writers fill it
+        # whenever the catalog table is available.  Legacy tags/memory_tags are
+        # deliberately not read here.
+        tag_columns = _columns(tx, "scoped_tags")
+        if "catalog_id" not in tag_columns:
+            tx.execute("ALTER TABLE scoped_tags ADD COLUMN catalog_id INTEGER")
+
+        now = time.time()
+        scoped_rows = tx.execute(
+            "SELECT id, name, tag_type, description FROM scoped_tags "
+            "WHERE catalog_id IS NULL"
+        ).fetchall()
+        for row in scoped_rows:
+            tag_id, name, tag_type, description = row
+            normalized_name = unicodedata.normalize("NFKC", str(name or "")).strip()
+            if not normalized_name:
+                continue
+            normalized_type = str(tag_type or "keyword").strip() or "keyword"
+            tx.execute(
+                """INSERT INTO tag_catalog(
+                       normalized_name, display_name, tag_type, description,
+                       status, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, 'active', ?, ?)
+                   ON CONFLICT(normalized_name, tag_type) DO UPDATE SET
+                       display_name=CASE WHEN tag_catalog.display_name='' THEN excluded.display_name
+                                         ELSE tag_catalog.display_name END,
+                       description=CASE WHEN tag_catalog.description='' THEN excluded.description
+                                        ELSE tag_catalog.description END,
+                       updated_at=excluded.updated_at""",
+                (normalized_name, normalized_name, normalized_type, str(description or ""), now, now),
+            )
+            catalog = tx.execute(
+                "SELECT id FROM tag_catalog WHERE normalized_name=? AND tag_type=?",
+                (normalized_name, normalized_type),
+            ).fetchone()
+            if catalog is not None:
+                tx.execute("UPDATE scoped_tags SET catalog_id=? WHERE id=?", (int(catalog[0]), int(tag_id)))
+
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scoped_tags_scope_catalog "
+            "ON scoped_tags (bot_id, session_id, visibility, catalog_id)"
+        )
 
         # 旧版 scoped schema 允许原地纯增量升级；这里只 ALTER scoped_* 表，
         # 不读取、回填或修改任何 legacy facts/tag_relations 表。

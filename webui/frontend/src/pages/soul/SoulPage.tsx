@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { ActivityIcon, AlertCircleIcon, Clock3Icon, CompassIcon, GitBranchIcon, Globe2Icon, HeartHandshakeIcon, LockIcon, MessageSquareQuoteIcon, TargetIcon } from 'lucide-react'
-import { Area, AreaChart, Bar, BarChart, CartesianGrid, Line, LineChart, XAxis, YAxis } from 'recharts'
+import { ActivityIcon, AlertCircleIcon, Clock3Icon, CompassIcon, GitBranchIcon, Globe2Icon, HeartHandshakeIcon, MessageSquareQuoteIcon, TargetIcon } from 'lucide-react'
+import { Bar, BarChart, CartesianGrid, Line, LineChart, XAxis, YAxis } from 'recharts'
 
 import { isRequestCancelled } from '@/api/client'
 import { getScopeOptions, scopeOptionsFor } from '@/api/options'
 import { getRelationships, type RelationshipItem } from '@/api/people'
-import { getLegacySoulSnapshot, getSoulState, type LegacyMoodItem, type LegacySoulSnapshot, type RelationshipHistoryItem, type SoulScopeSelection, type SoulStatePayload } from '@/api/soul'
+import { getSoulState, type RelationshipHistoryItem, type SoulScopeSelection, type SoulStatePayload } from '@/api/soul'
 import { RelationshipCalibrationPanel } from '@/components/relationship/RelationshipCalibrationPanel'
 import { EvidenceList, ObjectDeepLink, PaginationControls, QueryState, ScopeSelect } from '@/components/shared'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -14,12 +14,7 @@ import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart'
 import { Input } from '@/components/ui/input'
-import { Separator } from '@/components/ui/separator'
 import { useCanonicalScopeDefault, usePaginationSearchParams } from '@/hooks/use-pagination-search-params'
-
-const moodChartConfig = {
-  intensity: { label: '情绪强度', color: 'var(--chart-1)' },
-} satisfies ChartConfig
 
 const componentChartConfig = {
   value: { label: '分量值', color: 'var(--chart-2)' },
@@ -35,6 +30,7 @@ const RELATIONSHIP_DIMENSIONS = [
   ['familiarity', '熟悉度'],
   ['trust', '信任'],
   ['fun', '趣味'],
+  ['hostility', '敌意'],
   ['depth', '深度'],
 ] as const
 
@@ -94,26 +90,6 @@ function SectionUnavailable({ reason }: { reason?: string | null }) {
   )
 }
 
-function LegacyMoodChart({ moods }: { moods: LegacyMoodItem[] }) {
-  const data = moods.slice(-20).map((item) => ({ ...item, label: formatTime(item.timestamp) }))
-  if (data.length < 2) return <div className="rounded-xl border bg-muted/10 p-6 text-center text-xs text-muted-foreground">Legacy 情绪样本不足，暂不绘制轨迹。</div>
-  return (
-    <div className="flex flex-col gap-3">
-      <ChartContainer config={moodChartConfig} className="h-[220px] w-full">
-        <AreaChart data={data} margin={{ left: 4, right: 12, top: 8 }}>
-          <defs><linearGradient id="legacyMoodFill" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="var(--chart-1)" stopOpacity={0.2} /><stop offset="95%" stopColor="var(--chart-1)" stopOpacity={0.01} /></linearGradient></defs>
-          <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.2} />
-          <XAxis dataKey="timestamp" tickFormatter={(value) => formatTime(value).slice(5, 16)} tickLine={false} axisLine={false} minTickGap={28} className="text-[10px]" />
-          <YAxis domain={[0, 1]} tickLine={false} axisLine={false} width={32} className="text-[10px]" />
-          <ChartTooltip content={<ChartTooltipContent />} />
-          <Area dataKey="intensity" type="monotone" stroke="var(--chart-1)" strokeWidth={2} fill="url(#legacyMoodFill)" isAnimationActive={false} />
-        </AreaChart>
-      </ChartContainer>
-      <div className="flex flex-wrap gap-2">{data.slice(-10).map((item) => <div key={item.id} className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs ${item.is_active ? 'border-primary/30 bg-primary/5' : 'bg-muted/10'}`}><Badge variant="outline">{item.type || 'unknown'}</Badge><span className="font-mono text-muted-foreground">{Math.round(Number(item.intensity || 0) * 100)}%</span>{item.is_active ? <Badge variant="secondary">active</Badge> : null}</div>)}</div>
-    </div>
-  )
-}
-
 function RelationshipTrajectory({ history, dimension }: { history: RelationshipHistoryItem[]; dimension: string }) {
   const data = [...history].reverse().filter((item) => item.dimension === dimension && item.after).map((item) => ({
     timestamp: item.timestamp,
@@ -153,7 +129,6 @@ export function SoulPage() {
   const pagination = usePaginationSearchParams()
   const [searchParams] = useSearchParams()
   const [payload, setPayload] = useState<SoulStatePayload | null>(null)
-  const [legacy, setLegacy] = useState<LegacySoulSnapshot | null>(null)
   const [relationshipOptions, setRelationshipOptions] = useState<RelationshipItem[]>([])
   const [relationshipOptionsLoading, setRelationshipOptionsLoading] = useState(false)
   const subjectId = searchParams.get('subject_principal_id') ?? ''
@@ -163,10 +138,7 @@ export function SoulPage() {
   const relationshipDimension = RELATIONSHIP_DIMENSIONS.some(([key]) => key === dimensionParam) ? dimensionParam : 'trust'
   const [status, setStatus] = useState<'loading' | 'success' | 'empty' | 'unknown' | 'error'>('empty')
   const [error, setError] = useState<unknown>()
-  const [legacyStatus, setLegacyStatus] = useState<'loading' | 'success' | 'empty' | 'error'>('empty')
-  const [legacyError, setLegacyError] = useState<unknown>()
   const formalRequestRef = useRef<AbortController | null>(null)
-  const legacyRequestRef = useRef<AbortController | null>(null)
   const botId = searchParams.get('bot_id') ?? ''
   const sessionId = searchParams.get('session_id') ?? ''
   useCanonicalScopeDefault({ botId, sessionId, setFilters: pagination.setFilters })
@@ -236,39 +208,10 @@ export function SoulPage() {
     }
   }, [fromTs, pagination.limit, pagination.offset, scope, subjectId, toTs])
 
-  const loadLegacy = useCallback(async () => {
-    legacyRequestRef.current?.abort()
-    if (!scope) {
-      setLegacy(null)
-      setLegacyStatus('empty')
-      return
-    }
-    const controller = new AbortController()
-    legacyRequestRef.current = controller
-    setLegacyStatus('loading')
-    setLegacyError(undefined)
-    try {
-      const snapshot = await getLegacySoulSnapshot(scope, controller.signal)
-      if (legacyRequestRef.current !== controller || controller.signal.aborted) return
-      setLegacy(snapshot)
-      setLegacyStatus('success')
-    } catch (reason) {
-      if (legacyRequestRef.current !== controller || controller.signal.aborted || isRequestCancelled(reason)) return
-      setLegacy(null)
-      setLegacyError(reason)
-      setLegacyStatus('error')
-    }
-  }, [scope])
-
   useEffect(() => {
     void loadFormal()
     return () => formalRequestRef.current?.abort()
   }, [loadFormal])
-  useEffect(() => {
-    void loadLegacy()
-    return () => legacyRequestRef.current?.abort()
-  }, [loadLegacy])
-
   const componentData = useMemo(() => Object.entries(payload?.mood.components ?? {}).map(([name, value]) => ({ name, value })), [payload?.mood.components])
   const formalUnavailable = payload?.source.health === 'unavailable' || payload?.source.health === 'error'
 
@@ -290,7 +233,7 @@ export function SoulPage() {
 
       <QueryState status={status} error={error} onRetry={() => void loadFormal()} title={!scope ? '请选择真实 Bot 与群会话' : undefined} description={!scope ? 'Soul 不接受默认 Bot、私聊或伪群作用域。' : undefined}>
         {payload ? <div className="flex flex-col gap-5">
-          {formalUnavailable ? <Alert><AlertCircleIcon /><AlertTitle>正式 scoped Soul 数据 unavailable</AlertTitle><AlertDescription>{reasonText(payload.source.reason_code)}。下方正式区域会保持 unavailable/unknown；不会用 Legacy 表内容伪装成当前 Scope。</AlertDescription></Alert> : null}
+          {formalUnavailable ? <Alert><AlertCircleIcon /><AlertTitle>正式 scoped Soul 数据 unavailable</AlertTitle><AlertDescription>{reasonText(payload.source.reason_code)}。下方正式区域会保持 unavailable/unknown；不会用未归属旧表内容伪装成当前 Scope。</AlertDescription></Alert> : null}
 
           <div className="grid gap-4 lg:grid-cols-3">
             <Card className="overflow-hidden border-primary/15 bg-gradient-to-br from-card to-primary/5 lg:col-span-2">
@@ -329,29 +272,7 @@ export function SoulPage() {
 
           <div className="flex flex-col gap-2"><p className="text-xs text-muted-foreground">正式 Soul API 对 Concern 与 Timeline 使用同一组 limit/offset；下方分页会同时移动两个列表的共享窗口。</p><PaginationControls page={payload.concerns.page} onOffsetChange={pagination.setOffset} onLimitChange={pagination.setLimit} /></div>
 
-          <Separator />
-
-          <details className="overflow-hidden rounded-xl border border-amber-500/25 bg-amber-500/[0.03]">
-            <summary className="flex cursor-pointer list-none flex-wrap items-center gap-2 px-6 py-4 marker:hidden"><LockIcon className="size-4 text-amber-500" /><span className="text-sm font-semibold">Legacy 只读审计（非当前 Scope）</span><Badge variant="outline" className="border-amber-500/30 text-amber-600">readonly</Badge><Badge variant="outline">legacy-not-session-scoped</Badge><span className="text-xs text-muted-foreground">默认收起</span></summary>
-            <div className="border-t border-amber-500/15 px-6 py-5">
-              <p className="mb-5 text-sm text-muted-foreground">以下内容来自可安全读取的旧表，最多只能证明 Bot 级筛选，不能证明属于当前 session。它与上方正式 SoulScope 数据严格分区，不提供任何写按钮。</p>
-              <QueryState status={legacyStatus} error={legacyError} title="Legacy 只读投影不可用" onRetry={() => void loadLegacy()}>
-              {legacy ? <>
-                <div>
-                  <div className="mb-3 flex items-center justify-between"><h3 className="text-sm font-semibold">Legacy Mood trajectory</h3><Badge variant={legacy.moods.status === 'available' ? 'secondary' : 'outline'}>{legacy.moods.status}</Badge></div>
-                  {legacy.moods.status === 'available' ? <LegacyMoodChart moods={legacy.moods.items} /> : <SectionUnavailable reason={legacy.moods.reason} />}
-                </div>
-                <Separator />
-                <div className="grid gap-5 lg:grid-cols-2">
-                  <div><div className="mb-3 flex items-center justify-between"><h3 className="text-sm font-semibold">Legacy Concern</h3><Badge variant={legacy.concerns.status === 'available' ? 'secondary' : 'outline'}>{legacy.concerns.status}</Badge></div>{legacy.concerns.status === 'unavailable' ? <SectionUnavailable reason={legacy.concerns.reason} /> : legacy.concerns.items.length ? <div className="flex flex-col gap-3">{legacy.concerns.items.map((item) => <div key={item.id} className="rounded-lg border bg-background/50 p-3"><div className="flex items-center justify-between gap-3"><p className="truncate text-xs font-semibold">{item.topic}</p><Badge variant="outline" className="font-mono">{Math.round(Number(item.intensity || 0) * 100)}%</Badge></div><div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-amber-500" style={{ width: `${Math.max(0, Math.min(100, Number(item.intensity || 0) * 100))}%` }} /></div><p className="mt-2 text-[10px] text-muted-foreground">Bot {item.bot_id || botId} · 最近触发 {formatTime(item.last_triggered)}</p></div>)}</div> : <p className="rounded-xl border p-6 text-center text-xs text-muted-foreground">Legacy 表中没有该 Bot 的 Concern。</p>}</div>
-                  <div><div className="mb-3 flex items-center justify-between"><h3 className="text-sm font-semibold">Legacy Timeline</h3><Badge variant={legacy.timeline.status === 'available' ? 'secondary' : 'outline'}>{legacy.timeline.status}</Badge></div>{legacy.timeline.status === 'unavailable' ? <SectionUnavailable reason={legacy.timeline.reason} /> : legacy.timeline.items.length ? <div className="ml-2 flex flex-col gap-5 border-l-2 border-amber-500/20 pl-5">{legacy.timeline.items.map((item) => <div key={item.id} className="relative"><span className="absolute -left-[27px] top-1 size-3 rounded-full border-2 border-background bg-amber-500" /><p className="text-xs font-semibold leading-relaxed">{item.event_summary}</p><p className="mt-1 text-[10px] text-muted-foreground">{formatTime(item.timestamp)} · 情绪印记 {Math.round(Number(item.emotional_weight || 0) * 100)}% · Bot {item.bot_id || botId}</p></div>)}</div> : <p className="rounded-xl border p-6 text-center text-xs text-muted-foreground">Legacy 表中没有该 Bot 的 Timeline。</p>}</div>
-                </div>
-              </> : null}
-              </QueryState>
-            </div>
-          </details>
-
-          <Alert><AlertTitle>运行时一致性边界</AlertTitle><AlertDescription>正式 mutation：{payload.capabilities.mutate.available ? 'available' : `unavailable（${reasonText(payload.capabilities.mutate.reason_code)}）`}；runtime refresh：{payload.runtime_refresh.status}。页面不会展示不可用的写按钮，也不会把 Legacy 读数据声明为当前 Scope。</AlertDescription></Alert>
+          <Alert><AlertTitle>运行时一致性边界</AlertTitle><AlertDescription>正式 mutation：{payload.capabilities.mutate.available ? 'available' : `unavailable（${reasonText(payload.capabilities.mutate.reason_code)}）`}；runtime refresh：{payload.runtime_refresh.status}。页面仅展示正式 Scope 数据，不会展示未归属的旧数据。</AlertDescription></Alert>
         </div> : null}
       </QueryState>
     </div>

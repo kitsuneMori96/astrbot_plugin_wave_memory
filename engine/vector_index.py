@@ -30,6 +30,10 @@ except ImportError:
     hnswlib = None
 
 
+class IndexCapacityError(RuntimeError):
+    """Raised when a hard-bounded index cannot accept another label."""
+
+
 class VectorIndex:
     """基于 hnswlib 的 HNSW 向量索引，支持增量添加和持久化。"""
 
@@ -40,6 +44,7 @@ class VectorIndex:
         index_path: Optional[str] = None,
         kind: Optional[str] = None,
         strict_manifest: bool = True,
+        allow_resize: bool = True,
     ):
         if hnswlib is None:
             raise ImportError("hnswlib is required: pip install hnswlib")
@@ -48,6 +53,7 @@ class VectorIndex:
         self.max_elements = max_elements
         self.index_path = index_path
         self.kind = kind or self._infer_kind(index_path)
+        self.allow_resize = bool(allow_resize)
         self._lock = threading.Lock()
         self._manifest: Optional[IndexManifest] = None
         self._manifest_error: Optional[str] = None
@@ -67,10 +73,24 @@ class VectorIndex:
                 if strict_manifest:
                     raise
             if self._manifest is not None:
-                load_path = str(generation_path(index_path, self._manifest.generation))
+                if not self.allow_resize and int(self._manifest.count) > int(self.max_elements):
+                    # A bounded hot index must never briefly load a legacy full
+                    # generation only to rebuild it afterwards.  Start empty and
+                    # let the durable rebuild path publish a policy-compliant one.
+                    self._manifest_error = (
+                        "index_capacity_exceeded: "
+                        f"manifest_count={self._manifest.count} max_elements={self.max_elements}"
+                    )
+                    self._manifest = None
+                else:
+                    load_path = str(generation_path(index_path, self._manifest.generation))
             elif self._manifest_error is None and os.path.exists(index_path):
-                # Backward-compatible load for indexes created before manifests.
-                load_path = index_path
+                # Legacy generations have no verified count.  They are safe to
+                # load only for elastic indexes; bounded hot indexes rebuild them.
+                if self.allow_resize:
+                    load_path = index_path
+                else:
+                    self._manifest_error = "legacy_index_requires_bounded_rebuild"
 
         if load_path:
             self.index.load_index(load_path, max_elements=max_elements)
@@ -80,11 +100,34 @@ class VectorIndex:
         self.index.set_ef(50)
 
     def add(self, ids: list[int], vectors: np.ndarray):
-        """添加向量到索引。vectors shape: (n, dim)"""
+        """添加向量到索引。vectors shape: (n, dim)。
+
+        ``allow_resize=False`` is used by the memory hot tier.  It deliberately
+        refuses an over-capacity write instead of silently making the process
+        resident set grow; the caller can keep the record cold and request a
+        compacted durable rebuild.
+        """
+        if not ids:
+            return
         with self._lock:
             current = self.index.get_current_count()
-            needed = current + len(ids)
+            existing_ids: set[int] = set()
+            get_ids = getattr(self.index, "get_ids_list", None)
+            if callable(get_ids):
+                try:
+                    existing_ids = {int(value) for value in get_ids()}
+                except Exception:
+                    # Conservatively count every label as new when an older
+                    # hnswlib build cannot expose labels.
+                    existing_ids = set()
+            new_labels = {int(value) for value in ids if int(value) not in existing_ids}
+            needed = current + len(new_labels)
             if needed > self.max_elements:
+                if not self.allow_resize:
+                    raise IndexCapacityError(
+                        f"index capacity reached: current={current} incoming={len(new_labels)} "
+                        f"max_elements={self.max_elements}"
+                    )
                 self.index.resize_index(needed + 10000)
                 self.max_elements = needed + 10000
             self.index.add_items(vectors.astype(np.float32), np.array(ids, dtype=np.int64))

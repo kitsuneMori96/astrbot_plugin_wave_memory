@@ -130,13 +130,11 @@ class LearningObjectRegistryTest(unittest.TestCase):
 
     def test_frontend_routes_learning_object_review_to_learning_center(self):
         page = Path("webui/frontend/src/pages/review/LearningObjectsPage.tsx").read_text(encoding="utf-8")
-        api = Path("webui/frontend/src/api/review.ts").read_text(encoding="utf-8")
         routes = Path("webui/frontend/src/app/routes.tsx").read_text(encoding="utf-8")
 
         self.assertIn("/learning-center", page)
         self.assertNotIn("getLearningObjectsReview", page)
         self.assertNotIn("reviewCandidate", page)
-        self.assertNotIn("/api/learning-objects/review", api)
         self.assertNotIn("/learning-objects", routes)
 
 

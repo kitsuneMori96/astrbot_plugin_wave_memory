@@ -8,40 +8,35 @@ from dataclasses import dataclass
 from typing import Any
 
 try:  # 兼容插件包导入和仓库测试直接导入
+    from ..domain.relationship_policy import (
+        DIMENSION_RANGES,
+        DIMENSION_WEIGHTS,
+        HOSTILITY_WEIGHT,
+        VALID_DIMENSIONS,
+        VALID_EVENT_TYPES,
+        attitude_level,
+        compute_affinity,
+    )
     from ..domain.scope import RuntimeScope, ScopeValidationError
 except ImportError:  # pragma: no cover - 由仓库测试直接导入 services 使用
+    from domain.relationship_policy import (
+        DIMENSION_RANGES,
+        DIMENSION_WEIGHTS,
+        HOSTILITY_WEIGHT,
+        VALID_DIMENSIONS,
+        VALID_EVENT_TYPES,
+        attitude_level,
+        compute_affinity,
+    )
     from domain.scope import RuntimeScope, ScopeValidationError
 
 
-DIMENSION_WEIGHTS = {
-    "familiarity": 0.25,
-    "trust": 0.30,
-    "fun": 0.20,
-    "depth": 0.25,
-}
-HOSTILITY_WEIGHT = 0.5
-DIM_RANGES = {
-    "familiarity": (0, 100),
-    "trust": (-50, 100),
-    "fun": (0, 80),
-    "hostility": (0, 100),
-    "depth": (0, 80),
-}
-VALID_DIMENSIONS = set(DIM_RANGES)
-VALID_EVENT_TYPES = {
-    "message_seen",
-    "direct_reply",
-    "bot_praised",
-    "bot_attacked",
-    "correction",
-    "gift_or_feed",
-    "confession",
-    "joke",
-    "deep_talk",
-    "ignored_boundary",
-    "manual_adjustment",
-}
-DEFAULT_DIMS = {"familiarity": 0, "trust": 0, "fun": 0, "hostility": 0, "depth": 0}
+# 保留旧模块的公开常量名称，同时把正式写入、旧数据审计和工具统一到
+# domain.relationship_policy，防止五维定义再次漂移。
+DIM_RANGES = dict(DIMENSION_RANGES)
+VALID_DIMENSIONS = set(VALID_DIMENSIONS)
+VALID_EVENT_TYPES = set(VALID_EVENT_TYPES)
+DEFAULT_DIMS = {name: 0.0 for name in DIM_RANGES}
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
@@ -49,21 +44,13 @@ def _clamp(value: float, lo: float, hi: float) -> float:
 
 
 def compute_affection(dims: dict[str, float]) -> int:
-    score = sum(float(dims.get(k, 0)) * w for k, w in DIMENSION_WEIGHTS.items())
-    score -= float(dims.get("hostility", 0)) * HOSTILITY_WEIGHT
-    return int(_clamp(score, -100, 100))
+    """Legacy-compatible alias for the single formal Affinity formula."""
+    return compute_affinity(dims)
 
 
 def get_attitude_level(affection: int) -> str:
-    if affection >= 60:
-        return "intimate"
-    if affection >= 30:
-        return "friendly"
-    if affection >= 0:
-        return "neutral"
-    if affection >= -30:
-        return "cold"
-    return "hostile"
+    """Legacy-compatible alias for the single formal attitude policy."""
+    return attitude_level(affection)
 
 
 def _project_group_subject_scope(scope: RuntimeScope) -> tuple[str, str, str]:

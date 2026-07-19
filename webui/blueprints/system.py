@@ -172,20 +172,70 @@ def _get_services_health(c) -> list:
 
 
 def count_existing_tagged_memories(conn) -> int:
-    """只统计仍存在于 memories 表中的已打 tag 记忆，排除 memory_tags 孤儿引用。"""
-    return int(conn.execute(
-        """SELECT COUNT(DISTINCT m.id)
-           FROM memories m
-           JOIN memory_tags mt ON mt.memory_id = m.id"""
-    ).fetchone()[0])
+    """统计正式 RuntimeScope 下已有 scoped Tag 的可用记忆。
+
+    旧 schema 没有 scoped_memory_tags 时保留 memory_tags fallback，便于旧版单测和
+    尚未完成迁移的开发数据库继续读取；生产 v2 数据优先走正式 scoped 数据面。
+    """
+    try:
+        return int(conn.execute(
+            """SELECT COUNT(DISTINCT m.id)
+               FROM memories m
+               JOIN scoped_memory_tags smt
+                 ON smt.memory_id = m.id
+                AND smt.bot_id = m.bot_id
+                AND smt.session_id = m.session_id
+                AND smt.visibility = m.visibility
+              WHERE m.resolution_state = 'resolved'
+                AND COALESCE(m.quarantine, 0) = 0
+                AND m.visibility = 'group'
+                AND m.group_id IS NOT NULL AND m.group_id != ''
+                AND m.bot_id IS NOT NULL AND m.bot_id != ''
+                AND m.session_id IS NOT NULL AND m.session_id != ''"""
+        ).fetchone()[0])
+    except Exception:
+        return int(conn.execute(
+            """SELECT COUNT(DISTINCT m.id)
+               FROM memories m
+               JOIN memory_tags mt ON mt.memory_id = m.id"""
+        ).fetchone()[0])
 
 
 def count_untagged_memories(conn) -> int:
-    """统计真实 memories 表中没有任何 tag 关联的记忆。"""
-    return int(conn.execute(
-        """SELECT COUNT(*) FROM memories m
-           WHERE NOT EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = m.id)"""
-    ).fetchone()[0])
+    """统计当前正式 TagWorker 可以处理的无 Tag 记忆。
+
+    不把 unresolved/隔离/非 group/短文本/noise 或已明确 skipped/failed 的历史记录
+    伪装成当前待办；旧 schema 仅用于兼容测试和开发数据库。
+    """
+    try:
+        return int(conn.execute(
+            """SELECT COUNT(*) FROM memories m
+                WHERE m.resolution_state = 'resolved'
+                  AND COALESCE(m.quarantine, 0) = 0
+                  AND m.visibility = 'group'
+                  AND m.group_id IS NOT NULL AND m.group_id != ''
+                  AND m.bot_id IS NOT NULL AND m.bot_id != ''
+                  AND m.session_id IS NOT NULL AND m.session_id != ''
+                  AND LENGTH(COALESCE(m.content, '')) >= 10
+                  AND COALESCE(m.source, '') != 'noise'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM scoped_memory_tags smt
+                       WHERE smt.memory_id = m.id
+                         AND smt.bot_id = m.bot_id
+                         AND smt.session_id = m.session_id
+                         AND smt.visibility = m.visibility
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM tag_extraction_status tes
+                       WHERE tes.memory_id = m.id
+                         AND tes.status IN ('failed', 'skipped')
+                  )"""
+        ).fetchone()[0])
+    except Exception:
+        return int(conn.execute(
+            """SELECT COUNT(*) FROM memories m
+               WHERE NOT EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = m.id)"""
+        ).fetchone()[0])
 
 
 def _registry_bots(container: Any) -> list[dict[str, Any]]:

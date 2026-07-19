@@ -232,3 +232,56 @@ def test_scoped_duplicate_lookup_cannot_hit_cross_bot_or_legacy_null_rows(manage
         normalized_content="same normalized content",
         since_ts=900.0,
     ) == beta_id
+
+
+def test_hnsw_post_filter_keeps_same_group_legacy_rows_without_cross_bot_leakage(manager):
+    repo = _repo_with_legacy_memories(manager)
+    manager.execute_write(
+        "INSERT INTO memories(group_id, content, timestamp) VALUES (?, ?, ?)",
+        ("group-1", "legacy same group", 1000.0),
+    )
+    manager.commit()
+    ensure_memories_v2_schema(manager)
+    alpha = _group_scope(bot_id="bot-alpha")
+    beta = _group_scope(bot_id="bot-beta")
+    alpha_id = repo.add_memory("group-1", "formal alpha", scope=alpha)
+    beta_id = repo.add_memory("group-1", "formal beta", scope=beta)
+    legacy_id = manager.execute_read(
+        "SELECT id FROM memories WHERE content='legacy same group'"
+    ).fetchone()[0]
+    # Old runtime data uses evicted to mean "not resident in the previous HNSW".
+    # It remains eligible in the legacy compatibility lane, unlike scoped rows.
+    manager.execute_write("UPDATE memories SET memory_type='evicted' WHERE id=?", (legacy_id,))
+    manager.commit()
+
+    rows = repo.get_memories_by_ids([legacy_id, alpha_id, beta_id], scope=alpha)
+
+    assert {row["id"] for row in rows} == {legacy_id, alpha_id}
+    assert next(row for row in rows if row["id"] == legacy_id)["_tag_lane"] == "legacy"
+
+
+def test_legacy_tag_cold_candidates_stay_group_scoped_and_allow_explicit_global_reads(manager):
+    repo = _repo_with_legacy_memories(manager)
+    vector = np.asarray([0.1, 0.2], dtype=np.float32).tobytes()
+    manager.execute_write(
+        "INSERT INTO memories(group_id, content, vector, timestamp) VALUES (?, ?, ?, ?)",
+        ("group-1", "legacy group one", vector, 1000.0),
+    )
+    manager.execute_write(
+        "INSERT INTO memories(group_id, content, vector, timestamp) VALUES (?, ?, ?, ?)",
+        ("group-2", "legacy group two", vector, 1001.0),
+    )
+    manager.execute_write("CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT, vector BLOB)")
+    manager.execute_write("INSERT INTO tags VALUES (1, 'legacy topic', ?)", (vector,))
+    manager.execute_write("INSERT INTO memory_tags(memory_id, tag_id, relevance) VALUES (1, 1, 0.8)")
+    manager.execute_write("INSERT INTO memory_tags(memory_id, tag_id, relevance) VALUES (2, 1, 1.0)")
+    manager.commit()
+    ensure_memories_v2_schema(manager)
+
+    scoped = repo.list_legacy_cold_memory_candidates(_group_scope(group_id="group-1"), [1], limit=10)
+    global_denied = repo.list_legacy_cold_memory_candidates(None, [1], limit=10)
+    global_allowed = repo.list_legacy_cold_memory_candidates(None, [1], limit=10, allow_unscoped=True)
+
+    assert [row["content"] for row in scoped] == ["legacy group one"]
+    assert global_denied == []
+    assert {row["content"] for row in global_allowed} == {"legacy group one", "legacy group two"}

@@ -41,7 +41,6 @@ export interface TagListPayload {
   items: TagListItem[]
   total: number
   available_types: string[]
-  legacy: boolean
   readonly: boolean
   capabilities: {
     mutation: {
@@ -67,7 +66,7 @@ export interface TagRuntimePayload {
   }
   index: {
     available: boolean
-    health: 'ready' | 'legacy' | 'invalid' | 'unavailable'
+    health: 'ready' | 'invalid' | 'unavailable'
     reason_code?: string | null
     count: number
     generation?: number | null

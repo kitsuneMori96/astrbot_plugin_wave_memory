@@ -22,9 +22,8 @@ describe('TagsPage', () => {
       items: [{ id: 1, name: '共同记忆', type: 'topic', frequency: 12, confidence: 0.86 }],
       total: 1,
       available_types: ['person', 'topic'],
-      legacy: true,
       readonly: true,
-      capabilities: { mutation: { available: false, reason_code: 'legacy_mutation_disabled' } },
+      capabilities: { mutation: { available: false, reason_code: 'mutation_disabled' } },
     })
     api.getScopeOptions.mockReset().mockResolvedValue({ bots: [], sessions: [], channels: [], generated_at: 1, source: { health: 'empty', reason_code: null } })
     api.getTagQuality.mockReset().mockResolvedValue({
@@ -39,7 +38,7 @@ describe('TagsPage', () => {
       runtime: {
         capabilities: {
           extract: { available: true, reason_code: null },
-          mutation: { available: false, reason_code: 'legacy_mutation_disabled' },
+          mutation: { available: false, reason_code: 'mutation_disabled' },
         },
         index: { available: true, health: 'ready', reason_code: null, count: 42, generation: 7, db_watermark: 123 },
         rag: { mode: 'semantic', semantic_available: true, fallback_reason: null, provider_configured: true, reference_refresh_interval: 200 },
@@ -47,7 +46,7 @@ describe('TagsPage', () => {
     })
   })
 
-  it('展示真实质量指标与只读 Tag 目录，不暴露 legacy 写操作', async () => {
+  it('展示真实质量指标与只读 Tag 目录，不暴露未开放写操作', async () => {
     render(<TagsPage />)
 
     expect(await screen.findByText('共同记忆')).toBeVisible()

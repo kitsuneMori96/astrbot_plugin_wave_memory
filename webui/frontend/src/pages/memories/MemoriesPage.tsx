@@ -10,14 +10,12 @@ import {
   getMemoryDetail,
   getMemoryTagState,
   getSimilarMemories,
-  listLegacyMemories,
   listMemories,
   memoryBatchStreamUrl,
   reEmbedMemory,
   runPostStream,
   undoMemoryTagCorrection,
   updateMemory,
-  type LegacyMemoriesResponse,
   type MemoryDetail,
   type MemoryItem,
   type MemoryRefInput,
@@ -106,9 +104,6 @@ export function MemoriesPage() {
   const [status, setStatus] = useState<'loading' | 'success' | 'empty' | 'unknown' | 'error'>('empty')
   const [error, setError] = useState<unknown>()
   const [selectedRefs, setSelectedRefs] = useState<string[]>([])
-  const [legacyPayload, setLegacyPayload] = useState<LegacyMemoriesResponse | null>(null)
-  const [legacyOffset, setLegacyOffset] = useState(0)
-  const [legacyLoading, setLegacyLoading] = useState(true)
 
   const [detailOpen, setDetailOpen] = useState(false)
   const [detail, setDetail] = useState<MemoryDetail | null>(null)
@@ -171,15 +166,6 @@ export function MemoriesPage() {
   }, [hasTags, hasVector, pagination.limit, pagination.offset, scope, search, sender, source])
 
   useEffect(() => { void load() }, [load])
-  useEffect(() => {
-    let cancelled = false
-    setLegacyLoading(true)
-    listLegacyMemories({ limit: 25, offset: legacyOffset, search: search || undefined, source: source || undefined })
-      .then((result) => { if (!cancelled) setLegacyPayload(result) })
-      .catch(() => { if (!cancelled) setLegacyPayload(null) })
-      .finally(() => { if (!cancelled) setLegacyLoading(false) })
-    return () => { cancelled = true }
-  }, [legacyOffset, search, source])
 
   const hydrateDetail = useCallback(async (detailUrl: string): Promise<MemoryDetail | null> => {
     const request = ++detailRequest.current
@@ -569,24 +555,6 @@ export function MemoriesPage() {
         </CardContent>
       </Card>
 
-      <Card className="border-amber-500/10 bg-amber-500/[0.02]">
-        <CardHeader className="py-4">
-          <div className="flex items-center gap-2">
-            <Badge variant="outline" className="border-amber-500/20 text-amber-600 bg-amber-500/5">只读审计</Badge>
-            <CardTitle className="text-base">Legacy 历史记忆</CardTitle>
-          </div>
-          <CardDescription>这里保留尚未投影到 canonical RuntimeScope 的历史记忆。它们没有足够证据绑定当前 Bot / 群，因此不会混入上方正式列表，不参与实时召回。</CardDescription>
-        </CardHeader>
-        <CardContent className="pt-0">
-          <Alert className="mb-4 border-amber-500/15 bg-amber-500/[0.02] text-amber-700 dark:text-amber-500"><AlertCircleIcon className="size-4 text-amber-600" /><AlertTitle>未归属数据，不是当前群记忆</AlertTitle><AlertDescription className="text-xs">{legacyPayload ? `共 ${(legacyPayload.page.total ?? 0).toLocaleString('zh-CN')} 条历史记录待审计。` : legacyLoading ? '正在读取历史审计清单。' : 'Legacy 审计接口暂不可用。'} 仅当 metadata_json.runtime_scope 等证据能唯一确定作用域时，后端才会将记录投影到正式区。</AlertDescription></Alert>
-          {legacyPayload?.items.length ? <>
-            <div className="overflow-auto rounded-lg border bg-background">
-              <Table><TableHeader><TableRow><TableHead className="w-20">Legacy ID</TableHead><TableHead>内容</TableHead><TableHead>发送者</TableHead><TableHead>来源</TableHead><TableHead>时间</TableHead></TableRow></TableHeader><TableBody>{legacyPayload.items.map((item) => <TableRow key={item.id}><TableCell className="font-mono text-xs text-muted-foreground">#{item.id}</TableCell><TableCell className="max-w-xl"><p className="line-clamp-2">{item.content}</p></TableCell><TableCell className="text-muted-foreground text-xs">{item.sender_name ?? item.sender_id ?? '未记录'}</TableCell><TableCell><Badge variant="outline" className="font-mono text-[10px]">{item.source ?? '未记录'}</Badge></TableCell><TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">{formatTime(item.timestamp)}</TableCell></TableRow>)}</TableBody></Table>
-            </div>
-            <div className="mt-3 flex items-center justify-between text-sm text-muted-foreground"><span>第 {legacyOffset + 1}-{Math.min(legacyOffset + 25, (legacyPayload.page.total ?? 0))} 条</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={legacyLoading || legacyOffset === 0} onClick={() => setLegacyOffset(Math.max(0, legacyOffset - 25))}>上一页</Button><Button size="sm" variant="outline" disabled={legacyLoading || legacyOffset + 25 >= (legacyPayload.page.total ?? 0)} onClick={() => setLegacyOffset(legacyOffset + 25)}>下一页</Button></div></div>
-          </> : !legacyLoading ? <p className="text-xs text-muted-foreground py-4 text-center">没有未归属的 Legacy 记忆。</p> : null}
-        </CardContent>
-      </Card>
 
       <Sheet open={detailOpen} onOpenChange={(openValue) => { if (!openValue) closeDetail() }}>
         <SheetContent className="w-full gap-0 overflow-hidden sm:max-w-2xl">

@@ -17,13 +17,10 @@ const mocks = vi.hoisted(() => ({
   getBookLoreItems: vi.fn(),
   getApprovedFewShot: vi.fn(),
   getScopedFacts: vi.fn(),
-  getLegacyFacts: vi.fn(),
   getPeople: vi.fn(),
   getRelationships: vi.fn(),
-  getLegacyRelationships: vi.fn(),
   getIndexDiagnostics: vi.fn(),
   listJargons: vi.fn(),
-  listLegacyJargons: vi.fn(),
   getCatalogAudit: vi.fn(),
   getJargonEvidence: vi.fn(),
   batchReviewJargons: vi.fn(),
@@ -39,10 +36,9 @@ vi.mock('@/api/knowledge', () => ({
   getBookLoreItems: mocks.getBookLoreItems,
   getApprovedFewShot: mocks.getApprovedFewShot,
   getScopedFacts: mocks.getScopedFacts,
-  getLegacyFacts: mocks.getLegacyFacts,
 }))
-vi.mock('@/api/people', () => ({ getPeople: mocks.getPeople, getRelationships: mocks.getRelationships, getLegacyRelationships: mocks.getLegacyRelationships }))
-vi.mock('@/api/jargon', () => ({ listJargons: mocks.listJargons, listLegacyJargons: mocks.listLegacyJargons, getCatalogAudit: mocks.getCatalogAudit, getJargonEvidence: mocks.getJargonEvidence, batchReviewJargons: mocks.batchReviewJargons, updateJargonMeaning: mocks.updateJargonMeaning, archiveJargon: mocks.archiveJargon, checkHolymanUpdate: mocks.checkHolymanUpdate, previewHolymanSync: mocks.previewHolymanSync, reviewJargon: vi.fn() }))
+vi.mock('@/api/people', () => ({ getPeople: mocks.getPeople, getRelationships: mocks.getRelationships }))
+vi.mock('@/api/jargon', () => ({ listJargons: mocks.listJargons, getCatalogAudit: mocks.getCatalogAudit, getJargonEvidence: mocks.getJargonEvidence, batchReviewJargons: mocks.batchReviewJargons, updateJargonMeaning: mocks.updateJargonMeaning, archiveJargon: mocks.archiveJargon, checkHolymanUpdate: mocks.checkHolymanUpdate, previewHolymanSync: mocks.previewHolymanSync, reviewJargon: vi.fn() }))
 vi.mock('@/api/diagnostics', () => ({ getIndexDiagnostics: mocks.getIndexDiagnostics }))
 vi.mock('@/api/options', () => ({
   getScopeOptions: mocks.getScopeOptions,
@@ -57,10 +53,7 @@ beforeEach(() => {
   setViewport(1280)
   mocks.getScopeOptions.mockResolvedValue({ bots: [], sessions: [], channels: [], generated_at: 1, source: { health: 'healthy', reason_code: null } })
   mocks.getRelationships.mockResolvedValue({ items: [], page: { ...page, total: 0 } })
-  mocks.getLegacyRelationships.mockResolvedValue({ items: [], page: { ...page, total: 0 }, legacy: true, readonly: true, scope: null, scope_status: 'legacy_group_key', reason_code: 'bot_and_canonical_session_unavailable' })
-  mocks.getLegacyFacts.mockResolvedValue({ items: [], page: { ...page, total: 0 }, legacy: true, readonly: true, scope: null, scope_status: 'unresolved_legacy', reason_code: 'scope_unavailable' })
   mocks.listJargons.mockResolvedValue({ items: [], page, capabilities: { review: { available: false, reason_code: 'readonly' } } })
-  mocks.listLegacyJargons.mockResolvedValue({ items: [], page: { ...page, total: 0 }, legacy: true, readonly: true, scope: null, scope_status: 'unresolved_legacy', reason_code: 'scope_unavailable' })
   mocks.getCatalogAudit.mockResolvedValue({ asset_status: 'ready' })
   mocks.getJargonEvidence.mockResolvedValue({ ok: true, jargon: { id: 7, word: 'v我50', meaning: '疯狂星期四', revision: 2 }, scope: { kind: 'RuntimeScope', payload: {} }, anchor: null, messages: [], fallback_contexts: [], used_fallback: true })
   mocks.batchReviewJargons.mockResolvedValue({ ok: true, operation: { status: 'succeeded' }, reviewed_count: 1, items: [{ id: 7, status: 'rejected' }] })
@@ -75,12 +68,13 @@ describe('知识、人物与诊断页面关键约束', () => {
     expect(appRoutes.find((route) => route.path === '/jargon')).toMatchObject({ title: '黑话与口癖' })
   })
 
-  it('Jargon 默认收起非当前 Scope 的 Legacy 审计区', async () => {
+  it('Jargon 仅展示当前正式 Scope 数据', async () => {
     render(<MemoryRouter initialEntries={['/jargon?bot_id=bot-real&session_id=qq%3Agroup%3A42']}><JargonPage /></MemoryRouter>)
 
-    const legacyTitle = await screen.findByText('Legacy 历史黑话')
-    expect(legacyTitle.closest('details')).not.toHaveAttribute('open')
-    expect(screen.getByText('非当前 Scope · 默认收起')).toBeVisible()
+    expect(await screen.findByText('群聊黑话清单')).toBeVisible()
+    expect(screen.queryByText(/只读审计/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/非当前 Scope/)).not.toBeInTheDocument()
+    expect(mocks.listJargons).toHaveBeenCalledWith(expect.objectContaining({ bot_id: 'bot-real', session_id: 'qq:group:42', visibility: 'group' }))
   })
 
   it('BookLore 使用服务端摘要返回的真实 catalog scope', async () => {
@@ -240,19 +234,6 @@ describe('知识、人物与诊断页面关键约束', () => {
     await user.click(screen.getByRole('button', { name: '搜索' }))
     await waitFor(() => expect(mocks.getScopedFacts).toHaveBeenCalledTimes(2))
     expect(mocks.getScopedFacts).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'pending', offset: 0 }))
-  })
-
-  it('Legacy 总数缺失时不回填 0 或崩溃', async () => {
-    const user = userEvent.setup()
-    mocks.getScopedFacts.mockResolvedValue({ items: [], page: { ...page, total: 0 }, scope: { bot_id: 'bot-real', session_id: 'qq:group:42', visibility: 'group' } })
-    mocks.getLegacyFacts.mockResolvedValue({ items: [], page: { ...page, total: null, total_status: 'unavailable', has_more: false }, legacy: true, readonly: true, scope: null, scope_status: 'unresolved_legacy', reason_code: 'scope_unavailable' })
-
-    render(<MemoryRouter initialEntries={['/facts?bot_id=bot-real&session_id=qq%3Agroup%3A42']}><FactsPage /></MemoryRouter>)
-
-    await waitFor(() => expect(mocks.getLegacyFacts).toHaveBeenCalledTimes(1))
-    await user.click(screen.getByText('Legacy Facts 历史事实'))
-    expect(await screen.findByText(/Legacy facts 总数未提供/)).toBeVisible()
-    expect(screen.queryByText(/共 0 条 Legacy facts/)).not.toBeInTheDocument()
   })
 
   it('People 对缺失 Affinity 明示不可用且不回填 50', async () => {

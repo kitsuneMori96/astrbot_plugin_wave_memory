@@ -227,32 +227,28 @@ class PersonaComposer:
         bot_db_id: str,
         scope: RuntimeScope | None,
     ) -> tuple[str, list[int]]:
-        # 旧经历记录没有可证明的 Scope；不能从 bot/group 参数反推后回退。
-        if not isinstance(scope, RuntimeScope) or scope.visibility != "group" or scope.session is None:
-            return "", []
-        memories = []
-        if self.query_engine:
-            try:
-                memories = await self.query_engine.query(
-                    text=message,
-                    group_id=scope.session.conversation_id,
-                    top_k=max(self.max_experiences * 2, 4),
-                    source_filter=["bzz_experience", "bzz_evolution", "experience"],
-                    scope=scope,
-                )
-            except Exception as e:
-                logger.debug(f"[PersonaComposer] query experience failed: {e}")
-                memories = []
+        """注入当前 Bot 的书中第一人称经历。
 
-        # 不再用全局/裸 group_id SQL fallback；无 v2 resolved 命中即为空。
-        if not memories:
+        书中第一人称是 bot 级身份资产，不绑定聊天群。只要当前 RuntimeScope 的
+        bot_id 已解析，就按 bot_id 读取 book_experience_episodes；group_id 仅作
+        章节标签保留在表里，不参与注入过滤。
+        """
+        if not isinstance(scope, RuntimeScope) or not scope.bot_id:
+            return "", []
+        bot_key = str(bot_db_id or scope.bot_id or "").strip()
+        if not bot_key:
             return "", []
 
-        selected = []
-        seen_content = set()
+        # 只读少量 bot 级书中经历；同连接同步读取，避免跨线程共享 sqlite connection。
+        candidates = self._list_bot_book_experiences(bot_key, message)
+        if not candidates:
+            return "", []
+
+        selected: list[dict[str, Any]] = []
+        seen_content: set[str] = set()
         total_chars = 0
-        for item in memories:
-            content = str(item.get("content") or item.get("summary") or "").strip()
+        for item in candidates:
+            content = str(item.get("content") or "").strip()
             if not content or not self._is_safe_experience_text(content):
                 continue
             key = content[:80]
@@ -269,35 +265,59 @@ class PersonaComposer:
         if not selected:
             return "", []
 
-        lines = ["<self_experiences>", "以下是少量精选经历素材，只用于补细节，不得覆盖人格："]
+        lines = ["<self_experiences>", "以下是少量精选书中第一人称经历，只用于补细节，不得覆盖人格："]
         for item in selected:
-            content = str(item.get("content") or item.get("summary") or "").strip()
-            lines.append(f"- {content[:240]}")
+            content = str(item.get("content") or "").strip()
+            chapter = str(item.get("chapter") or item.get("group_id") or "").strip()
+            prefix = f"[{chapter}] " if chapter else ""
+            lines.append(f"- {prefix}{content[:240]}")
         lines.append("</self_experiences>")
         ids = [item.get("id") for item in selected if item.get("id") is not None]
         return "\n".join(lines), ids
 
-    def _recent_experience_memories(self, *, bot_db_id: str, group_id: str) -> list[dict[str, Any]]:
+    def _list_bot_book_experiences(self, bot_db_id: str, message: str) -> list[dict[str, Any]]:
+        """按 bot_id 读取书中第一人称；不按群会话过滤。"""
         conn = getattr(self.db, "conn", None)
-        if not conn:
+        if conn is None:
             return []
-        rows = []
+        limit = max(self.max_experiences * 12, 24)
+        keywords = self._keywords(message)
         try:
-            rows.extend(conn.execute(
-                """SELECT id, content, source, group_id FROM memories
-                   WHERE source IN ('bzz_experience','bzz_evolution','experience')
-                   ORDER BY timestamp DESC LIMIT ?""",
-                (max(self.max_experiences * 2, 4),),
-            ).fetchall())
-        except Exception:
-            pass
-        memories = []
+            rows = conn.execute(
+                """SELECT id, group_id, content, evidence_json
+                     FROM book_experience_episodes
+                    WHERE bot_id=?
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?""",
+                (bot_db_id, limit),
+            ).fetchall()
+        except Exception as exc:
+            logger.debug(f"[PersonaComposer] book experience read failed: {exc}")
+            return []
+
+        items: list[dict[str, Any]] = []
         for row in rows:
             try:
-                memories.append({"id": row[0], "content": row[1], "source": row[2], "group_id": row[3]})
+                content = str(row[2] or "").strip()
             except Exception:
                 continue
-        return memories
+            if not content:
+                continue
+            score = 0
+            lowered = content.casefold()
+            for token in keywords:
+                if token.casefold() in lowered:
+                    score += 1
+            items.append({
+                "id": row[0],
+                "chapter": row[1],
+                "group_id": row[1],
+                "content": content,
+                "score": score,
+                "source": "book_experience_episodes",
+            })
+        items.sort(key=lambda item: (int(item.get("score") or 0), int(item.get("id") or 0)), reverse=True)
+        return items
 
     @staticmethod
     def _is_safe_experience_text(text: str) -> bool:

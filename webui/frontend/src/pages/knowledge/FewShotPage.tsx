@@ -98,7 +98,7 @@ export function FewShotPage() {
 
     <details className="rounded-lg border border-dashed text-sm">
       <summary className="cursor-pointer list-none px-4 py-2.5 font-medium marker:hidden">正式数据边界与健康规则</summary>
-      <p className="border-t px-4 py-3 text-xs leading-relaxed text-muted-foreground">本页不展示候选、拒绝项、Legacy 数据或审核写操作。approved 之外还要求内容通过身份污染与不安全风格检查；总数、分页和搜索始终限定在完整 canonical RuntimeScope。</p>
+      <p className="border-t px-4 py-3 text-xs leading-relaxed text-muted-foreground">本页不展示候选、拒绝项或审核写操作。approved 之外还要求内容通过身份污染与不安全风格检查；总数、分页和搜索始终限定在完整 canonical RuntimeScope。</p>
     </details>
   </div>
 }

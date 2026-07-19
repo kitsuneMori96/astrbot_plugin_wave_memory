@@ -59,7 +59,6 @@ export interface BeliefsResponse extends PageResponse<BeliefItem> {
     create: BeliefCapability
     edit: BeliefCapability
     physical_delete: BeliefCapability
-    archive_legacy: BeliefCapability
     select_all_matching: BeliefCapability
   }
 }
@@ -85,32 +84,6 @@ export interface BeliefEvidencePayload {
   episodes: Array<Record<string, unknown>>
   used_fallback: boolean
   reason_code: string | null
-}
-
-export interface LegacyBeliefItem {
-  id: number
-  content: string
-  type: BeliefType
-  confidence: number | null
-  bot_id: string
-  source: string
-  status: string
-  created_at?: number
-  updated_at?: number
-  legacy: true
-  unresolved_legacy: true
-  scope: null
-}
-
-export interface LegacyBeliefsResponse {
-  items: LegacyBeliefItem[]
-  total: number
-  pending_count: number
-  legacy: true
-  unresolved_legacy: true
-  readonly: true
-  scope: null
-  page: { number: number; page_size: number; total: number; total_status: 'exact'; has_next: boolean }
 }
 
 export interface MutationResult {
@@ -145,15 +118,6 @@ export function listBeliefs(filters: BeliefFilters): Promise<BeliefsResponse> {
   if (filters.status) params.set('status', filters.status)
   if (filters.search) params.set('search', filters.search)
   return fetchJson<BeliefsResponse>(`/api/beliefs?${params.toString()}`)
-}
-
-export function listLegacyBeliefs(filters: { bot_id?: string; type?: BeliefType; status?: string; search?: string; limit: 25 | 50 | 100; offset: number }): Promise<LegacyBeliefsResponse> {
-  const params = new URLSearchParams({ limit: String(filters.limit), offset: String(filters.offset) })
-  if (filters.bot_id) params.set('bot_id', filters.bot_id)
-  if (filters.type) params.set('type', filters.type)
-  if (filters.status) params.set('status', filters.status)
-  if (filters.search) params.set('search', filters.search)
-  return fetchJson<LegacyBeliefsResponse>(`/api/beliefs/legacy/audit?${params.toString()}`)
 }
 
 export function getBeliefEvidence(item: BeliefItem, scope: ScopedSelection, before = 15, after = 15): Promise<BeliefEvidencePayload> {

@@ -13,8 +13,6 @@ const api = vi.hoisted(() => ({
   get: vi.fn(),
   reset: vi.fn(),
   validate: vi.fn(),
-  feedback: vi.fn(),
-  review: vi.fn(),
 }))
 
 vi.mock('@/api/channels', async (importOriginal) => {
@@ -27,7 +25,6 @@ vi.mock('@/api/channels', async (importOriginal) => {
     validateChannelConfig: api.validate,
   }
 })
-vi.mock('@/api/review', () => ({ getAgentFeedback: api.feedback, reviewConfigSuggestion: api.review }))
 vi.mock('sonner', () => ({ toast: { error: vi.fn(), info: vi.fn(), success: vi.fn(), warning: vi.fn() } }))
 
 const current = {
@@ -51,7 +48,6 @@ beforeEach(() => {
     limits: { timeout_ms_max: 5000, min_score_min: 0, min_score_max: 1 },
     descriptors: Object.keys(current.channels).map((id) => ({ id, purpose: `${id} purpose`, dependencies: [], risk: 'low', management_route: null, verification_filters: {}, available: true, numeric_limits: id === 'memory' ? { priority: { min: 0, max: 3 } } : undefined })),
   })
-  api.feedback.mockResolvedValue({ config_suggestions: [] })
   api.validate.mockResolvedValue({ ok: true, errors: [], diff: [], preflight_token: 'token-1' })
   api.reset.mockResolvedValue({ ok: true, errors: [], diff: [], operation: { status: 'succeeded' }, effective: current })
 })
@@ -107,6 +103,13 @@ describe('ChannelConfigPage 预检安全', () => {
     const fingerprint = channelPatchFingerprint(patch)
     expect(hasFreshChannelPreflight(validation, fingerprint, patch)).toBe(true)
     expect(hasFreshChannelPreflight(validation, fingerprint, { ...patch, trace_enabled: true })).toBe(false)
+  })
+
+  it('只读取通道配置，不加载或展示配置建议审核链路', async () => {
+    renderPage()
+
+    expect(await screen.findByRole('spinbutton', { name: 'memory 优先级' })).toBeVisible()
+    expect(screen.queryByText('配置建议')).not.toBeInTheDocument()
   })
 
   it('窄屏将通道参数表降级为可编辑卡片而非裁切参数列', async () => {

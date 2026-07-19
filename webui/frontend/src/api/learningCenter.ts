@@ -103,7 +103,6 @@ export interface LearningCandidateItem {
   target_ids?: Array<number | string>
   failures?: Array<{ id?: number; code?: string | null; message?: string | null; retryable?: boolean }>
   operations?: Array<Record<string, unknown>>
-  legacy_unlinked?: boolean
   quarantined?: boolean
   garbled?: boolean
   promotion_blocked?: boolean
@@ -117,10 +116,6 @@ export interface LearningExperiencesPayload {
   worldview_internalization?: LearningCandidateItem[]
   book_experience_episodes?: LearningCandidateItem[]
   interaction_experiences?: Array<Record<string, unknown>>
-  legacy_history?: {
-    evolution?: Array<Record<string, unknown>>
-    experience?: Array<Record<string, unknown>>
-  }
   pagination?: { limit?: number; offset?: number; has_more?: boolean }
   labels?: Record<string, string>
   [key: string]: unknown

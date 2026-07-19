@@ -120,6 +120,21 @@ class WaveMemoryDB:
     def list_scoped_memory_tags(self, scope, memory_ids):
         return self._scoped_knowledge_repo.list_scoped_memory_tags(scope, memory_ids)
 
+    def list_scoped_cold_memory_candidates(self, scope, tag_ids, **kwargs):
+        return self._scoped_knowledge_repo.list_scoped_cold_memory_candidates(scope, tag_ids, **kwargs)
+
+    def list_scoped_catalog_links(self, scope, catalog_ids):
+        return self._scoped_knowledge_repo.list_scoped_catalog_links(scope, catalog_ids)
+
+    def get_scoped_tag_vectors_by_ids(self, scope, tag_ids):
+        return self._scoped_knowledge_repo.get_scoped_tag_vectors_by_ids(scope, tag_ids)
+
+    def get_scoped_tag_catalog_id(self, scope, tag_id):
+        return self._scoped_knowledge_repo.get_scoped_tag_catalog_id(scope, tag_id)
+
+    def update_tag_catalog_embedding(self, catalog_id, vector, **kwargs):
+        return self._scoped_knowledge_repo.update_tag_catalog_embedding(catalog_id, vector, **kwargs)
+
     @property
     def soul_repository(self) -> ScopedSoulRepository:
         """正式 Scoped Soul 仓储。"""
@@ -209,8 +224,20 @@ class WaveMemoryDB:
     def get_all_memory_vectors(self, group_id=None):
         return self._memory_repo.get_all_memory_vectors(group_id)
 
-    def get_memories_by_ids(self, ids, *, scope=None):
-        return self._memory_repo.get_memories_by_ids(ids, scope=scope)
+    def get_memories_by_ids(self, ids, *, scope=None, allow_unscoped=False):
+        return self._memory_repo.get_memories_by_ids(
+            ids,
+            scope=scope,
+            allow_unscoped=allow_unscoped,
+        )
+
+    def list_legacy_cold_memory_candidates(self, scope, tag_ids, *, limit=128, allow_unscoped=False):
+        return self._memory_repo.list_legacy_cold_memory_candidates(
+            scope,
+            tag_ids,
+            limit=limit,
+            allow_unscoped=allow_unscoped,
+        )
 
     def find_recent_duplicate_memory(self, *, scope, normalized_content, since_ts):
         return self._memory_repo.find_recent_duplicate_memory(
@@ -310,6 +337,12 @@ class WaveMemoryDB:
 
     def get_tag_vectors_by_ids(self, ids: list[int]) -> dict:
         return self._tag_repo.get_tag_vectors_by_ids(ids)
+
+    def get_legacy_tag_vectors_by_ids(self, ids: list[int]) -> dict:
+        return self._tag_repo.get_legacy_tag_vectors_by_ids(ids)
+
+    def list_legacy_memory_tags(self, memory_ids: list[int]) -> dict:
+        return self._tag_repo.list_legacy_memory_tags(memory_ids)
 
     def add_tag_relation(self, source_tag_id, target_tag_id, relation_type, weight=1.0, confidence=1.0, metadata=None):
         return self._tag_repo.add_tag_relation(source_tag_id, target_tag_id, relation_type, weight, confidence, metadata)

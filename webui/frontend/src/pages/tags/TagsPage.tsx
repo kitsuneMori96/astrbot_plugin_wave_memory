@@ -31,7 +31,7 @@ function Metric({ label, value, detail }: { label: string; value: string | numbe
 }
 
 const RAG_MODE_LABELS = { semantic: '语义 RAG', static: '静态词表', unavailable: '不可用' } as const
-const INDEX_HEALTH_LABELS = { ready: '代次已验证', legacy: 'Legacy 索引', invalid: '清单无效', unavailable: '索引不可用' } as const
+const INDEX_HEALTH_LABELS = { ready: '代次已验证', invalid: '清单无效', unavailable: '索引不可用' } as const
 const REASON_LABELS: Record<string, string> = {
   provider_not_configured: 'Tag LLM Provider 未配置',
   tag_extractor_unavailable: 'Tag 提取器未启动',
@@ -92,14 +92,14 @@ export function TagsPage() {
   return <div className="flex flex-col gap-5" data-page="tags">
     <ScopedTagGovernancePanel />
     <div className="flex flex-wrap items-start justify-between gap-4">
-      <header className="max-w-2xl"><div className="flex items-center gap-2"><TagsIcon className="size-5 text-primary" aria-hidden="true" /><h1 className="text-xl font-bold tracking-tight">Tag 浪潮总览</h1></div><p className="mt-1 text-xs text-muted-foreground">查看真实 Tag 覆盖率、频率、类型与置信度。当前 legacy Tag 投影保持只读。</p></header>
+      <header className="max-w-2xl"><div className="flex items-center gap-2"><TagsIcon className="size-5 text-primary" aria-hidden="true" /><h1 className="text-xl font-bold tracking-tight">Tag 浪潮总览</h1></div><p className="mt-1 text-xs text-muted-foreground">查看当前正式 Scope Tag 覆盖率、频率、类型与置信度；Catalog 语义与 scoped 投影分层维护。</p></header>
       <Button type="button" size="sm" variant="outline" disabled={loading} onClick={() => setReload((value) => value + 1)}><RefreshCwIcon aria-hidden="true" />刷新</Button>
     </div>
 
     <Alert><ShieldCheckIcon aria-hidden="true" /><AlertTitle>只读安全边界</AlertTitle><AlertDescription>本页不会开放裸 Tag ID 的重命名、改类型或删除。需要写入的能力必须通过 scoped ObjectRef 命令与后端 capability 明确授权。</AlertDescription></Alert>
 
     <section aria-label="Tag 质量概览" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-      <Metric label="Tag 总数" value={quality ? formatCount(quality.total_tags) : '—'} detail="当前 legacy Tag 投影记录" />
+      <Metric label="Tag 总数" value={quality ? formatCount(quality.total_tags) : '—'} detail="当前正式 scoped Tag 投影记录" />
       <Metric label="记忆覆盖率" value={quality ? formatPercent(quality.coverage) : '—'} detail={quality ? `${formatCount(quality.tagged_memories)} / ${formatCount(quality.total_memories)} 条真实记忆` : '等待真实质量接口'} />
       <Metric label="可提取未标注" value={quality ? formatCount(quality.extractable_untagged_memories ?? 0) : '—'} detail={`短文本跳过 ${quality ? formatCount(quality.skipped_short_untagged_memories ?? 0) : '—'} 条`} />
       <Metric label="孤立引用" value={quality ? formatCount(quality.orphan_memory_tag_refs ?? 0) : '—'} detail="仅诊断，不在本页直接清理" />

@@ -5,7 +5,6 @@ import { useSearchParams } from 'react-router-dom'
 import { isRequestCancelled } from '@/api/client'
 import { getInjectionTrace, listInjectionTraces, type InjectionTraceSummary, type TraceDetailPayload, type TraceFilters } from '@/api/injection'
 import { getScopeOptions, scopeOptionsFor } from '@/api/options'
-import { getAgentFeedback, type AgentFeedbackPayload } from '@/api/review'
 import { PaginationControls, QueryState, ResponsiveTable, ScopeSelect } from '@/components/shared'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -28,9 +27,7 @@ function textValue(value: unknown, fallback = '未记录'): string {
 }
 
 function traceBot(trace: InjectionTraceSummary): string {
-  if (trace.bot_profile_id) return String(trace.bot_profile_id)
-  if (trace.bot_id) return String(trace.bot_id)
-  return '未记录（legacy trace 未关联 Bot）'
+  return textValue(trace.bot_profile_id ?? trace.bot_id)
 }
 
 function traceSession(trace: InjectionTraceSummary): { primary: string; secondary?: string } {
@@ -41,8 +38,7 @@ function traceSession(trace: InjectionTraceSummary): { primary: string; secondar
     }
   }
   if (trace.session_id) return { primary: String(trace.session_id), secondary: '仅记录 session_id' }
-  if (trace.group_id) return { primary: '未关联结构化 session', secondary: `legacy group_id: ${String(trace.group_id)}` }
-  return { primary: '未记录（legacy trace）', secondary: '无 session/session_id/group_id' }
+  return { primary: '未记录', secondary: '服务端未返回结构化 session' }
 }
 
 function tracePreview(trace: InjectionTraceSummary): string {
@@ -116,7 +112,6 @@ function inputToEpoch(value: string): string {
 
 type TraceFilterDraft = {
   channel: string
-  group_id: string
   sender_id: string
   status: string
   has_error: string
@@ -126,12 +121,11 @@ type TraceFilterDraft = {
   config_revision: string
 }
 
-const privateFilterKeys: Array<keyof TraceFilterDraft> = ['channel', 'group_id', 'sender_id', 'status', 'has_error', 'scope', 'from_ts', 'to_ts', 'config_revision']
+const privateFilterKeys: Array<keyof TraceFilterDraft> = ['channel', 'sender_id', 'status', 'has_error', 'scope', 'from_ts', 'to_ts', 'config_revision']
 
 function draftFromSearchParams(params: URLSearchParams): TraceFilterDraft {
   return {
     channel: params.get('channel') ?? '',
-    group_id: params.get('group_id') ?? '',
     sender_id: params.get('sender_id') ?? '',
     status: params.get('status') ?? '',
     has_error: params.get('has_error') ?? '',
@@ -155,15 +149,11 @@ export function InjectionPage() {
   const [payload, setPayload] = useState<Awaited<ReturnType<typeof listInjectionTraces>> | null>(null)
   const [status, setStatus] = useState<'loading' | 'success' | 'empty' | 'error'>('loading')
   const [error, setError] = useState<unknown>()
-  const [feedback, setFeedback] = useState<AgentFeedbackPayload | null>(null)
-  const [feedbackStatus, setFeedbackStatus] = useState<'loading' | 'success' | 'empty' | 'error'>('loading')
-  const [feedbackError, setFeedbackError] = useState<unknown>()
   const [detail, setDetail] = useState<TraceDetailPayload | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState('')
   const [filterDraft, setFilterDraft] = useState<TraceFilterDraft>(() => draftFromSearchParams(searchParams))
   const traceRequestRef = useRef<{ id: number; controller: AbortController } | null>(null)
-  const feedbackRequestRef = useRef<AbortController | null>(null)
 
   const botId = searchParams.get('bot_id') ?? ''
   const sessionId = searchParams.get('session_id') ?? ''
@@ -174,7 +164,6 @@ export function InjectionPage() {
   const filters = useMemo<TraceFilters>(() => ({
     bot_id: botId || undefined,
     session_id: sessionId || undefined,
-    group_id: searchParams.get('group_id') || undefined,
     sender_id: searchParams.get('sender_id') || undefined,
     channel: channel || undefined,
     status: searchParams.get('status') || undefined,
@@ -219,34 +208,10 @@ export function InjectionPage() {
     }
   }, [filters])
 
-  const loadFeedback = useCallback(async () => {
-    feedbackRequestRef.current?.abort()
-    const controller = new AbortController()
-    feedbackRequestRef.current = controller
-    setFeedbackStatus('loading')
-    setFeedbackError(undefined)
-    try {
-      const next = await getAgentFeedback(controller.signal)
-      if (controller.signal.aborted || feedbackRequestRef.current !== controller) return
-      const records = next.feedback_records ?? []
-      setFeedback(next)
-      setFeedbackStatus(records.length ? 'success' : 'empty')
-    } catch (reason) {
-      if (controller.signal.aborted || feedbackRequestRef.current !== controller || isRequestCancelled(reason)) return
-      setFeedback(null)
-      setFeedbackError(reason)
-      setFeedbackStatus('error')
-    }
-  }, [])
-
   useEffect(() => {
     void load()
     return () => traceRequestRef.current?.controller.abort()
   }, [load])
-  useEffect(() => {
-    void loadFeedback()
-    return () => feedbackRequestRef.current?.abort()
-  }, [loadFeedback])
 
   useEffect(() => {
     if (!selectedTraceId) {
@@ -300,8 +265,6 @@ export function InjectionPage() {
     })
   }
 
-  const feedbackRecords = feedback?.feedback_records ?? []
-
   return (
     <div data-slot="observatory-page" className="flex flex-col gap-6">
       <Card>
@@ -314,7 +277,6 @@ export function InjectionPage() {
             <ScopeSelect value={botId || undefined} loadOptions={loadBots} label="Bot" placeholder="选择真实 Bot" onValueChange={(value) => pagination.setFilters({ bot_id: value, session_id: null })} />
             <ScopeSelect value={sessionId || undefined} loadOptions={loadSessions} label="结构化会话" placeholder="选择真实会话" disabled={!botId} onValueChange={(value) => pagination.setFilters({ session_id: value })} />
             <ScopeSelect value={filterDraft.channel || undefined} loadOptions={loadChannels} label="通道" placeholder="选择已注册通道" onValueChange={(value) => setFilterDraft((current) => ({ ...current, channel: value }))} />
-            <Field><FieldLabel htmlFor="trace-group">Legacy 群 / 会话 ID</FieldLabel><Input id="trace-group" value={filterDraft.group_id} onChange={(event) => setFilterDraft((current) => ({ ...current, group_id: event.target.value }))} placeholder="仅按实际 group_id 筛选" /></Field>
             <Field><FieldLabel htmlFor="trace-sender">发送者 ID</FieldLabel><Input id="trace-sender" value={filterDraft.sender_id} onChange={(event) => setFilterDraft((current) => ({ ...current, sender_id: event.target.value }))} /></Field>
             <Field>
               <FieldLabel>状态</FieldLabel>
@@ -337,7 +299,7 @@ export function InjectionPage() {
           </FieldGroup>
           <div className="flex flex-wrap gap-2">
             <Button type="button" onClick={submitFilters}><SearchIcon data-icon="inline-start" aria-hidden="true" />查询</Button>
-            <Button type="button" variant="outline" disabled={status === 'loading'} onClick={() => { void load(); void loadFeedback() }}><RefreshCwIcon data-icon="inline-start" aria-hidden="true" />刷新</Button>
+            <Button type="button" variant="outline" disabled={status === 'loading'} onClick={() => void load()}><RefreshCwIcon data-icon="inline-start" aria-hidden="true" />刷新</Button>
             <Button type="button" variant="ghost" onClick={resetFilters}>清除筛选</Button>
           </div>
         </CardContent>
@@ -345,7 +307,7 @@ export function InjectionPage() {
 
       <Alert>
         <AlertTitle>如何阅读与验证 Trace</AlertTitle>
-        <AlertDescription>先核对真实 Bot 与结构化 session，再检查 revision、通道状态、预算、命中、过滤原因、错误和最终文本。legacy trace 缺少 Bot 或 session 时会明确标记缺失，不会用默认 Bot 或 group_id 伪造关联。</AlertDescription>
+        <AlertDescription>先核对真实 Bot 与结构化 session，再检查 revision、通道状态、预算、命中、过滤原因、错误和最终文本。</AlertDescription>
       </Alert>
 
       <Card>
@@ -383,18 +345,6 @@ export function InjectionPage() {
             })} />
           </QueryState>
           {payload ? <PaginationControls page={payload.page} onOffsetChange={pagination.setOffset} onLimitChange={pagination.setLimit} disabled={status === 'loading'} /> : null}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader><CardTitle>反馈记录</CardTitle><CardDescription>最近 trace / memory 反馈只读展示；需要查看候选、审核与晋升时进入学习中心。</CardDescription></CardHeader>
-        <CardContent>
-          <QueryState status={feedbackStatus} error={feedbackError} onRetry={() => void loadFeedback()}>
-            <ResponsiveTable label="Injection 反馈记录清单" table={<Table>
-              <TableHeader><TableRow><TableHead>ID</TableHead><TableHead>反馈</TableHead><TableHead>Trace</TableHead><TableHead>记忆</TableHead><TableHead>原因</TableHead><TableHead>时间</TableHead></TableRow></TableHeader>
-              <TableBody>{feedbackRecords.slice(0, 50).map((item, index) => <TableRow key={`feedback-${String(item.id ?? index)}-${index}`}><TableCell className="font-mono text-xs">{textValue(item.id)}</TableCell><TableCell><Badge variant="secondary">{textValue(item.feedback)}</Badge></TableCell><TableCell className="font-mono text-xs">{textValue(item.trace_id)}</TableCell><TableCell className="font-mono text-xs">{textValue(item.memory_id)}</TableCell><TableCell className="max-w-lg truncate" title={textValue(item.reason ?? item.content)}>{textValue(item.reason ?? item.content)}</TableCell><TableCell>{formatTime(item.created_at ?? item.timestamp)}</TableCell></TableRow>)}</TableBody>
-            </Table>} cards={feedbackRecords.slice(0, 50).map((item, index) => <article key={`feedback-card-${String(item.id ?? index)}-${index}`} className="flex flex-col gap-3 rounded-lg border bg-card p-4"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-mono text-xs text-muted-foreground">#{textValue(item.id)}</span><Badge variant="secondary">{textValue(item.feedback)}</Badge></div><dl className="grid gap-2 text-sm sm:grid-cols-2"><div><dt className="text-muted-foreground">Trace</dt><dd className="break-all font-mono text-xs">{textValue(item.trace_id)}</dd></div><div><dt className="text-muted-foreground">记忆</dt><dd className="break-all font-mono text-xs">{textValue(item.memory_id)}</dd></div><div className="sm:col-span-2"><dt className="text-muted-foreground">原因</dt><dd className="whitespace-pre-wrap break-words">{textValue(item.reason ?? item.content)}</dd></div><div><dt className="text-muted-foreground">时间</dt><dd>{formatTime(item.created_at ?? item.timestamp)}</dd></div></dl></article>)} />
-          </QueryState>
         </CardContent>
       </Card>
 

@@ -133,10 +133,10 @@ function NeedsAttentionCards({ system }: { system?: SystemPayload }) {
 
   const activeTodos = [
     ...(untagged > 0 ? [{
-      title: '记忆标签待复核',
-      description: `系统检测到有 ${untagged} 条记忆尚未提取任何结构化标签，需进行批量分析处理。`,
+      title: '记忆标签待处理',
+      description: `当前正式 Scope 中有 ${untagged} 条记忆尚未完成结构化标签提取，可运行批量分析。`,
       route: '/maintenance',
-      badge: '标签待审',
+      badge: '标签待处理',
       statusClass: 'border-l-4 border-l-violet-500/80 shadow-[0_0_15px_rgba(139,92,246,0.03)]',
     }] : []),
     ...(pendingFewShot > 0 ? [{

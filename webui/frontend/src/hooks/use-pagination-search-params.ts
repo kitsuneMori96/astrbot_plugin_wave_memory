@@ -42,7 +42,7 @@ function preferredSession(sessions: SessionOptionDto[], botId: string, sessionId
 
 /**
  * 将缺失或失效的 URL Scope 收敛到服务端证实的 canonical group session。
- * 不读取 legacy_groups，也不从 QQ 号或旧 group_id 猜测 RuntimeScope。
+ * 只读取正式 Scope 参数，不从 QQ 号或不完整的会话标识猜测 RuntimeScope。
  */
 export function useCanonicalScopeDefault({ botId, sessionId, setFilters, enabled = true }: CanonicalScopeDefaultOptions) {
   useEffect(() => {

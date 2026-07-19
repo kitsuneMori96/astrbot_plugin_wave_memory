@@ -117,6 +117,52 @@ class TagsBatchExtractStreamTest(unittest.TestCase):
         self.assertEqual(payload["skipped_short_untagged_memories"], 1)
         self.assertEqual(payload["orphan_memory_tag_refs"], 1)
 
+    def test_dashboard_counts_use_formal_scoped_tag_queue_when_available(self):
+        from webui.blueprints.system import count_existing_tagged_memories, count_untagged_memories
+
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        conn.execute(
+            """CREATE TABLE memories (
+                id INTEGER PRIMARY KEY,
+                group_id TEXT,
+                content TEXT,
+                source TEXT,
+                bot_id TEXT,
+                session_id TEXT,
+                visibility TEXT,
+                resolution_state TEXT,
+                quarantine INTEGER
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE scoped_memory_tags (
+                memory_id INTEGER,
+                tag_id INTEGER,
+                bot_id TEXT,
+                session_id TEXT,
+                visibility TEXT
+            )"""
+        )
+        conn.execute("CREATE TABLE tag_extraction_status (memory_id INTEGER PRIMARY KEY, status TEXT)")
+        conn.executemany(
+            """INSERT INTO memories(
+                id, group_id, content, source, bot_id, session_id, visibility, resolution_state, quarantine
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (1, "group-1", "正式 Scope 待提取标签", "chat", "bot-a", "qq:group:group-1", "group", "resolved", 0),
+                (2, "group-1", "正式 Scope 已有标签", "chat", "bot-a", "qq:group:group-1", "group", "resolved", 0),
+                (3, "group-1", "旧数据不应进入正式待办", "chat", "", "", "", "", 0),
+            ],
+        )
+        conn.execute(
+            "INSERT INTO scoped_memory_tags(memory_id, tag_id, bot_id, session_id, visibility) VALUES (2, 1, 'bot-a', 'qq:group:group-1', 'group')"
+        )
+        conn.commit()
+
+        assert count_existing_tagged_memories(conn) == 1
+        assert count_untagged_memories(conn) == 1
+
     def test_normalize_tag_execution_options_clamps_and_validates_shared_fields(self):
         from webui.blueprints.tags import normalize_tag_execution_options
 

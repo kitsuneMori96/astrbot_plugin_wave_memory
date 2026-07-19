@@ -1,9 +1,10 @@
-"""EvictionService — 记忆淘汰服务
+"""EvictionService — noise cleanup plus bounded-hot-index rebalance.
 
 定期执行：
 - noise: 7 天后从 DB 删除
-- chat: 30 天无访问 → 从 HNSW 索引移除（DB 保留）
+- chat: 到达热窗口后仅请求热索引重平衡；canonical Memory 继续留在冷层
 """
+
 
 from __future__ import annotations
 
@@ -29,6 +30,7 @@ class EvictionService:
         chat_stale_days: int = 30,
         eviction_interval_hours: float = 6.0,
         write_gateway=None,
+        on_hot_rebalance=None,
     ):
         self.db = db
         self.memory_index = memory_index
@@ -36,9 +38,10 @@ class EvictionService:
         self.chat_stale = chat_stale_days * 86400
         self.interval = eviction_interval_hours * 3600
         self.write_gateway = write_gateway
+        self.on_hot_rebalance = on_hot_rebalance
         self._task: Optional[asyncio.Task] = None
         self._running = False
-        self._stats = {"noise_deleted": 0, "chat_evicted": 0}
+        self._stats = {"noise_deleted": 0, "chat_evicted": 0, "hot_rebalance_requested": 0}
 
     def start(self, supervisor=None):
         self._running = True
@@ -106,53 +109,47 @@ class EvictionService:
         return grouped
 
     async def evict_once(self):
-        """执行一次按完整 RuntimeScope 分组的淘汰。"""
+        """Delete expired noise and refresh only the derived hot membership.
+
+        ``memory_type='evicted'`` is a real lifecycle state: using it for the
+        routine chat window made cold recall impossible.  The hot-index policy
+        now performs that demotion during a bounded rebuild without mutating the
+        canonical Memory row.
+        """
         if self.write_gateway is None:
             noise_deleted = self.db.delete_memories_by_source("noise", self.noise_ttl)
-            stale_ids = self.db.get_stale_memories("chat", self.chat_stale)
-            for mem_id in stale_ids:
-                self.memory_index.mark_deleted([mem_id])
-                self.db.mark_evicted(mem_id)
             self._stats["noise_deleted"] += noise_deleted
-            self._stats["chat_evicted"] += len(stale_ids)
+        else:
+            now = time.time()
+            noise_deleted = 0
+            for scope, memory_ids in self._scoped_candidates(
+                source="noise", cutoff=now - self.noise_ttl
+            ).items():
+                changed = await self.write_gateway.mutate_memories(
+                    scope=scope,
+                    memory_ids=memory_ids,
+                    action="delete",
+                    idempotency_hint=f"eviction:noise:{int(now // self.interval)}:{scope.session.id}",
+                )
+                noise_deleted += len(changed)
+            if noise_deleted:
+                self._stats["noise_deleted"] += noise_deleted
+                logger.info(
+                    f"[EvictionService] Deleted {noise_deleted} scoped noise memories "
+                    f"(>{self.noise_ttl//86400}d)"
+                )
+
+        callback = self.on_hot_rebalance
+        if not callable(callback):
             return
-
-        now = time.time()
-        noise_deleted = 0
-        for scope, memory_ids in self._scoped_candidates(
-            source="noise", cutoff=now - self.noise_ttl
-        ).items():
-            changed = await self.write_gateway.mutate_memories(
-                scope=scope,
-                memory_ids=memory_ids,
-                action="delete",
-                idempotency_hint=f"eviction:noise:{int(now // self.interval)}:{scope.session.id}",
-            )
-            noise_deleted += len(changed)
-        if noise_deleted:
-            self._stats["noise_deleted"] += noise_deleted
-            logger.info(
-                f"[EvictionService] Deleted {noise_deleted} scoped noise memories "
-                f"(>{self.noise_ttl//86400}d)"
-            )
-
-        evicted_ids: list[int] = []
-        for scope, memory_ids in self._scoped_candidates(
-            source="chat", cutoff=now - self.chat_stale
-        ).items():
-            changed = await self.write_gateway.mutate_memories(
-                scope=scope,
-                memory_ids=memory_ids,
-                action="evict",
-                idempotency_hint=f"eviction:chat:{int(now // self.interval)}:{scope.session.id}",
-            )
-            evicted_ids.extend(changed)
-        if evicted_ids:
-            self._stats["chat_evicted"] += len(evicted_ids)
-            logger.info(
-                f"[EvictionService] Evicted {len(evicted_ids)} scoped chat memories "
-                f"(>{self.chat_stale//86400}d)"
-            )
+        try:
+            result = callback()
+            if hasattr(result, "__await__"):
+                await result
+        except Exception as exc:
+            logger.warning("[EvictionService] hot-index rebalance request failed: %s", exc)
+            return
+        self._stats["hot_rebalance_requested"] += 1
 
     @property
     def stats(self) -> dict:

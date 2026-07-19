@@ -81,6 +81,7 @@ _CHANNEL_DESCRIPTORS = {
     "book_lore": ("检索已审核的 BookLore projection", ["book_lore_adapter"], "medium", "/knowledge/book-lore"),
     "fts5": ("使用 FTS5 补充文字召回", ["fts_memories"], "medium", "/diagnostics/indexes"),
     "affinity": ("读取当前关系投影；未知值保持为空", ["relationship_projection"], "medium", "/people"),
+    "soul_state": ("注入当前 Scope 的 Mood、Concern、Timeline 与 Soul 状态", ["soul_repository"], "high", "/soul"),
 }
 
 

@@ -27,7 +27,6 @@ const SECTION_LABELS: Record<string, string> = {
   errors: '错误',
   final_text: '最终文本',
   final_injection_text: '最终文本',
-  feedback: '反馈',
 }
 
 function safeJson(value: unknown): string {

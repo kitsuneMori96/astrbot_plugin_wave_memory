@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
 
 import numpy as np
@@ -8,7 +9,9 @@ import pytest
 
 from domain.scope import RuntimeScope, SessionRef
 from engine.db.outbox_repo import OutboxEvent
+from engine.vector_index import IndexCapacityError
 from services.derived_projections import MemoryIndexProjection, TagIndexProjection
+from services.memory_index_policy import MemoryIndexPolicy
 from services.system_convergence_runtime import ProductionWriteGateway
 
 
@@ -83,6 +86,11 @@ class _Index:
         self.saved.append(dict(kwargs))
 
 
+class _CapacityIndex(_Index):
+    def add(self, ids, vectors):
+        raise IndexCapacityError("index capacity reached")
+
+
 @pytest.mark.asyncio
 async def test_committed_memory_event_projects_vector_and_delete_tombstone(tmp_path):
     path = tmp_path / "stage3.sqlite"
@@ -100,7 +108,7 @@ async def test_committed_memory_event_projects_vector_and_delete_tombstone(tmp_p
         vector=vector,
         sender_id="u1",
         sender_name="user",
-        timestamp=10.0,
+        timestamp=time.time(),
         importance=1.0,
         source="chat",
         provenance={},
@@ -110,6 +118,16 @@ async def test_committed_memory_event_projects_vector_and_delete_tombstone(tmp_p
     )
     watermark = await gateway.drain_committed()
 
+    # A raw committed chat Memory stays cold until the canonical scoped Tag
+    # transaction succeeds; this prevents unbounded pre-classification growth.
+    assert index.added == []
+    await gateway.apply_tag_extraction(
+        scope=scope,
+        memory_id=memory_id,
+        tags=[{"name": "canonical", "type": "topic", "confidence": 0.9}],
+        status="done",
+    )
+    watermark = await gateway.drain_committed()
     assert index.added and index.added[-1][0] == [memory_id]
     np.testing.assert_allclose(index.added[-1][1][0], vector)
 
@@ -125,6 +143,85 @@ async def test_committed_memory_event_projects_vector_and_delete_tombstone(tmp_p
 
     assert memory_id in index.deleted
     assert index.saved[-1]["db_watermark"] == watermark
+    await gateway.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_hot_capacity_keeps_tagged_memory_cold_and_requests_rebuild(tmp_path):
+    path = tmp_path / "capacity.sqlite"
+    _prepare_db(path)
+    index = _CapacityIndex()
+    projection = MemoryIndexProjection(str(path), index)
+    gateway = ProductionWriteGateway(str(path), consumers={projection.consumer_name: projection})
+    scope = _scope()
+    memory_id = await gateway.append_memory(
+        scope=scope,
+        group_id="g1",
+        content="bounded hot candidate",
+        vector=np.ones(3, dtype=np.float32),
+        sender_id="u1",
+        sender_name="user",
+        timestamp=time.time(),
+        importance=1.0,
+        source="chat",
+        provenance={},
+        origin_metadata={},
+        quarantine=False,
+        idempotency_hint="capacity-create",
+    )
+    await gateway.drain_committed()
+    await gateway.apply_tag_extraction(
+        scope=scope,
+        memory_id=memory_id,
+        tags=[{"name": "bounded", "type": "topic", "confidence": 0.9}],
+        status="done",
+    )
+    await gateway.drain_committed()
+
+    assert projection.capacity_rebuild_required is True
+    assert index.added == []
+    await gateway.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_incremental_projection_respects_per_scope_hot_quota(tmp_path):
+    path = tmp_path / "scope-quota.sqlite"
+    _prepare_db(path)
+    index = _Index()
+    projection = MemoryIndexProjection(
+        str(path),
+        index,
+        policy=MemoryIndexPolicy(max_vectors=10, per_scope_max_vectors=1),
+    )
+    gateway = ProductionWriteGateway(str(path), consumers={projection.consumer_name: projection})
+    scope = _scope()
+    for sequence in (1, 2):
+        memory_id = await gateway.append_memory(
+            scope=scope,
+            group_id="g1",
+            content=f"candidate-{sequence}",
+            vector=np.ones(3, dtype=np.float32),
+            sender_id="u1",
+            sender_name="user",
+            timestamp=time.time(),
+            importance=1.0,
+            source="chat",
+            provenance={},
+            origin_metadata={},
+            quarantine=False,
+            idempotency_hint=f"scope-quota-create-{sequence}",
+        )
+        await gateway.drain_committed()
+        await gateway.apply_tag_extraction(
+            scope=scope,
+            memory_id=memory_id,
+            tags=[{"name": f"tag-{sequence}", "type": "topic", "confidence": 0.9}],
+            status="done",
+        )
+        await gateway.drain_committed()
+
+    assert [entry[0] for entry in index.added] == [[1]]
+    assert projection.capacity_rebuild_required is True
     await gateway.shutdown()
 
 
@@ -153,6 +250,28 @@ async def test_tag_index_consumer_checkpoints_scoped_links_without_legacy_vector
     assert index.added == []
     assert index.deleted == []
     assert index.saved == []
+
+
+@pytest.mark.asyncio
+async def test_tag_correction_name_payload_is_not_coerced_to_an_integer():
+    projection = TagIndexProjection(_Index())
+    event = OutboxEvent(
+        event_id="event-name-correction",
+        operation_id="operation-name-correction",
+        write_sequence=1,
+        aggregate_kind="memory",
+        aggregate_id="1",
+        aggregate_version=2,
+        event_type="memory.tags_corrected",
+        payload_version=1,
+        payload={"memory_id": 1, "after_tags": ["人工标签"]},
+        consumer_name="tag_index",
+        attempt=1,
+    )
+
+    await projection(event)
+
+    assert projection.withheld_count == 0
 
 
 @pytest.mark.asyncio

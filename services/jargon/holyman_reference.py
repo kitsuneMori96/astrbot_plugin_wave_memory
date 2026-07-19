@@ -245,6 +245,32 @@ class HolymanReference:
         # examples/corpus are evidence only. They may hint in context, but never confirm a match.
         return self._no_match(term)
 
+    def match_text(self, text: str, *, max_items: int | None = None) -> list[dict[str, Any]]:
+        """Match curated runtime phrases explicitly present in a message.
+
+        ``corpus`` and examples remain evidence-only; only curated catchphrase
+        entries can reach this method.  The returned rows are understanding
+        references and never persona/style instructions.
+        """
+        text = str(text or "")
+        if not text:
+            return []
+        selected: list[dict[str, Any]] = []
+        for phrase, value in self._phrases.items():
+            if not self._is_runtime_phrase(phrase, value) or not self._is_matchable_phrase(phrase):
+                continue
+            matched = phrase in text
+            if phrase == "动了XX的蛋糕":
+                matched = re.search(r"动了.{1,12}的蛋糕", text) is not None
+            if not matched:
+                continue
+            result = self.match(phrase, text)
+            if result.get("matched"):
+                selected.append(result)
+            if max_items is not None and len(selected) >= max(0, int(max_items)):
+                break
+        return selected
+
     def _no_match(self, term: str = "") -> dict[str, Any]:
         return {
             "matched": False,

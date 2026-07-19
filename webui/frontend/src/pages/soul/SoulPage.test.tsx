@@ -1,14 +1,13 @@
 import { MemoryRouter } from 'react-router-dom'
 import { render, screen } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { SoulPage } from './SoulPage'
 
-const api = vi.hoisted(() => ({ formal: vi.fn(), legacy: vi.fn(), scopes: vi.fn(), relationships: vi.fn() }))
+const api = vi.hoisted(() => ({ formal: vi.fn(), scopes: vi.fn(), relationships: vi.fn() }))
 vi.mock('@/api/soul', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/soul')>()
-  return { ...actual, getSoulState: api.formal, getLegacySoulSnapshot: api.legacy }
+  return { ...actual, getSoulState: api.formal }
 })
 vi.mock('@/api/options', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/options')>()
@@ -28,7 +27,7 @@ vi.mock('@/components/ui/chart', async (importOriginal) => {
 })
 vi.mock('recharts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('recharts')>()
-  return { ...actual, Area: () => null, AreaChart: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>, Bar: () => null, BarChart: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>, CartesianGrid: () => null, Line: () => null, LineChart: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>, Legend: () => null, XAxis: () => null, YAxis: () => null }
+  return { ...actual, Bar: () => null, BarChart: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>, CartesianGrid: () => null, Line: () => null, LineChart: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>, Legend: () => null, XAxis: () => null, YAxis: () => null }
 })
 
 const page = { items: [], page: { total: 0, total_status: 'exact', reason_code: null, limit: 25, offset: 0, page: 1, page_count: 0, has_more: false } }
@@ -52,22 +51,16 @@ beforeEach(() => {
     capabilities: { mutate: { available: false, reason_code: 'readonly' }, runtime_refresh: { available: false, reason_code: 'unavailable' } },
     runtime_refresh: { status: 'unavailable', operation: null, reason_code: 'unavailable' },
   })
-  api.legacy.mockRejectedValue(new Error('legacy offline'))
 })
 
-describe('SoulPage 正式与 Legacy 独立加载', () => {
-  it('Legacy 失败不拖垮 formal scoped 数据，并在展开审计后提供独立重试', async () => {
-    const user = userEvent.setup()
+describe('SoulPage 仅加载正式 Scope 数据', () => {
+  it('展示 formal scoped 数据且不渲染旧数据审计区', async () => {
     render(<MemoryRouter initialEntries={['/soul?bot_id=bot-a&session_id=session-a&visibility=group']}><SoulPage /></MemoryRouter>)
 
     expect(await screen.findByText('平静')).toBeVisible()
-    const legacySummary = screen.getByText('Legacy 只读审计（非当前 Scope）')
-    expect(legacySummary.closest('details')).not.toHaveAttribute('open')
-    await user.click(legacySummary)
-    expect(await screen.findByText('Legacy 只读投影不可用')).toBeVisible()
-    expect(screen.getByText('legacy offline')).toBeVisible()
+    expect(screen.queryByText(/只读审计/)).not.toBeInTheDocument()
     expect(screen.getByText(/同一组 limit\/offset/)).toBeVisible()
-    expect(screen.getByRole('button', { name: '重试' })).toBeVisible()
+    expect(api.formal).toHaveBeenCalledWith(expect.objectContaining({ bot_id: 'bot-a', session_id: 'session-a' }), 25, 0, expect.anything(), { from_ts: undefined, to_ts: undefined })
   })
 
   it('展示关系三层轨迹、真实来源和时间范围', async () => {

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Callable
 
 try:
     from quart import has_request_context, request
@@ -63,10 +63,12 @@ class RuntimeScopeOptionsSource:
         db: Any,
         bot_registry: Mapping[str, Any] | None,
         channel_config: Any = None,
+        group_name_resolver: Callable[[str, str], str | None] | None = None,
     ) -> None:
         self._db = db
         self._bot_registry = dict(bot_registry or {})
         self._channel_config = channel_config
+        self._group_name_resolver = group_name_resolver
 
     def _bots(self) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
@@ -92,6 +94,25 @@ class RuntimeScopeOptionsSource:
     def _registered_bot_ids(self) -> set[str]:
         return {item["db_id"] for item in self._bots()}
 
+    def _group_name(self, bot_id: Any, group_id: Any) -> str | None:
+        resolver = self._group_name_resolver
+        if not callable(resolver):
+            return None
+        try:
+            name = resolver(str(bot_id or "").strip(), str(group_id or "").strip())
+        except Exception:
+            return None
+        normalized = str(name or "").strip()
+        return normalized or None
+
+    @staticmethod
+    def _session_label(session: SessionRef, group_name: str | None) -> str:
+        conversation_id = session.conversation_id
+        if session.kind != "group":
+            return conversation_id
+        normalized_name = str(group_name or "").strip()
+        return f"{normalized_name}（{conversation_id}）" if normalized_name and normalized_name != conversation_id else conversation_id
+
     @staticmethod
     def _add_session(
         target: dict[tuple[str, str], dict[str, Any]],
@@ -102,12 +123,14 @@ class RuntimeScopeOptionsSource:
         count: Any,
         registered_bots: set[str],
         capabilities: Mapping[str, int] | None = None,
+        group_name: str | None = None,
     ) -> None:
         normalized_bot = str(bot_id or "").strip()
         if not normalized_bot or normalized_bot not in registered_bots or session is None:
             return
         key = (normalized_bot, session.id)
         amount = max(0, int(count or 0))
+        normalized_group_name = str(group_name or "").strip() or None
         current = target.get(key)
         if current is None:
             current = target[key] = {
@@ -116,13 +139,17 @@ class RuntimeScopeOptionsSource:
                 "platform_id": session.platform_id,
                 "kind": session.kind,
                 "conversation_id": session.conversation_id,
-                "label": session.conversation_id,
+                "group_name": normalized_group_name,
+                "label": RuntimeScopeOptionsSource._session_label(session, normalized_group_name),
                 "source": source,
                 "sources": [source],
                 "count": amount,
                 "capabilities": {},
             }
         else:
+            if normalized_group_name and not current.get("group_name"):
+                current["group_name"] = normalized_group_name
+                current["label"] = RuntimeScopeOptionsSource._session_label(session, normalized_group_name)
             current["count"] += amount
             sources = set(current["sources"])
             sources.add(source)
@@ -182,7 +209,16 @@ class RuntimeScopeOptionsSource:
             for bot_id, session_id, count in conn.execute(
                 f"SELECT bot_id,session_id,COUNT(*) FROM memories WHERE {where} GROUP BY bot_id,session_id"
             ).fetchall():
-                self._add_session(sessions, bot_id=bot_id, session=_session_from_id(session_id), source="memories", count=count, registered_bots=registered_bots)
+                session = _session_from_id(session_id)
+                self._add_session(
+                    sessions,
+                    bot_id=bot_id,
+                    session=session,
+                    source="memories",
+                    count=count,
+                    registered_bots=registered_bots,
+                    group_name=self._group_name(bot_id, session.conversation_id if session is not None else ""),
+                )
 
         trace_columns = _table_columns(conn, "injection_traces")
         if "metadata_json" in trace_columns:
@@ -191,7 +227,15 @@ class RuntimeScopeOptionsSource:
                 if parsed is None:
                     continue
                 bot_id, session = parsed
-                self._add_session(sessions, bot_id=bot_id, session=session, source="traces", count=1, registered_bots=registered_bots)
+                self._add_session(
+                    sessions,
+                    bot_id=bot_id,
+                    session=session,
+                    source="traces",
+                    count=1,
+                    registered_bots=registered_bots,
+                    group_name=self._group_name(bot_id, session.conversation_id),
+                )
 
         # Formal scoped tables enrich an already established canonical session;
         # they never manufacture one from a legacy group id.
@@ -209,7 +253,16 @@ class RuntimeScopeOptionsSource:
                     session = _session_from_id(session_id)
                     if (str(bot_id or "").strip(), session.id if session is not None else "") not in sessions:
                         continue
-                    self._add_session(sessions, bot_id=bot_id, session=session, source=table, count=count, registered_bots=registered_bots, capabilities={table: count})
+                    self._add_session(
+                        sessions,
+                        bot_id=bot_id,
+                        session=session,
+                        source=table,
+                        count=count,
+                        registered_bots=registered_bots,
+                        capabilities={table: count},
+                        group_name=self._group_name(bot_id, session.conversation_id),
+                    )
         for table, scope_column in (("scoped_few_shot_examples", "runtime_scope_json"), ("reviewed_book_lore_projections", "target_runtime_scope_json")):
             if scope_column not in _table_columns(conn, table):
                 continue
@@ -222,7 +275,16 @@ class RuntimeScopeOptionsSource:
             for (bot_id, session_id), count in grouped.items():
                 session = _session_from_id(session_id)
                 if (str(bot_id or "").strip(), session.id if session is not None else "") in sessions:
-                    self._add_session(sessions, bot_id=bot_id, session=session, source=table, count=count, registered_bots=registered_bots, capabilities={table: count})
+                    self._add_session(
+                        sessions,
+                        bot_id=bot_id,
+                        session=session,
+                        source=table,
+                        count=count,
+                        registered_bots=registered_bots,
+                        capabilities={table: count},
+                        group_name=self._group_name(bot_id, session.conversation_id),
+                    )
         return sorted(sessions.values(), key=lambda item: (item["bot_id"], item["id"]))
 
     def _channels(self, conn: Any) -> list[dict[str, Any]]:

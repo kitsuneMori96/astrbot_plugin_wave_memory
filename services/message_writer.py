@@ -168,8 +168,9 @@ def classify_source(
 class MessageWriter:
     """异步消息写入服务。
 
-    负责：批量 embedding → 按 source 分类 → 写入 memories → 按策略入索引。
-    noise 不入 HNSW 索引（省内存），core/chat 入索引。
+    负责：批量 embedding → 按 source 分类 → 写入 memories。
+    HNSW 准入由 committed outbox 的 Tag 驱动热索引投影决定；新 core/chat
+    先保留在 canonical 冷层，只有获得有效 Scoped Tag 后才可能升温。
     """
 
     def __init__(
