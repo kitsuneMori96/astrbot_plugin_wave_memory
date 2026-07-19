@@ -2,7 +2,7 @@
 
 # Wave Memory
 
-[![Version](https://img.shields.io/badge/version-v4.5.0-blue.svg)](https://github.com/vivy1024/astrbot_plugin_wave_memory/releases)
+[![Version](https://img.shields.io/badge/version-v4.6.0--rc.1-blue.svg)](https://github.com/vivy1024/astrbot_plugin_wave_memory/releases)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-≥4.14-green.svg)](https://github.com/AstrBotDevs/AstrBot)
@@ -32,6 +32,7 @@
 
 | 版本 | 日期 | 重点 |
 |------|------|------|
+| **v4.6.0-rc.1** | 2026-07-19 | Scoped Runtime、Tag 治理、Learning Center、关系/Soul、受限 HNSW 热冷召回与全历史 Timeline 的集成候选版 |
 | **v4.5.0** | 2026-07-06 | 前端优化 + 认知资源管理：BookLore/FewShot/Facts/People/Indexes 独立 API 与真实数据闭环 |
 | **v4.2.1** | 2026-07-05 | Holyman GitHub 更新握手：轻量检查缓存 · 强制刷新 · 预览确认同步 · lint 清零 |
 | **v4.2.0** | 2026-07-05 | React WebUI Holyman 黑话治理补全：筛选/批量审核 · 显式命中注入 · 神经云图与审计 UI 修复 |

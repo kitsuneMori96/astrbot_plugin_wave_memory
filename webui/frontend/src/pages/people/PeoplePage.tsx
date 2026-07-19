@@ -149,8 +149,8 @@ export function PeoplePage() {
     setDetailOpen(true)
   }
 
-  // 原始人物
-  const rawPeople = data?.items ?? []
+  // 原始人物；空列表也保持稳定引用，避免派生筛选每次渲染失效。
+  const rawPeople = useMemo(() => data?.items ?? [], [data])
 
   // 关联心智关系，应用多维高级过滤和排序
   const people = useMemo(() => {
@@ -225,7 +225,7 @@ export function PeoplePage() {
   const activeRelationships = relationshipData?.items.filter(r => r.affinity !== null) ?? []
   const averageAffinity = activeRelationships.length > 0
     ? (activeRelationships.reduce((sum, r) => sum + (r.affinity ?? 0), 0) / activeRelationships.length).toFixed(1)
-    : '未激活'
+    : '不可用'
 
   return <div className="flex flex-col gap-4" data-page="people">
     <div className="flex flex-wrap items-center justify-between gap-3">
