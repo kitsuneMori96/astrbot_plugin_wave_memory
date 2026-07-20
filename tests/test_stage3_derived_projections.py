@@ -191,7 +191,11 @@ async def test_incremental_projection_respects_per_scope_hot_quota(tmp_path):
     projection = MemoryIndexProjection(
         str(path),
         index,
-        policy=MemoryIndexPolicy(max_vectors=10, per_scope_max_vectors=1),
+        policy=MemoryIndexPolicy(
+            max_vectors=10,
+            per_scope_max_vectors=1,
+            enforce_scope_hot_quota=True,
+        ),
     )
     gateway = ProductionWriteGateway(str(path), consumers={projection.consumer_name: projection})
     scope = _scope()
@@ -222,6 +226,48 @@ async def test_incremental_projection_respects_per_scope_hot_quota(tmp_path):
 
     assert [entry[0] for entry in index.added] == [[1]]
     assert projection.capacity_rebuild_required is True
+    await gateway.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_incremental_projection_admits_same_scope_until_global_capacity(tmp_path):
+    path = tmp_path / "dynamic-scope.sqlite"
+    _prepare_db(path)
+    index = _Index()
+    projection = MemoryIndexProjection(
+        str(path),
+        index,
+        policy=MemoryIndexPolicy(max_vectors=10, per_scope_max_vectors=1),
+    )
+    gateway = ProductionWriteGateway(str(path), consumers={projection.consumer_name: projection})
+    scope = _scope()
+    for sequence in (1, 2):
+        memory_id = await gateway.append_memory(
+            scope=scope,
+            group_id="g1",
+            content=f"dynamic-candidate-{sequence}",
+            vector=np.ones(3, dtype=np.float32),
+            sender_id="u1",
+            sender_name="user",
+            timestamp=time.time(),
+            importance=1.0,
+            source="chat",
+            provenance={},
+            origin_metadata={},
+            quarantine=False,
+            idempotency_hint=f"dynamic-scope-create-{sequence}",
+        )
+        await gateway.drain_committed()
+        await gateway.apply_tag_extraction(
+            scope=scope,
+            memory_id=memory_id,
+            tags=[{"name": f"dynamic-tag-{sequence}", "type": "topic", "confidence": 0.9}],
+            status="done",
+        )
+        await gateway.drain_committed()
+
+    assert [entry[0] for entry in index.added] == [[1], [2]]
+    assert projection.capacity_rebuild_required is False
     await gateway.shutdown()
 
 

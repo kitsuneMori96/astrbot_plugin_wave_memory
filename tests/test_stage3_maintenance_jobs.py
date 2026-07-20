@@ -8,6 +8,7 @@ import pytest
 
 from engine.db.job_repo import JobRequest, JobRun
 from engine.write_coordinator import WriteCoordinator
+from services.maintenance_tokens import maintenance_repair_token
 from services.pair_similarity_projection import compute_pair_similarity_projection
 from webui.blueprints import maintenance, memories, tags
 
@@ -55,6 +56,35 @@ class _Jobs:
             created_at=1.0,
             updated_at=1.0,
         )
+
+
+def test_memory_hot_capacity_tokens_coalesce_per_generation():
+    first = maintenance_repair_token(
+        "memory_index",
+        "hot_capacity",
+        watermark=100,
+        generation=7,
+    )
+    next_event = maintenance_repair_token(
+        "memory_index",
+        "hot_capacity",
+        watermark=101,
+        generation=7,
+    )
+
+    assert first == next_event == "memory_index:hot_capacity:7"
+    assert maintenance_repair_token(
+        "memory_index",
+        "hot_capacity",
+        watermark=101,
+        generation=8,
+    ) != first
+    assert maintenance_repair_token(
+        "memory_index",
+        "startup_drift",
+        watermark=101,
+        generation=7,
+    ) == "memory_index:startup_drift:101:7"
 
 
 @pytest.mark.asyncio

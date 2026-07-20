@@ -10,6 +10,7 @@ from engine.index_manifest import (
     ManifestValidationError,
     checksum_file,
     generation_path,
+    latest_generation,
     manifest_path,
     read_index_manifest,
 )
@@ -122,6 +123,79 @@ def test_save_writes_versioned_manifest_and_preserves_generations(tmp_path):
     assert reloaded.count == 5
 
 
+def test_save_prunes_only_generations_beyond_default_retention(tmp_path):
+    index_path = tmp_path / "memory.hnsw"
+    index = vector_index_module.VectorIndex(
+        dimension=4,
+        index_path=str(index_path),
+        kind="memory",
+    )
+
+    for count in (1, 2, 3):
+        index.index.current_count = count
+        committed = index.save()
+
+    assert committed is not None
+    assert committed.generation == 3
+    assert not generation_path(index_path, 1).exists()
+    assert generation_path(index_path, 2).is_file()
+    assert generation_path(index_path, 3).is_file()
+    assert read_index_manifest(index_path) == committed
+
+
+def test_generation_retention_is_configurable(tmp_path):
+    index_path = tmp_path / "memory.hnsw"
+    index = vector_index_module.VectorIndex(
+        dimension=4,
+        index_path=str(index_path),
+        kind="memory",
+        generation_retention=3,
+    )
+
+    for count in (1, 2, 3, 4):
+        index.index.current_count = count
+        index.save()
+
+    assert not generation_path(index_path, 1).exists()
+    assert generation_path(index_path, 2).is_file()
+    assert generation_path(index_path, 3).is_file()
+    assert generation_path(index_path, 4).is_file()
+
+
+def test_retention_keeps_the_previous_generation_after_orphan(tmp_path):
+    index_path = tmp_path / "memory.hnsw"
+    index = vector_index_module.VectorIndex(
+        dimension=4,
+        index_path=str(index_path),
+        kind="memory",
+    )
+    index.index.current_count = 1
+    index.save()
+    index.index.current_count = 2
+    index.save()
+
+    orphan = generation_path(index_path, 3)
+    orphan.write_text("count:3", encoding="ascii")
+    index.index.current_count = 4
+    committed = index.save()
+
+    assert committed is not None
+    assert committed.generation == 4
+    assert not generation_path(index_path, 1).exists()
+    assert not generation_path(index_path, 2).exists()
+    assert orphan.is_file()
+    assert generation_path(index_path, 4).is_file()
+
+
+def test_latest_generation_ignores_noncanonical_generation_names(tmp_path):
+    index_path = tmp_path / "memory.hnsw"
+    generation_path(index_path, 2).write_bytes(b"canonical")
+    (tmp_path / "memory.hnsw.g3").write_bytes(b"not canonical")
+    (tmp_path / "memory.hnsw.g00000000000000000004.tmp").write_bytes(b"not canonical")
+
+    assert latest_generation(index_path) == 2
+
+
 def test_manifest_validation_rejects_tampered_generation(tmp_path):
     index_path = tmp_path / "tags.hnsw"
     index = vector_index_module.VectorIndex(
@@ -157,8 +231,11 @@ def test_failed_manifest_replace_is_bounded_and_keeps_old_generation(
         kind="memory",
     )
     index.index.current_count = 1
-    committed = index.save(db_watermark=7)
+    index.save(db_watermark=7)
+    index.index.current_count = 2
+    committed = index.save(db_watermark=8)
     assert committed is not None
+    assert committed.generation == 2
 
     real_replace = vector_index_module.os.replace
     manifest_destination = manifest_path(index_path)
@@ -178,20 +255,103 @@ def test_failed_manifest_replace_is_bounded_and_keeps_old_generation(
 
     monkeypatch.setattr(vector_index_module.os, "replace", fail_manifest_replace)
     monkeypatch.setattr(vector_index_module.time, "sleep", lambda _delay: None)
-    index.index.current_count = 2
+    index.index.current_count = 3
 
     with pytest.raises(PermissionError, match="sharing violation"):
-        index.save(db_watermark=8, replace_attempts=3)
+        index.save(db_watermark=9, replace_attempts=3)
 
     assert manifest_attempts == 3
     assert replace_pairs
     still_committed = read_index_manifest(index_path)
     assert still_committed is not None
-    assert still_committed.generation == committed.generation == 1
-    assert still_committed.db_watermark == 7
+    assert still_committed.generation == committed.generation == 2
+    assert still_committed.db_watermark == 8
     assert generation_path(index_path, 1).is_file()
     assert generation_path(index_path, 2).is_file()
+    assert generation_path(index_path, 3).is_file()
     assert not list(tmp_path.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize(
+    ("failure", "error"),
+    [("checksum", "checksum mismatch"), ("missing", "generation is missing")],
+)
+def test_unverified_current_manifest_never_prunes_generations(
+    tmp_path, monkeypatch, failure, error
+):
+    index_path = tmp_path / "memory.hnsw"
+    index = vector_index_module.VectorIndex(
+        dimension=4,
+        index_path=str(index_path),
+        kind="memory",
+    )
+    index.index.current_count = 1
+    index.save()
+    index.index.current_count = 2
+    index.save()
+    first_generation = generation_path(index_path, 1)
+    second_generation = generation_path(index_path, 2)
+
+    real_write_manifest = index._write_manifest_atomic
+
+    def write_then_invalidate(manifest, *, attempts):
+        real_write_manifest(manifest, attempts=attempts)
+        target = generation_path(index_path, manifest.generation)
+        if failure == "checksum":
+            target.write_bytes(b"tampered after manifest publication")
+        else:
+            target.unlink()
+
+    monkeypatch.setattr(index, "_write_manifest_atomic", write_then_invalidate)
+    index.index.current_count = 3
+
+    with pytest.raises(ManifestValidationError, match=error):
+        index.save()
+
+    assert first_generation.is_file()
+    assert second_generation.is_file()
+
+
+def test_prune_failure_is_recorded_and_retried_without_failing_save(tmp_path, monkeypatch):
+    index_path = tmp_path / "memory.hnsw"
+    index = vector_index_module.VectorIndex(
+        dimension=4,
+        index_path=str(index_path),
+        kind="memory",
+    )
+    index.index.current_count = 1
+    index.save()
+    index.index.current_count = 2
+    index.save()
+    first_generation = generation_path(index_path, 1)
+
+    real_unlink = Path.unlink
+    fail_once = True
+
+    def fail_first_generation(path, *args, **kwargs):
+        nonlocal fail_once
+        if path == first_generation and fail_once:
+            fail_once = False
+            raise PermissionError("simulated locked stale generation")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_first_generation)
+    index.index.current_count = 3
+    third = index.save()
+
+    assert third is not None
+    assert first_generation.is_file()
+    assert str(first_generation) in index.generation_prune_errors
+
+    index.index.current_count = 4
+    fourth = index.save()
+
+    assert fourth is not None
+    assert not first_generation.exists()
+    assert not generation_path(index_path, 2).exists()
+    assert generation_path(index_path, 3).is_file()
+    assert generation_path(index_path, 4).is_file()
+    assert str(first_generation) not in index.generation_prune_errors
 
 
 def test_bounded_hot_index_refuses_legacy_oversized_generation_and_resize(tmp_path):

@@ -268,7 +268,8 @@ class MemoryIndexProjection:
                 self._capacity_rebuild_required = True
                 return
             if (
-                scope_key is not None
+                self.policy.enforce_scope_hot_quota
+                and scope_key is not None
                 and previous_scope != scope_key
                 and (
                     self.policy.per_scope_max_vectors <= 0
@@ -443,34 +444,81 @@ class TagIndexProjection:
 
 
 class CooccurrenceProjection:
-    """Rebuild the in-memory cooccurrence view after committed tag-link changes."""
+    """将已提交的 Tag 变更快速通知给共现防抖调度器。"""
 
     consumer_name = "cooccurrence"
+    _EVENT_TYPES = {
+        "memory.tags_applied",
+        "memory.tags_corrected",
+        "memory.tags_correction_undone",
+        "memory.deleted",
+        "memory.archived",
+        "memory.evicted",
+        "tag.deleted",
+        "tag.merged",
+        "tag.merge",
+        "tag.deactivate",
+        "tag.governance.applied",
+        "tag.governance.compensated",
+    }
 
-    def __init__(self, cooccurrence: Any) -> None:
+    def __init__(
+        self,
+        cooccurrence: Any,
+        *,
+        scheduler: Any | None = None,
+        notify: Any | None = None,
+    ) -> None:
         self.cooccurrence = cooccurrence
         self._lock = asyncio.Lock()
         self._dirty = False
+        self._metrics: dict[str, object] = {
+            "notifications_total": 0,
+            "ignored_events_total": 0,
+            "last_reason": None,
+        }
+        # Existing construction order creates the scheduler first.  Discover it
+        # from the matrix so this wiring remains compatible without main.py.
+        self.scheduler = scheduler or getattr(cooccurrence, "_cooccurrence_scheduler", None)
+        if self.scheduler is None and notify is None:
+            try:
+                from ..engine.directed_cooccurrence import CooccurrenceScheduler
+            except ImportError:  # pragma: no cover - top-level repository tests
+                from engine.directed_cooccurrence import CooccurrenceScheduler
+            self.scheduler = CooccurrenceScheduler(cooccurrence)
+        if self.scheduler is not None:
+            bind_lock = getattr(self.scheduler, "set_rebuild_lock", None)
+            if callable(bind_lock):
+                bind_lock(self._lock)
+            notify = notify or getattr(self.scheduler, "notify_tag_change", None)
+        if not callable(notify):
+            raise TypeError("CooccurrenceProjection requires a scheduler or notify callback")
+        self._notify = notify
+
+    def metrics_snapshot(self) -> dict[str, object]:
+        return dict(self._metrics)
 
     async def __call__(self, event: OutboxEvent) -> None:
-        if event.event_type not in {
-            "memory.tags_applied",
-            "memory.tags_corrected",
-            "memory.tags_correction_undone",
-            "memory.deleted",
-            "memory.archived",
-            "memory.evicted",
-            "tag.deleted",
-            "tag.merged",
-            "tag.merge",
-            "tag.deactivate",
-            "tag.governance.applied",
-            "tag.governance.compensated",
-        }:
+        if event.event_type not in self._EVENT_TYPES:
+            self._metrics["ignored_events_total"] = int(self._metrics["ignored_events_total"]) + 1
             return
-        async with self._lock:
-            await asyncio.to_thread(self.cooccurrence.rebuild)
-            self._dirty = True
+        self._dirty = True
+        self._metrics["notifications_total"] = int(self._metrics["notifications_total"]) + 1
+        self._metrics["last_reason"] = event.event_type
+        result = self._notify(count=1, reason=event.event_type)
+        if hasattr(result, "__await__"):
+            await result
+
+    async def force_rebuild(self, *, reason: str = "maintenance") -> dict[str, object]:
+        """Use the scheduler's shared barrier for maintenance-triggered rebuilds."""
+        force_rebuild = getattr(self.scheduler, "force_rebuild", None)
+        if not callable(force_rebuild):
+            raise RuntimeError("cooccurrence scheduler does not support force_rebuild")
+        result = force_rebuild(reason=reason)
+        if hasattr(result, "__await__"):
+            result = await result
+        self._dirty = False
+        return result if isinstance(result, dict) else self.metrics_snapshot()
 
     async def save_barrier(self, *, db_watermark: int = 0) -> None:
         self._dirty = False

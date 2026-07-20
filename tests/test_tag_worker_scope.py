@@ -25,6 +25,20 @@ class _Extractor:
         return [[{"name": "作用域标签", "type": "topic", "confidence": 0.9}] for _ in messages]
 
 
+class _DeleteDuringExtraction:
+    def __init__(self, db, memory_id: int):
+        self.db = db
+        self.memory_id = memory_id
+        self.deleted = False
+
+    async def extract_tags_batch(self, messages, scope=None):
+        if not self.deleted:
+            self.db.conn.execute("DELETE FROM memories WHERE id=?", (self.memory_id,))
+            self.db.conn.commit()
+            self.deleted = True
+        return [[{"name": "竞态标签", "type": "topic", "confidence": 0.9}] for _ in messages]
+
+
 class _NoLegacyEmbedding:
     async def get_embedding(self, name):  # pragma: no cover - 调用即代表正式路径退回 legacy 向量逻辑
         raise AssertionError("TagWorker scoped path must not calculate a legacy tag embedding")
@@ -144,6 +158,70 @@ def test_tag_worker_writes_only_scoped_tags_for_canonical_resolved_group_memorie
             "SELECT COUNT(*) FROM tag_extraction_status WHERE memory_id IN (?, ?) AND status='done'",
             (alpha_memory, beta_memory),
         ).fetchone()[0] == 2
+    finally:
+        db.close()
+
+
+def test_tag_worker_skips_scoped_memory_deleted_while_llm_awaits(tmp_path):
+    db = WaveMemoryDB(str(tmp_path / "scoped-stale.sqlite3"), dimension=4)
+    try:
+        scope = _scope("bot-alpha")
+        surviving_id = db.add_memory("group-1", "同批仍存在的 scoped 记忆必须继续写回", scope=scope)
+        stale_id = db.add_memory("group-1", "LLM 返回前被删除的 scoped 记忆必须跳过", scope=scope)
+        worker = TagWorker(
+            db=db,
+            tag_extractor=_DeleteDuringExtraction(db, stale_id),
+            embedding_service=None,
+            tag_index=_NoLegacyIndex(),
+            config={"max_batch_per_cycle": 10},
+        )
+
+        batch = worker._fetch_untagged_batch()
+        assert {item.memory_id for item in batch} == {surviving_id, stale_id}
+        asyncio.run(worker._process_batch(batch))
+
+        assert db.conn.execute("SELECT 1 FROM memories WHERE id=?", (stale_id,)).fetchone() is None
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM scoped_memory_tags WHERE memory_id=?", (surviving_id,)
+        ).fetchone()[0] == 1
+        assert db.conn.execute(
+            "SELECT memory_id, status FROM tag_extraction_status ORDER BY memory_id"
+        ).fetchall() == [(surviving_id, "done")]
+    finally:
+        db.close()
+
+
+def test_tag_worker_skips_legacy_memory_deleted_while_llm_awaits(tmp_path):
+    db = WaveMemoryDB(str(tmp_path / "legacy-stale.sqlite3"), dimension=4)
+    try:
+        surviving_id = db.conn.execute(
+            "INSERT INTO memories(group_id, content, timestamp, source) VALUES (?, ?, ?, ?)",
+            ("group-1", "同批仍存在的 legacy 记忆必须继续写回", 100.0, "legacy"),
+        ).lastrowid
+        stale_id = db.conn.execute(
+            "INSERT INTO memories(group_id, content, timestamp, source) VALUES (?, ?, ?, ?)",
+            ("group-1", "LLM 返回前被删除的 legacy 记忆必须跳过", 101.0, "legacy"),
+        ).lastrowid
+        db.conn.commit()
+        worker = TagWorker(
+            db=db,
+            tag_extractor=_DeleteDuringExtraction(db, stale_id),
+            embedding_service=None,
+            tag_index=_NoLegacyIndex(),
+            config={"max_batch_per_cycle": 10},
+        )
+
+        batch = worker._fetch_untagged_batch()
+        assert {item.memory_id for item in batch} == {surviving_id, stale_id}
+        asyncio.run(worker._process_batch(batch))
+
+        assert db.conn.execute("SELECT 1 FROM memories WHERE id=?", (stale_id,)).fetchone() is None
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM memory_tags WHERE memory_id=?", (surviving_id,)
+        ).fetchone()[0] == 1
+        assert db.conn.execute(
+            "SELECT memory_id, status FROM tag_extraction_status ORDER BY memory_id"
+        ).fetchall() == [(surviving_id, "done")]
     finally:
         db.close()
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -17,6 +18,7 @@ from .index_manifest import (
     IndexManifest,
     ManifestValidationError,
     checksum_file,
+    generation_files,
     generation_path,
     latest_generation,
     manifest_path,
@@ -28,6 +30,9 @@ try:
     import hnswlib
 except ImportError:
     hnswlib = None
+
+
+logger = logging.getLogger(__name__)
 
 
 class IndexCapacityError(RuntimeError):
@@ -45,18 +50,27 @@ class VectorIndex:
         kind: Optional[str] = None,
         strict_manifest: bool = True,
         allow_resize: bool = True,
+        generation_retention: int = 2,
     ):
         if hnswlib is None:
             raise ImportError("hnswlib is required: pip install hnswlib")
+        if (
+            not isinstance(generation_retention, int)
+            or isinstance(generation_retention, bool)
+            or generation_retention < 1
+        ):
+            raise ValueError("generation_retention must be a positive integer")
 
         self.dimension = dimension
         self.max_elements = max_elements
         self.index_path = index_path
         self.kind = kind or self._infer_kind(index_path)
         self.allow_resize = bool(allow_resize)
+        self.generation_retention = generation_retention
         self._lock = threading.Lock()
         self._manifest: Optional[IndexManifest] = None
         self._manifest_error: Optional[str] = None
+        self._generation_prune_errors: dict[str, str] = {}
 
         self.index = hnswlib.Index(space="cosine", dim=dimension)
 
@@ -217,8 +231,16 @@ class VectorIndex:
                     created_at=datetime.now(timezone.utc).isoformat(),
                 )
                 self._write_manifest_atomic(manifest, attempts=replace_attempts)
-                self._manifest = manifest
-                return manifest
+                committed = read_index_manifest(
+                    base_path,
+                    expected_kind=self.kind,
+                    expected_dimension=self.dimension,
+                )
+                if committed is None:
+                    raise ManifestValidationError("committed index manifest is missing")
+                self._manifest = committed
+                self._prune_generations(base_path, committed)
+                return committed
             finally:
                 try:
                     temp_path.unlink()
@@ -278,6 +300,32 @@ class VectorIndex:
             except FileNotFoundError:
                 pass
 
+    def _prune_generations(self, base_path: Path, current: IndexManifest) -> None:
+        """Best-effort cleanup after a checksum-verified manifest publication."""
+        previous = [
+            generation
+            for generation, _path in generation_files(base_path)
+            if generation < current.generation
+        ]
+        keep = {current.generation}
+        previous_to_keep = self.generation_retention - 1
+        if previous_to_keep:
+            keep.update(previous[-previous_to_keep:])
+
+        for generation, candidate in generation_files(base_path):
+            # Generations newer than the verified manifest can only be orphaned
+            # work from another interrupted publisher; leave them untouched.
+            if generation >= current.generation or generation in keep:
+                continue
+            try:
+                candidate.unlink()
+            except OSError as exc:
+                key = str(candidate)
+                self._generation_prune_errors[key] = str(exc)
+                logger.warning("failed to prune stale HNSW generation %s: %s", candidate, exc)
+            else:
+                self._generation_prune_errors.pop(str(candidate), None)
+
     @staticmethod
     def _replace_with_retry(
         source: Path,
@@ -320,6 +368,11 @@ class VectorIndex:
     @property
     def manifest_error(self) -> Optional[str]:
         return self._manifest_error
+
+    @property
+    def generation_prune_errors(self) -> dict[str, str]:
+        """Return generation cleanup failures retained for a later save retry."""
+        return dict(self._generation_prune_errors)
 
     @property
     def count(self) -> int:

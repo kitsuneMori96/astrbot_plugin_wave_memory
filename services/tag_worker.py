@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -195,9 +196,15 @@ class TagWorker:
         if rejected_ids and "tag_extraction_status" in tables:
             now = time.time()
             conn.executemany(
-                "INSERT OR REPLACE INTO tag_extraction_status (memory_id, status, updated_at) "
-                "VALUES (?, 'skipped', ?)",
-                [(memory_id, now) for memory_id in rejected_ids],
+                """INSERT INTO tag_extraction_status (
+                       memory_id, status, attempts, last_error, last_run_at, updated_at
+                   ) VALUES (?, 'skipped', 0, NULL, ?, ?)
+                   ON CONFLICT(memory_id) DO UPDATE SET
+                       status=excluded.status,
+                       last_error=excluded.last_error,
+                       last_run_at=excluded.last_run_at,
+                       updated_at=excluded.updated_at""",
+                [(memory_id, now, now) for memory_id in rejected_ids],
             )
             conn.commit()
         return batch
@@ -228,9 +235,59 @@ class TagWorker:
             ),
         )
 
+    def _is_current_work_item(self, item: TagWorkItem) -> bool:
+        """确认 LLM await 后目标仍存在，且没有跨入另一条 Scope/legacy lane。"""
+        conn = self.db.conn
+        columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(memories)").fetchall()
+        }
+        if not {"id", "group_id"} <= columns:
+            return False
+
+        clauses = ["id=?"]
+        params: list[object] = [item.memory_id]
+        if item.scope is None:
+            clauses.append("group_id=?")
+            params.append(item.legacy_group_id)
+            for column in ("bot_id", "session_id", "visibility"):
+                if column in columns:
+                    clauses.append("COALESCE(%s, '')=''" % column)
+            if "memory_type" in columns:
+                clauses.append("COALESCE(memory_type, 'message') NOT IN ('deleted', 'noise')")
+        else:
+            scope = item.scope
+            if scope.session is None or not {"bot_id", "session_id", "visibility"} <= columns:
+                return False
+            clauses.extend(("group_id=?", "bot_id=?", "session_id=?", "visibility='group'"))
+            params.extend((scope.session.conversation_id, scope.bot_id, scope.session.id))
+            if "resolution_state" in columns:
+                clauses.append("COALESCE(resolution_state, '') IN ('', 'resolved')")
+            if "quarantine" in columns:
+                clauses.append("COALESCE(quarantine, 0)=0")
+
+        if "source" in columns:
+            clauses.append("COALESCE(source, '') != 'noise'")
+        if "provenance" in columns and not self.include_recovered_backfill:
+            clauses.append("COALESCE(provenance, '') NOT LIKE '%classified_legacy_recovery%'")
+        return conn.execute(
+            f"SELECT 1 FROM memories WHERE {' AND '.join(clauses)}", params
+        ).fetchone() is not None
+
+    def _record_status(self, memory_id: int, status: str, now: float) -> None:
+        self.db.conn.execute(
+            """INSERT INTO tag_extraction_status (
+                   memory_id, status, attempts, last_error, last_run_at, updated_at
+               ) VALUES (?, ?, 0, NULL, ?, ?)
+               ON CONFLICT(memory_id) DO UPDATE SET
+                   status=excluded.status,
+                   last_error=excluded.last_error,
+                   last_run_at=excluded.last_run_at,
+                   updated_at=excluded.updated_at""",
+            (memory_id, status, now, now),
+        )
+
     async def _process_batch(self, batch: list[TagWorkItem]):
         """Process formal scoped work and explicitly unscoped legacy-group work."""
-        needs_direct_commit = self.write_gateway is None or any(item.scope is None for item in batch)
         messages = [
             {"id": item.memory_id, "content": item.content, "sender": item.sender_name or "unknown"}
             for item in batch
@@ -261,13 +318,21 @@ class TagWorker:
                     group_results = await self.extractor.extract_tags_batch(group_messages)
                 for index, (memory_id, _item, _message) in enumerate(grouped_items):
                     result_by_memory[memory_id] = group_results[index] if index < len(group_results) else []
+        except Exception as error:
+            logger.warning(f"[WaveMemory] TagWorker batch LLM error: {error}")
+            return
 
-            tag_count = 0
-            now = time.time()
+        tag_count = 0
+        for item in batch:
+            tags = await self._attach_tag_vectors(result_by_memory.get(item.memory_id, []))
+            # LLM/embedding await 期间 memory 可能被删除或迁移；只允许写回
+            # 到仍属于原 lane 的行，避免 legacy/scoped 之间的越界写入。
+            if not self._is_current_work_item(item):
+                logger.debug(f"[WaveMemory] TagWorker skipped stale memory {item.memory_id}")
+                continue
 
-            for i, item in enumerate(batch):
-                tags = result_by_memory.get(item.memory_id, [])
-                tags = await self._attach_tag_vectors(tags)
+            try:
+                now = time.time()
                 if self.write_gateway is not None and item.scope is not None:
                     saved_count = await self.write_gateway.apply_tag_extraction(
                         scope=item.scope,
@@ -278,38 +343,52 @@ class TagWorker:
                     )
                     tag_count += saved_count
                     continue
+
                 if tags:
                     saved_count = await self._save_tags(item, tags)
                     tag_count += saved_count
-                    self.db.conn.execute(
-                        "INSERT OR REPLACE INTO tag_extraction_status (memory_id, status, updated_at) VALUES (?, 'done', ?)",
-                        (item.memory_id, now),
-                    )
+                    self._record_status(item.memory_id, "done", now)
                     # 未注入协调入口的兼容测试路径仍保持原有事务语义。
                     if item.scope is not None:
                         self._maybe_upgrade_source(item, tags)
                 else:
-                    self.db.conn.execute(
-                        "INSERT OR REPLACE INTO tag_extraction_status (memory_id, status, updated_at) VALUES (?, 'skipped', ?)",
-                        (item.memory_id, now),
-                    )
-            if needs_direct_commit:
+                    self._record_status(item.memory_id, "skipped", now)
+                # 单条提交保证删除竞态或 FK 冲突不会回滚同批其它有效记忆。
                 self.db.conn.commit()
-
-            if tag_count > 0 and self.on_tags_written:
-                self.on_tags_written(tag_count)
-
-            logger.debug(f"[WaveMemory] TagWorker batch done: {len(batch)} memories, {tag_count} tags")
-
-        except Exception as e:
-            # 任一步写入失败都必须回滚，否则共享连接会一直处于 active
-            # transaction，后续学习中心等写接口将被 SQLite 拒绝。
-            if needs_direct_commit:
+            except sqlite3.IntegrityError as error:
                 try:
                     self.db.conn.rollback()
                 except Exception as rollback_error:
                     logger.warning(f"[WaveMemory] TagWorker rollback failed: {rollback_error}")
-            logger.warning(f"[WaveMemory] TagWorker batch error: {e}")
+                logger.warning(
+                    f"[WaveMemory] TagWorker skipped memory {item.memory_id} after FK integrity error: {error}"
+                )
+            except ValueError as error:
+                # ProductionWriteGateway 会在提交时再次校验 Scope；若在两次
+                # 校验之间发生迁移/删除，视为该条 stale，而非整批失败。
+                if self.write_gateway is not None and item.scope is not None:
+                    logger.warning(
+                        f"[WaveMemory] TagWorker skipped stale scoped memory {item.memory_id}: {error}"
+                    )
+                    continue
+                try:
+                    self.db.conn.rollback()
+                except Exception as rollback_error:
+                    logger.warning(f"[WaveMemory] TagWorker rollback failed: {rollback_error}")
+                logger.warning(f"[WaveMemory] TagWorker batch error: {error}")
+                return
+            except Exception as error:
+                try:
+                    self.db.conn.rollback()
+                except Exception as rollback_error:
+                    logger.warning(f"[WaveMemory] TagWorker rollback failed: {rollback_error}")
+                logger.warning(f"[WaveMemory] TagWorker batch error: {error}")
+                return
+
+        if tag_count > 0 and self.on_tags_written:
+            self.on_tags_written(tag_count)
+
+        logger.debug(f"[WaveMemory] TagWorker batch done: {len(batch)} memories, {tag_count} tags")
 
     async def _attach_tag_vectors(self, tags: list) -> list[dict]:
         """Attach explicit Catalog vectors when an embedding provider is available.

@@ -8,6 +8,7 @@ from typing import Optional
 import numpy as np
 
 from .connection import ConnectionManager
+from .migrations.tag_extraction_status_integrity import ensure_tag_extraction_status_integrity
 
 
 class TagRepo:
@@ -54,9 +55,11 @@ class TagRepo:
             CREATE TABLE IF NOT EXISTS tag_extraction_status (
                 memory_id INTEGER PRIMARY KEY,
                 status TEXT NOT NULL DEFAULT 'pending',
-                attempts INTEGER DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT,
-                updated_at REAL
+                last_run_at REAL,
+                updated_at REAL,
+                FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS tag_intrinsic_residuals (
@@ -80,6 +83,7 @@ class TagRepo:
             CREATE INDEX IF NOT EXISTS idx_tag_relations_target ON tag_relations(target_tag_id);
         """)
         self.cm.commit()
+        ensure_tag_extraction_status_integrity(self.cm)
 
     def add_tag(self, name: str, vector: Optional[np.ndarray] = None) -> int:
         vec_blob = vector.astype(np.float32).tobytes() if vector is not None else None

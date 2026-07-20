@@ -20,10 +20,10 @@ except Exception:  # pragma: no cover - helper tests without Quart
 
 try:
     from services.diagnostics import DiagnosticsService, IndexSource
-    from services.memory_index_policy import MemoryIndexPolicy
+    from services.memory_index_policy import MemoryIndexPolicy, memory_index_policy_from_settings
 except ImportError:  # pragma: no cover - AstrBot package import path
     from ...services.diagnostics import DiagnosticsService, IndexSource
-    from ...services.memory_index_policy import MemoryIndexPolicy
+    from ...services.memory_index_policy import MemoryIndexPolicy, memory_index_policy_from_settings
 
 try:
     from ..container import get_container
@@ -85,26 +85,7 @@ def _index_source(
 def _memory_index_policy(container: Any) -> MemoryIndexPolicy:
     cfg = getattr(container, "plugin_config", {})
     section = cfg.get("Memory_Index_Settings", {}) if isinstance(cfg, Mapping) else {}
-    section = section if isinstance(section, Mapping) else {}
-
-    def bounded(name: str, default: int, minimum: int) -> int:
-        try:
-            return max(minimum, int(float(section.get(name, default))))
-        except (TypeError, ValueError):
-            return default
-
-    hot_max_vectors = bounded("hot_max_vectors", 100_000, 1)
-    try:
-        scoped_reserved_vectors = max(0, int(float(section.get("scoped_reserved_vectors", 10_000))))
-    except (TypeError, ValueError):
-        scoped_reserved_vectors = 10_000
-    return MemoryIndexPolicy(
-        max_vectors=hot_max_vectors,
-        per_scope_max_vectors=bounded("per_scope_max_vectors", 1_000, 1),
-        scoped_reserved_vectors=min(hot_max_vectors, scoped_reserved_vectors),
-        chat_hot_days=bounded("chat_hot_days", 30, 0),
-        candidate_limit=bounded("cold_candidate_limit", 128, 1),
-    )
+    return memory_index_policy_from_settings(section)
 
 
 def _canonical_index_kind(value: Any) -> str:

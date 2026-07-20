@@ -186,6 +186,9 @@ class MessageWriter:
         quality_gate: QualityGate | None = None,
         write_gateway: Any | None = None,
         embedding_timeout: float = 8.0,
+        embedding_retry_attempts: int = 2,
+        embedding_retry_backoff_seconds: float = 0.5,
+        on_vector_backfill_requested: Any | None = None,
     ):
         self.db = db
         self.memory_index = memory_index
@@ -198,6 +201,18 @@ class MessageWriter:
         self.quality_gate = quality_gate or QualityGate()
         self.write_gateway = write_gateway
         self.embedding_timeout = max(float(embedding_timeout), 0.1)
+        self.on_vector_backfill_requested = on_vector_backfill_requested
+        try:
+            self.embedding_retry_attempts = min(max(int(embedding_retry_attempts), 1), 5)
+        except (TypeError, ValueError):
+            self.embedding_retry_attempts = 2
+        try:
+            self.embedding_retry_backoff_seconds = min(
+                max(float(embedding_retry_backoff_seconds), 0.0),
+                10.0,
+            )
+        except (TypeError, ValueError):
+            self.embedding_retry_backoff_seconds = 0.5
 
         self._queue: asyncio.Queue = asyncio.Queue()
         self._task: Optional[asyncio.Task] = None
@@ -214,6 +229,9 @@ class MessageWriter:
             "writer_failures": 0,
             "consecutive_failures": 0,
             "embedding_timeouts": 0,
+            "embedding_retries": 0,
+            "embedding_recovered_after_retry": 0,
+            "embedding_terminal_timeouts": 0,
             "last_success_at": None,
         }
 
@@ -403,6 +421,51 @@ class MessageWriter:
 
         # HNSW persistence is owned by the committed-outbox projection barrier.
 
+    async def _embed_with_limited_retry(self, texts: list[str]) -> list[Any] | None:
+        """Request one embedding batch with bounded timeout retries.
+
+        The caller persists the original memories even after terminal timeout; the
+        durable vector-backfill maintenance job can later recover those vectors.
+        """
+        for attempt in range(self.embedding_retry_attempts):
+            try:
+                vectors = await asyncio.wait_for(
+                    self.embedding.get_embeddings(texts),
+                    timeout=self.embedding_timeout,
+                )
+            except asyncio.TimeoutError:
+                self._stats["embedding_timeouts"] = self._stats.get("embedding_timeouts", 0) + 1
+                if attempt + 1 >= self.embedding_retry_attempts:
+                    self._stats["embedding_terminal_timeouts"] = (
+                        self._stats.get("embedding_terminal_timeouts", 0) + 1
+                    )
+                    logger.warning(
+                        "[WaveMemory] Embedding timed out after %s attempt(s), %.1fs each; "
+                        "persisting %s memory record(s) without vectors for backfill",
+                        self.embedding_retry_attempts,
+                        self.embedding_timeout,
+                        len(texts),
+                    )
+                    return None
+                self._stats["embedding_retries"] = self._stats.get("embedding_retries", 0) + 1
+                delay = self.embedding_retry_backoff_seconds * (2**attempt)
+                logger.warning(
+                    "[WaveMemory] Embedding timeout attempt=%s/%s batch_size=%s; retrying in %.2fs",
+                    attempt + 1,
+                    self.embedding_retry_attempts,
+                    len(texts),
+                    delay,
+                )
+                if delay:
+                    await asyncio.sleep(delay)
+                continue
+            if attempt:
+                self._stats["embedding_recovered_after_retry"] = (
+                    self._stats.get("embedding_recovered_after_retry", 0) + 1
+                )
+            return list(vectors or [])
+        return None  # defensive: retry attempts are normalized to at least one
+
     async def _process_batch(self, batch: list[dict]):
         """处理一批消息：分类 + embedding + 存储。"""
         batch = [self._normalize_scope_payload(item) for item in batch]
@@ -464,24 +527,16 @@ class MessageWriter:
 
         # embed 非 noise 消息。Provider 超时不能丢掉原始消息；无向量记录
         # 仍会正式落库，并由维护/补向量任务恢复派生索引。
+        vector_backfill_required = False
         if need_embed:
             texts = [item["content"] for item in need_embed]
-            try:
-                vectors = await asyncio.wait_for(
-                    self.embedding.get_embeddings(texts),
-                    timeout=self.embedding_timeout,
-                )
-            except asyncio.TimeoutError:
-                self._stats["embedding_timeouts"] = self._stats.get("embedding_timeouts", 0) + 1
-                logger.warning(
-                    "[WaveMemory] Embedding timeout after %.1fs batch_size=%s; persisting without vectors",
-                    self.embedding_timeout,
-                    len(need_embed),
-                )
+            vectors = await self._embed_with_limited_retry(texts)
+            if vectors is None:
                 vectors = [None] * len(need_embed)
-            vectors = list(vectors or [])
+                vector_backfill_required = True
             if len(vectors) < len(need_embed):
                 vectors = [*vectors, *([None] * (len(need_embed) - len(vectors)))]
+            vector_backfill_required = vector_backfill_required or any(vector is None for vector in vectors)
         else:
             vectors = []
 
@@ -532,6 +587,16 @@ class MessageWriter:
         if self._write_count >= self._save_threshold:
             self._write_count = 0
             logger.debug("[WaveMemory] Index save deferred to outbox projection barrier")
+
+        if vector_backfill_required and callable(self.on_vector_backfill_requested):
+            try:
+                result = self.on_vector_backfill_requested()
+                if hasattr(result, "__await__"):
+                    await result
+            except Exception:
+                # Backfill scheduling must never turn a successfully persisted
+                # source memory into a writer failure; startup detection retries it.
+                logger.warning("[WaveMemory] vector backfill queue request failed", exc_info=True)
 
         self._stats["consecutive_failures"] = 0
         self._stats["last_success_at"] = time.time()

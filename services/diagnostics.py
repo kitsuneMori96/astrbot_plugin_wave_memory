@@ -658,6 +658,7 @@ class DiagnosticsService:
                 "runtime_count": len(runtime_ids),
                 "bounded_hot_policy": bool(bounded_memory_policy),
                 "hot_capacity": None if index.memory_policy is None else index.memory_policy.max_vectors,
+                "scope_hot_quota_enabled": None if index.memory_policy is None else index.memory_policy.enforce_scope_hot_quota,
                 "per_scope_capacity": None if index.memory_policy is None else index.memory_policy.per_scope_max_vectors,
                 "scoped_reserved_vectors": None if index.memory_policy is None else index.memory_policy.scoped_reserved_vectors,
                 "missing_ids": sorted(canonical_ids - runtime_ids)[:20],

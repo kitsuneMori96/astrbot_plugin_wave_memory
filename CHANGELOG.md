@@ -1,5 +1,16 @@
 # Changelog
 
+## v4.6.1 (2026-07-20)
+
+### 稳定性修复：外键、共现、索引保留与向量补偿
+
+- **Tag 提取状态完整性**：规范化 `tag_extraction_status` 列与 `ON DELETE CASCADE`；幂等迁移清理 orphan/缺列旧表；TagWorker 写回前复核 Scope，单条 `IntegrityError` 不拖垮整批。
+- **共现矩阵防抖重建**：`CooccurrenceScheduler` 合并阈值/强制重建到共享屏障，重建后保留增量 generation，维护任务走 `force_rebuild`。
+- **HNSW generation 保留**：新增 `generation_retention`（默认/最小 2），成功发布后只保留当前 generation 与回滚窗口。
+- **向量超时恢复**：MessageWriter 有限重试后仍可 `vector=None` 落库；新增 scoped `memory.vector_backfill.v1` 与 durable `maintenance.vector_backfill.run`，启动与超时后自动分批补偿。
+- **维护任务修复**：`pair_similarity` 维护事务去掉非法 `actor=` 参数，避免任务反复失败。
+- **验证**：聚焦稳定性测试 37 项通过。生产生效需同步运行时并重启；历史无向量记忆由 backfill job 分批恢复。
+
 ## v4.6.0 (2026-07-19)
 
 ### Scoped Runtime、治理闭环与受限召回

@@ -4,6 +4,7 @@ AstrBot Wave Memory 插件 — 基于 VCP TagMemo 浪潮算法的高性能记忆
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import time
@@ -45,7 +46,8 @@ from .services.scope_recovery import build_scope_recovery_handlers
 from .services.quality_gate import QualityGate
 from .services.pair_similarity import PairSimilarityService
 from .services.hot_config import HotConfig
-from .services.memory_index_policy import MemoryIndexPolicy, select_hot_memory_candidates
+from .services.memory_index_policy import memory_index_policy_from_settings, select_hot_memory_candidates
+from .services.maintenance_tokens import maintenance_repair_token
 from .services.runtime_mode import effective_native_injection_enabled, effective_query_feature, resolve_runtime_mode, runtime_capability_enabled, should_self_heal_advanced_query
 from .services.compat import build_duplicate_memory_warnings, build_livingmemory_compat_surface, detect_memory_plugins
 from .services.lifecycle import LifecycleService
@@ -95,7 +97,7 @@ from .services.learning.review import LearningReviewService
 from .services.learning.source import LearningSourceRegistry
 from .services.learning.book_experience import register_book_experience_task
 from .services.relationship_events import RelationshipEventService
-from .domain.scope import RuntimeScope
+from .domain.scope import RuntimeScope, SessionRef
 from .services.identity_safety import (
     build_identity_safety_injection,
     filter_identity_contamination_memories,
@@ -288,20 +290,8 @@ class WaveMemoryPlugin(Star):
             except (TypeError, ValueError):
                 return default
 
-        # Missing values use the new bounded defaults; explicit False remains
-        # observable so a safe cold-recall rollback cannot be self-healed away.
-        hot_max_vectors = _bounded_index_int("hot_max_vectors", 100_000, 1)
-        try:
-            scoped_reserved_vectors = max(0, int(float(memory_index_cfg.get("scoped_reserved_vectors", 10_000))))
-        except (TypeError, ValueError):
-            scoped_reserved_vectors = 10_000
-        self.memory_index_policy = MemoryIndexPolicy(
-            max_vectors=hot_max_vectors,
-            per_scope_max_vectors=_bounded_index_int("per_scope_max_vectors", 1_000, 1),
-            scoped_reserved_vectors=min(hot_max_vectors, scoped_reserved_vectors),
-            chat_hot_days=_bounded_index_int("chat_hot_days", 30, 0),
-            candidate_limit=_bounded_index_int("cold_candidate_limit", 128, 1),
-        )
+        # Scope remains an access boundary; its hot-tier quota is opt-in.
+        self.memory_index_policy = memory_index_policy_from_settings(memory_index_cfg)
         raw_cold_recall = memory_index_cfg.get("cold_recall_enabled")
         if raw_cold_recall is None:
             self.cold_recall_enabled = True
@@ -316,6 +306,9 @@ class WaveMemoryPlugin(Star):
             self.tag_index_max_vectors,
             1,
         )
+        # Immutable HNSW generations retain the active manifest target plus a
+        # small rollback window. Values below two would remove that safety net.
+        self.index_generation_retention = _bounded_index_int("generation_retention", 2, 2)
         self.injection_orchestrator_active_enabled = inject_cfg.get("orchestrator_active_enabled", True)
         self.injection_shadow_enabled = inject_cfg.get("orchestrator_shadow_enabled", not self.injection_orchestrator_active_enabled)
         self.livingmemory_alias_tools_enabled = bool(compat_cfg.get("livingmemory_alias_tools_enabled", False))
@@ -502,6 +495,7 @@ class WaveMemoryPlugin(Star):
             kind="memory",
             strict_manifest=False,
             allow_resize=False,
+            generation_retention=self.index_generation_retention,
         )
 
         self.legacy_tag_index = VectorIndex(
@@ -510,6 +504,7 @@ class WaveMemoryPlugin(Star):
             index_path=legacy_tag_index_path,
             kind="legacy_tag",
             strict_manifest=False,
+            generation_retention=self.index_generation_retention,
         )
         self.tag_catalog_index = VectorIndex(
             dimension=self.dimension,
@@ -517,6 +512,7 @@ class WaveMemoryPlugin(Star):
             index_path=tag_catalog_index_path,
             kind="tag_catalog",
             strict_manifest=False,
+            generation_retention=self.index_generation_retention,
         )
         # Existing services/WebUI use ``tag_index`` for formal semantic Catalog
         # behavior. Keep that compatibility alias intentionally Catalog-only.
@@ -622,7 +618,10 @@ class WaveMemoryPlugin(Star):
             policy=self.memory_index_policy,
         )
         self.tag_index_projection = TagIndexProjection(self.tag_catalog_index, database_path=self.db.db_path)
-        self.cooccurrence_projection = CooccurrenceProjection(self.cooccurrence)
+        self.cooccurrence_projection = CooccurrenceProjection(
+            self.cooccurrence,
+            scheduler=self.cooccurrence_scheduler,
+        )
         self.runtime_refresh_projection = RuntimeRefreshProjection(
             callbacks={"memory": self._on_memory_projection_refresh}
         )
@@ -696,6 +695,7 @@ class WaveMemoryPlugin(Star):
             noise_max_length=int(self.config.get("Eviction_Settings", {}).get("noise_max_length", 10)),
             quality_gate=self.quality_gate,
             write_gateway=self.write_gateway,
+            on_vector_backfill_requested=self._on_vector_backfill_requested,
         )
 
         # LivingMemory-compatible surface（兼容已有记忆生态，不伪装插件名）
@@ -737,6 +737,7 @@ class WaveMemoryPlugin(Star):
             "maintenance.legacy_tag_index.rebuild": self._maintenance_rebuild_legacy_tag_index,
             "maintenance.cooccurrence.rebuild": self._maintenance_rebuild_cooccurrence,
             "maintenance.pair_similarity.rebuild": self._maintenance_rebuild_pair_similarity,
+            "maintenance.vector_backfill.run": self._maintenance_run_vector_backfill,
             "maintenance.tag_audit.run": self._maintenance_run_tag_audit,
             "maintenance.tag_backfill.run": self._maintenance_run_tag_backfill,
             "maintenance.import.run": self._maintenance_run_import,
@@ -1382,6 +1383,8 @@ class WaveMemoryPlugin(Star):
 
         # 长修复只通过 durable Maintenance jobs 执行；启动时仅排队，不直接重建。
         self.maintenance_job_runner.start(self.task_supervisor)
+        if await self._has_pending_vector_backfill():
+            await self._queue_vector_backfill(reason="startup_missing_vectors")
         if (
             self.memory_index.manifest_error
             or (self.memory_index.count == 0 and self.db.get_memory_count() > 0)
@@ -2895,6 +2898,56 @@ class WaveMemoryPlugin(Star):
         """Queue a policy rebuild when the ordinary-chat hot window advances."""
         await self._queue_maintenance_repair("memory_index", reason="chat_hot_window")
 
+    @staticmethod
+    def _vector_backfill_predicate(*, after_id: int = 0) -> tuple[str, tuple[object, ...]]:
+        """Return the exact canonical predicate for recoverable missing vectors."""
+        return (
+            """m.id>? AND m.vector IS NULL
+                 AND m.resolution_state='resolved'
+                 AND COALESCE(m.quarantine, 0)=0
+                 AND m.visibility='group'
+                 AND COALESCE(m.bot_id, '')<>''
+                 AND COALESCE(m.session_id, '')<>''
+                 AND COALESCE(m.source, '') NOT IN ('noise', 'identity_quarantine')""",
+            (int(after_id),),
+        )
+
+    async def _has_pending_vector_backfill(self) -> bool:
+        """Check for eligible vectorless canonical memories without touching writes."""
+        where, params = self._vector_backfill_predicate()
+
+        def _read(connection):
+            return connection.execute(
+                f"SELECT 1 FROM memories m WHERE {where} LIMIT 1", params
+            ).fetchone() is not None
+
+        return bool(await self.write_gateway.coordinator.read(_read))
+
+    async def _on_vector_backfill_requested(self) -> None:
+        """Coalesce post-timeout recovery only after source rows were committed."""
+        if await self._has_pending_vector_backfill():
+            await self._queue_vector_backfill(reason="embedding_terminal_timeout")
+
+    async def _queue_vector_backfill(self, *, reason: str) -> str:
+        """Queue one bounded, resumable recovery chain for missing embeddings."""
+        token = "memory-vector-backfill"
+        request = await self.write_gateway.jobs.create_request(
+            idempotency_key="maintenance:memory-vector-backfill:v1",
+            kind="maintenance.vector_backfill.run",
+            scope={"kind": "system_maintenance"},
+            payload={"kind": "memory_vector_backfill", "reason": str(reason)},
+        )
+        run = await self.write_gateway.jobs.schedule_run(
+            request_id=request.request_id,
+            schedule_slot=token,
+            cursor_generation=0,
+            cursor={"phase": "queued", "after_id": 0, "reason": str(reason)},
+            # An already-completed pass may be safely restarted after a later
+            # timeout creates a new vectorless memory; an active pass is reused.
+            reschedule_terminal=True,
+        )
+        return run.run_id
+
     async def _queue_maintenance_repair(self, kind: str, *, reason: str) -> str:
         """Idempotently queue a recoverable repair instead of mutating derived state inline."""
         manifest = None
@@ -2909,7 +2962,16 @@ class WaveMemoryPlugin(Star):
             manifest = None
         generation = 0 if manifest is None else int(manifest.generation)
         watermark = await self.write_gateway.coordinator.committed_watermark()
-        token = f"{kind}:{reason}:{watermark}:{generation}"
+        # A full hot index must not receive one rebuild request per incoming
+        # event while its physical generation is already capacity-bound.
+        # The generation changes only after a successful rebuild, naturally
+        # opening the next coalescing window when capacity is reached again.
+        token = maintenance_repair_token(
+            kind,
+            reason,
+            watermark=watermark,
+            generation=generation,
+        )
         request = await self.write_gateway.jobs.create_request(
             idempotency_key=f"maintenance:{token}",
             kind=f"maintenance.{kind}.rebuild",
@@ -2926,6 +2988,189 @@ class WaveMemoryPlugin(Star):
             reschedule_terminal=True,
         )
         return run.run_id
+
+    async def _maintenance_run_vector_backfill(self, run, request, runner):
+        """Recover one bounded batch of missing embeddings through scoped commands."""
+        import numpy as np
+
+        payload = request.payload if isinstance(request.payload, dict) else {}
+        try:
+            batch_size = max(1, min(int(payload.get("batch_size", 16)), 32))
+        except (TypeError, ValueError):
+            batch_size = 16
+        cursor = run.cursor if isinstance(run.cursor, dict) else {}
+        try:
+            after_id = max(0, int(cursor.get("after_id", 0)))
+            timeout_batches = max(0, int(cursor.get("timeout_batches", 0)))
+        except (TypeError, ValueError):
+            after_id, timeout_batches = 0, 0
+        where, params = self._vector_backfill_predicate(after_id=after_id)
+
+        def _snapshot(connection):
+            return connection.execute(
+                f"""SELECT m.id, m.content, m.bot_id, m.session_id, m.group_id
+                      FROM memories m
+                     WHERE {where}
+                     ORDER BY m.id ASC
+                     LIMIT ?""",
+                (*params, batch_size),
+            ).fetchall()
+
+        rows = await self.write_gateway.coordinator.read(_snapshot)
+        if not rows:
+            return {
+                "kind": "memory_vector_backfill",
+                "status": "completed",
+                "processed": 0,
+                "updated": 0,
+                "after_id": after_id,
+            }
+
+        selected: list[tuple[int, str, RuntimeScope]] = []
+        skipped_scope = 0
+        for memory_id, content, bot_id, session_id, group_id in rows:
+            try:
+                raw_session_id = str(session_id)
+                platform_id, kind, conversation_id = raw_session_id.split(":", 2)
+                if kind != "group" or conversation_id != str(group_id):
+                    raise ValueError("noncanonical_session_id")
+                scope = RuntimeScope(
+                    bot_id=str(bot_id),
+                    visibility="group",
+                    session=SessionRef(
+                        id=raw_session_id,
+                        platform_id=platform_id,
+                        kind="group",
+                        conversation_id=conversation_id,
+                    ),
+                )
+                text = str(content or "").strip()
+                if not text:
+                    raise ValueError("empty_content")
+            except (TypeError, ValueError):
+                skipped_scope += 1
+                continue
+            selected.append((int(memory_id), text, scope))
+
+        next_after_id = int(rows[-1][0])
+        await self.write_gateway.jobs.update_progress(
+            run.run_id,
+            lease_owner=runner.lease_owner,
+            lease_seconds=120.0,
+            progress={
+                "phase": "embed",
+                "selected": len(selected),
+                "skipped_scope": skipped_scope,
+                "after_id": next_after_id,
+            },
+            cursor={"phase": "embed", "after_id": after_id, "timeout_batches": timeout_batches},
+        )
+
+        vectors = await self.writer._embed_with_limited_retry([item[1] for item in selected]) if selected else []
+        if vectors is None:
+            # A terminal writer retry records a temporary failure. Requeue this
+            # exact cursor only a small, explicit number of times; vector=NULL
+            # remains the durable recoverable state after that limit.
+            timeout_batches += 1
+            retry_queued = False
+            if timeout_batches < 3:
+                retry = await self.write_gateway.jobs.schedule_run(
+                    request_id=request.request_id,
+                    schedule_slot=run.schedule_slot,
+                    cursor_generation=run.cursor_generation + 1,
+                    cursor={
+                        "phase": "retry",
+                        "after_id": after_id,
+                        "timeout_batches": timeout_batches,
+                    },
+                )
+                retry_queued = retry.run_id != run.run_id
+            return {
+                "kind": "memory_vector_backfill",
+                "status": "retry_queued" if retry_queued else "deferred",
+                "processed": len(selected),
+                "updated": 0,
+                "after_id": after_id,
+                "timeout_batches": timeout_batches,
+                "retry_queued": retry_queued,
+            }
+
+        vectors = list(vectors)
+        if len(vectors) < len(selected):
+            vectors.extend([None] * (len(selected) - len(vectors)))
+        updated = 0
+        skipped_vector = 0
+        write_failures = 0
+        for (memory_id, _text, scope), vector in zip(selected, vectors):
+            if await self.write_gateway.jobs.cancellation_requested(run.run_id):
+                return {
+                    "kind": "memory_vector_backfill",
+                    "status": "cancel_requested",
+                    "processed": updated + skipped_vector + write_failures,
+                    "updated": updated,
+                    "after_id": after_id,
+                }
+            try:
+                normalized = np.asarray(vector, dtype=np.float32)
+                if normalized.ndim != 1 or normalized.size != self.dimension or not np.isfinite(normalized).all():
+                    raise ValueError("embedding_dimension_or_finiteness_invalid")
+                changed = await self.write_gateway.backfill_memory_vector(
+                    scope=scope,
+                    memory_id=memory_id,
+                    vector=normalized,
+                    idempotency_hint=f"{memory_id}:{hashlib.sha256(normalized.tobytes()).hexdigest()}",
+                )
+                updated += int(changed)
+            except (TypeError, ValueError):
+                skipped_vector += 1
+            except Exception:
+                write_failures += 1
+                logger.warning(
+                    "[WaveMemory] vector backfill write skipped memory_id=%s",
+                    memory_id,
+                    exc_info=True,
+                )
+
+        remaining_where, remaining_params = self._vector_backfill_predicate(after_id=next_after_id)
+        has_remaining = await self.write_gateway.coordinator.read(
+            lambda connection: connection.execute(
+                f"SELECT 1 FROM memories m WHERE {remaining_where} LIMIT 1",
+                remaining_params,
+            ).fetchone() is not None
+        )
+        next_run_id = None
+        if has_remaining:
+            next_run = await self.write_gateway.jobs.schedule_run(
+                request_id=request.request_id,
+                schedule_slot=run.schedule_slot,
+                cursor_generation=max(run.cursor_generation + 1, next_after_id),
+                cursor={"phase": "queued", "after_id": next_after_id, "timeout_batches": 0},
+            )
+            next_run_id = next_run.run_id
+        await self.write_gateway.jobs.update_progress(
+            run.run_id,
+            lease_owner=runner.lease_owner,
+            progress={
+                "phase": "write",
+                "processed": len(selected),
+                "updated": updated,
+                "skipped_scope": skipped_scope,
+                "skipped_vector": skipped_vector,
+                "write_failures": write_failures,
+            },
+            cursor={"phase": "write", "after_id": next_after_id, "timeout_batches": 0},
+        )
+        return {
+            "kind": "memory_vector_backfill",
+            "status": "continued" if next_run_id else "completed",
+            "processed": len(selected),
+            "updated": updated,
+            "skipped_scope": skipped_scope,
+            "skipped_vector": skipped_vector,
+            "write_failures": write_failures,
+            "after_id": next_after_id,
+            "next_run_id": next_run_id,
+        }
 
     async def _maintenance_rebuild_memory_index(self, run, request, runner):
         """Build one bounded, Tag-admitted hot HNSW generation from canonical state."""
@@ -2956,18 +3201,25 @@ class WaveMemoryPlugin(Star):
                 return candidates, rows, OutboxRepository.committed_watermark(connection)
 
             candidates, rows, watermark = await self.write_gateway.coordinator.read(_snapshot)
-            fresh = VectorIndex(
-                dimension=self.dimension,
-                max_elements=self.memory_index_policy.max_vectors,
-                index_path=None,
-                kind="memory",
-                allow_resize=False,
-            )
-            if rows:
-                fresh.add(
-                    [int(row[0]) for row in rows],
-                    np.asarray([row[1] for row in rows], dtype=np.float32),
+
+            def _build_fresh_index() -> VectorIndex:
+                fresh_index = VectorIndex(
+                    dimension=self.dimension,
+                    max_elements=self.memory_index_policy.max_vectors,
+                    index_path=None,
+                    kind="memory",
+                    allow_resize=False,
                 )
+                if rows:
+                    fresh_index.add(
+                        [int(row[0]) for row in rows],
+                        np.asarray([row[1] for row in rows], dtype=np.float32),
+                    )
+                return fresh_index
+
+            # HNSW construction is CPU- and allocation-heavy; never block the
+            # AstrBot event loop while publishing a replacement generation.
+            fresh = await asyncio.to_thread(_build_fresh_index)
             with self.memory_index._lock:
                 self.memory_index.index = fresh.index
                 self.memory_index.max_elements = fresh.max_elements
@@ -3373,10 +3625,7 @@ class WaveMemoryPlugin(Star):
                     params,
                 )
 
-        await self.write_gateway.coordinator.transaction(
-            _publish,
-            actor="maintenance.pair_similarity",
-        )
+        await self.write_gateway.coordinator.transaction(_publish)
         self.pair_sim_service.install_projection(cache)
         return {
             "tags": len(rows),
@@ -3385,21 +3634,23 @@ class WaveMemoryPlugin(Star):
         }
 
     async def _maintenance_rebuild_cooccurrence(self, run, request, runner):
-        """Rebuild the cooccurrence projection under its outbox consumer barrier."""
+        """Force one serialized scheduler rebuild for an operator maintenance request."""
         await self.write_gateway.jobs.update_progress(
             run.run_id,
             lease_owner=runner.lease_owner,
             progress={"phase": "rebuild"},
             cursor={"phase": "rebuild"},
         )
-        async with self.cooccurrence_projection._lock:
-            await asyncio.to_thread(self.cooccurrence.rebuild)
-            watermark = await self.write_gateway.coordinator.committed_watermark()
+        scheduler_metrics = await self.cooccurrence_projection.force_rebuild(
+            reason="maintenance.cooccurrence.rebuild"
+        )
+        watermark = await self.write_gateway.coordinator.committed_watermark()
         return {
             "kind": "cooccurrence",
             "nodes": self.cooccurrence.node_count,
             "edges": self.cooccurrence.edge_count,
             "db_watermark": int(watermark),
+            "scheduler": scheduler_metrics,
             "verified": True,
         }
 

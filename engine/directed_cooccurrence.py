@@ -302,9 +302,11 @@ class DirectedCooccurrence:
 
 
 class CooccurrenceScheduler:
-    """防抖重建调度器 — 修复：改成满阈值+过冷却期才触发。
+    """合并已提交 Tag 变更，并在共享屏障内异步重建共现矩阵。
 
-    累积 Tag 变更超过阈值后，检查冷却期是否已过，再触发重建。
+    达到阈值后会始终保留一个延迟任务：即使冷却期内不再有事件，冷却期
+    结束时仍会执行重建。所有自动和强制重建都经过同一 ``rebuild_lock``，
+    使维护任务可以复用这一屏障而不会并行交换矩阵。
     """
 
     def __init__(
@@ -313,76 +315,233 @@ class CooccurrenceScheduler:
         threshold_pct: float = 0.05,
         cooldown_sec: float = 300,
         on_rebuild_complete=None,
+        rebuild_lock: asyncio.Lock | None = None,
     ):
         self.cooccurrence = cooccurrence
-        self.threshold_pct = threshold_pct
-        self.cooldown_sec = cooldown_sec
+        self.threshold_pct = max(float(threshold_pct), 0.0)
+        self.cooldown_sec = max(float(cooldown_sec), 0.0)
         self.on_rebuild_complete = on_rebuild_complete
+        self._rebuild_lock = rebuild_lock or asyncio.Lock()
         self._accumulated_changes = 0
         self._change_generation = 0
         self._last_rebuild_ts: float = 0
         self._is_rebuilding = False
-        self._scheduled_task = None
+        self._scheduled_task: asyncio.Task | None = None
+        self._wake_event = asyncio.Event()
+        self._force_requested = False
+        self._force_waiters: list[asyncio.Future] = []
+        self._pending_reasons: dict[str, int] = {}
+        self._metrics: dict[str, object] = {
+            "notifications_total": 0,
+            "rebuild_started_total": 0,
+            "rebuild_completed_total": 0,
+            "rebuild_failed_total": 0,
+            "force_requested_total": 0,
+            "pending_changes": 0,
+            "pending_reasons": {},
+            "last_rebuild": None,
+        }
+        # Projection construction happens after scheduler construction in the
+        # existing plugin.  This compatibility attachment lets the projection
+        # discover and bind the already configured scheduler without main.py.
+        try:
+            setattr(cooccurrence, "_cooccurrence_scheduler", self)
+        except Exception:
+            pass
 
-    def notify_tag_change(self, count: int = 1):
-        """Accumulate Tag deltas and schedule at most one background rebuild."""
+    def set_rebuild_lock(self, rebuild_lock: asyncio.Lock) -> None:
+        """Bind the projection/maintenance barrier before work is scheduled."""
+        if self._scheduled_task is not None and not self._scheduled_task.done():
+            raise RuntimeError("cannot replace cooccurrence rebuild lock while scheduled")
+        self._rebuild_lock = rebuild_lock
+
+    def metrics_snapshot(self) -> dict[str, object]:
+        """Return a copy suitable for structured diagnostics and tests."""
+        snapshot = dict(self._metrics)
+        snapshot["pending_changes"] = self._accumulated_changes
+        snapshot["pending_reasons"] = dict(self._pending_reasons)
+        last_rebuild = snapshot.get("last_rebuild")
+        if isinstance(last_rebuild, dict):
+            snapshot["last_rebuild"] = dict(last_rebuild)
+        return snapshot
+
+    def notify_tag_change(self, count: int = 1, *, reason: str = "tag_change") -> None:
+        """Mark the projection dirty and start/retain one cooldown driver task."""
         normalized_count = max(int(count), 0)
+        if normalized_count <= 0:
+            return
+        normalized_reason = str(reason or "tag_change")
         self._accumulated_changes += normalized_count
         self._change_generation += normalized_count
-        total = self.cooccurrence.node_count or 1
-        if self._accumulated_changes / total >= self.threshold_pct:
-            now = time.time()
-            if now - self._last_rebuild_ts >= self.cooldown_sec:
-                self._schedule_rebuild()
+        self._pending_reasons[normalized_reason] = (
+            self._pending_reasons.get(normalized_reason, 0) + normalized_count
+        )
+        self._metrics["notifications_total"] = int(self._metrics["notifications_total"]) + normalized_count
+        self._metrics["pending_changes"] = self._accumulated_changes
+        self._metrics["pending_reasons"] = dict(self._pending_reasons)
+        if self._threshold_reached():
+            self._ensure_driver()
+            self._wake_event.set()
 
-    def _schedule_rebuild(self):
-        """Schedule one rebuild; repeated notifications only advance generation."""
-        if self._is_rebuilding:
+    async def force_rebuild(self, *, reason: str = "force") -> dict[str, object]:
+        """Run one rebuild through the same barrier, bypassing cooldown safely."""
+        loop = asyncio.get_running_loop()
+        waiter = loop.create_future()
+        self._force_waiters.append(waiter)
+        self._force_requested = True
+        normalized_reason = str(reason or "force")
+        self._pending_reasons[normalized_reason] = self._pending_reasons.get(normalized_reason, 0) + 1
+        self._metrics["force_requested_total"] = int(self._metrics["force_requested_total"]) + 1
+        self._metrics["pending_reasons"] = dict(self._pending_reasons)
+        self._ensure_driver()
+        self._wake_event.set()
+        await asyncio.shield(waiter)
+        return self.metrics_snapshot()
+
+    def _threshold_reached(self) -> bool:
+        if self._accumulated_changes <= 0:
+            return False
+        total = self.cooccurrence.node_count or 1
+        return self._accumulated_changes / total >= self.threshold_pct
+
+    def _ensure_driver(self) -> None:
+        """Create exactly one driver task; it may sleep, then rebuild serially."""
+        if self._scheduled_task is not None and not self._scheduled_task.done():
             return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        self._is_rebuilding = True
-        self._scheduled_task = loop.create_task(self._do_rebuild())
+        self._scheduled_task = loop.create_task(self._run_rebuild_driver())
 
-    async def _do_rebuild(self):
-        """Rebuild off the AstrBot event loop and consume a generation snapshot."""
-        generation = self._change_generation
+    def _schedule_rebuild(self) -> None:
+        """Backward-compatible alias for older callers/tests."""
+        self._ensure_driver()
+
+    async def _run_rebuild_driver(self) -> None:
         try:
-            logger.info(
-                "[WaveMemory] CooccurrenceScheduler: starting rebuild generation=%s pending_changes=%s",
-                generation,
-                self._accumulated_changes,
-            )
-            new_matrix = DirectedCooccurrence(
-                self.cooccurrence.db,
-                pair_sim_service=self.cooccurrence.pair_sim_service,
-                residual_map=self.cooccurrence.residual_map,
-                semantic_gain_config=self.cooccurrence.semantic_gain_config,
-            )
-            await asyncio.to_thread(new_matrix.rebuild)
-            self.cooccurrence.forward = new_matrix.forward
-            self.cooccurrence.backward = new_matrix.backward
-            self.cooccurrence._tag_count = new_matrix._tag_count
-            consumed = min(generation, self._change_generation)
-            self._accumulated_changes = max(0, self._change_generation - consumed)
-            self._last_rebuild_ts = time.time()
-            logger.info(
-                "[WaveMemory] CooccurrenceScheduler: rebuild complete generation=%s remaining_changes=%s",
-                generation,
-                self._accumulated_changes,
-            )
+            while self._force_requested or self._threshold_reached():
+                if not self._force_requested:
+                    delay = self.cooldown_sec - (time.time() - self._last_rebuild_ts)
+                    if delay > 0:
+                        self._wake_event.clear()
+                        try:
+                            await asyncio.wait_for(self._wake_event.wait(), timeout=delay)
+                        except asyncio.TimeoutError:
+                            pass
+                        continue
+                rebuilt = await self._do_rebuild()
+                if not rebuilt:
+                    return
+        finally:
+            # A notification can land after the loop condition observes a clean
+            # state but before this task relinquishes ownership. Re-check after
+            # clearing the handle so that burst is never stranded without a
+            # future event to wake it.
+            self._scheduled_task = None
+            if self._force_requested or self._threshold_reached():
+                self._ensure_driver()
+
+    async def _do_rebuild(self) -> bool:
+        """Build off-loop, atomically publish the replacement, and retain new deltas."""
+        snapshot_reasons: dict[str, int] = {}
+        force_waiters: list[asyncio.Future] = []
+        generation = 0
+        forced = False
+        try:
+            async with self._rebuild_lock:
+                generation = self._change_generation
+                snapshot_reasons = self._pending_reasons
+                self._pending_reasons = {}
+                force_waiters = self._force_waiters
+                self._force_waiters = []
+                forced = self._force_requested
+                self._force_requested = False
+                self._is_rebuilding = True
+                reason_names = sorted(snapshot_reasons) or (["force"] if forced else ["threshold"])
+                self._metrics["rebuild_started_total"] = int(self._metrics["rebuild_started_total"]) + 1
+                self._metrics["last_rebuild"] = {
+                    "status": "running",
+                    "reasons": reason_names,
+                    "generation": generation,
+                    "started_at": time.time(),
+                }
+                logger.info(
+                    "[WaveMemory] CooccurrenceScheduler: starting rebuild generation=%s pending_changes=%s reasons=%s",
+                    generation,
+                    self._accumulated_changes,
+                    reason_names,
+                )
+                new_matrix = DirectedCooccurrence(
+                    self.cooccurrence.db,
+                    pair_sim_service=self.cooccurrence.pair_sim_service,
+                    residual_map=self.cooccurrence.residual_map,
+                    semantic_gain_config=self.cooccurrence.semantic_gain_config,
+                )
+                await asyncio.to_thread(new_matrix.rebuild)
+                # Publish only a fully rebuilt matrix; readers never observe its
+                # partially constructed local dictionaries.
+                self.cooccurrence.forward = new_matrix.forward
+                self.cooccurrence.backward = new_matrix.backward
+                self.cooccurrence._tag_count = new_matrix._tag_count
+                self._accumulated_changes = max(0, self._change_generation - generation)
+                self._last_rebuild_ts = time.time()
+                self._metrics["rebuild_completed_total"] = int(self._metrics["rebuild_completed_total"]) + 1
+                self._metrics["pending_changes"] = self._accumulated_changes
+                self._metrics["pending_reasons"] = dict(self._pending_reasons)
+                self._metrics["last_rebuild"] = {
+                    "status": "completed",
+                    "reasons": reason_names,
+                    "generation": generation,
+                    "completed_at": self._last_rebuild_ts,
+                    "remaining_changes": self._accumulated_changes,
+                }
+                logger.info(
+                    "[WaveMemory] CooccurrenceScheduler: rebuild complete generation=%s remaining_changes=%s reasons=%s",
+                    generation,
+                    self._accumulated_changes,
+                    reason_names,
+                )
 
             if self.on_rebuild_complete:
-                await self.on_rebuild_complete()
-
-        except Exception as e:
+                try:
+                    result = self.on_rebuild_complete()
+                    if hasattr(result, "__await__"):
+                        await result
+                except Exception:
+                    logger.warning(
+                        "[WaveMemory] CooccurrenceScheduler rebuild completion callback failed",
+                        exc_info=True,
+                    )
+            for waiter in force_waiters:
+                if not waiter.done():
+                    waiter.set_result(None)
+            return True
+        except Exception as exc:
+            self._pending_reasons = {
+                **snapshot_reasons,
+                **{
+                    key: self._pending_reasons.get(key, 0) + value
+                    for key, value in snapshot_reasons.items()
+                },
+            }
+            self._metrics["rebuild_failed_total"] = int(self._metrics["rebuild_failed_total"]) + 1
+            self._metrics["pending_reasons"] = dict(self._pending_reasons)
+            self._metrics["last_rebuild"] = {
+                "status": "failed",
+                "reasons": sorted(snapshot_reasons),
+                "generation": generation,
+                "failed_at": time.time(),
+                "error_type": type(exc).__name__,
+            }
             logger.error(
                 "[WaveMemory] CooccurrenceScheduler rebuild error type=%s error=%r",
-                type(e).__name__,
-                e,
+                type(exc).__name__,
+                exc,
             )
+            for waiter in force_waiters:
+                if not waiter.done():
+                    waiter.set_exception(exc)
+            return False
         finally:
             self._is_rebuilding = False
-            self._scheduled_task = None

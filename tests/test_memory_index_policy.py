@@ -7,6 +7,7 @@ from services.memory_index_policy import (
     MemoryIndexPolicy,
     decode_vector,
     evaluate_memory_admission,
+    memory_index_policy_from_settings,
     select_hot_memory_candidates,
 )
 
@@ -177,7 +178,7 @@ def test_durable_sources_and_types_outlive_expired_core_chat():
         connection.close()
 
 
-def test_per_scope_then_global_quotas_and_single_memory_evaluation():
+def test_default_policy_admits_one_scope_until_global_capacity():
     connection = _connection()
     try:
         for memory_id, importance in ((1, 5.0), (2, 4.0), (3, 3.0)):
@@ -187,7 +188,30 @@ def test_per_scope_then_global_quotas_and_single_memory_evaluation():
             _insert_memory(connection, memory_id, group_id="g2", importance=importance)
             _tag(connection, memory_id, group_id="g2")
 
-        policy = MemoryIndexPolicy(max_vectors=3, per_scope_max_vectors=2, candidate_limit=128)
+        policy = MemoryIndexPolicy(max_vectors=4, per_scope_max_vectors=1, candidate_limit=128)
+
+        assert _ids(connection, policy) == [1, 2, 3, 4]
+        assert evaluate_memory_admission(connection, 3, policy, DIMENSION, now=NOW).memory_id == 3
+    finally:
+        connection.close()
+
+
+def test_opt_in_scope_quota_then_global_quota_and_single_memory_evaluation():
+    connection = _connection()
+    try:
+        for memory_id, importance in ((1, 5.0), (2, 4.0), (3, 3.0)):
+            _insert_memory(connection, memory_id, importance=importance)
+            _tag(connection, memory_id)
+        for memory_id, importance in ((4, 2.0), (5, 1.0)):
+            _insert_memory(connection, memory_id, group_id="g2", importance=importance)
+            _tag(connection, memory_id, group_id="g2")
+
+        policy = MemoryIndexPolicy(
+            max_vectors=3,
+            per_scope_max_vectors=2,
+            enforce_scope_hot_quota=True,
+            candidate_limit=128,
+        )
 
         assert _ids(connection, policy) == [1, 2, 4]
         assert evaluate_memory_admission(connection, 2, policy, DIMENSION, now=NOW).memory_id == 2
@@ -195,6 +219,22 @@ def test_per_scope_then_global_quotas_and_single_memory_evaluation():
         assert evaluate_memory_admission(connection, 5, policy, DIMENSION, now=NOW) is None
     finally:
         connection.close()
+
+
+def test_scope_hot_quota_configuration_is_explicitly_opt_in():
+    default = memory_index_policy_from_settings({"per_scope_max_vectors": 1})
+    explicit_false = memory_index_policy_from_settings({"enforce_scope_hot_quota": False})
+    disabled = memory_index_policy_from_settings({"enforce_scope_hot_quota": "false"})
+    enabled = memory_index_policy_from_settings({
+        "enforce_scope_hot_quota": "true",
+        "per_scope_max_vectors": "7",
+    })
+
+    assert default.enforce_scope_hot_quota is False
+    assert explicit_false.enforce_scope_hot_quota is False
+    assert disabled.enforce_scope_hot_quota is False
+    assert enabled.enforce_scope_hot_quota is True
+    assert enabled.per_scope_max_vectors == 7
 
 
 def test_cold_candidate_limit_does_not_truncate_hot_rebuild_selection():

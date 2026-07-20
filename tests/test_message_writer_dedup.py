@@ -61,6 +61,18 @@ class HangingEmbedding:
         return [np.ones(3, dtype=np.float32) for _ in texts]
 
 
+class FlakyEmbedding:
+    def __init__(self):
+        self.calls = 0
+
+    async def get_embeddings(self, texts):
+        self.calls += 1
+        if self.calls == 1:
+            await asyncio.sleep(1)
+            return [np.ones(3, dtype=np.float32) for _ in texts]
+        return [np.ones(3, dtype=np.float32) for _ in texts]
+
+
 class BlockingQualityRepository:
     def __init__(self):
         self.calls = 0
@@ -275,6 +287,7 @@ class MessageWriterDedupTest(unittest.TestCase):
         from astrbot_plugin_wave_memory.services.message_writer import MessageWriter
 
         db = FakeDB()
+        requested = []
         writer = MessageWriter(
             db=db,
             memory_index=FakeIndex(),
@@ -282,6 +295,9 @@ class MessageWriterDedupTest(unittest.TestCase):
             bot_keywords=set(),
             noise_max_length=1,
             embedding_timeout=0.01,
+            embedding_retry_attempts=2,
+            embedding_retry_backoff_seconds=0.0,
+            on_vector_backfill_requested=lambda: requested.append("queued"),
         )
 
         asyncio.run(writer._process_batch([{
@@ -295,8 +311,44 @@ class MessageWriterDedupTest(unittest.TestCase):
 
         self.assertEqual(len(db.added), 1)
         self.assertIsNone(db.added[0]["vector"])
-        self.assertEqual(writer.stats["embedding_timeouts"], 1)
+        self.assertEqual(writer.stats["embedding_timeouts"], 2)
+        self.assertEqual(writer.stats["embedding_retries"], 1)
+        self.assertEqual(writer.stats["embedding_terminal_timeouts"], 1)
         self.assertEqual(writer.stats["consecutive_failures"], 0)
+        self.assertEqual(requested, ["queued"])
+
+    def test_embedding_timeout_recovers_within_retry_budget(self):
+        from astrbot_plugin_wave_memory.services.message_writer import MessageWriter
+
+        db = FakeDB()
+        embedding = FlakyEmbedding()
+        writer = MessageWriter(
+            db=db,
+            memory_index=FakeIndex(),
+            embedding_service=embedding,
+            bot_keywords=set(),
+            noise_max_length=1,
+            embedding_timeout=0.05,
+            embedding_retry_attempts=2,
+            embedding_retry_backoff_seconds=0.0,
+        )
+
+        asyncio.run(writer._process_batch([{
+            "scope": _group_scope(),
+            "group_id": "group-1",
+            "sender_id": "user-1",
+            "content": "短暂超时后应恢复向量",
+            "timestamp": 3301.0,
+            "source": "core",
+        }]))
+
+        self.assertEqual(embedding.calls, 2)
+        self.assertEqual(len(db.added), 1)
+        self.assertIsNotNone(db.added[0]["vector"])
+        self.assertEqual(writer.stats["embedding_timeouts"], 1)
+        self.assertEqual(writer.stats["embedding_retries"], 1)
+        self.assertEqual(writer.stats["embedding_recovered_after_retry"], 1)
+        self.assertEqual(writer.stats["embedding_terminal_timeouts"], 0)
 
     def test_scope_payload_rejects_mismatched_or_non_group_legacy_projection(self):
         from astrbot_plugin_wave_memory.services.message_writer import MessageScopeError

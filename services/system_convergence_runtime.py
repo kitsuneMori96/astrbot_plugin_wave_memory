@@ -31,6 +31,7 @@ except ImportError:  # pragma: no cover - focused repository tests import top-le
 
 
 _APPEND_MEMORY = "memory.append.v1"
+_BACKFILL_MEMORY_VECTOR = "memory.vector_backfill.v1"
 _APPLY_TAG_EXTRACTION = "tag_extraction.apply.v1"
 _MUTATE_MEMORIES = "memory.mutate.v1"
 
@@ -148,6 +149,58 @@ def _append_memory_handler(connection, command: DomainCommand, now: float) -> Mu
                     "quarantine": quarantined,
                     "scope": scope_payload,
                 },
+            ),
+        ),
+    )
+
+
+def _backfill_memory_vector_handler(connection, command: DomainCommand, now: float) -> MutationOutcome:
+    """Attach a recovered embedding to one still-live, exact-scope memory.
+
+    A missing/deleted/replaced row is deliberately a no-op: the durable backfill
+    runner must be able to continue past stale work without widening its Scope.
+    """
+    scope = _require_group_scope(command.scope)
+    payload = command.payload
+    memory_id = int(payload["memory_id"])
+    vector_blob = payload.get("vector_blob")
+    if not isinstance(vector_blob, (bytes, bytearray, memoryview)) or not vector_blob:
+        raise ValueError("memory vector backfill requires a non-empty vector blob")
+    if len(vector_blob) % np.dtype(np.float32).itemsize:
+        raise ValueError("memory vector backfill requires float32-aligned data")
+
+    row = connection.execute(
+        """SELECT version, vector FROM memories
+             WHERE id=? AND bot_id=? AND session_id=? AND visibility=?
+               AND resolution_state='resolved' AND COALESCE(quarantine, 0)=0""",
+        (memory_id, *_scope_tuple(scope)),
+    ).fetchone()
+    if row is None:
+        return MutationOutcome(entities=(), events=(), warnings=("memory_missing_or_stale",))
+    if row[1] is not None:
+        return MutationOutcome(entities=(), events=(), warnings=("memory_vector_already_present",))
+
+    previous_version = int(row[0] or MEMORIES_V2_VERSION)
+    next_version = previous_version + 1
+    connection.execute(
+        "UPDATE memories SET vector=?, version=? WHERE id=?",
+        (bytes(vector_blob), next_version, memory_id),
+    )
+    scope_payload = {
+        "bot_id": scope.bot_id,
+        "session_id": scope.session.id,
+        "visibility": scope.visibility,
+        "group_id": scope.session.conversation_id,
+    }
+    return MutationOutcome(
+        entities=(EntityChange("memory", str(memory_id), next_version, "vector_backfilled"),),
+        events=(
+            OutboxEventDraft(
+                aggregate_kind="memory",
+                aggregate_id=str(memory_id),
+                aggregate_version=next_version,
+                event_type="memory.vector_backfilled",
+                payload={"memory_id": memory_id, "scope": scope_payload},
             ),
         ),
     )
@@ -471,6 +524,7 @@ class ProductionWriteGateway:
             database_path,
             command_handlers={
                 _APPEND_MEMORY: _append_memory_handler,
+                _BACKFILL_MEMORY_VECTOR: _backfill_memory_vector_handler,
                 _APPLY_TAG_EXTRACTION: _apply_tag_extraction_handler,
                 _MUTATE_MEMORIES: _mutate_memories_handler,
             },
@@ -560,6 +614,36 @@ class ProductionWriteGateway:
         result = await self.coordinator.submit(command)
         memory = next(item for item in result.entities if item.aggregate_kind == "memory")
         return int(memory.aggregate_id)
+
+    async def backfill_memory_vector(
+        self,
+        *,
+        scope: RuntimeScope,
+        memory_id: int,
+        vector: np.ndarray,
+        idempotency_hint: str | None = None,
+    ) -> bool:
+        """Persist one recovered embedding through the canonical scoped write path."""
+        normalized = np.asarray(vector, dtype=np.float32)
+        if normalized.ndim != 1 or normalized.size <= 0 or not np.isfinite(normalized).all():
+            raise ValueError("memory vector backfill requires a finite one-dimensional vector")
+        vector_blob = normalized.tobytes()
+        request_shape = {
+            "scope": scope.to_dict(),
+            "memory_id": int(memory_id),
+            "vector_sha256": hashlib.sha256(vector_blob).hexdigest(),
+        }
+        stable_hint = str(idempotency_hint or _digest(request_shape)).strip()
+        command = self._command(
+            command_type=_BACKFILL_MEMORY_VECTOR,
+            actor="memory_vector_backfill",
+            scope=scope,
+            payload={**request_shape, "vector_blob": vector_blob},
+            idempotency_key=f"memory.vector_backfill:{stable_hint}",
+            request_shape=request_shape,
+        )
+        result = await self.coordinator.submit(command)
+        return any(item.aggregate_kind == "memory" for item in result.entities)
 
     async def apply_tag_extraction(
         self,

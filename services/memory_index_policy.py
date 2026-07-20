@@ -11,7 +11,7 @@ import json
 import math
 import time
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 
@@ -35,10 +35,57 @@ class MemoryIndexPolicy:
     """Bounds and freshness controls for the shared memory HNSW index."""
 
     max_vectors: int = 100_000
+    # Scope always remains a query/access boundary. Its hot-tier quota is opt-in:
+    # the default admits every eligible memory until the global HNSW limit is met.
     per_scope_max_vectors: int = 1_000
     scoped_reserved_vectors: int = 10_000
     chat_hot_days: int = 30
     candidate_limit: int = 128
+    enforce_scope_hot_quota: bool = False
+
+
+def _bounded_int(settings: Mapping[str, Any], key: str, default: int, minimum: int) -> int:
+    try:
+        return max(minimum, int(float(settings.get(key, default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _bool_setting(settings: Mapping[str, Any], key: str, default: bool = False) -> bool:
+    """Read a bool without conflating absent, explicit false, and malformed values."""
+    if key not in settings:
+        return default
+    value = settings.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off", ""}:
+            return False
+        return default
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return bool(value)
+    return default
+
+
+def memory_index_policy_from_settings(section: Mapping[str, Any] | None) -> MemoryIndexPolicy:
+    """Build one consistent hot-index policy from plugin configuration settings."""
+    settings = section if isinstance(section, Mapping) else {}
+    hot_max_vectors = _bounded_int(settings, "hot_max_vectors", 100_000, 1)
+    try:
+        scoped_reserved_vectors = max(0, int(float(settings.get("scoped_reserved_vectors", 10_000))))
+    except (TypeError, ValueError):
+        scoped_reserved_vectors = 10_000
+    return MemoryIndexPolicy(
+        max_vectors=hot_max_vectors,
+        per_scope_max_vectors=_bounded_int(settings, "per_scope_max_vectors", 1_000, 1),
+        enforce_scope_hot_quota=_bool_setting(settings, "enforce_scope_hot_quota", False),
+        scoped_reserved_vectors=min(hot_max_vectors, scoped_reserved_vectors),
+        chat_hot_days=_bounded_int(settings, "chat_hot_days", 30, 0),
+        candidate_limit=_bounded_int(settings, "cold_candidate_limit", 128, 1),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -416,10 +463,10 @@ def select_hot_memory_candidates(
 ) -> list[HotMemoryCandidate]:
     """Return deterministic candidates from scoped and legacy-group lanes.
 
-    Scope remains the access and quota boundary for modern rows. Fully unscoped
-    legacy group rows may use their existing tags as semantic evidence without
-    consuming a synthetic Scope quota; a bounded reservation prevents that
-    legacy corpus from starving the modern lane.
+    Scope remains the access boundary for modern rows. Its hot-tier quota is
+    disabled by default, so every eligible row competes only against the global
+    HNSW limit; fully unscoped legacy rows never consume a synthetic Scope quota.
+    A bounded reservation prevents the legacy corpus from starving modern rows.
     """
     timestamp = float(time.time() if now is None else now)
     try:
@@ -441,10 +488,11 @@ def select_hot_memory_candidates(
     admitted: list[HotMemoryCandidate] = []
     admitted_ids: set[int] = set()
     scope_counts: dict[tuple[str, str, str, str], int] = {}
+    enforce_scope_hot_quota = bool(policy.enforce_scope_hot_quota)
 
     def admit(candidate: HotMemoryCandidate) -> bool:
         scope_key = candidate.scope_key
-        if scope_key is not None:
+        if scope_key is not None and enforce_scope_hot_quota:
             if not per_scope_limit or scope_counts.get(scope_key, 0) >= per_scope_limit:
                 return False
             scope_counts[scope_key] = scope_counts.get(scope_key, 0) + 1

@@ -146,9 +146,16 @@
         "default": 100000,
         "restart_required": true
       },
+      "enforce_scope_hot_quota": {
+        "description": "启用单个 Scope 热记忆配额",
+        "hint": "默认关闭：有效记忆会持续增量加入热 HNSW，直到全局硬上限。开启后才使用下方的单 Scope 上限，用于需要严格公平分配的场景。",
+        "type": "bool",
+        "default": false,
+        "restart_required": true
+      },
       "per_scope_max_vectors": {
-        "description": "单个 Scope 的热记忆上限",
-        "hint": "防止单一 Bot/群会话占满共享热索引。",
+        "description": "单个 Scope 的热记忆上限（可选）",
+        "hint": "仅在“启用单个 Scope 热记忆配额”打开时生效；关闭时 Scope 仍用于访问隔离和检索过滤，不限制热索引增量写入。",
         "type": "int",
         "default": 1000,
         "restart_required": true
@@ -193,6 +200,13 @@
         "hint": "legacy_tags.hnsw 只读取旧 tags.vector。实际重建容量始终至少为旧 Tag 行数加一，避免历史 Tag 超出默认值时失败。",
         "type": "int",
         "default": 40000,
+        "restart_required": true
+      },
+      "generation_retention": {
+        "description": "HNSW generation 保留数量",
+        "hint": "每次成功校验并发布 manifest 后，保留当前 generation 和最近的回滚 generation；较旧文件会自动回收，避免磁盘无限增长。最小值为 2。",
+        "type": "int",
+        "default": 2,
         "restart_required": true
       }
     }

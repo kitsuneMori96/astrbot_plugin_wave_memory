@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -59,10 +60,31 @@ def manifest_path(index_path: str | Path) -> Path:
 
 
 def generation_path(index_path: str | Path, generation: int) -> Path:
-    if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
-        raise ManifestValidationError("generation must be a positive integer")
+    if (
+        not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or not 1 <= generation < 10**GENERATION_WIDTH
+    ):
+        raise ManifestValidationError("generation must fit the canonical generation filename")
     path = Path(index_path)
     return path.with_name(f"{path.name}.g{generation:0{GENERATION_WIDTH}d}")
+
+
+def generation_files(index_path: str | Path) -> list[tuple[int, Path]]:
+    """Return canonical immutable generation files ordered by generation."""
+    path = Path(index_path)
+    pattern = re.compile(rf"^{re.escape(path.name)}\.g(\d{{{GENERATION_WIDTH}}})$")
+    try:
+        candidates = path.parent.iterdir()
+    except FileNotFoundError:
+        return []
+
+    generations: list[tuple[int, Path]] = []
+    for candidate in candidates:
+        match = pattern.fullmatch(candidate.name)
+        if match is not None and candidate.is_file():
+            generations.append((int(match.group(1)), candidate))
+    return sorted(generations)
 
 
 def checksum_file(path: str | Path, chunk_size: int = 1024 * 1024) -> str:
@@ -74,15 +96,8 @@ def checksum_file(path: str | Path, chunk_size: int = 1024 * 1024) -> str:
 
 
 def latest_generation(index_path: str | Path) -> int:
-    """Return the highest immutable generation present beside ``index_path``."""
-    path = Path(index_path)
-    prefix = f"{path.name}.g"
-    latest = 0
-    for candidate in path.parent.glob(f"{path.name}.g*"):
-        suffix = candidate.name[len(prefix) :]
-        if suffix.isdigit():
-            latest = max(latest, int(suffix))
-    return latest
+    """Return the highest canonical immutable generation beside ``index_path``."""
+    return max((generation for generation, _path in generation_files(index_path)), default=0)
 
 
 def validate_index_manifest(

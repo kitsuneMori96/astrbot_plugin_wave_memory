@@ -109,6 +109,62 @@ async def test_production_gateway_commits_memory_tags_operation_and_outbox_atomi
 
 
 @pytest.mark.asyncio
+async def test_vector_backfill_is_scoped_idempotent_and_emits_one_memory_event(tmp_path):
+    path = str(tmp_path / "vector-backfill.sqlite3")
+    db = WaveMemoryDB(path, dimension=4)
+    gateway = ProductionWriteGateway(path)
+    try:
+        memory_id = await gateway.append_memory(
+            scope=_scope(),
+            group_id="group-1",
+            content="recover this embedding",
+            vector=None,
+            sender_id="qq:user:user-1",
+            sender_name="tester",
+            timestamp=100.0,
+            importance=0.8,
+            source="chat",
+            provenance={"event_id": "vectorless-event"},
+            origin_metadata={"event_id": "vectorless-event"},
+            quarantine=False,
+            idempotency_hint="vectorless-event",
+        )
+        base_version = db.conn.execute(
+            "SELECT version FROM memories WHERE id=?", (memory_id,)
+        ).fetchone()[0]
+        vector = np.asarray([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+        assert await gateway.backfill_memory_vector(
+            scope=_scope(),
+            memory_id=memory_id,
+            vector=vector,
+            idempotency_hint="first-recovery",
+        ) is True
+        stored, version = db.conn.execute(
+            "SELECT vector, version FROM memories WHERE id=?", (memory_id,)
+        ).fetchone()
+        assert np.frombuffer(stored, dtype=np.float32).tolist() == vector.tolist()
+        assert version == base_version + 1
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM domain_outbox WHERE event_type='memory.vector_backfilled'"
+        ).fetchone()[0] == 1
+
+        # A differently-keyed stale retry sees the already-filled vector as a
+        # no-op, rather than rewriting it or emitting another projection event.
+        assert await gateway.backfill_memory_vector(
+            scope=_scope(),
+            memory_id=memory_id,
+            vector=vector * 2,
+            idempotency_hint="stale-retry",
+        ) is False
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM domain_outbox WHERE event_type='memory.vector_backfilled'"
+        ).fetchone()[0] == 1
+    finally:
+        await gateway.shutdown()
+        db.close()
+
+
+@pytest.mark.asyncio
 async def test_production_gateway_enforces_single_process_writer_lease(tmp_path):
     path = str(tmp_path / "writer-lease.sqlite3")
     first = ProductionWriteGateway(path)
