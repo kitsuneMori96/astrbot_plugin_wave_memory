@@ -20,7 +20,8 @@ from ..config.channel_config import ChannelConfigSet, channel_config_revision
 
 
 logger = logging.getLogger(__name__)
-SLOW_INJECTION_WARNING_MS = 500
+# Warn only when total injection exceeds the remote-embedding memory budget.
+SLOW_INJECTION_WARNING_MS = 2000
 
 
 @dataclass

@@ -1329,9 +1329,12 @@ class WaveMemoryPlugin(Star):
             else:
                 logger.info(f"[WaveMemory] inject_memory: no orchestrator memories found to inject | trace={trace_id}")
 
-            if result.total_latency_ms > 500:
+            # Online embedding recall commonly needs ~1-2s; keep the warning
+            # threshold aligned with the memory channel soft-timeout default.
+            slow_ms = 2000
+            if result.total_latency_ms > slow_ms:
                 logger.warning(
-                    f"[WaveMemory] inject_memory 耗时过长: {result.total_latency_ms:.0f}ms > 500ms | "
+                    f"[WaveMemory] inject_memory 耗时过长: {result.total_latency_ms:.0f}ms > {slow_ms}ms | "
                     f"channels={[{ 'channel': r.channel, 'status': r.status, 'ms': r.latency_ms } for r in result.channel_results]}"
                 )
             return True

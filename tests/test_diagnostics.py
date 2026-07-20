@@ -199,6 +199,7 @@ def test_diagnostics_collects_readonly_evidence_and_distinct_health(tmp_path):
     assert set(by_name) == {
         "fts",
         "memory_vectors",
+        "legacy_scope_debt",
         "outbox_consumer_lag",
         "job_runs",
         "derived_projection",
@@ -208,6 +209,8 @@ def test_diagnostics_collects_readonly_evidence_and_distinct_health(tmp_path):
         "tag_index_shadow",
         "book_lore_source",
     }
+    assert by_name["legacy_scope_debt"]["health"] in HEALTH_VALUES
+    assert "legacy_null_scope" in by_name["legacy_scope_debt"]["evidence"]
     assert all(item["health"] in HEALTH_VALUES for item in by_name.values())
     assert all(item["source"] and item["checked_at"] and "evidence" in item for item in by_name.values())
     assert by_name["fts"]["health"] == "drift"

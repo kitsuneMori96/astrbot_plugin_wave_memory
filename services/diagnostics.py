@@ -128,6 +128,7 @@ class DiagnosticsService:
         names = (
             "fts",
             "memory_vectors",
+            "legacy_scope_debt",
             "outbox_consumer_lag",
             "job_runs",
             "derived_projection",
@@ -151,6 +152,7 @@ class DiagnosticsService:
                 probes = (
                     ("fts", self._probe_fts),
                     ("memory_vectors", self._probe_memory_vectors),
+                    ("legacy_scope_debt", self._probe_legacy_scope_debt),
                     ("outbox_consumer_lag", self._probe_outbox_consumer_lag),
                     ("job_runs", self._probe_job_runs),
                     ("derived_projection", self._probe_derived_projection),
@@ -310,6 +312,112 @@ class DiagnosticsService:
         if vector_count == 0 and canonical_vector_count == 0:
             return "empty", evidence
         if orphan_count or mismatched_count or vector_count != canonical_vector_count:
+            return "drift", evidence
+        return "healthy", evidence
+
+    @staticmethod
+    def _probe_legacy_scope_debt(connection: sqlite3.Connection) -> tuple[str, dict[str, Any]]:
+        """Surface dual-track debt for governance without mutating anything."""
+        existing = _existing_tables(connection)
+        if "memories" not in existing:
+            return "not_configured", {
+                "reason": "canonical_memory_schema_not_configured",
+                "missing_tables": ["memories"],
+            }
+        columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(memories)").fetchall()
+        }
+        total = _scalar(connection, "SELECT COUNT(*) FROM memories")
+        if not {"bot_id", "session_id", "visibility"} <= columns:
+            return "healthy", {
+                "scope": "pre_v2_schema",
+                "total_memories": total,
+                "legacy_null_scope": total,
+                "formal_group_scope": 0,
+                "formal_vector_null_recoverable": 0,
+                "legacy_vector_null": 0,
+                "pair_similarity_schema": None,
+            }
+
+        legacy_null_scope = _scalar(
+            connection,
+            """SELECT COUNT(*) FROM memories
+                 WHERE COALESCE(bot_id, '')=''
+                    OR COALESCE(session_id, '')=''
+                    OR visibility IS NULL""",
+        )
+        formal_group_scope = _scalar(
+            connection,
+            """SELECT COUNT(*) FROM memories
+                 WHERE COALESCE(bot_id, '')<>''
+                   AND COALESCE(session_id, '')<>''
+                   AND visibility='group'""",
+        )
+        formal_vector_null = _scalar(
+            connection,
+            """SELECT COUNT(*) FROM memories
+                 WHERE vector IS NULL
+                   AND COALESCE(bot_id, '')<>''
+                   AND COALESCE(session_id, '')<>''
+                   AND visibility='group'
+                   AND COALESCE(resolution_state, '') IN ('', 'resolved')
+                   AND COALESCE(quarantine, 0)=0
+                   AND COALESCE(source, '') NOT IN ('noise', 'identity_quarantine')""",
+        )
+        legacy_vector_null = _scalar(
+            connection,
+            """SELECT COUNT(*) FROM memories
+                 WHERE vector IS NULL
+                   AND (COALESCE(bot_id, '')=''
+                        OR COALESCE(session_id, '')=''
+                        OR visibility IS NULL)""",
+        )
+        pair_schema = None
+        if "tag_pair_similarity" in existing:
+            pair_cols = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(tag_pair_similarity)").fetchall()
+            }
+            if {"tag_id_a", "tag_id_b"} <= pair_cols:
+                pair_schema = "canonical_tag_id"
+            elif {"tag_a", "tag_b"} <= pair_cols:
+                pair_schema = "legacy_tag_a"
+            else:
+                pair_schema = "unknown"
+        profiles = (
+            _scalar(connection, "SELECT COUNT(*) FROM user_profiles")
+            if "user_profiles" in existing
+            else 0
+        )
+        relationship_events = (
+            _scalar(connection, "SELECT COUNT(*) FROM relationship_events")
+            if "relationship_events" in existing
+            else 0
+        )
+        scoped_relationships = (
+            _scalar(connection, "SELECT COUNT(*) FROM scoped_soul_relationships")
+            if "scoped_soul_relationships" in existing
+            else 0
+        )
+        evidence = {
+            "scope": "legacy_vs_formal_dual_track",
+            "total_memories": total,
+            "legacy_null_scope": legacy_null_scope,
+            "formal_group_scope": formal_group_scope,
+            "formal_vector_null_recoverable": formal_vector_null,
+            "legacy_vector_null": legacy_vector_null,
+            "pair_similarity_schema": pair_schema,
+            "user_profiles": profiles,
+            "relationship_events": relationship_events,
+            "scoped_soul_relationships": scoped_relationships,
+        }
+        if total == 0:
+            return "empty", evidence
+        if formal_vector_null or (pair_schema in {"legacy_tag_a", "unknown"}):
+            return "drift", evidence
+        if legacy_null_scope or relationship_events > scoped_relationships * 10:
+            # Dual-track debt is expected during governance; surface as drift so
+            # operators notice, without treating an empty formal DB as healthy.
             return "drift", evidence
         return "healthy", evidence
 

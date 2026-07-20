@@ -197,7 +197,9 @@ def build_default_channel_config(
 
     defaults = {
         "safety": ChannelConfig("safety", True, priority=1000, token_budget=0, timeout_ms=50, modes=_modes_for("safety", mode)),
-        "memory": ChannelConfig("memory", _enabled_for("memory", mode, inject_cfg), priority=100, top_k=inject_top_k, token_budget=600, timeout_ms=1200, min_score=min_similarity, modes=_modes_for("memory", mode)),
+        # Online embedding providers routinely need >1s; keep memory channel
+        # soft-timeout at 2s so remote vector recall is not cancelled early.
+        "memory": ChannelConfig("memory", _enabled_for("memory", mode, inject_cfg), priority=100, top_k=inject_top_k, token_budget=600, timeout_ms=2000, min_score=min_similarity, modes=_modes_for("memory", mode)),
         "timeline": ChannelConfig("timeline", _enabled_for("timeline", mode, inject_cfg), priority=80, max_items=timeline_max, token_budget=220, timeout_ms=400, modes=_modes_for("timeline", mode)),
         "facts": ChannelConfig("facts", _enabled_for("facts", mode, inject_cfg), priority=75, max_items=facts_max, token_budget=260, timeout_ms=120, modes=_modes_for("facts", mode)),
         "persona": ChannelConfig("persona", _enabled_for("persona", mode, inject_cfg), priority=70, max_items=1, token_budget=350, timeout_ms=500, modes=_modes_for("persona", mode)),

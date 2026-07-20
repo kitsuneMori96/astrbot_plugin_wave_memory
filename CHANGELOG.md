@@ -1,5 +1,16 @@
 # Changelog
 
+## v4.6.2 (2026-07-20)
+
+### 治理 Phase 0：防再污染止血
+
+- **legacy Tag upsert**：`INSERT OR IGNORE` 后按 name 解析真实 `tag_id`，避免陈旧 `lastrowid` 触发 `memory_tags` FK 失败；写后先 commit 再读，兼容读写分离。
+- **pair_similarity schema 统一**：建表与迁移统一为 `tag_id_a/tag_id_b/similarity/updated_at`，幂等升级旧 `tag_a/tag_b` 表。
+- **注入默认 source_filter**：纳入 `chat`，与 `classify_source` 对齐，避免普通群聊记忆被默认滤掉。
+- **memory 通道超时**：默认/慢注入告警对齐 2000ms，适配在线 embedding。
+- **TagWorker 失败记账**：`IntegrityError`/异常写入 `failed` 并递增 `attempts`；`attempts>=5` 不再热循环。
+- **诊断**：新增只读 `legacy_scope_debt` probe（legacy/formal 计数、无向量、关系旧新表差、pair schema）。
+
 ## v4.6.1 (2026-07-20)
 
 ### 稳定性修复：外键、共现、索引保留与向量补偿

@@ -96,6 +96,6 @@ def test_tag_worker_skips_fk_failure_without_rolling_back_other_batch_items():
         "SELECT memory_id FROM scoped_memory_tags ORDER BY memory_id"
     ).fetchall() == [(2,)]
     assert connection.execute(
-        "SELECT memory_id, status FROM tag_extraction_status ORDER BY memory_id"
-    ).fetchall() == [(2, "done")]
+        "SELECT memory_id, status, attempts FROM tag_extraction_status ORDER BY memory_id"
+    ).fetchall() == [(1, "failed", 1), (2, "done", 0)]
     connection.close()

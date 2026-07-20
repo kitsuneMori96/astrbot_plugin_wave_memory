@@ -135,6 +135,25 @@ class MemoryRecallChannelTest(unittest.TestCase):
         self.assertEqual(result.status, "empty")
         self.assertEqual(result.text, "")
 
+    def test_default_source_filter_includes_chat(self):
+        from services.injection.channels.memory_recall import (
+            MemoryRecallChannel,
+            _DEFAULT_SOURCE_FILTER,
+        )
+
+        self.assertIn("chat", _DEFAULT_SOURCE_FILTER)
+        self.assertIn("core", _DEFAULT_SOURCE_FILTER)
+
+        memories = [
+            {"id": 301, "content": "普通群聊记忆", "score": 0.8, "source": "chat", "timestamp": 1},
+        ]
+        query_engine = FakeQueryEngine(memories)
+        channel = MemoryRecallChannel(query_engine=query_engine)
+        result = asyncio.run(channel.build(self._ctx()))
+        self.assertEqual(result.status, "hit")
+        self.assertEqual(query_engine.query_calls[0]["source_filter"], list(_DEFAULT_SOURCE_FILTER))
+        self.assertIn("chat", query_engine.query_calls[0]["source_filter"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,7 @@ import numpy as np
 
 from .connection import ConnectionManager
 from .migrations.tag_extraction_status_integrity import ensure_tag_extraction_status_integrity
+from .migrations.tag_pair_similarity_schema import ensure_tag_pair_similarity_schema
 
 
 class TagRepo:
@@ -70,11 +71,11 @@ class TagRepo:
             );
 
             CREATE TABLE IF NOT EXISTS tag_pair_similarity (
-                tag_a INTEGER NOT NULL,
-                tag_b INTEGER NOT NULL,
+                tag_id_a INTEGER NOT NULL,
+                tag_id_b INTEGER NOT NULL,
                 similarity REAL NOT NULL,
-                computed_at REAL,
-                PRIMARY KEY (tag_a, tag_b)
+                updated_at REAL,
+                PRIMARY KEY (tag_id_a, tag_id_b)
             );
 
             CREATE INDEX IF NOT EXISTS idx_tags_type ON tags(tag_type);
@@ -84,22 +85,31 @@ class TagRepo:
         """)
         self.cm.commit()
         ensure_tag_extraction_status_integrity(self.cm)
+        ensure_tag_pair_similarity_schema(self.cm)
 
     def add_tag(self, name: str, vector: Optional[np.ndarray] = None) -> int:
+        """Upsert a legacy tag and always return the real primary key.
+
+        ``INSERT OR IGNORE`` may leave ``cursor.lastrowid`` as 0 or as a stale
+        previous insert id on UNIQUE conflicts.  Never trust that value for
+        foreign-key links such as ``memory_tags.tag_id``.
+        """
         vec_blob = vector.astype(np.float32).tobytes() if vector is not None else None
-        cur = self.cm.execute_write(
+        # Never trust INSERT OR IGNORE lastrowid: UNIQUE conflicts may leave a
+        # stale id.  Commit first so the WAL read connection can resolve by name.
+        self.cm.execute_write(
             "INSERT OR IGNORE INTO tags (name, vector, created_at) VALUES (?, ?, ?)",
             (name, vec_blob, time.time()),
         )
-        if cur.lastrowid == 0:
-            row = self.cm.execute_read("SELECT id FROM tags WHERE name=?", (name,)).fetchone()
-            if row:
-                if vec_blob:
-                    self.cm.execute_write("UPDATE tags SET vector=? WHERE id=?", (vec_blob, row[0]))
-                self.cm.commit()
-                return row[0]
         self.cm.commit()
-        return cur.lastrowid
+        row = self.cm.execute_read("SELECT id FROM tags WHERE name=?", (name,)).fetchone()
+        if row is None:
+            raise RuntimeError(f"tag upsert did not produce a row for name={name!r}")
+        tag_id = int(row[0])
+        if vec_blob:
+            self.cm.execute_write("UPDATE tags SET vector=? WHERE id=?", (vec_blob, tag_id))
+            self.cm.commit()
+        return tag_id
 
     def add_tag_extended(
         self,
@@ -118,30 +128,40 @@ class TagRepo:
         meta_str = _json.dumps(metadata, ensure_ascii=False) if metadata else None
         now = time.time()
 
+        # Always resolve the canonical id after INSERT OR IGNORE. SQLite does not
+        # guarantee lastrowid==0 on UNIQUE conflicts, so relying on it can hand
+        # TagWorker a non-existent tag_id and trip memory_tags FK checks.
         cur = self.cm.execute_write(
             "INSERT OR IGNORE INTO tags (name, tag_type, vector, parent_id, aliases, description, frequency, last_seen, confidence, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)",
             (name, tag_type, vec_blob, parent_id, aliases_str, description, now, confidence, meta_str, now, now),
         )
-        if cur.lastrowid == 0:
-            row = self.cm.execute_read("SELECT id FROM tags WHERE name=?", (name,)).fetchone()
-            if row:
-                updates = ["frequency = frequency + 1", "last_seen = ?", "updated_at = ?"]
-                params = [now, now]
-                if vec_blob:
-                    updates.append("vector = ?")
-                    params.append(vec_blob)
-                if tag_type != "keyword":
-                    updates.append("tag_type = ?")
-                    params.append(tag_type)
-                if description:
-                    updates.append("description = ?")
-                    params.append(description)
-                params.append(row[0])
-                self.cm.execute_write(f"UPDATE tags SET {', '.join(updates)} WHERE id = ?", params)
-                self.cm.commit()
-                return row[0]
+        # Commit before name lookup: the read connection is a separate WAL snapshot
+        # and cannot see an uncommitted INSERT on the write connection.
         self.cm.commit()
-        return cur.lastrowid
+        row = self.cm.execute_read("SELECT id FROM tags WHERE name=?", (name,)).fetchone()
+        if row is None:
+            raise RuntimeError(f"tag upsert did not produce a row for name={name!r}")
+        tag_id = int(row[0])
+        # rowcount==0 means the unique name already existed; only then bump frequency.
+        if int(getattr(cur, "rowcount", 0) or 0) == 0:
+            updates = ["frequency = frequency + 1", "last_seen = ?", "updated_at = ?"]
+            params: list = [now, now]
+            if vec_blob:
+                updates.append("vector = ?")
+                params.append(vec_blob)
+            if tag_type != "keyword":
+                updates.append("tag_type = ?")
+                params.append(tag_type)
+            if description:
+                updates.append("description = ?")
+                params.append(description)
+            if meta_str is not None:
+                updates.append("metadata = ?")
+                params.append(meta_str)
+            params.append(tag_id)
+            self.cm.execute_write(f"UPDATE tags SET {', '.join(updates)} WHERE id = ?", params)
+            self.cm.commit()
+        return tag_id
 
     def get_tag_count(self) -> int:
         return self.cm.execute_read("SELECT COUNT(*) FROM tags").fetchone()[0]

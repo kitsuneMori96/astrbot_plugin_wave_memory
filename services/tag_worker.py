@@ -126,9 +126,16 @@ class TagWorker:
             active.append("COALESCE(m.provenance, '') NOT LIKE '%classified_legacy_recovery%'")
         status_filter = "1=1"
         if "tag_extraction_status" in tables:
-            # failed stays retryable; done/skipped remain terminal only while the
-            # row has an effective link, which is checked separately below.
-            status_filter = "NOT EXISTS (SELECT 1 FROM tag_extraction_status tes WHERE tes.memory_id=m.id AND tes.status IN ('done', 'skipped'))"
+            # done/skipped are terminal.  failed stays retryable only while
+            # attempts stay under the poison budget; beyond that the row is
+            # treated as skipped so TagWorker does not hot-loop forever.
+            status_filter = (
+                "NOT EXISTS ("
+                "SELECT 1 FROM tag_extraction_status tes WHERE tes.memory_id=m.id AND ("
+                "tes.status IN ('done', 'skipped') "
+                "OR (tes.status='failed' AND COALESCE(tes.attempts, 0) >= 5)"
+                "))"
+            )
         legacy_link_missing = "1=1"
         if "memory_tags" in tables:
             legacy_link_missing = "NOT EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id=m.id)"
@@ -273,17 +280,45 @@ class TagWorker:
             f"SELECT 1 FROM memories WHERE {' AND '.join(clauses)}", params
         ).fetchone() is not None
 
-    def _record_status(self, memory_id: int, status: str, now: float) -> None:
+    def _record_status(
+        self,
+        memory_id: int,
+        status: str,
+        now: float,
+        *,
+        error: str | None = None,
+        bump_attempts: bool = False,
+    ) -> None:
+        """Persist terminal/retryable extraction state for one memory.
+
+        Failed rows keep ``status='failed'`` and increment ``attempts`` so the
+        fetcher can stop hot-looping poison items after a bounded budget.
+        """
+        err = None if error is None else str(error)[:2000]
+        if bump_attempts:
+            self.db.conn.execute(
+                """INSERT INTO tag_extraction_status (
+                       memory_id, status, attempts, last_error, last_run_at, updated_at
+                   ) VALUES (?, ?, 1, ?, ?, ?)
+                   ON CONFLICT(memory_id) DO UPDATE SET
+                       status=excluded.status,
+                       attempts=COALESCE(tag_extraction_status.attempts, 0) + 1,
+                       last_error=excluded.last_error,
+                       last_run_at=excluded.last_run_at,
+                       updated_at=excluded.updated_at""",
+                (memory_id, status, err, now, now),
+            )
+            return
         self.db.conn.execute(
             """INSERT INTO tag_extraction_status (
                    memory_id, status, attempts, last_error, last_run_at, updated_at
-               ) VALUES (?, ?, 0, NULL, ?, ?)
+               ) VALUES (?, ?, 0, ?, ?, ?)
                ON CONFLICT(memory_id) DO UPDATE SET
                    status=excluded.status,
                    last_error=excluded.last_error,
                    last_run_at=excluded.last_run_at,
                    updated_at=excluded.updated_at""",
-            (memory_id, status, now, now),
+            (memory_id, status, err, now, now),
         )
 
     async def _process_batch(self, batch: list[TagWorkItem]):
@@ -360,6 +395,21 @@ class TagWorker:
                     self.db.conn.rollback()
                 except Exception as rollback_error:
                     logger.warning(f"[WaveMemory] TagWorker rollback failed: {rollback_error}")
+                try:
+                    self._record_status(
+                        item.memory_id,
+                        "failed",
+                        time.time(),
+                        error=f"IntegrityError: {error}",
+                        bump_attempts=True,
+                    )
+                    self.db.conn.commit()
+                except Exception as status_error:
+                    logger.warning(
+                        "[WaveMemory] TagWorker failed-status write skipped memory=%s error=%r",
+                        item.memory_id,
+                        status_error,
+                    )
                 logger.warning(
                     f"[WaveMemory] TagWorker skipped memory {item.memory_id} after FK integrity error: {error}"
                 )
@@ -375,6 +425,17 @@ class TagWorker:
                     self.db.conn.rollback()
                 except Exception as rollback_error:
                     logger.warning(f"[WaveMemory] TagWorker rollback failed: {rollback_error}")
+                try:
+                    self._record_status(
+                        item.memory_id,
+                        "failed",
+                        time.time(),
+                        error=f"ValueError: {error}",
+                        bump_attempts=True,
+                    )
+                    self.db.conn.commit()
+                except Exception:
+                    pass
                 logger.warning(f"[WaveMemory] TagWorker batch error: {error}")
                 return
             except Exception as error:
@@ -382,6 +443,17 @@ class TagWorker:
                     self.db.conn.rollback()
                 except Exception as rollback_error:
                     logger.warning(f"[WaveMemory] TagWorker rollback failed: {rollback_error}")
+                try:
+                    self._record_status(
+                        item.memory_id,
+                        "failed",
+                        time.time(),
+                        error=f"{type(error).__name__}: {error}",
+                        bump_attempts=True,
+                    )
+                    self.db.conn.commit()
+                except Exception:
+                    pass
                 logger.warning(f"[WaveMemory] TagWorker batch error: {error}")
                 return
 

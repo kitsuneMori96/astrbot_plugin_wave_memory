@@ -9,7 +9,18 @@ from typing import Any
 from ..channel_base import InjectionResult
 from .safety import SafetyChannel, is_channel_allowed_in_mode
 
-_DEFAULT_SOURCE_FILTER = ["core", "evolution", "experience", "lore", "bzz_experience", "bzz_evolution", "book_lore"]
+# Align with MessageWriter.classify_source: ordinary group chat is "chat".
+# Excluding chat made the memory channel look empty despite stored rows.
+_DEFAULT_SOURCE_FILTER = [
+    "core",
+    "chat",
+    "evolution",
+    "experience",
+    "lore",
+    "bzz_experience",
+    "bzz_evolution",
+    "book_lore",
+]
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
