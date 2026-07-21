@@ -132,11 +132,27 @@ class InjectionOrchestrator:
         if cfg is not None:
             channel_options[name] = cfg.to_dict()
         channel_ctx = replace(ctx, channel_options=channel_options)
+        # Task wrapper: on timeout wait_for cancels the channel; embedding now
+        # has its own hard timeout and HNSW/cold run in to_thread so cancel can
+        # land at await points instead of sitting on multi-second sync work.
+        task = asyncio.create_task(channel.build(channel_ctx))
         try:
-            result = await asyncio.wait_for(channel.build(channel_ctx), timeout=max(timeout_ms / 1000.0, 0.001))
+            result = await asyncio.wait_for(task, timeout=max(timeout_ms / 1000.0, 0.001))
         except asyncio.TimeoutError:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
             result = InjectionResult.timeout(name, timeout_ms=timeout_ms)
         except Exception as exc:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
             result = InjectionResult.error_result(name, exc)
         result.latency_ms = round((time.perf_counter() - started) * 1000, 2)
         return result

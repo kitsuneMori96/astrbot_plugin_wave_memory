@@ -11,6 +11,7 @@
 - **热 HNSW 与读路径对齐**：legacy 准入排除 `archived/evicted/deleted/noise`，避免 inactive 占满 knn 槽；`scripts/rebuild_hot_memory_hnsw.py` 可按 policy 重建。
 - **观察/结案工具**：`scripts/retrieval_readiness_readonly.py`（含 hot_hnsw 抽样）、`scripts/observation_idle_check.py`。
 - **Job lease / eviction 噪声**：幂等租约与 eviction 告警降噪（不改变数据边界）。
+- **memory 注入超时收敛**：注入 embedding 1.5s 硬超时 soft-fail；HNSW/cold hydrate 进 `asyncio.to_thread`；通道超时后 cancel 任务，避免远程 embedding 把整次注入拖到 ~12s。
 - **默认不 fanout promote**；硬 DROP soft-deleted 与双 Bot 历史去重仍需运营明确授权。
 
 ## v4.6.2 (2026-07-20)

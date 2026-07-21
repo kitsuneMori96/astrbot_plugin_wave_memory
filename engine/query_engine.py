@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import re
@@ -36,6 +37,9 @@ from .recall_policy import RecallPolicy
 
 
 _QUERY_STAGE_NAMES = ("epa", "pyramid", "spike", "geodesic")
+# Inject path budget is ~2s for the memory channel. Embedding must fail soft
+# before remote providers sit on multi-second HTTP retries (seen ~12s).
+_INJECT_EMBEDDING_TIMEOUT_SEC = 1.5
 _QUERY_PARAM_LIMITS = {
     "pyramid_max_levels": (int, 1, 10),
     "pyramid_top_k": (int, 1, 50),
@@ -709,7 +713,30 @@ class QueryEngine:
 
         embed_start = time.perf_counter()
         try:
-            query_vec = await self.embedding.get_embedding(text)
+            query_vec = await asyncio.wait_for(
+                self.embedding.get_embedding(text),
+                timeout=_INJECT_EMBEDDING_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            embed_ms = (time.perf_counter() - embed_start) * 1000
+            self._trace_warning(
+                collector,
+                "embedding",
+                "embedding_timeout",
+                f"Embedding timed out after {_INJECT_EMBEDDING_TIMEOUT_SEC:.1f}s",
+            )
+            self._trace_record(
+                collector,
+                "embedding",
+                {
+                    "enabled": True,
+                    "available": False,
+                    "reason_code": "embedding_timeout",
+                    "latency_ms": round(embed_ms, 1),
+                    "timeout_sec": _INJECT_EMBEDDING_TIMEOUT_SEC,
+                },
+            )
+            return []
         except Exception as exc:
             if collector is None:
                 raise
@@ -738,23 +765,42 @@ class QueryEngine:
         )
         candidates_k = top_k * 20 if source_filter else top_k * 3
         search_start = time.perf_counter()
+
+        def _hot_and_cold_sync() -> tuple[list, list[tuple[dict[str, Any], float]], dict[str, Any], list[dict]]:
+            try:
+                hot = self.memory_index.search(search_vec, k=candidates_k)
+            except Exception as exc:
+                if collector is None:
+                    raise
+                self._trace_warning(collector, "vector_search", "vector_search_failed", str(exc))
+                hot = []
+            cold, cold_meta = self._search_scoped_cold_memories(
+                tag_query_vec=query_vec,
+                score_query_vec=search_vec,
+                policy=recall_policy,
+            )
+            hot_ids = [item[0] for item in hot]
+            hot_memories = self._get_scoped_memories_by_ids(hot_ids, recall_policy)
+            return hot, cold, cold_meta, hot_memories
+
         try:
-            raw_candidates = self.memory_index.search(search_vec, k=candidates_k)
+            (
+                raw_candidates,
+                cold_candidates,
+                cold_details,
+                memories,
+            ) = await asyncio.to_thread(_hot_and_cold_sync)
         except Exception as exc:
             if collector is None:
                 raise
             self._trace_warning(collector, "vector_search", "vector_search_failed", str(exc))
             raw_candidates = []
+            cold_candidates, cold_details = [], {"enabled": False, "available": False, "reason_code": "sync_search_failed"}
+            memories = []
         search_ms = (time.perf_counter() - search_start) * 1000
 
-        cold_candidates, cold_details = self._search_scoped_cold_memories(
-            tag_query_vec=query_vec,
-            score_query_vec=search_vec,
-            policy=recall_policy,
-        )
         memory_ids = [item[0] for item in raw_candidates]
         distances = {int(item[0]): float(item[1]) for item in raw_candidates}
-        memories = self._get_scoped_memories_by_ids(memory_ids, recall_policy)
         for memory in memories:
             memory["_retrieval_tier"] = "hot"
         scoped_ids = {int(memory.get("id")) for memory in memories if memory.get("id") is not None}
