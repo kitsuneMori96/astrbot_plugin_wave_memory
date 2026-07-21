@@ -285,8 +285,9 @@ def test_legacy_schema_rows_with_legacy_tags_are_admitted_without_fabricated_sco
             CREATE TABLE memory_tags (memory_id INTEGER NOT NULL, tag_id INTEGER NOT NULL);
             """
         )
+        # Active legacy message (not evicted): hot index must match SQL read filters.
         connection.execute(
-            "INSERT INTO memories VALUES (1, ?, 'g1', 'chat', 'evicted', 1.0, 0, ?)",
+            "INSERT INTO memories VALUES (1, ?, 'g1', 'chat', 'message', 1.0, 0, ?)",
             (_vector(0.1, 0.2, 0.3), NOW - 365 * 86400),
         )
         connection.execute("INSERT INTO tags VALUES (11, '历史标签', ?)", (_vector(0.1, 0.2, 0.3),))
@@ -303,6 +304,36 @@ def test_legacy_schema_rows_with_legacy_tags_are_admitted_without_fabricated_sco
         assert candidates[0].recall_visibility == "legacy_group"
         assert candidates[0].scope_key is None
         assert candidates[0].tag_relevance == 1.0
+    finally:
+        connection.close()
+
+
+def test_legacy_lane_excludes_evicted_like_sql_read_path():
+    connection = sqlite3.connect(":memory:")
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE memories (
+                id INTEGER PRIMARY KEY, vector BLOB, group_id TEXT, source TEXT,
+                memory_type TEXT, importance REAL, access_count INTEGER, timestamp REAL
+            );
+            CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT, vector BLOB);
+            CREATE TABLE memory_tags (memory_id INTEGER NOT NULL, tag_id INTEGER NOT NULL);
+            """
+        )
+        connection.execute(
+            "INSERT INTO memories VALUES (1, ?, 'g1', 'chat', 'evicted', 1.0, 0, ?)",
+            (_vector(0.1, 0.2, 0.3), NOW - 10 * 86400),
+        )
+        connection.execute("INSERT INTO tags VALUES (11, '历史标签', ?)", (_vector(0.1, 0.2, 0.3),))
+        connection.execute("INSERT INTO memory_tags VALUES (1, 11)")
+        candidates = select_hot_memory_candidates(
+            connection,
+            MemoryIndexPolicy(max_vectors=10),
+            DIMENSION,
+            now=NOW,
+        )
+        assert candidates == []
     finally:
         connection.close()
 

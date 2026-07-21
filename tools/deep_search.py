@@ -94,31 +94,36 @@ class WaveMemoryDeepSearchTool(FunctionTool[AstrAgentContext]):
                 return "记忆数据库连接异常。"
 
         try:
-            # Hitting IDs and all later window rows must satisfy the exact same
-            # Bot/session visibility boundary; FTS itself has no Scope columns.
-            base = """
-                m.bot_id = ? AND m.session_id = ? AND m.visibility = ?
-                AND m.resolution_state = 'resolved' AND m.quarantine = 0
+            # Read path is group-scoped, not bot+session exact. Historical rows
+            # use display-name sessions (e.g. 羽书:group:…) while runtime emits
+            # platform sessions (qq:group:…). Matching session_id would 0-hit.
+            group_id = scope.session.conversation_id
+            active = """
+                COALESCE(m.quarantine, 0) = 0
+                AND COALESCE(m.memory_type, 'message') NOT IN
+                    ('archived', 'evicted', 'deleted', 'noise')
+                AND COALESCE(m.source, '') != 'noise'
+                AND COALESCE(m.group_id, '') = ?
             """
-            scope_params = (scope.bot_id, scope.session.id, scope.visibility)
+            scope_params = (group_id,)
             fts_query = " AND ".join(keywords.split())
             hits = self.db.conn.execute(f"""
                 SELECT m.id, rank
                 FROM fts_memories
                 JOIN memories AS m ON m.id = fts_memories.rowid
-                WHERE fts_memories MATCH ? AND {base}
+                WHERE fts_memories MATCH ? AND {active}
                 ORDER BY rank
                 LIMIT ?
             """, (fts_query, *scope_params, max_results * 2)).fetchall()
 
             if not hits:
-                # 尝试 OR 搜索，仍只在同一 Scope 内。
+                # 尝试 OR 搜索，仍限本群活动行。
                 fts_query_or = " OR ".join(keywords.split())
                 hits = self.db.conn.execute(f"""
                     SELECT m.id, rank
                     FROM fts_memories
                     JOIN memories AS m ON m.id = fts_memories.rowid
-                    WHERE fts_memories MATCH ? AND {base}
+                    WHERE fts_memories MATCH ? AND {active}
                     ORDER BY rank
                     LIMIT ?
                 """, (fts_query_or, *scope_params, max_results * 2)).fetchall()
@@ -129,26 +134,28 @@ class WaveMemoryDeepSearchTool(FunctionTool[AstrAgentContext]):
             # 上下文窗口扩展
             fragments = []
             seen_ids = set()
+            window_active = """
+                COALESCE(quarantine, 0) = 0
+                AND COALESCE(memory_type, 'message') NOT IN
+                    ('archived', 'evicted', 'deleted', 'noise')
+                AND COALESCE(source, '') != 'noise'
+                AND COALESCE(group_id, '') = ?
+            """
 
             for hit in hits[:max_results]:
                 memory_id = hit[0]
                 if memory_id in seen_ids:
                     continue
 
-                # The hit query has already scoped memory_id.  The context
-                # window repeats every Scope predicate so adjacent IDs from a
-                # different Bot/session can never bleed into the fragment.
-                window = self.db.conn.execute("""
+                # Expand window inside the same group only (not bot/session exact).
+                window = self.db.conn.execute(f"""
                     SELECT id, sender_name, content, timestamp
                     FROM memories
-                    WHERE bot_id = ? AND session_id = ? AND visibility = ?
-                      AND resolution_state = 'resolved' AND quarantine = 0
+                    WHERE {window_active}
                       AND id BETWEEN ? AND ?
                     ORDER BY id ASC
                 """, (
-                    scope.bot_id,
-                    scope.session.id,
-                    scope.visibility,
+                    group_id,
                     memory_id - window_size,
                     memory_id + window_size,
                 )).fetchall()

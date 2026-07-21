@@ -298,6 +298,12 @@
         "type": "bool",
         "default": true
       },
+      "shared_memory_grants_enabled": {
+        "description": "开启共享记忆只读授权（grant）扩展召回",
+        "hint": "默认关闭。开启后 QueryEngine 可按 shared_memory_grants 表中的 active 授权，窄扩展跨 Scope 只读候选；绝不 touch 外群、绝不物理 fanout 复制 memories。与 cross_group_enabled 全量跨群不同：grant 是精确授权列表。生产写入 grant 前请先跑 same-bot pilot。",
+        "type": "bool",
+        "default": false
+      },
       "cross_group_persona_merge": {
         "description": "开启跨群用户画像合并",
         "hint": "在不同群遇到的同一个人（根据QQ号主键），其好感度分值、交友大事记和性格标签自动打通聚合。推荐开启。",

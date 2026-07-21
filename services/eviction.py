@@ -122,15 +122,35 @@ class EvictionService:
         else:
             now = time.time()
             noise_deleted = 0
+            # Include a content fingerprint in the idempotency key so the same
+            # schedule slot can safely resubmit when the candidate set changes
+            # (otherwise WriteCoordinator raises "idempotency key was reused with
+            # different input" and the whole eviction tick looks failed).
             for scope, memory_ids in self._scoped_candidates(
                 source="noise", cutoff=now - self.noise_ttl
             ).items():
-                changed = await self.write_gateway.mutate_memories(
-                    scope=scope,
-                    memory_ids=memory_ids,
-                    action="delete",
-                    idempotency_hint=f"eviction:noise:{int(now // self.interval)}:{scope.session.id}",
-                )
+                if not memory_ids:
+                    continue
+                ids_sorted = sorted(int(x) for x in memory_ids)
+                id_fp = f"{len(ids_sorted)}:{ids_sorted[0]}:{ids_sorted[-1]}"
+                try:
+                    changed = await self.write_gateway.mutate_memories(
+                        scope=scope,
+                        memory_ids=memory_ids,
+                        action="delete",
+                        idempotency_hint=(
+                            f"eviction:noise:{int(now // self.interval)}:"
+                            f"{scope.session.id}:{id_fp}"
+                        ),
+                    )
+                except Exception as exc:
+                    # Idempotency conflict / scope edge: log and continue other scopes.
+                    logger.warning(
+                        "[EvictionService] noise delete skipped for %s: %s",
+                        getattr(scope.session, "id", "?"),
+                        exc,
+                    )
+                    continue
                 noise_deleted += len(changed)
             if noise_deleted:
                 self._stats["noise_deleted"] += noise_deleted

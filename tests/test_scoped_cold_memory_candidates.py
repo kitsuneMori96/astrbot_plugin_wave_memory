@@ -6,9 +6,9 @@ from domain.scope import RuntimeScope, SessionRef
 from engine.database import WaveMemoryDB
 
 
-def _scope(group_id: str = "g1") -> RuntimeScope:
+def _scope(group_id: str = "g1", bot_id: str = "bot-a") -> RuntimeScope:
     return RuntimeScope(
-        bot_id="bot-a",
+        bot_id=bot_id,
         visibility="group",
         session=SessionRef(
             id=f"qq:group:{group_id}",
@@ -57,5 +57,37 @@ def test_scoped_cold_candidates_use_effective_tags_and_never_cross_scope(tmp_pat
         assert rows[0]["tag_score"] == 0.8
         assert rows[0]["vector"] is not None
         assert db.list_scoped_cold_memory_candidates(scope, [other_tag], limit=8) == []
+    finally:
+        db.close()
+
+
+def test_scoped_cold_candidates_expand_across_group_and_bot_only_with_explicit_policy(tmp_path):
+    db = WaveMemoryDB(str(tmp_path / "cross-cold.sqlite"), dimension=3)
+    scope = _scope("g1", "bot-a")
+    other_scope = _scope("g2", "bot-b")
+    try:
+        current_id = _memory(db, scope, content="当前 Scope 的 Catalog 冷记忆")
+        cross_id = _memory(db, other_scope, content="跨群跨 Bot 的 Catalog 冷记忆")
+        current_tag = db.upsert_scoped_tag(scope, name="共享话题", tag_type="topic", confidence=0.9, metadata={})
+        cross_tag = db.upsert_scoped_tag(other_scope, name="共享话题", tag_type="topic", confidence=0.9, metadata={})
+        db.link_scoped_memory_tag(scope, memory_id=current_id, tag_id=current_tag, relevance=1.0)
+        db.link_scoped_memory_tag(other_scope, memory_id=cross_id, tag_id=cross_tag, relevance=1.0)
+
+        exact = db.list_scoped_cold_memory_candidates(scope, [current_tag, cross_tag], limit=8)
+        expanded = db.list_scoped_cold_memory_candidates(
+            scope,
+            [current_tag, cross_tag],
+            limit=8,
+            allow_cross_group_recall=True,
+        )
+        catalog_id = db.get_scoped_tag_catalog_id(scope, current_tag)
+        assert catalog_id is not None
+        exact_links = db.list_scoped_catalog_links(scope, [catalog_id], allow_cross_group_recall=False)
+        expanded_links = db.list_scoped_catalog_links(scope, [catalog_id], allow_cross_group_recall=True)
+
+        assert [row["id"] for row in exact] == [current_id]
+        assert {row["id"] for row in expanded} == {current_id, cross_id}
+        assert len(exact_links) == 1
+        assert {row["scoped_tag_id"] for row in expanded_links} == {current_tag, cross_tag}
     finally:
         db.close()

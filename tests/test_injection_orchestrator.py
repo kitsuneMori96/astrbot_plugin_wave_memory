@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 class FakeTextPart:
@@ -325,8 +326,12 @@ class InjectionOrchestratorTest(unittest.TestCase):
             trace_id="trace-orch-slow-warning",
         )
 
-        with self.assertLogs("services.injection.orchestrator", level="WARNING") as logs:
-            result = asyncio.run(orchestrator.run(ctx))
+        import services.injection.orchestrator as orchestrator_module
+
+        self.assertEqual(orchestrator_module.SLOW_INJECTION_WARNING_MS, 2000)
+        with patch.object(orchestrator_module, "SLOW_INJECTION_WARNING_MS", 500):
+            with self.assertLogs("services.injection.orchestrator", level="WARNING") as logs:
+                result = asyncio.run(orchestrator.run(ctx))
 
         self.assertTrue(result.injected)
         message = "\n".join(logs.output)

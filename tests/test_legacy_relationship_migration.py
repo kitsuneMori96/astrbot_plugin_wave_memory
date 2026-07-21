@@ -168,6 +168,7 @@ def test_stage_preserves_source_writes_five_dimension_baseline_and_audits_events
 
     assert source.read_bytes() == before
     assert report["quick_check"] == "ok"
+    assert report.get("mode", "full") == "full"
     assert report["legacy_table_state"]["user_profiles"]["count"] == 1
     assert report["legacy_table_state"]["relationship_events"]["count"] == 1
     assert report["legacy_table_state"]["user_profiles"]["sha256"].startswith("sha256:")
@@ -190,6 +191,59 @@ def test_stage_preserves_source_writes_five_dimension_baseline_and_audits_events
     assert item == (None, None)
     assert conn.execute("SELECT COUNT(*) FROM user_profiles").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM relationship_events").fetchone()[0] == 1
+    conn.close()
+
+
+def test_event_audit_only_does_not_change_formal_affinity(tmp_path: Path):
+    source = tmp_path / "source.sqlite3"
+    output = tmp_path / "staged-event-only.sqlite3"
+    _schema(source)
+    _seed(source)
+    conn = sqlite3.connect(source)
+    conn.execute(
+        "INSERT INTO scoped_soul_relationships VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            "bot-a",
+            "qq:group:g1",
+            "group",
+            "qq:user:u1",
+            12,
+            "neutral",
+            json.dumps({"familiarity": 1, "trust": 0, "fun": 0, "hostility": 0, "depth": 0}),
+            2,
+            "[]",
+            1.0,
+        ),
+    )
+    conn.execute(
+        """INSERT INTO scoped_soul_relationship_values
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        ("bot-a", "qq:group:g1", "group", "qq:user:u1", "familiarity", 1, None, None, 1, 2, "[]", 1.0),
+    )
+    conn.commit()
+    conn.close()
+    before = source.read_bytes()
+
+    report = stage(
+        source,
+        output,
+        tmp_path / "runs-event-only",
+        [_scope()],
+        _hash(source),
+        CONFIRMATION,
+        mode="event_audit_only",
+    )
+
+    assert source.read_bytes() == before
+    assert report["mode"] == "event_audit_only"
+    assert report["profile_result"]["skipped"] is True
+    assert report["event_result"]["audited"] == 1
+    assert report["formal_fingerprint_before"] == report["formal_fingerprint_after"]
+    conn = sqlite3.connect(output)
+    assert conn.execute("SELECT affinity FROM scoped_soul_relationships").fetchone()[0] == 12
+    assert conn.execute("SELECT COUNT(*) FROM scoped_soul_relationship_legacy_events").fetchone()[0] == 1
+    # no new formal live events
+    assert conn.execute("SELECT COUNT(*) FROM scoped_soul_relationship_events").fetchone()[0] == 0
     conn.close()
 
 

@@ -89,7 +89,10 @@ class WaveMemorySearchTool(FunctionTool[AstrAgentContext]):
         if not memories:
             return "没有找到相关记忆"
 
-        return self.query_engine.format_injection(memories)
+        return self.query_engine.format_injection(
+            memories,
+            current_group_id=scope.session.conversation_id,
+        )
 
 
 @dataclass

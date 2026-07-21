@@ -13,9 +13,11 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 try:  # 兼容插件包导入和仓库测试直接导入
     from ..domain.scope import RuntimeScope
+    from .person_identity import display_name_for_user, resolve_user_id
     from .scope_boundary import require_group_runtime_scope, scope_error_message
 except ImportError:  # pragma: no cover - 由仓库测试直接导入 tools 使用
     from domain.scope import RuntimeScope
+    from tools.person_identity import display_name_for_user, resolve_user_id
     from tools.scope_boundary import require_group_runtime_scope, scope_error_message
 
 
@@ -125,36 +127,10 @@ class WaveMemoryAffinityUpdateTool(FunctionTool[AstrAgentContext]):
 
     def _resolve_user(self, target: str, scope: RuntimeScope) -> str:
         """Resolve only within the active Bot + canonical group session."""
-        if not target or scope.session is None:
-            return ""
-        current_user_id = self._scope_subject_user_id(scope)
-        if target == current_user_id:
-            return current_user_id
-        params = (scope.session.conversation_id, scope.bot_id)
-        row = self.db.conn.execute(
-            """SELECT user_id FROM user_profiles
-               WHERE user_id=? AND group_id=? AND bot_id=? LIMIT 1""",
-            (target, *params),
-        ).fetchone()
-        if row:
-            return str(row[0] or "")
-        row = self.db.conn.execute(
-            """SELECT user_id FROM user_profiles
-               WHERE group_id=? AND bot_id=? AND nickname LIKE ?
-               ORDER BY last_seen DESC LIMIT 1""",
-            (*params, f"%{target}%"),
-        ).fetchone()
-        return str(row[0] or "") if row else ""
+        return resolve_user_id(self.db, target, scope)
 
     def _display_name(self, user_id: str, scope: RuntimeScope) -> str:
-        if scope.session is None:
-            return user_id
-        row = self.db.conn.execute(
-            """SELECT nickname FROM user_profiles
-               WHERE user_id=? AND group_id=? AND bot_id=?""",
-            (user_id, scope.session.conversation_id, scope.bot_id),
-        ).fetchone()
-        return str(row[0] or user_id) if row else user_id
+        return display_name_for_user(self.db, user_id, scope)
 
 
 @dataclass
@@ -224,7 +200,62 @@ class WaveMemoryAffinityTool(FunctionTool[AstrAgentContext]):
             item = values.get(name) if isinstance(values, dict) else None
             value = item.get("effective_value") if isinstance(item, dict) else dimensions.get(name, 0)
             lines.append(f"- {name}: {value}")
+        # Durable evidence summary on formal row (if migrated); read-only.
+        try:
+            from services.relationship_evidence_display import format_evidence_summary_lines
+        except ImportError:  # pragma: no cover
+            from ..services.relationship_evidence_display import format_evidence_summary_lines
+        lines.extend(
+            format_evidence_summary_lines(
+                relationship.get("evidence") if isinstance(relationship, dict) else None,
+                max_items=2,
+            )
+        )
+        lines.extend(self._legacy_audit_lines(target_scope))
         return "\n".join(lines)
+
+    def _legacy_audit_lines(self, scope: RuntimeScope) -> list[str]:
+        """Append historical audit summary; never affects affinity calculation."""
+        repo = getattr(self.db, "soul_repository", None)
+        if repo is None or not hasattr(repo, "list_legacy_relationship_audit_summary"):
+            return []
+        try:
+            summary = repo.list_legacy_relationship_audit_summary(scope, recent_limit=3)
+        except Exception:
+            return []
+        if not isinstance(summary, dict) or not summary.get("available"):
+            return []
+        total = int(summary.get("total") or 0)
+        if total <= 0:
+            return ["历史事件审计：0 条（仅统计，不改变好感度）"]
+        by_type = summary.get("by_type") or []
+        type_bits = []
+        for item in by_type[:4]:
+            if not isinstance(item, dict):
+                continue
+            type_bits.append(f"{item.get('event_type') or '?'}×{int(item.get('count') or 0)}")
+        lines = [
+            f"历史事件审计：{total} 条（只读侧写，不改变好感度）",
+        ]
+        if type_bits:
+            lines.append("类型分布：" + "，".join(type_bits))
+        recent = summary.get("recent") or []
+        for item in recent[:3]:
+            if not isinstance(item, dict):
+                continue
+            reason = str(item.get("reason") or "").strip() or "无原因"
+            if len(reason) > 40:
+                reason = reason[:40] + "…"
+            delta = item.get("delta")
+            try:
+                delta_text = f"{float(delta):+g}"
+            except (TypeError, ValueError):
+                delta_text = str(delta or "")
+            lines.append(
+                f"- 近例 {item.get('event_type') or '?'}/{item.get('dimension') or '?'} "
+                f"{delta_text} · {reason}"
+            )
+        return lines
 
     def _rank(self, mode: str, scope: RuntimeScope, limit: int) -> str:
         assert scope.session is not None
@@ -299,30 +330,17 @@ class WaveMemoryAffinityTool(FunctionTool[AstrAgentContext]):
                 WHERE bot_id=? AND group_id=?""",
             (scope.bot_id, scope.session.conversation_id),
         ).fetchall()
-        user_ids = [str(user_id) for user_id, _nickname, _count in rows if user_id is not None]
-        names: dict[str, str] = {}
-        registry_exists = self.db.conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='person_registry'"
-        ).fetchone()
-        if registry_exists and user_ids:
-            placeholders = ",".join("?" for _ in user_ids)
-            names = {
-                str(row[0]): str(row[1] or "")
-                for row in self.db.conn.execute(
-                    f"SELECT qq_id, display_name FROM person_registry WHERE qq_id IN ({placeholders})",
-                    user_ids,
-                ).fetchall()
-                if row[0] is not None
-            }
-        return {
-            str(user_id): {
-                "user_id": str(user_id),
-                "display_name": names.get(str(user_id)) or str(nickname or user_id),
+        people: dict[str, dict[str, Any]] = {}
+        for user_id, nickname, interaction_count in rows:
+            if user_id is None:
+                continue
+            uid = str(user_id)
+            people[uid] = {
+                "user_id": uid,
+                "display_name": display_name_for_user(self.db, uid, scope) or str(nickname or uid),
                 "interaction_count": int(interaction_count or 0),
             }
-            for user_id, nickname, interaction_count in rows
-            if user_id is not None
-        }
+        return people
 
     @staticmethod
     def _current_user(scope: RuntimeScope) -> str:
@@ -333,26 +351,7 @@ class WaveMemoryAffinityTool(FunctionTool[AstrAgentContext]):
         return principal[len(prefix):] if principal.startswith(prefix) else ""
 
     def _resolve_user(self, target: str, scope: RuntimeScope) -> str:
-        if not target or scope.session is None:
-            return ""
-        if target == self._current_user(scope):
-            return target
-        # This lookup is only an identity resolver inside the exact current Bot/group;
-        # the returned id is immediately projected into a canonical subject Scope.
-        row = self.db.conn.execute(
-            """SELECT user_id FROM user_profiles
-               WHERE user_id=? AND group_id=? AND bot_id=? LIMIT 1""",
-            (target, scope.session.conversation_id, scope.bot_id),
-        ).fetchone()
-        if row:
-            return str(row[0] or "")
-        row = self.db.conn.execute(
-            """SELECT user_id FROM user_profiles
-               WHERE group_id=? AND bot_id=? AND nickname LIKE ?
-               ORDER BY last_seen DESC LIMIT 1""",
-            (scope.session.conversation_id, scope.bot_id, f"%{target}%"),
-        ).fetchone()
-        return str(row[0] or "") if row else ""
+        return resolve_user_id(self.db, target, scope)
 
 
 __all__ = ["WaveMemoryAffinityTool", "WaveMemoryAffinityUpdateTool"]

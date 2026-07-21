@@ -47,6 +47,24 @@ export interface RelationshipValue {
   evidence: unknown[]
 }
 
+export interface HistoricalAuditSummary {
+  available: boolean
+  total: number
+  by_type: Array<{ event_type: string; count: number }>
+  recent: Array<{
+    event_type: string
+    dimension: string
+    delta: number | string | null
+    reason: string
+    occurred_at?: number | null
+    legacy_event_id?: string
+  }>
+  readonly: boolean
+  affects_affinity: boolean
+  source_table?: string
+  reason_code?: string
+}
+
 export interface RelationshipItem {
   subject_principal_id: string
   person: PersonItem
@@ -55,12 +73,51 @@ export interface RelationshipItem {
   revision: number | null
   values: Record<string, RelationshipValue> | null
   evidence: unknown[]
+  /** Extracted historical_audit_summary texts; read-only, does not affect affinity. */
+  evidence_summaries?: string[]
   object_ref: (ObjectRefDescriptor & { kind: 'relationship' }) | null
   calibration: { available: boolean; reason_code: string | null }
+  historical_audit?: HistoricalAuditSummary
 }
 
 export interface RelationshipQuery extends PeopleQuery {
   user_id?: string
+  include_historical_audit?: boolean | 0 | 1 | 'true' | 'false'
+}
+
+export interface HistoricalAuditQuery extends PeopleQuery {
+  subject_principal_id?: string
+  user_id?: string
+}
+
+export interface HistoricalAuditEventItem {
+  id: number
+  legacy_event_id: string
+  bot_id: string
+  session_id: string
+  visibility: string
+  group_id: string
+  subject_principal_id: string
+  event_type: string
+  dimension: string
+  delta: number
+  reason: string
+  occurred_at: number | null
+  source_episode_id: number | null
+  source_memory_id: number | null
+  created_at: number | null
+  readonly: true
+  affects_affinity: false
+  source: 'scoped_soul_relationship_legacy_events'
+}
+
+export interface HistoricalAuditPage extends PageResponse<HistoricalAuditEventItem> {
+  scope: Record<string, unknown>
+  subject_principal_id: string
+  summary: HistoricalAuditSummary
+  readonly: true
+  affects_affinity: false
+  historical_audit: true
 }
 
 export interface RelationshipCalibrationPayload {
@@ -83,6 +140,16 @@ export interface RelationshipCalibrationResponse {
 
 export function getRelationships(query: RelationshipQuery, signal?: AbortSignal): Promise<PageResponse<RelationshipItem>> {
   return fetchJson<PageResponse<RelationshipItem>>(`/api/people/relationships${queryString(query)}`, { signal })
+}
+
+export function getRelationshipHistoricalAudit(
+  query: HistoricalAuditQuery,
+  signal?: AbortSignal,
+): Promise<HistoricalAuditPage> {
+  return fetchJson<HistoricalAuditPage>(
+    `/api/people/relationships/historical-audit${queryString(query)}`,
+    { signal },
+  )
 }
 
 export function calibrateRelationship(query: PeopleQuery, payload: RelationshipCalibrationPayload): Promise<RelationshipCalibrationResponse> {

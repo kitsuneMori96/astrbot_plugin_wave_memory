@@ -296,6 +296,59 @@ def _relationship_error(exc: Exception):
     return jsonify(error_payload(str(code), str(exc))), status
 
 
+def _formal_evidence_summaries(relationship: Any) -> list[str]:
+    """Extract historical_audit_summary texts from formal relationship.evidence."""
+    if not isinstance(relationship, dict):
+        return []
+    try:
+        from ...services.relationship_evidence_display import extract_historical_audit_summaries
+    except ImportError:  # pragma: no cover
+        from services.relationship_evidence_display import extract_historical_audit_summaries
+    return extract_historical_audit_summaries(relationship.get("evidence"), max_items=3)
+
+
+def _historical_audit_summary_for_subject(repository: Any, scope: RuntimeScope, subject: str) -> dict[str, Any]:
+    """Read-only historical audit side-channel; never mutates formal affinity."""
+    if repository is None or not hasattr(repository, "list_legacy_relationship_audit_summary"):
+        return {
+            "available": False,
+            "total": 0,
+            "by_type": [],
+            "recent": [],
+            "readonly": True,
+            "affects_affinity": False,
+        }
+    try:
+        subject_scope = RuntimeScope(
+            bot_id=scope.bot_id,
+            visibility=scope.visibility,
+            session=scope.session,
+            subject_principal_id=subject,
+        )
+        summary = repository.list_legacy_relationship_audit_summary(
+            subject_scope,
+            recent_limit=5,
+        )
+    except Exception:
+        return {
+            "available": False,
+            "total": 0,
+            "by_type": [],
+            "recent": [],
+            "readonly": True,
+            "affects_affinity": False,
+            "reason_code": "historical_audit_query_failed",
+        }
+    if not isinstance(summary, dict):
+        summary = {}
+    return {
+        **summary,
+        "readonly": True,
+        "affects_affinity": False,
+        "source_table": "scoped_soul_relationship_legacy_events",
+    }
+
+
 @people_bp.route("/people/relationships", methods=["GET"])
 @require_auth
 async def list_relationships():
@@ -307,6 +360,9 @@ async def list_relationships():
         if repository is None:
             return jsonify(error_payload("relationship_repository_unavailable", "Scoped relationship repository is unavailable", retryable=True)), 503
         limit, offset = _page_args()
+        include_historical_audit = str(
+            request.args.get("include_historical_audit") or ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
         profiles = []
         conn = _connection()
         if conn is not None and _table_exists(conn, "user_profiles"):
@@ -322,12 +378,17 @@ async def list_relationships():
             subject = f"{scope.session.platform_id}:user:{profile['user_id']}"
             relationship = relationship_rows.get(subject)
             if relationship is None:
-                item = {"subject_principal_id": subject, "person": profile, "affinity": None, "state": "unknown", "revision": None, "values": None, "evidence": [], "object_ref": None, "calibration": {"available": False, "reason_code": "relationship_unknown"}}
+                item = {"subject_principal_id": subject, "person": profile, "affinity": None, "state": "unknown", "revision": None, "values": None, "evidence": [], "evidence_summaries": [], "object_ref": None, "calibration": {"available": False, "reason_code": "relationship_unknown"}}
             else:
                 item = {"subject_principal_id": subject, "person": profile, **relationship}
+                item["evidence_summaries"] = _formal_evidence_summaries(relationship)
                 if refs is not None:
                     ref = refs.issue(kind="relationship", locator=subject, scope=scope, revision=int(relationship["revision"]))
                     item["object_ref"] = {"ref": ref, "kind": "relationship", "locator": subject, "scope_key": scope.session.id, "version": int(relationship["revision"])}
+            if include_historical_audit:
+                item["historical_audit"] = _historical_audit_summary_for_subject(
+                    repository, scope, subject
+                )
             items.append(item)
         search = str(request.args.get("search") or "").strip().casefold()
         user_filter = str(request.args.get("user_id") or "").strip()
@@ -336,11 +397,99 @@ async def list_relationships():
         if search:
             items = [item for item in items if search in json.dumps(item.get("person", {}), ensure_ascii=False).casefold()]
         total = len(items)
-        return jsonify({**page_response(items[offset:offset + limit], total=total, limit=limit, offset=offset), "scope": scope.to_dict()})
+        return jsonify({
+            **page_response(items[offset:offset + limit], total=total, limit=limit, offset=offset),
+            "scope": scope.to_dict(),
+            "historical_audit_mode": "included" if include_historical_audit else "omitted",
+        })
     except (TypeError, ValueError) as exc:
         return jsonify(error_payload("invalid_relationship_query", str(exc))), 400
     except Exception as exc:
         return jsonify(error_payload("relationship_query_unavailable", str(exc), retryable=True)), 503
+
+
+@people_bp.route("/people/relationships/historical-audit", methods=["GET"])
+@require_auth
+async def get_relationship_historical_audit():
+    """Scoped formal historical audit summary/list (readonly, never changes affinity)."""
+    try:
+        scope = _request_scope()
+        if scope is None or scope.session is None or scope.visibility != "group":
+            return jsonify(error_payload("scope_required", "A complete group RuntimeScope is required")), 400
+        repository = getattr(get_container(), "soul_repository", None)
+        if repository is None:
+            return jsonify(error_payload(
+                "relationship_repository_unavailable",
+                "Scoped relationship repository is unavailable",
+                retryable=True,
+            )), 503
+
+        subject = str(request.args.get("subject_principal_id") or "").strip()
+        user_id = str(request.args.get("user_id") or "").strip()
+        if not subject and user_id:
+            subject = f"{scope.session.platform_id}:user:{user_id}"
+        if not subject:
+            return jsonify(error_payload(
+                "subject_required",
+                "subject_principal_id or user_id is required",
+            )), 400
+
+        summary = _historical_audit_summary_for_subject(repository, scope, subject)
+        limit, offset = _page_args()
+        items: list[dict[str, Any]] = []
+        total = int(summary.get("total") or 0)
+        conn = _connection()
+        if (
+            conn is not None
+            and _table_exists(conn, "scoped_soul_relationship_legacy_events")
+            and total > 0
+        ):
+            cursor = conn.execute(
+                """SELECT id, legacy_event_id, bot_id, session_id, visibility, group_id,
+                          subject_principal_id, event_type, dimension, delta, reason,
+                          occurred_at, source_episode_id, source_memory_id, created_at
+                     FROM scoped_soul_relationship_legacy_events
+                    WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?
+                    ORDER BY COALESCE(occurred_at, 0) DESC, id DESC
+                    LIMIT ? OFFSET ?""",
+                (
+                    scope.bot_id,
+                    scope.session.id,
+                    scope.visibility,
+                    subject,
+                    limit,
+                    offset,
+                ),
+            )
+            names = [str(column[0]) for column in cursor.description or ()]
+            for row in cursor.fetchall():
+                item = dict(zip(names, row))
+                item.update({
+                    "readonly": True,
+                    "affects_affinity": False,
+                    "source": "scoped_soul_relationship_legacy_events",
+                })
+                items.append(item)
+
+        payload = page_response(items, total=total, limit=limit, offset=offset)
+        payload.update({
+            "scope": scope.to_dict(),
+            "subject_principal_id": subject,
+            "summary": summary,
+            "readonly": True,
+            "affects_affinity": False,
+            "legacy": False,
+            "historical_audit": True,
+        })
+        return jsonify(payload)
+    except (TypeError, ValueError) as exc:
+        return jsonify(error_payload("invalid_historical_audit_query", str(exc))), 400
+    except Exception as exc:
+        return jsonify(error_payload(
+            "historical_audit_unavailable",
+            str(exc),
+            retryable=True,
+        )), 503
 
 
 @people_bp.route("/people/relationships/commands/calibrate", methods=["POST"])

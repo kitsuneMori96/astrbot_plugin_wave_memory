@@ -22,9 +22,11 @@ except ImportError:  # pragma: no cover - direct package imports in focused test
 
 
 _INACTIVE_MEMORY_TYPES = frozenset({"archived", "evicted", "deleted"})
-# Legacy ``evicted`` is a historical old-HNSW residency marker, not a canonical
-# deletion. Compatibility recall keeps it while still excluding explicit delete/noise.
-_LEGACY_EXCLUDED_MEMORY_TYPES = frozenset({"deleted", "noise"})
+# Keep hot-index admission aligned with SQL read-path activity filters
+# (``_read_active_memory_predicates``): quarantine/deleted/noise/archived/evicted
+# must not occupy bounded knn slots that QueryEngine will drop after fetch.
+# Legacy rows still use the unscoped lane; they just cannot be dead weight.
+_LEGACY_EXCLUDED_MEMORY_TYPES = frozenset({"archived", "evicted", "deleted", "noise"})
 _DURABLE_SOURCES = frozenset({"bzz_experience", "book_lore", "oni_lore"})
 _DURABLE_MEMORY_TYPES = frozenset({"experience", "knowledge"})
 _REQUIRED_MEMORY_COLUMNS = frozenset({"id", "vector", "group_id"})

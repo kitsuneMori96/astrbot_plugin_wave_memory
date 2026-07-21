@@ -367,6 +367,8 @@ class ScopedKnowledgeRepo:
         self,
         scope: RuntimeScope,
         catalog_ids: Sequence[int],
+        *,
+        allow_cross_group_recall: bool = False,
     ) -> list[dict[str, Any]]:
         """Map semantic Catalog hits back to scoped Tag IDs before graph/query use."""
         scope = _require_group_scope(scope)
@@ -375,14 +377,24 @@ class ScopedKnowledgeRepo:
             return []
         placeholders = ",".join("?" for _ in ids)
         status_clause = " AND COALESCE(status, 'active') NOT IN ('inactive', 'deleted', 'archived')" if "status" in self._table_columns("scoped_tags") else ""
+        if allow_cross_group_recall:
+            # Only the QueryEngine's explicit recall policy may request this
+            # broad mapping. A Catalog id is never used as a legacy tag id.
+            where = (
+                "COALESCE(bot_id, '') != '' AND COALESCE(session_id, '') != '' "
+                "AND visibility='group'"
+            )
+            params: list[Any] = list(ids)
+        else:
+            where = "bot_id=? AND session_id=? AND visibility=?"
+            params = [*_scope_params(scope), *ids]
         rows = self.cm.execute_read(
             f"""SELECT id, catalog_id, name, tag_type, confidence
                    FROM scoped_tags
-                  WHERE bot_id=? AND session_id=? AND visibility=?
-                    AND catalog_id IN ({placeholders})
+                  WHERE {where} AND catalog_id IN ({placeholders})
                     {status_clause}
                   ORDER BY id""",
-            [*_scope_params(scope), *ids],
+            params,
         ).fetchall()
         return [
             {
@@ -611,6 +623,7 @@ class ScopedKnowledgeRepo:
         tag_ids: Sequence[int],
         *,
         limit: int = 128,
+        allow_cross_group_recall: bool = False,
     ) -> list[dict[str, Any]]:
         """Return a bounded exact-Scope cold candidate set for semantic reranking.
 
@@ -631,9 +644,10 @@ class ScopedKnowledgeRepo:
             raise ValueError("limit must be a positive integer") from exc
 
         # `effective_tag_rows` deliberately falls back to the canonical automatic
-        # baseline when the materialized projection is not backfilled yet.
+        # baseline when the materialized projection is not backfilled yet. Cross
+        # group recall is explicit and still admits only complete group tag scopes.
         try:
-            effective = effective_tag_rows(self.cm, scope=scope)
+            effective = effective_tag_rows(self.cm, scope=None if allow_cross_group_recall else scope)
         except Exception:
             return []
         wanted = set(ids)
@@ -644,6 +658,13 @@ class ScopedKnowledgeRepo:
                 memory_id = int(tag["memory_id"])
             except (KeyError, TypeError, ValueError):
                 continue
+            if allow_cross_group_recall:
+                if (
+                    str(tag.get("visibility") or "") != "group"
+                    or not str(tag.get("bot_id") or "").strip()
+                    or not str(tag.get("session_id") or "").strip()
+                ):
+                    continue
             if tag_id not in wanted or memory_id <= 0:
                 continue
             relevance = float(tag.get("relevance", 1.0) or 0.0)
@@ -676,17 +697,33 @@ class ScopedKnowledgeRepo:
         sender_id_expression = "COALESCE(sender_id, '')" if "sender_id" in memory_columns else "''"
         sender_name_expression = "COALESCE(sender_name, '')" if "sender_name" in memory_columns else "''"
         group_expression = "COALESCE(group_id, '')" if "group_id" in memory_columns else "''"
+        # Read path: do not require formal bot/session/resolution_state.
+        # Prefer current group when not expanding cross-group; still allow rows
+        # with partial or empty Scope fields as long as they are active.
+        if allow_cross_group_recall:
+            scope_where = "1=1"
+            scope_params: list[Any] = []
+        else:
+            scope_where = "COALESCE(group_id, '') = ?"
+            scope_params = [scope.session.conversation_id]
+        origin_expression = (
+            "COALESCE(origin_fingerprint, '')" if "origin_fingerprint" in memory_columns else "''"
+        )
+        provenance_expression = (
+            "COALESCE(provenance, '')" if "provenance" in memory_columns else "''"
+        )
         rows = self.cm.execute_read(
             f"""SELECT id, vector, content, {timestamp_expression}, {importance_expression},
                        {access_expression}, {source_expression}, {type_expression},
-                       {sender_id_expression}, {sender_name_expression}, {group_expression}
+                       {sender_id_expression}, {sender_name_expression}, {group_expression},
+                       {origin_expression}, {provenance_expression}
                   FROM memories
                  WHERE id IN ({placeholders})
-                   AND bot_id=? AND session_id=? AND visibility=?
-                   AND resolution_state='resolved' AND COALESCE(quarantine, 0)=0
+                   AND {scope_where}
+                   AND COALESCE(quarantine, 0)=0
                    AND {source_expression} != 'noise'
-                   AND {type_expression} NOT IN ('archived', 'evicted', 'deleted')""",
-            [*candidate_ids, *_scope_params(scope)],
+                   AND {type_expression} NOT IN ('archived', 'evicted', 'deleted', 'noise')""",
+            [*candidate_ids, *scope_params],
         ).fetchall()
         by_id = {int(row[0]): row for row in rows if row[1] is not None}
         result: list[dict[str, Any]] = []
@@ -695,23 +732,36 @@ class ScopedKnowledgeRepo:
             if row is None:
                 continue
             tag_score, tag_count = tag_scores[memory_id]
-            result.append(
-                {
-                    "id": memory_id,
-                    "vector": row[1],
-                    "content": str(row[2] or ""),
-                    "timestamp": row[3],
-                    "importance": row[4],
-                    "access_count": row[5],
-                    "source": str(row[6] or ""),
-                    "memory_type": str(row[7] or "message"),
-                    "sender_id": str(row[8] or ""),
-                    "sender_name": str(row[9] or ""),
-                    "group_id": str(row[10] or ""),
-                    "tag_score": tag_score,
-                    "tag_count": tag_count,
-                }
-            )
+            provenance: dict[str, Any] = {}
+            raw_prov = row[12]
+            if isinstance(raw_prov, str) and raw_prov.strip():
+                try:
+                    loaded = json.loads(raw_prov)
+                    if isinstance(loaded, dict):
+                        provenance = loaded
+                except Exception:
+                    provenance = {}
+            item = {
+                "id": memory_id,
+                "vector": row[1],
+                "content": str(row[2] or ""),
+                "timestamp": row[3],
+                "importance": row[4],
+                "access_count": row[5],
+                "source": str(row[6] or ""),
+                "memory_type": str(row[7] or "message"),
+                "sender_id": str(row[8] or ""),
+                "sender_name": str(row[9] or ""),
+                "group_id": str(row[10] or ""),
+                "origin_fingerprint": str(row[11] or ""),
+                "provenance": provenance,
+                "tag_score": tag_score,
+                "tag_count": tag_count,
+            }
+            if str(provenance.get("projection_kind") or "") == "fanout_duplicate":
+                item["_fanout_duplicate"] = True
+                item["fanout_family_id"] = provenance.get("fanout_family_id")
+            result.append(item)
             if len(result) >= bounded_limit:
                 break
         return result

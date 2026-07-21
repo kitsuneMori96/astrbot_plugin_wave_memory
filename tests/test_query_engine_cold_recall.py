@@ -196,3 +196,89 @@ def test_query_merges_catalog_and_legacy_tag_cold_lanes_without_id_space_mixing(
     assert by_id[41]["_tag_lane"] == "catalog"
     assert by_id[42]["_tag_lane"] == "legacy"
     assert db.legacy_calls and db.legacy_calls[0][1] == [901]
+
+
+class _CrossGroupColdDb:
+    def __init__(self):
+        self.catalog_calls = []
+        self.legacy_calls = []
+        self.touched = []
+
+    def get_memories_by_ids(self, ids, *, scope, allow_cross_group_recall=False):
+        return []
+
+    def list_scoped_catalog_links(self, scope, catalog_ids, *, allow_cross_group_recall=False):
+        self.catalog_calls.append((catalog_ids, allow_cross_group_recall))
+        assert catalog_ids == [101]
+        links = [{"catalog_id": 101, "scoped_tag_id": 17}]
+        if allow_cross_group_recall:
+            links.append({"catalog_id": 101, "scoped_tag_id": 18})
+        return links
+
+    @staticmethod
+    def _row(memory_id, group_id, content):
+        return {
+            "id": memory_id,
+            "vector": np.asarray([0.98, 0.05, 0.0], dtype=np.float32).tobytes(),
+            "content": content,
+            "timestamp": 1_800_000_000.0,
+            "importance": 1.0,
+            "access_count": 0,
+            "source": "chat",
+            "memory_type": "message",
+            "group_id": group_id,
+            "tag_score": 1.0,
+            "tag_count": 1,
+        }
+
+    def list_scoped_cold_memory_candidates(self, scope, tag_ids, *, limit, allow_cross_group_recall=False):
+        self.catalog_calls.append((tag_ids, allow_cross_group_recall))
+        rows = [self._row(41, "g1", "当前 Scope Catalog")]
+        if allow_cross_group_recall:
+            rows.append(self._row(43, "g2", "跨群跨 Bot Catalog"))
+        return rows
+
+    def list_legacy_cold_memory_candidates(self, scope, tag_ids, *, limit, allow_cross_group_recall=False):
+        self.legacy_calls.append((tag_ids, allow_cross_group_recall))
+        assert tag_ids == [901]
+        rows = [self._row(42, "g1", "当前群 fully-unscoped legacy")]
+        if allow_cross_group_recall:
+            rows.append(self._row(44, "g2", "跨群 fully-unscoped legacy"))
+        return rows
+
+    def touch_memories(self, ids):
+        self.touched.append(ids)
+
+
+def _cross_group_cold_engine(enabled):
+    from engine.query_engine import QueryEngine
+
+    db = _CrossGroupColdDb()
+    return QueryEngine(
+        db,
+        _EmptyMemoryIndex(),
+        _Embedding(),
+        {"min_similarity": 0.0, "cold_recall_enabled": True, "cross_group_enabled": enabled},
+        tag_index=_TagIndex(),
+        legacy_tag_index=_LegacyTagIndex(),
+    ), db
+
+
+def test_cross_group_cold_catalog_and_legacy_lanes_expand_only_when_enabled():
+    enabled_engine, enabled_db = _cross_group_cold_engine(True)
+    disabled_engine, disabled_db = _cross_group_cold_engine(False)
+    scope = _ScopeFactory.make()
+
+    expanded = asyncio.run(enabled_engine.query("跨群冷召回", scope=scope))
+    exact = asyncio.run(disabled_engine.query("精确冷召回", scope=scope))
+
+    assert {row["id"] for row in expanded} == {41, 42, 43, 44}
+    assert {row["id"] for row in exact} == {41, 42}
+    assert next(row for row in expanded if row["id"] == 43)["_is_cross_group"] is True
+    assert next(row for row in expanded if row["id"] == 44)["_is_cross_group"] is True
+    # `_wave_boost` performs an exact-scope Catalog lookup before cold recall;
+    # the cold lane then explicitly expands the same Catalog ID to both scoped IDs.
+    assert enabled_db.catalog_calls == [([101], False), ([101], True), ([17, 18], True)]
+    assert enabled_db.legacy_calls == [([901], True)]
+    assert disabled_db.catalog_calls == [([101], False), ([101], False), ([17], False)]
+    assert disabled_db.legacy_calls == [([901], False)]

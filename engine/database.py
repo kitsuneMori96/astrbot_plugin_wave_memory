@@ -28,12 +28,14 @@ from .db.migrations.scoped_tag_governance import ensure_scoped_tag_governance_sc
 from .db.migrations.scoped_relationship_calibration import ensure_scoped_relationship_calibration_schema
 from .db.migrations.scoped_soul import ensure_scoped_soul_schema
 from .db.migrations.scoped_fact_history import ensure_scoped_fact_history_schema
+from .db.migrations.shared_memory_grants import ensure_shared_memory_grants_schema
 from .db.scoped_knowledge_repo import ScopedKnowledgeRepo
 from .db.scoped_learning_projection_repo import (
     ReviewedBookLoreProjectionRepository,
     ScopedFewShotRepository,
 )
 from .db.scoped_soul_repo import ScopedSoulRepository
+from .db.shared_memory_grant_repo import SharedMemoryGrantRepository
 from .db.tag_repo import TagRepo
 from .db.social_repo import SocialRepo
 from .db.knowledge_repo import KnowledgeRepo
@@ -72,6 +74,9 @@ class WaveMemoryDB:
             ensure_scoped_relationship_calibration_schema(self._cm)
             ensure_scoped_fact_history_schema(self._cm)
             ensure_scoped_learning_projection_schema(self._cm)
+            # Shared-memory grants: read authorization only; never physical fanout.
+            ensure_shared_memory_grants_schema(self._cm)
+            self._shared_memory_grants = SharedMemoryGrantRepository(self._cm)
             self._scoped_knowledge_repo = ScopedKnowledgeRepo(self._cm)
             self._soul_repository = ScopedSoulRepository(
                 self._cm,
@@ -123,8 +128,12 @@ class WaveMemoryDB:
     def list_scoped_cold_memory_candidates(self, scope, tag_ids, **kwargs):
         return self._scoped_knowledge_repo.list_scoped_cold_memory_candidates(scope, tag_ids, **kwargs)
 
-    def list_scoped_catalog_links(self, scope, catalog_ids):
-        return self._scoped_knowledge_repo.list_scoped_catalog_links(scope, catalog_ids)
+    def list_scoped_catalog_links(self, scope, catalog_ids, *, allow_cross_group_recall=False):
+        return self._scoped_knowledge_repo.list_scoped_catalog_links(
+            scope,
+            catalog_ids,
+            allow_cross_group_recall=allow_cross_group_recall,
+        )
 
     def get_scoped_tag_vectors_by_ids(self, scope, tag_ids):
         return self._scoped_knowledge_repo.get_scoped_tag_vectors_by_ids(scope, tag_ids)
@@ -134,6 +143,11 @@ class WaveMemoryDB:
 
     def update_tag_catalog_embedding(self, catalog_id, vector, **kwargs):
         return self._scoped_knowledge_repo.update_tag_catalog_embedding(catalog_id, vector, **kwargs)
+
+    @property
+    def shared_memory_grants(self) -> SharedMemoryGrantRepository:
+        """共享记忆只读授权仓储；禁止用它做物理 fanout 复制。"""
+        return self._shared_memory_grants
 
     @property
     def soul_repository(self) -> ScopedSoulRepository:
@@ -224,19 +238,38 @@ class WaveMemoryDB:
     def get_all_memory_vectors(self, group_id=None):
         return self._memory_repo.get_all_memory_vectors(group_id)
 
-    def get_memories_by_ids(self, ids, *, scope=None, allow_unscoped=False):
+    def get_memories_by_ids(
+        self,
+        ids,
+        *,
+        scope=None,
+        allow_unscoped=False,
+        allow_cross_group_recall=False,
+        shared_grant_memory_ids=None,
+    ):
         return self._memory_repo.get_memories_by_ids(
             ids,
             scope=scope,
             allow_unscoped=allow_unscoped,
+            allow_cross_group_recall=allow_cross_group_recall,
+            shared_grant_memory_ids=shared_grant_memory_ids,
         )
 
-    def list_legacy_cold_memory_candidates(self, scope, tag_ids, *, limit=128, allow_unscoped=False):
+    def list_legacy_cold_memory_candidates(
+        self,
+        scope,
+        tag_ids,
+        *,
+        limit=128,
+        allow_unscoped=False,
+        allow_cross_group_recall=False,
+    ):
         return self._memory_repo.list_legacy_cold_memory_candidates(
             scope,
             tag_ids,
             limit=limit,
             allow_unscoped=allow_unscoped,
+            allow_cross_group_recall=allow_cross_group_recall,
         )
 
     def find_recent_duplicate_memory(self, *, scope, normalized_content, since_ts):

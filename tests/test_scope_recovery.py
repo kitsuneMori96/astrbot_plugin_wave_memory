@@ -16,6 +16,14 @@ from services.scope_recovery import (
     build_recovery_request,
     plan_snapshot,
 )
+from services.approved_scope_recovery import (
+    ApprovedScopeRecoveryError,
+    apply_approved_scope_recovery,
+    build_approved_scope_recovery_plan,
+    create_approved_scope_snapshot,
+    verify_approved_scope_recovery,
+    write_approved_scope_recovery_plan,
+)
 from services.scope_recovery_migration import (
     ScopeRecoveryMigrationError,
     apply_classified_scope_recovery,
@@ -445,6 +453,236 @@ def test_classified_recovery_projects_only_live_generic_and_single_bot_group_row
         assert recovered.execute("SELECT COUNT(*) FROM memories WHERE id IN (1,2,3,4)").fetchone()[0] == 4
     finally:
         recovered.close()
+
+
+def test_approved_group_scope_recovery_fans_out_and_retains_verified_external_projections(tmp_path):
+    source = tmp_path / "snapshot.sqlite3"
+    plan_path = tmp_path / "approved-plan.json"
+    output = tmp_path / "staged.sqlite3"
+    connection = sqlite3.connect(source)
+    connection.executescript(
+        """
+        CREATE TABLE memories (
+            id INTEGER PRIMARY KEY, group_id TEXT NOT NULL, sender_id TEXT, sender_name TEXT,
+            content TEXT NOT NULL, vector BLOB, timestamp REAL NOT NULL, importance REAL,
+            access_count INTEGER, last_accessed REAL, memory_type TEXT, source TEXT, summary TEXT,
+            bot_id TEXT, session_id TEXT, visibility TEXT, origin_fingerprint TEXT, provenance TEXT,
+            version INTEGER, quarantine INTEGER, resolution_state TEXT
+        );
+        CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT, vector BLOB, created_at REAL, tag_type TEXT,
+            aliases TEXT, description TEXT, confidence REAL, metadata TEXT, updated_at REAL);
+        CREATE TABLE memory_tags (memory_id INTEGER, tag_id INTEGER, position INTEGER, relevance REAL);
+        CREATE TABLE tag_catalog (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, normalized_name TEXT, display_name TEXT,
+            tag_type TEXT, description TEXT, embedding BLOB, embedding_model TEXT,
+            embedding_dim INTEGER, status TEXT, created_at REAL, updated_at REAL,
+            UNIQUE(normalized_name, tag_type)
+        );
+        CREATE TABLE scoped_tags (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, session_id TEXT, visibility TEXT,
+            name TEXT, tag_type TEXT, description TEXT, confidence REAL, metadata TEXT,
+            created_at REAL, updated_at REAL, revision INTEGER DEFAULT 1, status TEXT DEFAULT 'active',
+            aliases TEXT DEFAULT '[]', catalog_id INTEGER,
+            UNIQUE(bot_id, session_id, visibility, name)
+        );
+        CREATE TABLE scoped_memory_tags (
+            bot_id TEXT, session_id TEXT, visibility TEXT, memory_id INTEGER, tag_id INTEGER,
+            position INTEGER, relevance REAL, created_at REAL,
+            PRIMARY KEY(bot_id, session_id, visibility, memory_id, tag_id)
+        );
+        CREATE TABLE scoped_memory_effective_tags (
+            bot_id TEXT, session_id TEXT, visibility TEXT, memory_id INTEGER, tag_id INTEGER,
+            position INTEGER, relevance REAL, source TEXT, correction_id TEXT,
+            projection_revision INTEGER, updated_at REAL,
+            PRIMARY KEY(bot_id, session_id, visibility, memory_id, tag_id)
+        );
+        CREATE TABLE scoped_tag_projection_state (
+            bot_id TEXT, session_id TEXT, visibility TEXT, state TEXT,
+            projection_revision INTEGER, cursor_memory_id INTEGER, last_error TEXT, updated_at REAL,
+            PRIMARY KEY(bot_id, session_id, visibility)
+        );
+        CREATE TABLE scoped_tag_relations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, session_id TEXT, visibility TEXT,
+            source_tag_id INTEGER, target_tag_id INTEGER, relation_type TEXT, weight REAL,
+            confidence REAL, metadata TEXT, created_at REAL, updated_at REAL, status TEXT,
+            valid_until REAL, revision INTEGER,
+            UNIQUE(bot_id, session_id, visibility, source_tag_id, target_tag_id, relation_type)
+        );
+        CREATE TABLE scoped_beliefs (id INTEGER PRIMARY KEY, source_memory_id INTEGER, content TEXT);
+        CREATE TABLE memory_feedback (id INTEGER PRIMARY KEY, memory_id INTEGER, feedback TEXT);
+        CREATE TABLE experience_episodes (id INTEGER PRIMARY KEY, source_memory_ids TEXT);
+        CREATE TABLE scope_recovery_memory_map (
+            legacy_memory_id INTEGER NOT NULL, target_scope_key TEXT NOT NULL,
+            target_memory_id INTEGER NOT NULL, origin_key TEXT NOT NULL UNIQUE, run_id TEXT NOT NULL,
+            PRIMARY KEY(legacy_memory_id, target_scope_key)
+        );
+        """
+    )
+    formal = [
+        (100, "g1", "formal a", "bot-a", "a:group:g1"),
+        (101, "g1", "formal b", "bot-b", "b:group:g1"),
+        (102, "g2", "formal c", "bot-c", "c:group:g2"),
+    ]
+    for memory_id, group_id, content, bot_id, session_id in formal:
+        connection.execute(
+            """INSERT INTO memories(id,group_id,sender_id,sender_name,content,timestamp,importance,memory_type,
+                   source,bot_id,session_id,visibility,quarantine,resolution_state,provenance)
+               VALUES (?,?, 'u','U',?,1,1,'message','live',?,?, 'group',0,'resolved','{}')""",
+            (memory_id, group_id, content, bot_id, session_id),
+        )
+    connection.executemany(
+        """INSERT INTO memories(id,group_id,sender_id,sender_name,content,timestamp,importance,memory_type,
+               source,bot_id,session_id,visibility,quarantine,resolution_state)
+           VALUES (?,?,'u','U',?,1,1,'message',?,NULL,NULL,NULL,0,'')""",
+        [
+            (1, "g1", "group-bound core", "core"),
+            (2, "g1", "group-bound chat", "chat"),
+            (3, "g2", "mapping not approved", "chat"),
+            (4, "g1", "noise stays review", "noise"),
+        ],
+    )
+    connection.execute(
+        """INSERT INTO memories(id,group_id,sender_id,sender_name,content,timestamp,importance,memory_type,
+               source,bot_id,session_id,visibility,quarantine,resolution_state)
+           VALUES (5,'g1','u','U','partial Scope evidence',1,1,'message','chat','bot-a',NULL,NULL,0,'')"""
+    )
+    provenance = json.dumps(
+        {
+            "legacy_source_table": "memories",
+            "legacy_id": 1,
+            "source_group_id": "g1",
+        },
+        ensure_ascii=False,
+    )
+    historical = [
+        (200, "g1", "bot-a", "a:group:g1", "bot-a|a:group:g1|group"),
+        (201, "g1", "bot-b", "b:group:g1", "bot-b|b:group:g1|group"),
+        (202, "g2", "bot-c", "c:group:g2", "bot-c|c:group:g2|group"),
+    ]
+    for memory_id, group_id, bot_id, session_id, scope_key in historical:
+        connection.execute(
+            """INSERT INTO memories(id,group_id,sender_id,sender_name,content,timestamp,importance,memory_type,
+                   source,bot_id,session_id,visibility,quarantine,resolution_state,provenance)
+               VALUES (?,?,'u','U','group-bound core',1,1,'message','core',?,?, 'group',0,'resolved',?)""",
+            (memory_id, group_id, bot_id, session_id, provenance),
+        )
+        connection.execute(
+            """INSERT INTO scope_recovery_memory_map(
+                   legacy_memory_id,target_scope_key,target_memory_id,origin_key,run_id
+               ) VALUES (1,?,?,?, 'historical')""",
+            (scope_key, memory_id, f"historical|1|{scope_key}"),
+        )
+    connection.execute("INSERT INTO tags VALUES (1,'alpha',NULL,1,'topic','[]','',.9,'{}',1)")
+    connection.execute("INSERT INTO memory_tags VALUES (1,1,1,.9)")
+    connection.execute(
+        "INSERT INTO scoped_memory_tags VALUES ('bot-c','c:group:g2','group',202,1,1,.9,1)"
+    )
+    connection.execute("INSERT INTO scoped_beliefs VALUES (1,202,'wrong scope belief')")
+    connection.execute("INSERT INTO memory_feedback VALUES (1,202,'historical feedback')")
+    connection.execute("INSERT INTO experience_episodes VALUES (1,'[202]')")
+    connection.commit()
+    connection.close()
+
+    mappings = [
+        {"group_id": "g1", "bot_id": "bot-a", "session_id": "a:group:g1", "visibility": "group"},
+        {"group_id": "g1", "bot_id": "bot-b", "session_id": "b:group:g1", "visibility": "group"},
+    ]
+    frozen_snapshot = tmp_path / "frozen-snapshot.sqlite3"
+    snapshot_result = create_approved_scope_snapshot(source, frozen_snapshot)
+    assert snapshot_result["quick_check"] == "ok"
+    sidecar = Path(str(frozen_snapshot) + "-wal")
+    sidecar.write_bytes(b"must reject non-single-file snapshot")
+    with pytest.raises(ApprovedScopeRecoveryError, match="source_snapshot_sidecar_present"):
+        build_approved_scope_recovery_plan(frozen_snapshot, mappings)
+    sidecar.unlink()
+
+    plan = build_approved_scope_recovery_plan(frozen_snapshot, mappings)
+    assert plan["summary"]["selected_source_memories"] == 2
+    assert plan["summary"]["projected_memory_rows"] == 4
+    assert plan["summary"]["skipped"]["partial_scope_requires_review"] == 1
+    write_approved_scope_recovery_plan(plan, plan_path)
+
+    # v2 approved artifacts encoded the deletion policy and must never be
+    # reinterpreted under v3 retain-only semantics, even with a valid hash.
+    legacy_plan = dict(plan)
+    legacy_plan["rule_version"] = "approved-group-scope-recovery/2"
+    legacy_plan["policy"] = "group-bound-core-chat-fanout/v2"
+    legacy_plan["plan_hash"] = "sha256:" + hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in legacy_plan.items() if key != "plan_hash"},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    legacy_plan_path = tmp_path / "v2-approved-plan.json"
+    legacy_plan_path.write_text(json.dumps(legacy_plan, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(ApprovedScopeRecoveryError, match="approved_plan_rule_unsupported"):
+        apply_approved_scope_recovery(
+            frozen_snapshot,
+            legacy_plan_path,
+            tmp_path / "v2-must-not-stage.sqlite3",
+            tmp_path / "v2-runs",
+            confirmation="retain-approved-group-scopes-non-destructive",
+        )
+
+    result = apply_approved_scope_recovery(
+        frozen_snapshot,
+        plan_path,
+        output,
+        tmp_path / "runs",
+        confirmation="retain-approved-group-scopes-non-destructive",
+    )
+    assert result["created_memory_rows"] == 2
+    assert result["preserved_memory_rows"] == 2
+    assert result["retained_plan_external_projection_rows"] == 1
+    assert result["removed_cross_scope_memory_rows"] == 0
+    assert result["verification"]["actual_mappings"] == 4
+
+    verification = verify_approved_scope_recovery(output, plan_path, result["run_id"])
+    assert verification["verification"]["foreign_key_violations"] == 0
+    assert verification["corrections"] == {"created": 2, "preserved": 2, "retained": 1}
+    staged = sqlite3.connect(output)
+    try:
+        # The plan does not target g2, but the verified group-visible projection
+        # is historical cross-group sharing.  Retain it and every dependent row.
+        assert staged.execute(
+            "SELECT COUNT(*) FROM memories WHERE id=202 AND group_id='g2' AND content='group-bound core'"
+        ).fetchone()[0] == 1
+        assert staged.execute(
+            "SELECT COUNT(*) FROM scoped_memory_tags WHERE session_id='c:group:g2' AND memory_id=202"
+        ).fetchone()[0] == 1
+        assert staged.execute("SELECT COUNT(*) FROM scoped_beliefs WHERE source_memory_id=202").fetchone()[0] == 1
+        assert staged.execute("SELECT COUNT(*) FROM memory_feedback WHERE memory_id=202").fetchone()[0] == 1
+        assert staged.execute("SELECT source_memory_ids FROM experience_episodes WHERE id=1").fetchone()[0] == "[202]"
+        assert staged.execute(
+            "SELECT COUNT(*) FROM scope_recovery_memory_map WHERE legacy_memory_id=1 AND target_scope_key='bot-c|c:group:g2|group'"
+        ).fetchone()[0] == 1
+        assert staged.execute(
+            "SELECT COUNT(*) FROM scope_recovery_approved_memory_map WHERE run_id=?",
+            (result["run_id"],),
+        ).fetchone()[0] == 4
+        assert staged.execute(
+            "SELECT COUNT(*) FROM memories WHERE content='group-bound chat' AND group_id='g1' AND visibility='group'"
+        ).fetchone()[0] == 2
+        assert staged.execute(
+            "SELECT COUNT(*) FROM memories WHERE content='partial Scope evidence' AND visibility='group'"
+        ).fetchone()[0] == 0
+    finally:
+        staged.close()
+
+    changed = sqlite3.connect(frozen_snapshot)
+    changed.execute("UPDATE memories SET content='changed after planning' WHERE id=1")
+    changed.commit()
+    changed.close()
+    with pytest.raises(ApprovedScopeRecoveryError, match="approved_snapshot_hash_mismatch"):
+        apply_approved_scope_recovery(
+            frozen_snapshot,
+            plan_path,
+            tmp_path / "must-not-exist.sqlite3",
+            tmp_path / "runs-unsafe",
+            confirmation="retain-approved-group-scopes-non-destructive",
+        )
 
 
 def test_tag_links_without_legacy_endpoints_are_review_samples():

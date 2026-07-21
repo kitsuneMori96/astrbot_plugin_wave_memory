@@ -209,11 +209,14 @@ def test_main_production_wiring_passes_formal_repositories_writer_and_runtime_sc
     initializer = _method(tree, "_initialize_once")
     learning = _method(tree, "_configure_learning_center_services")
     injection = _method(tree, "_setup_injection_shadow_pipeline")
+    context_config = _method(tree, "_build_shadow_context_config")
     on_message = _method(tree, "on_message")
 
     constructor_source = ast.unparse(constructor)
     initializer_source = ast.unparse(initializer)
     learning_source = ast.unparse(learning)
+    injection_source = ast.unparse(injection)
+    context_config_source = ast.unparse(context_config)
     on_message_source = ast.unparse(on_message)
 
     assert "CoordinatorScopedProjectionWriter(self.write_gateway.coordinator" in constructor_source
@@ -231,7 +234,15 @@ def test_main_production_wiring_passes_formal_repositories_writer_and_runtime_sc
     assert "'book_lore': self.scoped_projection_writer" in learning_source
     assert "'few_shot'" in learning_source and "self.scoped_projection_writer" in learning_source
     assert {"FewShotChannel", "BookLoreChannel"} <= set(_call_names(injection))
-    assert "from .webui.container import get_container" in ast.unparse(injection)
+    assert "from .webui.container import get_container" in injection_source
+    assert "_parse_bool_config_value(cross_group_cfg.get('cross_group_enabled'), True)" in constructor_source
+    assert constructor_source.count("'cross_group_enabled': self.cross_group_enabled") == 1
+    assert injection_source.count("cross_group_enabled=self.cross_group_enabled") == 2
+    assert injection_source.count(
+        "shared_memory_grants_enabled=self.shared_memory_grants_enabled"
+    ) == 2
+    assert "config['cross_group_enabled'] = self.cross_group_enabled" in context_config_source
+    assert "config['shared_memory_grants_enabled'] = self.shared_memory_grants_enabled" in context_config_source
     assert "self.concern_tracker.add(topic=topic" in on_message_source
     assert "scope=runtime_scope" in on_message_source
     assert "self.concern_tracker.match(locked_message, scope=runtime_scope)" in on_message_source

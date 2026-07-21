@@ -39,6 +39,16 @@ try:
 except ImportError:  # pragma: no cover - top-level repository imports
     from services.soul_context import resolve_soul_context
 
+try:
+    from ...services.relationship_evidence_display import extract_historical_audit_summaries
+except ImportError:  # pragma: no cover - top-level repository imports
+    from services.relationship_evidence_display import extract_historical_audit_summaries
+
+
+def _evidence_summaries(evidence: Any) -> list[str]:
+    """Read-only extract of historical_audit_summary texts; never mutates affinity."""
+    return extract_historical_audit_summaries(evidence, max_items=3)
+
 
 _DIMENSION_WEIGHTS = DIMENSION_WEIGHTS
 _DIMENSION_RANGES = DIMENSION_RANGES
@@ -89,6 +99,79 @@ def _json_evidence(value: Sequence[Mapping[str, Any]] | None) -> str:
             raise TypeError("every evidence item must be a mapping")
         items.append(dict(item))
     return json.dumps(items, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _parse_evidence_list(raw: Any) -> list[dict[str, Any]]:
+    """Best-effort parse of stored evidence JSON into a list of dicts."""
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [dict(x) for x in raw if isinstance(x, Mapping)]
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", errors="ignore")
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [dict(x) for x in data if isinstance(x, Mapping)]
+
+
+def _historical_audit_summary_items(items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        if item.get("kind") == "historical_audit_summary":
+            out.append(dict(item))
+    return out
+
+
+def _merge_relationship_evidence(
+    existing: Any,
+    new_items: Sequence[Mapping[str, Any]] | None,
+    *,
+    prefer_new_first: bool = True,
+) -> list[dict[str, Any]]:
+    """Merge live evidence onto formal row while preserving audit summaries.
+
+    Live paths historically *replaced* evidence with only the latest event
+    fragment, which dropped ``historical_audit_summary`` objects written by
+    Wave2. Preserve those kinds; de-dupe by kind+summary text.
+
+    If ``new_items`` is None, keep the existing list unchanged (including
+    non-summary fragments).
+    """
+    old = _parse_evidence_list(existing)
+    if new_items is None:
+        return old
+    preserved = _historical_audit_summary_items(old)
+    fresh: list[dict[str, Any]] = []
+    for item in new_items:
+        if not isinstance(item, Mapping):
+            continue
+        fresh.append(dict(item))
+    # If caller already supplied summaries, do not duplicate from existing.
+    if _historical_audit_summary_items(fresh):
+        merged = list(fresh)
+    elif prefer_new_first:
+        merged = list(fresh) + preserved
+    else:
+        merged = preserved + list(fresh)
+    # Dedupe historical_audit_summary by summary text (keep first).
+    seen_summary: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for item in merged:
+        if item.get("kind") == "historical_audit_summary":
+            key = str(item.get("summary") or "")
+            if key in seen_summary:
+                continue
+            seen_summary.add(key)
+        out.append(item)
+    return out
 
 
 def _state_for_affinity(affinity: int) -> str:
@@ -362,7 +445,6 @@ class ScopedSoulRepository:
         if scope.subject_principal_id is not None and scope.subject_principal_id != subject:
             raise ScopedSoulScopeError("scope_subject_mismatch")
         affinity = int(max(-100, min(100, int(affinity))))
-        encoded_evidence = _json_evidence(evidence)
         normalized_dimensions = {
             str(key): clamp_dimension(str(key), float(value))
             for key, value in dict(dimensions or {}).items()
@@ -374,6 +456,10 @@ class ScopedSoulRepository:
             existing = self._relationship_row(tx, scope, subject)
             existing_values = self._ensure_formal_values(tx, scope, subject, now)
             revision = self._next_revision(tx, scope, "relationship", subject, now)
+            # Preserve historical_audit_summary when callers pass partial/new evidence.
+            existing_evidence = existing[4] if existing is not None and len(existing) > 4 else None
+            merged_evidence = _merge_relationship_evidence(existing_evidence, evidence)
+            encoded_evidence = _json_evidence(merged_evidence)
             tx.execute(
                 "UPDATE scoped_soul_relationship_values SET relationship_revision=? WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?",
                 (revision, *_scope_params(scope), subject),
@@ -510,7 +596,12 @@ class ScopedSoulRepository:
                 "UPDATE scoped_soul_relationship_events SET before_json=?, after_json=? WHERE id=?",
                 (encoded_before, encoded_after, event_id),
             )
-            relationship_evidence = [{"relationship_event_id": event_id}, *evidence]
+            # Keep Wave2 historical_audit_summary objects across live affinity events.
+            existing_rel_evidence = row[4] if row is not None and len(row) > 4 else None
+            relationship_evidence = _merge_relationship_evidence(
+                existing_rel_evidence,
+                [{"relationship_event_id": event_id}, *evidence],
+            )
             tx.execute(
                 """INSERT INTO scoped_soul_relationships(
                        bot_id, session_id, visibility, subject_principal_id, affinity, state,
@@ -625,7 +716,12 @@ class ScopedSoulRepository:
             values_after = self._value_rows(tx, scope, subject)
             dimensions = {key: item["effective_value"] for key, item in values_after.items()}
             affinity = _compute_affinity(dimensions)
-            relationship_evidence = [{"calibration_operation_id": operation_id}, *list(evidence)]
+            rel_row = self._relationship_row(tx, scope, subject)
+            existing_rel_evidence = rel_row[4] if rel_row is not None and len(rel_row) > 4 else None
+            relationship_evidence = _merge_relationship_evidence(
+                existing_rel_evidence,
+                [{"calibration_operation_id": operation_id}, *list(evidence)],
+            )
             tx.execute(
                 """UPDATE scoped_soul_relationships
                       SET affinity=?, state=?, dimensions=?, revision=?, evidence=?, updated_at=?
@@ -817,6 +913,80 @@ class ScopedSoulRepository:
         return {"items": items[offset:offset + limit], "total": total,
                 "revision": max(revision_values, default=None)}
 
+    def list_legacy_relationship_audit_summary(
+        self,
+        scope: RuntimeScope,
+        *,
+        subject_principal_id: str | None = None,
+        recent_limit: int = 5,
+    ) -> dict[str, Any]:
+        """Read-only summary of historical legacy events (audit table only).
+
+        Never mutates formal affinity/values. Missing table returns empty summary.
+        """
+        scope = _require_scope(scope)
+        subject = subject_principal_id or scope.subject_principal_id
+        if subject is None:
+            return {"total": 0, "by_type": [], "recent": [], "available": False}
+        subject = _exact_string(subject, "subject_principal_id")
+        if scope.subject_principal_id is not None and scope.subject_principal_id != subject:
+            raise ScopedSoulScopeError("scope_subject_mismatch")
+        recent_limit = max(1, min(int(recent_limit or 5), 20))
+
+        tables = {
+            str(row[0])
+            for row in self.cm.execute_read(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "scoped_soul_relationship_legacy_events" not in tables:
+            return {"total": 0, "by_type": [], "recent": [], "available": False}
+
+        scope_params = (*_scope_params(scope), subject)
+        total = int(
+            self.cm.execute_read(
+                """SELECT COUNT(*)
+                     FROM scoped_soul_relationship_legacy_events
+                    WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?""",
+                scope_params,
+            ).fetchone()[0]
+        )
+        by_type_rows = self.cm.execute_read(
+            """SELECT event_type, COUNT(*) AS n
+                 FROM scoped_soul_relationship_legacy_events
+                WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?
+                GROUP BY event_type
+                ORDER BY n DESC, event_type ASC""",
+            scope_params,
+        ).fetchall()
+        recent_rows = self.cm.execute_read(
+            """SELECT event_type, dimension, delta, reason, occurred_at, legacy_event_id
+                 FROM scoped_soul_relationship_legacy_events
+                WHERE bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=?
+                ORDER BY COALESCE(occurred_at, 0) DESC, id DESC
+                LIMIT ?""",
+            (*scope_params, recent_limit),
+        ).fetchall()
+        return {
+            "available": True,
+            "total": total,
+            "by_type": [
+                {"event_type": str(row[0] or ""), "count": int(row[1] or 0)}
+                for row in by_type_rows
+            ],
+            "recent": [
+                {
+                    "event_type": str(row[0] or ""),
+                    "dimension": str(row[1] or ""),
+                    "delta": row[2],
+                    "reason": str(row[3] or ""),
+                    "occurred_at": row[4],
+                    "legacy_event_id": str(row[5] or ""),
+                }
+                for row in recent_rows
+            ],
+        }
+
     def list_relationships(self, scope: RuntimeScope, *, subject_principal_id: str | None = None) -> list[dict[str, Any]]:
         scope = _require_scope(scope)
         subject = subject_principal_id or scope.subject_principal_id
@@ -858,13 +1028,15 @@ class ScopedSoulRepository:
                 }
                 for item in value_rows
             }
+            evidence = json.loads(str(row[5] or "[]"))
             result.append({
                 "subject_principal_id": subject_id,
                 "affinity": int(row[1]),
                 "state": str(row[2]),
                 "dimensions": json.loads(str(row[3] or "{}")),
                 "revision": int(row[4]),
-                "evidence": json.loads(str(row[5] or "[]")),
+                "evidence": evidence,
+                "evidence_summaries": _evidence_summaries(evidence),
                 "updated_at": float(row[6]),
                 "values": values,
                 "calibration": {"available": bool(values), "reason_code": None if values else "relationship_values_unknown"},
@@ -974,7 +1146,7 @@ class ScopedSoulRepository:
         } for row in timeline_rows]
 
         relationship = {"affinity": None, "state": "unknown", "revision": None,
-                        "evidence": [], "people_ref": None, "dimensions": None,
+                        "evidence": [], "evidence_summaries": [], "people_ref": None, "dimensions": None,
                         "values": None, "calibration": {"available": False, "reason_code": "relationship_unknown"}}
         if subject is not None:
             row = self.cm.execute_read(
@@ -1005,9 +1177,11 @@ class ScopedSoulRepository:
                     }
                     for item in value_rows
                 }
+                rel_evidence = json.loads(str(row[4] or "[]"))
                 relationship = {
                     "affinity": row[0], "state": row[1], "dimensions": json.loads(str(row[2] or "{}")),
-                    "revision": row[3], "evidence": json.loads(str(row[4] or "[]")),
+                    "revision": row[3], "evidence": rel_evidence,
+                    "evidence_summaries": _evidence_summaries(rel_evidence),
                     "updated_at": row[5], "people_ref": subject, "values": values,
                     "calibration": {"available": bool(values), "reason_code": None if values else "relationship_values_unknown"},
                 }
@@ -1020,6 +1194,30 @@ class ScopedSoulRepository:
             limit=limit,
             offset=offset,
         )
+        # Side-channel only: never mixes into relationship_history / affinity.
+        if subject is not None:
+            historical_audit = self.list_legacy_relationship_audit_summary(
+                scope,
+                subject_principal_id=subject,
+                recent_limit=5,
+            )
+            if isinstance(historical_audit, dict):
+                historical_audit = {
+                    **historical_audit,
+                    "readonly": True,
+                    "affects_affinity": False,
+                    "source_table": "scoped_soul_relationship_legacy_events",
+                }
+        else:
+            historical_audit = {
+                "available": False,
+                "total": 0,
+                "by_type": [],
+                "recent": [],
+                "readonly": True,
+                "affects_affinity": False,
+                "reason_code": "relationship_subject_required",
+            }
         revision_params: list[Any] = list(params)
         revision_where = "bot_id=? AND session_id=? AND visibility=? AND subject_principal_id=''"
         if subject is not None:
@@ -1043,6 +1241,7 @@ class ScopedSoulRepository:
             "timeline": {"items": timeline, "total": timeline_total, "revision": max((item["revision"] for item in timeline), default=None)},
             "relationship": relationship,
             "relationship_history": relationship_history,
+            "historical_audit": historical_audit,
             "soul_context": resolve_soul_context(
                 self.soul_context_provider,
                 scope=scope,

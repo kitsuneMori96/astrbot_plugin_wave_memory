@@ -39,49 +39,18 @@ def _quick_check(path: Path) -> str:
 
 
 def _promote(staged: Path, production: Path, backup: Path, confirmation: str) -> dict[str, Any]:
+    """Hard-disabled: classified recovery promote implements multi-group fanout.
+
+    Shared memory is now cross-group read authorization + collapse, not a
+    production DB swap of 1→N physical copies.
+    """
+    del staged, production, backup  # arguments retained for CLI compatibility
     if confirmation != "promote-recovered-database":
         raise ScopeRecoveryMigrationError("promotion_confirmation_required")
-    staged = staged.resolve()
-    production = production.resolve()
-    backup = backup.resolve()
-    if not staged.is_file() or not production.is_file():
-        raise ScopeRecoveryMigrationError("promotion_database_missing")
-    if staged.parent.stat().st_dev != production.parent.stat().st_dev:
-        raise ScopeRecoveryMigrationError("promotion_requires_same_filesystem")
-    if _quick_check(staged) != "ok":
-        raise ScopeRecoveryMigrationError("staged_database_integrity_failed")
-    staged_conn = sqlite3.connect(staged)
-    try:
-        migration = staged_conn.execute(
-            """SELECT run_id,status,indexes_status FROM scope_recovery_migrations
-                 WHERE rule_version=? ORDER BY created_at DESC LIMIT 1""",
-            (CLASSIFIED_RECOVERY_RULE_VERSION,),
-        ).fetchone()
-    finally:
-        staged_conn.close()
-    if migration is None or str(migration[1]) != "staged":
-        raise ScopeRecoveryMigrationError("staged_recovery_marker_missing")
-    backup.parent.mkdir(parents=True, exist_ok=True)
-    if backup.exists():
-        raise ScopeRecoveryMigrationError("promotion_backup_already_exists")
-    for suffix in ("-wal", "-shm"):
-        sidecar = Path(str(production) + suffix)
-        try:
-            sidecar.unlink()
-        except FileNotFoundError:
-            pass
-    os.replace(production, backup)
-    try:
-        os.replace(staged, production)
-    except Exception:
-        os.replace(backup, production)
-        raise
-    return {
-        "run_id": str(migration[0]),
-        "production_db": str(production),
-        "promotion_backup": str(backup),
-        "quick_check": _quick_check(production),
-    }
+    raise ScopeRecoveryMigrationError(
+        "classified_fanout_promote_forbidden:"
+        "use owned-scope recovery / read-share policy; never re-promote classified-scope-recovery/1 fanout"
+    )
 
 
 def _valid_vectors(conn: sqlite3.Connection, query: str, dimension: int) -> tuple[list[int], list[bytes], int]:
@@ -135,11 +104,33 @@ def _save_index(
     return manifest.to_dict()
 
 
-def _rebuild_indexes(database: Path, data_dir: Path, dimension: int, confirmation: str) -> dict[str, Any]:
+def _rebuild_indexes(
+    database: Path,
+    data_dir: Path,
+    dimension: int,
+    confirmation: str,
+    *,
+    run_id: str | None = None,
+) -> dict[str, Any]:
     if confirmation != "rebuild-recovery-indexes":
         raise ScopeRecoveryMigrationError("index_rebuild_confirmation_required")
     database = database.resolve()
     data_dir = data_dir.resolve()
+    if run_id:
+        run_conn = sqlite3.connect(database)
+        try:
+            run = run_conn.execute(
+                "SELECT rule_version,status FROM scope_recovery_migrations WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+        finally:
+            run_conn.close()
+        if run is None:
+            raise ScopeRecoveryMigrationError("recovery_run_missing")
+        if str(run[0]).startswith("approved-group-scope-recovery/"):
+            raise ScopeRecoveryMigrationError("approved_recovery_requires_phase2_index_tool")
+        if str(run[1]) != "staged":
+            raise ScopeRecoveryMigrationError("recovery_run_not_staged")
     conn = sqlite3.connect(database)
     try:
         memory_ids, memory_vectors, invalid_memory_vectors = _valid_vectors(
@@ -178,19 +169,36 @@ def _rebuild_indexes(database: Path, data_dir: Path, dimension: int, confirmatio
     )
     conn = sqlite3.connect(database)
     try:
-        conn.execute(
-            """UPDATE scope_recovery_migrations
-                  SET indexes_status='ready:memory_hnsw,tag_catalog_hnsw'
-                WHERE run_id=(
-                    SELECT run_id FROM scope_recovery_migrations
-                     WHERE rule_version=? ORDER BY created_at DESC LIMIT 1
-                )""",
-            (CLASSIFIED_RECOVERY_RULE_VERSION,),
-        )
+        if run_id:
+            existing = conn.execute(
+                "SELECT run_id FROM scope_recovery_migrations WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if existing is None:
+                raise ScopeRecoveryMigrationError("recovery_run_missing")
+            cursor = conn.execute(
+                """UPDATE scope_recovery_migrations
+                      SET indexes_status='ready:memory_hnsw,tag_catalog_hnsw'
+                    WHERE run_id=?""",
+                (run_id,),
+            )
+        else:
+            cursor = conn.execute(
+                """UPDATE scope_recovery_migrations
+                      SET indexes_status='ready:memory_hnsw,tag_catalog_hnsw'
+                    WHERE run_id=(
+                        SELECT run_id FROM scope_recovery_migrations
+                         WHERE rule_version=? ORDER BY created_at DESC LIMIT 1
+                    )""",
+                (CLASSIFIED_RECOVERY_RULE_VERSION,),
+            )
+        if cursor.rowcount != 1:
+            raise ScopeRecoveryMigrationError("recovery_run_missing")
         conn.commit()
     finally:
         conn.close()
     return {
+        "run_id": run_id,
         "memory": memory_manifest,
         "tag": tag_manifest,
         "invalid_memory_vectors": invalid_memory_vectors,
@@ -198,33 +206,64 @@ def _rebuild_indexes(database: Path, data_dir: Path, dimension: int, confirmatio
     }
 
 
-def _verify(database: Path, data_dir: Path, dimension: int) -> dict[str, Any]:
+def _verify(database: Path, data_dir: Path, dimension: int, *, run_id: str | None = None) -> dict[str, Any]:
     database = database.resolve()
     data_dir = data_dir.resolve()
     conn = sqlite3.connect(database)
+    conn.row_factory = sqlite3.Row
     try:
-        run = conn.execute(
-            """SELECT run_id,status,indexes_status,created_at,completed_at
-                 FROM scope_recovery_migrations WHERE rule_version=?
-                 ORDER BY created_at DESC LIMIT 1""",
-            (CLASSIFIED_RECOVERY_RULE_VERSION,),
-        ).fetchone()
+        if run_id:
+            run = conn.execute(
+                """SELECT run_id,rule_version,status,indexes_status,created_at,completed_at
+                     FROM scope_recovery_migrations WHERE run_id=?""",
+                (run_id,),
+            ).fetchone()
+        else:
+            run = conn.execute(
+                """SELECT run_id,rule_version,status,indexes_status,created_at,completed_at
+                     FROM scope_recovery_migrations WHERE rule_version=?
+                     ORDER BY created_at DESC LIMIT 1""",
+                (CLASSIFIED_RECOVERY_RULE_VERSION,),
+            ).fetchone()
         if run is None:
-            raise ScopeRecoveryMigrationError("classified_recovery_run_missing")
-        mapped = int(conn.execute(
-            "SELECT COUNT(*) FROM scope_recovery_memory_map WHERE run_id=?",
-            (run[0],),
-        ).fetchone()[0])
-        projected = int(conn.execute(
-            """SELECT COUNT(*) FROM memories
-                 WHERE provenance LIKE '%classified_legacy_recovery%' AND resolution_state='resolved'
-                   AND COALESCE(quarantine,0)=0"""
-        ).fetchone()[0])
-        evicted_reactivated = int(conn.execute(
-            """SELECT COUNT(*) FROM memories
-                 WHERE provenance LIKE '%classified_legacy_recovery%'
-                   AND memory_type='evicted'"""
-        ).fetchone()[0])
+            raise ScopeRecoveryMigrationError("recovery_run_missing")
+        tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        approved_mapped = 0
+        if "scope_recovery_approved_memory_map" in tables:
+            approved_mapped = int(conn.execute(
+                "SELECT COUNT(*) FROM scope_recovery_approved_memory_map WHERE run_id=?",
+                (run["run_id"],),
+            ).fetchone()[0])
+        if approved_mapped:
+            mapped = approved_mapped
+            projected = int(conn.execute(
+                """SELECT COUNT(*) FROM scope_recovery_approved_memory_map rm
+                     JOIN memories m ON m.id=rm.target_memory_id
+                    WHERE rm.run_id=? AND m.resolution_state='resolved'
+                      AND COALESCE(m.quarantine,0)=0""",
+                (run["run_id"],),
+            ).fetchone()[0])
+            evicted_reactivated = int(conn.execute(
+                """SELECT COUNT(*) FROM scope_recovery_approved_memory_map rm
+                     JOIN memories m ON m.id=rm.target_memory_id
+                    WHERE rm.run_id=? AND m.memory_type='evicted'""",
+                (run["run_id"],),
+            ).fetchone()[0])
+        else:
+            mapped = int(conn.execute(
+                "SELECT COUNT(*) FROM scope_recovery_memory_map WHERE run_id=?",
+                (run["run_id"],),
+            ).fetchone()[0])
+            projected = int(conn.execute(
+                """SELECT COUNT(*) FROM memories
+                     WHERE provenance LIKE '%classified_legacy_recovery%' AND resolution_state='resolved'
+                       AND COALESCE(quarantine,0)=0"""
+            ).fetchone()[0])
+            evicted_reactivated = int(conn.execute(
+                """SELECT COUNT(*) FROM memories
+                     WHERE provenance LIKE '%classified_legacy_recovery%'
+                       AND memory_type='evicted'"""
+            ).fetchone()[0])
         scoped_tag_links = int(conn.execute(
             """SELECT COUNT(*) FROM scope_recovery_items
                  WHERE run_id=? AND source_table='memory_tags' AND disposition='migrated'""",
@@ -261,11 +300,12 @@ def _verify(database: Path, data_dir: Path, dimension: int) -> dict[str, Any]:
     )
     return {
         "run": {
-            "run_id": run[0],
-            "status": run[1],
-            "indexes_status": run[2],
-            "created_at": run[3],
-            "completed_at": run[4],
+            "run_id": run["run_id"],
+            "rule_version": run["rule_version"],
+            "status": run["status"],
+            "indexes_status": run["indexes_status"],
+            "created_at": run["created_at"],
+            "completed_at": run["completed_at"],
         },
         "database": {
             "quick_check": quick_check,
@@ -305,12 +345,14 @@ def main() -> int:
     rebuild.add_argument("--database", required=True)
     rebuild.add_argument("--data-dir", required=True)
     rebuild.add_argument("--dimension", type=int, required=True)
+    rebuild.add_argument("--run-id", help="bind index readiness to this exact staged run")
     rebuild.add_argument("--confirmation", choices=("rebuild-recovery-indexes",), required=True)
 
     verify = subparsers.add_parser("verify")
     verify.add_argument("--database", required=True)
     verify.add_argument("--data-dir", required=True)
     verify.add_argument("--dimension", type=int, required=True)
+    verify.add_argument("--run-id", help="verify this exact staged run")
 
     args = parser.parse_args()
     if args.command == "stage":
@@ -324,9 +366,15 @@ def main() -> int:
     elif args.command == "promote":
         result = _promote(Path(args.staged_db), Path(args.production_db), Path(args.backup_db), args.confirmation)
     elif args.command == "rebuild-indexes":
-        result = _rebuild_indexes(Path(args.database), Path(args.data_dir), args.dimension, args.confirmation)
+        result = _rebuild_indexes(
+            Path(args.database),
+            Path(args.data_dir),
+            args.dimension,
+            args.confirmation,
+            run_id=args.run_id,
+        )
     else:
-        result = _verify(Path(args.database), Path(args.data_dir), args.dimension)
+        result = _verify(Path(args.database), Path(args.data_dir), args.dimension, run_id=args.run_id)
     print(_json(result))
     return 0
 

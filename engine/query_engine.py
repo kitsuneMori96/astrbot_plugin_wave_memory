@@ -32,6 +32,7 @@ from .spike_routing import SpikeRouter
 from .residual_pyramid import ResidualPyramid
 from .epa import EPAModule
 from .geodesic_rerank import GeodesicReranker
+from .recall_policy import RecallPolicy
 
 
 _QUERY_STAGE_NAMES = ("epa", "pyramid", "spike", "geodesic")
@@ -241,51 +242,120 @@ class QueryEngine:
             return None
         return scope
 
-    def _get_scoped_memories_by_ids(self, ids: list[Any], scope: RuntimeScope) -> list[dict]:
-        """Post-filter HNSW candidates through the repository's exact Scope helper.
+    def _resolve_recall_policy(self, scope: RuntimeScope) -> RecallPolicy:
+        """Build recall policy and optionally load active shared-memory grant ids."""
+        policy = RecallPolicy.from_config(scope, self.config)
+        if not policy.shared_grants_enabled or policy.cross_group_enabled:
+            # Full cross-group already covers granted rows; grants are a narrow path.
+            return policy
+        grant_repo = getattr(self.db, "shared_memory_grants", None)
+        if grant_repo is None:
+            return policy
+        lister = getattr(grant_repo, "active_memory_ids_for_consumer", None)
+        if not callable(lister):
+            return policy
+        assert scope.session is not None
+        consumer = {
+            "bot_id": scope.bot_id,
+            "session_id": scope.session.id,
+            "visibility": scope.visibility,
+            "group_id": scope.session.conversation_id,
+        }
+        try:
+            ids = lister(consumer_scope=consumer) or []
+        except Exception:
+            logger.warning("[WaveMemory] shared_memory_grants load failed", exc_info=True)
+            return policy
+        return policy.with_granted_memory_ids(ids)
 
-        The vector index has no Scope dimension, so it may return IDs belonging to
-        any Bot/session.  Never compensate with a legacy group_id predicate: until
-        the repository can prove the complete RuntimeScope, return no candidates.
+    def _get_scoped_memories_by_ids(self, ids: list[Any], policy: RecallPolicy) -> list[dict]:
+        """Post-filter HNSW candidates through the explicit recall policy.
+
+        The vector index has no Scope dimension.  Repository defaults stay exact
+        Scope; only this policy-bearing QueryEngine call may opt into the approved
+        group-visible cross-Scope read envelope or a narrow shared-grant allow-list.
         """
         if not ids:
             return []
         getter = getattr(self.db, "get_memories_by_ids", None)
         if not callable(getter):
             return []
+        grant_ids = list(policy.granted_memory_ids) if policy.shared_grants_enabled else None
         try:
-            memories = getter(ids, scope=scope)
-        except TypeError:
-            # Legacy repository signatures cannot establish bot/session ownership.
-            return []
+            # Prefer full signature; fall back for focused doubles that only know
+            # cross-group flag or exact Scope.
+            try:
+                memories = getter(
+                    ids,
+                    scope=policy.scope,
+                    allow_cross_group_recall=policy.cross_group_enabled,
+                    shared_grant_memory_ids=grant_ids,
+                )
+            except TypeError:
+                try:
+                    memories = getter(
+                        ids,
+                        scope=policy.scope,
+                        allow_cross_group_recall=policy.cross_group_enabled,
+                    )
+                except TypeError:
+                    memories = getter(ids, scope=policy.scope)
         except Exception:
             logger.warning("[WaveMemory] Scoped memory candidate filter failed", exc_info=True)
             return []
-        return [dict(memory) for memory in memories or [] if isinstance(memory, dict)]
+        out: list[dict] = []
+        grant_set = set(policy.granted_memory_ids) if policy.shared_grants_enabled else set()
+        for memory in memories or []:
+            if not isinstance(memory, dict):
+                continue
+            item = dict(memory)
+            try:
+                mid = int(item.get("id"))
+            except (TypeError, ValueError):
+                mid = 0
+            if mid in grant_set and policy.is_cross_group(item):
+                item["_shared_grant"] = True
+            out.append(item)
+        return out
 
     def _map_catalog_hits_to_scope(
         self,
         scope: RuntimeScope | None,
         catalog_ids: list[Any],
-    ) -> dict[int, int]:
-        """Map global semantic Catalog ids to scoped tag ids before graph use."""
+        *,
+        allow_cross_group_recall: bool = False,
+    ) -> dict[int, list[int]]:
+        """Map Catalog ids to eligible scoped tag ids without mixing tag spaces."""
         if not isinstance(scope, RuntimeScope) or not catalog_ids:
             return {}
         mapper = getattr(self.db, "list_scoped_catalog_links", None)
         if not callable(mapper):
             return {}
         try:
-            links = mapper(scope, [int(value) for value in catalog_ids]) or []
+            links = mapper(
+                scope,
+                [int(value) for value in catalog_ids],
+                allow_cross_group_recall=allow_cross_group_recall,
+            ) or []
+        except TypeError:
+            # Compatibility facades stay exact-Scope rather than accidentally
+            # broadening their reads.
+            try:
+                links = mapper(scope, [int(value) for value in catalog_ids]) or []
+            except Exception:
+                return {}
         except Exception:
             return {}
-        result: dict[int, int] = {}
+        result: dict[int, list[int]] = {}
         for link in links:
             if not isinstance(link, Mapping):
                 continue
             try:
-                result[int(link["catalog_id"])] = int(link["scoped_tag_id"])
+                catalog_id = int(link["catalog_id"])
+                scoped_tag_id = int(link["scoped_tag_id"])
             except (KeyError, TypeError, ValueError):
                 continue
+            result.setdefault(catalog_id, []).append(scoped_tag_id)
         return result
 
     def _search_scoped_tags(
@@ -294,6 +364,7 @@ class QueryEngine:
         scope: RuntimeScope | None,
         *,
         k: int = 10,
+        allow_cross_group_recall: bool = False,
     ) -> list[tuple[int, float]]:
         """Search the Catalog index, then return only current-Scope tag ids."""
         catalog_index = self.tag_catalog_index or self.tag_index
@@ -304,16 +375,30 @@ class QueryEngine:
             return [(int(tag_id), 1.0 - float(distance)) for tag_id, distance in raw[:k]]
         mapper = getattr(self.db, "list_scoped_catalog_links", None)
         if not callable(mapper):
+            # Cross-group Catalog reads must never pass global Catalog IDs into
+            # a scoped-tag API. Legacy compatibility remains exact-only.
+            if allow_cross_group_recall:
+                return []
             # Test/extension doubles without the formal mapper retain their old
             # contract; the production WaveMemoryDB always exposes the mapper.
             return [(int(tag_id), 1.0 - float(distance)) for tag_id, distance in raw[:k]]
-        catalog_to_scoped = self._map_catalog_hits_to_scope(scope, [item[0] for item in raw])
+        catalog_to_scoped = self._map_catalog_hits_to_scope(
+            scope,
+            [item[0] for item in raw],
+            allow_cross_group_recall=allow_cross_group_recall,
+        )
         scoped: list[tuple[int, float]] = []
+        mapped_catalog_count = 0
+        # In shared mode one semantic Catalog entry can map to many independent
+        # group/Bot scoped-tag IDs. Bound by Catalog hits rather than the first N
+        # scoped IDs, otherwise low numeric tag IDs could starve every other group.
         for catalog_id, distance in raw:
-            scoped_id = catalog_to_scoped.get(int(catalog_id))
-            if scoped_id is not None:
-                scoped.append((scoped_id, 1.0 - float(distance)))
-            if len(scoped) >= k:
+            scoped_ids = catalog_to_scoped.get(int(catalog_id), ())
+            if not scoped_ids:
+                continue
+            mapped_catalog_count += 1
+            scoped.extend((scoped_id, 1.0 - float(distance)) for scoped_id in scoped_ids)
+            if mapped_catalog_count >= k:
                 break
         return scoped
 
@@ -342,12 +427,6 @@ class QueryEngine:
             if len(result) >= int(k):
                 break
         return result
-
-    def _allow_global_legacy_cold(self) -> bool:
-        value = self.config.get("allow_global_legacy_cold_recall", False)
-        if isinstance(value, str):
-            return value.strip().casefold() in {"1", "true", "yes", "on"}
-        return bool(value)
 
     def _load_tag_vectors(self, scope: RuntimeScope | None, tag_ids: list[Any]) -> dict[Any, Any]:
         scoped_getter = getattr(self.db, "get_scoped_tag_vectors_by_ids", None)
@@ -381,7 +460,7 @@ class QueryEngine:
         *,
         tag_query_vec: np.ndarray,
         score_query_vec: np.ndarray,
-        scope: RuntimeScope | None,
+        policy: RecallPolicy,
     ) -> tuple[list[tuple[dict[str, Any], float]], dict[str, Any]]:
         """Cold-recall from independent Catalog and legacy-tag lanes.
 
@@ -450,14 +529,27 @@ class QueryEngine:
         # Formal Catalog lane.
         catalog_getter = getattr(self.db, "list_scoped_cold_memory_candidates", None)
         catalog_index = self.tag_catalog_index or self.tag_index
-        if isinstance(scope, RuntimeScope) and catalog_index and callable(catalog_getter):
+        if catalog_index and callable(catalog_getter):
             catalog = details["catalog"]
             try:
-                catalog_hits = self._search_scoped_tags(tag_query_vec, scope, k=12)
+                catalog_hits = self._search_scoped_tags(
+                    tag_query_vec,
+                    policy.scope,
+                    k=12,
+                    allow_cross_group_recall=policy.cross_group_enabled,
+                )
                 catalog_ids = [int(tag_id) for tag_id, similarity in catalog_hits if float(similarity) > 0.1]
                 catalog["tag_count"] = len(catalog_ids)
                 if catalog_ids:
-                    catalog_rows = catalog_getter(scope, catalog_ids, limit=self._cold_candidate_limit()) or []
+                    try:
+                        catalog_rows = catalog_getter(
+                            policy.scope,
+                            catalog_ids,
+                            limit=self._cold_candidate_limit(),
+                            allow_cross_group_recall=policy.cross_group_enabled,
+                        ) or []
+                    except TypeError:
+                        catalog_rows = catalog_getter(policy.scope, catalog_ids, limit=self._cold_candidate_limit()) or []
                     catalog["candidate_count"] = len(catalog_rows)
                     catalog["accepted_count"] = rerank(catalog_rows, "catalog")
                     catalog["available"] = True
@@ -469,13 +561,10 @@ class QueryEngine:
         else:
             details["catalog"]["reason_code"] = "catalog_lane_unavailable"
 
-        # Legacy tags are a separate source and can only yield explicitly
-        # unscoped legacy rows through group_id compatibility filtering.
+        # Legacy tags keep their separate ID lane. The repository itself proves
+        # that each result is fully unscoped before the policy expands groups.
         legacy_getter = getattr(self.db, "list_legacy_cold_memory_candidates", None)
-        allow_global_legacy = self._allow_global_legacy_cold()
-        if self.legacy_tag_index and callable(legacy_getter) and (
-            isinstance(scope, RuntimeScope) or allow_global_legacy
-        ):
+        if self.legacy_tag_index and callable(legacy_getter):
             legacy = details["legacy"]
             try:
                 legacy_hits = self._search_legacy_tags(tag_query_vec, k=12)
@@ -484,18 +573,18 @@ class QueryEngine:
                 if legacy_ids:
                     try:
                         legacy_rows = legacy_getter(
-                            scope if isinstance(scope, RuntimeScope) else None,
+                            policy.scope,
                             legacy_ids,
                             limit=self._cold_candidate_limit(),
-                            allow_unscoped=allow_global_legacy,
+                            allow_cross_group_recall=policy.cross_group_enabled,
                         ) or []
                     except TypeError:
-                        # Focused test doubles and older extension facades do not
-                        # expose the optional offline flag.
-                        if isinstance(scope, RuntimeScope):
-                            legacy_rows = legacy_getter(scope, legacy_ids, limit=self._cold_candidate_limit()) or []
-                        else:
-                            legacy_rows = []
+                        # Older facades remain on the safe same-group legacy path.
+                        legacy_rows = legacy_getter(
+                            policy.scope,
+                            legacy_ids,
+                            limit=self._cold_candidate_limit(),
+                        ) or []
                     legacy["candidate_count"] = len(legacy_rows)
                     legacy["accepted_count"] = rerank(legacy_rows, "legacy")
                     legacy["available"] = True
@@ -509,9 +598,31 @@ class QueryEngine:
 
         details["tag_count"] = int(details["catalog"]["tag_count"]) + int(details["legacy"]["tag_count"])
         details["candidate_count"] = int(details["catalog"]["candidate_count"]) + int(details["legacy"]["candidate_count"])
-        details["accepted_count"] = len(results_by_id)
         details["available"] = bool(details["catalog"]["available"] or details["legacy"]["available"])
-        result = sorted(results_by_id.values(), key=lambda item: (item[1], int(item[0]["id"])))
+        paired = sorted(results_by_id.values(), key=lambda item: (item[1], int(item[0]["id"])))
+        # Collapse multi-group fanout clones before cold candidates enter the main
+        # hot/cold merge; otherwise one semantic event can monopolize the budget.
+        collapse_input: list[dict[str, Any]] = []
+        for memory, distance in paired:
+            item = dict(memory)
+            item["score"] = 1.0 - float(distance)
+            item["similarity"] = 1.0 - float(distance)
+            item["_is_cross_group"] = policy.is_cross_group(item)
+            collapse_input.append(item)
+        try:
+            from .memory_collapse import collapse_memories
+        except ImportError:  # pragma: no cover
+            from engine.memory_collapse import collapse_memories
+        collapsed = collapse_memories(
+            collapse_input,
+            current_group_id=policy.current_group_id,
+        )
+        result = [
+            (memory, 1.0 - float(memory.get("score") or 0.0))
+            for memory in collapsed
+        ]
+        details["accepted_count"] = len(result)
+        details["collapsed_from"] = len(paired)
         if not result and not details["available"]:
             details["reason_code"] = "cold_lanes_unavailable"
         elif not result:
@@ -576,6 +687,7 @@ class QueryEngine:
             self._trace_record(collector, "final", {"result_count": 0, "reason_code": "canonical_group_scope_required"})
             return []
 
+        recall_policy = self._resolve_recall_policy(resolved_scope)
         start = time.perf_counter()
         stage_flags = {
             "epa": self._stage_enabled(call_options, "epa", self.enable_epa),
@@ -638,11 +750,11 @@ class QueryEngine:
         cold_candidates, cold_details = self._search_scoped_cold_memories(
             tag_query_vec=query_vec,
             score_query_vec=search_vec,
-            scope=resolved_scope,
+            policy=recall_policy,
         )
         memory_ids = [item[0] for item in raw_candidates]
         distances = {int(item[0]): float(item[1]) for item in raw_candidates}
-        memories = self._get_scoped_memories_by_ids(memory_ids, resolved_scope)
+        memories = self._get_scoped_memories_by_ids(memory_ids, recall_policy)
         for memory in memories:
             memory["_retrieval_tier"] = "hot"
         scoped_ids = {int(memory.get("id")) for memory in memories if memory.get("id") is not None}
@@ -687,7 +799,7 @@ class QueryEngine:
         now = time.time()
         import math
         for memory in memories:
-            memory["_is_cross_group"] = False
+            memory["_is_cross_group"] = recall_policy.is_cross_group(memory)
             similarity = 1.0 - distances.get(memory["id"], 1.0)
             memory["similarity"] = similarity
             timestamp = memory.get("timestamp")
@@ -761,7 +873,15 @@ class QueryEngine:
 
         before_threshold = len(memories)
         memories = [memory for memory in memories if memory["similarity"] >= self.min_similarity]
-        memories.sort(key=lambda memory: memory["score"], reverse=True)
+        # Collapse historical fanout clones before top_k, otherwise duplicate
+        # projections can fill the entire result window and starve unique rows.
+        current_group_id = ""
+        if resolved_scope is not None and resolved_scope.session is not None:
+            current_group_id = resolved_scope.session.conversation_id
+        memories = self._prefer_current_group_and_dedupe(
+            memories,
+            current_group_id=current_group_id,
+        )
         memories = memories[:top_k]
         final_ids = [memory["id"] for memory in memories]
         final_breakdown = []
@@ -779,10 +899,18 @@ class QueryEngine:
         })
 
         if memories and call_options.touch:
-            if self.write_gateway is not None:
-                await self.write_gateway.touch_memories(scope=resolved_scope, memory_ids=final_ids)
-            else:
-                self.db.touch_memories(final_ids)
+            # Cross-group recall is intentionally read-only: the current Scope
+            # cannot be used to manufacture an exact-scope mutation for another
+            # group's memory. Touch failures are best-effort and never fail recall.
+            touch_ids = recall_policy.touchable_ids(memories)
+            if touch_ids:
+                try:
+                    if self.write_gateway is not None:
+                        await self.write_gateway.touch_memories(scope=resolved_scope, memory_ids=touch_ids)
+                    else:
+                        self.db.touch_memories(touch_ids)
+                except Exception:
+                    logger.warning("[WaveMemory] Safe memory touch failed", exc_info=True)
         self._trace_record(collector, "final", {
             "result_count": len(memories), "ids": final_ids, "score_breakdown": final_breakdown,
             "readonly": not call_options.touch, "touch": call_options.touch,
@@ -875,7 +1003,8 @@ class QueryEngine:
                             similarity = float(tag_info.get("similarity", 0))
                             mapped_ids = self._map_catalog_hits_to_scope(scope, [raw_tag_id]) if raw_tag_id else {}
                             mapper_available = callable(getattr(self.db, "list_scoped_catalog_links", None)) and isinstance(scope, RuntimeScope)
-                            tag_id = mapped_ids.get(int(raw_tag_id)) if mapper_available and raw_tag_id else raw_tag_id
+                            mapped_tag_ids = mapped_ids.get(int(raw_tag_id), ()) if mapper_available and raw_tag_id else ()
+                            tag_id = mapped_tag_ids[0] if mapped_tag_ids else raw_tag_id
                             compact = {
                                 "tag_id": tag_id,
                                 "similarity": round(similarity, 4),
@@ -1001,6 +1130,7 @@ class QueryEngine:
             logger.warning("[WaveMemory] Shotgun query rejected: resolved group RuntimeScope required")
             return []
 
+        recall_policy = self._resolve_recall_policy(resolved_scope)
         start = time.time()
 
         query_vec = await self.embedding.get_embedding(text)
@@ -1031,11 +1161,11 @@ class QueryEngine:
         cold_candidates, _cold_details = self._search_scoped_cold_memories(
             tag_query_vec=np.asarray(query_vec, dtype=np.float32),
             score_query_vec=np.asarray(search_vec, dtype=np.float32),
-            scope=resolved_scope,
+            policy=recall_policy,
         )
 
         memory_ids = list(all_candidates)
-        memories = self._get_scoped_memories_by_ids(memory_ids, resolved_scope)
+        memories = self._get_scoped_memories_by_ids(memory_ids, recall_policy)
         known_ids = {int(memory["id"]) for memory in memories if memory.get("id") is not None}
         for mem in memories:
             mem["_retrieval_tier"] = "hot"
@@ -1052,7 +1182,7 @@ class QueryEngine:
             return []
 
         for mem in memories:
-            mem["_is_cross_group"] = False
+            mem["_is_cross_group"] = recall_policy.is_cross_group(mem)
 
         for mem in memories:
             dist = all_candidates.get(mem["id"], 1.0)
@@ -1072,6 +1202,13 @@ class QueryEngine:
                     mem["score"] = rerank_scores[mem["id"]]
 
         memories = [m for m in memories if m["similarity"] >= self.min_similarity]
+        current_group_id = ""
+        if resolved_scope is not None and resolved_scope.session is not None:
+            current_group_id = resolved_scope.session.conversation_id
+        memories = self._prefer_current_group_and_dedupe(
+            memories,
+            current_group_id=current_group_id,
+        )
         if len(memories) > top_k:
             memories = self._svd_dedup(memories, query_vec, top_k)
         else:
@@ -1079,13 +1216,18 @@ class QueryEngine:
             memories = memories[:top_k]
 
         if memories:
-            if self.write_gateway is not None:
-                await self.write_gateway.touch_memories(
-                    scope=resolved_scope,
-                    memory_ids=[m["id"] for m in memories],
-                )
-            else:
-                self.db.touch_memories([m["id"] for m in memories])
+            touch_ids = recall_policy.touchable_ids(memories)
+            if touch_ids:
+                try:
+                    if self.write_gateway is not None:
+                        await self.write_gateway.touch_memories(
+                            scope=resolved_scope,
+                            memory_ids=touch_ids,
+                        )
+                    else:
+                        self.db.touch_memories(touch_ids)
+                except Exception:
+                    logger.warning("[WaveMemory] Safe memory touch failed", exc_info=True)
 
         total_ms = (time.time() - start) * 1000
         logger.debug(
@@ -1163,12 +1305,15 @@ class QueryEngine:
         if not template:
             template = "[记忆] {sender}({time}): {content}"
 
+        # Prefer the active group and collapse fanout duplicates before rendering.
+        ordered = self._prefer_current_group_and_dedupe(memories, current_group_id=current_group_id)
+
         # 按 source 分组
         your_memories = []  # bzz_experience — 白真真第一人称经历
         world_knowledge = []  # book_lore — 书设常识
         chat_memories = []  # live 及其他 — 群聊记忆
 
-        for mem in memories:
+        for mem in ordered:
             source = mem.get("source", "live")
             if source == "bzz_experience":
                 your_memories.append(mem)
@@ -1215,3 +1360,16 @@ class QueryEngine:
             sections.append("\n".join(lines))
 
         return "\n\n".join(sections)
+
+    @staticmethod
+    def _prefer_current_group_and_dedupe(
+        memories: list[dict],
+        *,
+        current_group_id: str = "",
+    ) -> list[dict]:
+        """Prefer current-group rows and collapse identical fanout copies."""
+        try:
+            from .memory_collapse import collapse_memories
+        except ImportError:  # pragma: no cover - top-level plugin import path
+            from engine.memory_collapse import collapse_memories
+        return collapse_memories(memories, current_group_id=current_group_id)

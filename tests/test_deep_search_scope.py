@@ -48,15 +48,28 @@ class _Db:
             """CREATE TABLE memories (
                 id INTEGER PRIMARY KEY, sender_name TEXT, content TEXT, timestamp REAL,
                 bot_id TEXT, session_id TEXT, visibility TEXT, resolution_state TEXT,
-                quarantine INTEGER
+                quarantine INTEGER, group_id TEXT, memory_type TEXT, source TEXT
             )"""
         )
         self.conn.execute("CREATE VIRTUAL TABLE fts_memories USING fts5(content)")
 
-    def add(self, memory_id, content, *, bot="yushu", session="qq:group:g1", quarantine=0, state="resolved"):
+    def add(
+        self,
+        memory_id,
+        content,
+        *,
+        bot="yushu",
+        session="qq:group:g1",
+        quarantine=0,
+        state="resolved",
+        group=None,
+        memory_type="message",
+        source="live",
+    ):
+        group_id = group if group is not None else session.rsplit(":", 1)[-1]
         self.conn.execute(
-            "INSERT INTO memories VALUES (?, '用户', ?, 1, ?, ?, 'group', ?, ?)",
-            (memory_id, content, bot, session, state, quarantine),
+            "INSERT INTO memories VALUES (?, '用户', ?, 1, ?, ?, 'group', ?, ?, ?, ?, ?)",
+            (memory_id, content, bot, session, state, quarantine, group_id, memory_type, source),
         )
         self.conn.execute("INSERT INTO fts_memories(rowid, content) VALUES (?, ?)", (memory_id, content))
         self.conn.commit()
@@ -85,17 +98,29 @@ class DeepSearchScopeTest(unittest.TestCase):
         return RuntimeScope("yushu", "group", SessionRef("qq:group:g1", "qq", "group", "g1"))
 
     def test_hits_and_context_window_are_scope_filtered(self):
+        """Group-open read: same group any bot/session; other groups excluded."""
         from tools.deep_search import WaveMemoryDeepSearchTool
+
+        # Historical display-name session must still hit in the same group.
+        self.db.add(
+            15,
+            "历史编码 咖啡",
+            bot="yushu",
+            session="羽书:group:g1",
+            group="g1",
+            state="",
+        )
 
         tool = WaveMemoryDeepSearchTool(db=self.db)
         result = asyncio.run(tool.call(_context(self._scope()), keywords="咖啡", window_size=3))
 
         self.assertIn("命中消息", result)
         self.assertIn("同一会话上下文", result)
-        self.assertNotIn("另一个 Bot", result)
+        self.assertIn("另一个 Bot", result)  # same group
+        self.assertIn("历史编码", result)
+        self.assertIn("legacy", result)  # same group, unresolved still searchable
         self.assertNotIn("跨会话", result)
         self.assertNotIn("隔离", result)
-        self.assertNotIn("legacy", result)
 
     def test_missing_scope_fails_closed_before_querying(self):
         from tools.deep_search import WaveMemoryDeepSearchTool

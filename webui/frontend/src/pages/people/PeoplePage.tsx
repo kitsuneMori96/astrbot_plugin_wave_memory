@@ -2,7 +2,14 @@ import { useCallback, useEffect, useState, useMemo, type FormEvent } from 'react
 import { AlertCircleIcon, EyeIcon, RefreshCwIcon, SearchIcon, SlidersHorizontalIcon, ArrowUpDownIcon } from 'lucide-react'
 
 import { getScopeOptions, scopeOptionsFor } from '@/api/options'
-import { getPeople, getRelationships, type PersonItem, type RelationshipItem } from '@/api/people'
+import {
+  getPeople,
+  getRelationshipHistoricalAudit,
+  getRelationships,
+  type HistoricalAuditPage,
+  type PersonItem,
+  type RelationshipItem,
+} from '@/api/people'
 import { RelationshipCalibrationPanel } from '@/components/relationship/RelationshipCalibrationPanel'
 import { PaginationControls, QueryState, ResponsiveTable, ScopeSelect, usePaginationSearchParams, type PageResponse } from '@/components/shared'
 import { useCanonicalScopeDefault } from '@/hooks/use-pagination-search-params'
@@ -27,6 +34,95 @@ function interactionCount(item: PersonItem): number | null {
 
 function SummaryTile({ label, value, tone }: { label: string; value: string | number; tone?: string }) {
   return <div className="min-w-[4.75rem] rounded-lg border bg-muted/20 px-3 py-1.5 text-center text-xs"><div className="text-[10px] text-muted-foreground">{label}</div><div className={`font-semibold ${tone ?? ''}`}>{value}</div></div>
+}
+
+function HistoricalAuditPanel({
+  query,
+  userId,
+}: {
+  query: { bot_id: string; session_id: string; visibility: 'group' }
+  userId: string
+}) {
+  const [data, setData] = useState<HistoricalAuditPage | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let active = true
+    setLoading(true)
+    setError(null)
+    getRelationshipHistoricalAudit({
+      bot_id: query.bot_id,
+      session_id: query.session_id,
+      visibility: 'group',
+      user_id: userId,
+      limit: 25,
+      offset: 0,
+    })
+      .then((page) => {
+        if (active) setData(page)
+      })
+      .catch((reason: unknown) => {
+        if (active) {
+          setData(null)
+          setError(reason instanceof Error ? reason.message : '历史审计读取失败')
+        }
+      })
+      .finally(() => {
+        if (active) setLoading(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [query.bot_id, query.session_id, userId])
+
+  const summary = data?.summary
+  const total = summary?.total ?? 0
+  const typeBits = (summary?.by_type ?? [])
+    .slice(0, 4)
+    .map((item) => `${item.event_type}×${item.count}`)
+    .join('，')
+
+  return (
+    <div className="rounded-lg border bg-muted/10 p-3.5">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <Badge variant="outline">历史事件审计</Badge>
+        <Badge variant="secondary">只读</Badge>
+        <Badge variant="outline">不改变好感度</Badge>
+      </div>
+      {loading ? (
+        <p className="text-xs text-muted-foreground">正在读取 historical audit…</p>
+      ) : error ? (
+        <p className="text-xs text-muted-foreground">{error}</p>
+      ) : !summary?.available || total <= 0 ? (
+        <p className="text-xs text-muted-foreground">当前 Scope 没有 historical audit 记录。</p>
+      ) : (
+        <div className="grid gap-2 text-xs">
+          <p>
+            共 <span className="font-mono font-semibold">{total}</span> 条侧写事件
+            {typeBits ? <span className="text-muted-foreground"> · {typeBits}</span> : null}
+          </p>
+          <div className="grid gap-1.5">
+            {(data?.items ?? []).slice(0, 5).map((item) => (
+              <div key={`${item.id}-${item.legacy_event_id}`} className="rounded border bg-background/70 px-2 py-1.5">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Badge variant="outline" className="font-mono text-[10px]">{item.event_type}</Badge>
+                  <Badge variant="secondary" className="font-mono text-[10px]">{item.dimension}</Badge>
+                  <span className="font-mono text-[10px] text-muted-foreground">
+                    {typeof item.delta === 'number' ? (item.delta > 0 ? `+${item.delta}` : String(item.delta)) : String(item.delta ?? '')}
+                  </span>
+                </div>
+                <p className="mt-1 text-[11px] text-muted-foreground">{item.reason || '无原因'}</p>
+              </div>
+            ))}
+          </div>
+          <p className="text-[10px] text-muted-foreground">
+            来源表 scoped_soul_relationship_legacy_events；仅审计展示，不参与 affinity 计算。
+          </p>
+        </div>
+      )}
+    </div>
+  )
 }
 
 function PersonDetail({ item, relationship, query, onChanged }: { item: PersonItem; relationship: RelationshipItem | null; query: { bot_id: string; session_id: string; visibility: 'group'; user_id?: string }; onChanged?: () => void }) {
@@ -64,6 +160,31 @@ function PersonDetail({ item, relationship, query, onChanged }: { item: PersonIt
     </div>
 
     {relationship ? <RelationshipCalibrationPanel item={relationship} query={query} onChanged={onChanged} /> : <Alert><AlertCircleIcon /><AlertTitle>当前关系未知</AlertTitle><AlertDescription>当前 Scope 没有正式 relationship projection；不会使用跨群全局值或默认 0 伪造关系。</AlertDescription></Alert>}
+
+    {(relationship?.evidence_summaries?.length ?? 0) > 0 ? (
+      <div className="rounded-lg border bg-muted/10 p-3.5">
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <Badge variant="outline">可读历史摘要</Badge>
+          <Badge variant="secondary">只读</Badge>
+          <Badge variant="outline">不改变好感度</Badge>
+        </div>
+        <div className="grid gap-1.5 text-xs">
+          {relationship!.evidence_summaries!.map((summary, index) => (
+            <p key={`${index}-${summary.slice(0, 24)}`} className="rounded border bg-background/70 px-2 py-1.5 text-muted-foreground">
+              {summary}
+            </p>
+          ))}
+        </div>
+        <p className="mt-2 text-[10px] text-muted-foreground">
+          来自 formal evidence 中的 historical_audit_summary；与下方 legacy 事件审计表并列，不参与 affinity 计算。
+        </p>
+      </div>
+    ) : null}
+
+    <HistoricalAuditPanel
+      query={{ bot_id: query.bot_id, session_id: query.session_id, visibility: 'group' }}
+      userId={item.user_id}
+    />
 
     {actualAffinity === null && (
       <Alert>

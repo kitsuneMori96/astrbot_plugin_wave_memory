@@ -1,5 +1,18 @@
 # Changelog
 
+## v4.6.3 (2026-07-21)
+
+### 检索开放 Scope 与跨群同文治理
+
+- **读路径开放 Scope**：检索不再被 bot/session 硬门禁挡住；有无完整 Scope 均可按群/内容召回，Scope 主要影响排序偏好。
+- **person_search 跨群**：默认本群；`scope=all_groups` 按 QQ 跨群只读检索；跨群 recent 按群分桶，避免主群刷满 limit。
+- **同文 collapse**：注入/FTS/QueryEngine 路径折叠同人同句跨群重复，减刷屏（不物理 fanout）。
+- **跨群同文 soft-delete**：`scripts/cross_group_same_content_dedupe_dryrun.py` 支持 cluster 时间窗 dry-run/apply；确认令 + `--allow-production`；可选 FTS purge 与热 HNSW `mark_deleted`。
+- **热 HNSW 与读路径对齐**：legacy 准入排除 `archived/evicted/deleted/noise`，避免 inactive 占满 knn 槽；`scripts/rebuild_hot_memory_hnsw.py` 可按 policy 重建。
+- **观察/结案工具**：`scripts/retrieval_readiness_readonly.py`（含 hot_hnsw 抽样）、`scripts/observation_idle_check.py`。
+- **Job lease / eviction 噪声**：幂等租约与 eviction 告警降噪（不改变数据边界）。
+- **默认不 fanout promote**；硬 DROP soft-deleted 与双 Bot 历史去重仍需运营明确授权。
+
 ## v4.6.2 (2026-07-20)
 
 ### 治理 Phase 0：防再污染止血

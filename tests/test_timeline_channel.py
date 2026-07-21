@@ -112,7 +112,7 @@ class TimelineChannelTest(unittest.TestCase):
                 self._row(3, "别的群事件", now - 3600, "g2", "u1", "用户说其他"),
             ],
         )
-        channel = TimelineChannel(db=db)
+        channel = TimelineChannel(db=db, cross_group_enabled=False)
 
         result = asyncio.run(channel.build(self._ctx(now=now)))
 
@@ -141,7 +141,7 @@ class TimelineChannelTest(unittest.TestCase):
             ],
         )
 
-        result = asyncio.run(TimelineChannel(db=db).build(self._ctx(now=now)))
+        result = asyncio.run(TimelineChannel(db=db, cross_group_enabled=False).build(self._ctx(now=now)))
 
         self.assertEqual(result.status, "hit")
         self.assertEqual(
@@ -169,13 +169,13 @@ class TimelineChannelTest(unittest.TestCase):
             "timeline": {"days": 7},
         })
 
-        result = asyncio.run(TimelineChannel(db=db).build(ctx))
+        result = asyncio.run(TimelineChannel(db=db, cross_group_enabled=False).build(ctx))
 
         self.assertEqual(result.status, "hit")
         self.assertIn("窗口内近期事件", result.text)
         self.assertNotIn("窗口外历史事件", result.text)
 
-    def test_legacy_schema_falls_back_to_current_group(self):
+    def test_legacy_schema_fails_closed_without_complete_scope_columns(self):
         from services.injection.channels.timeline import TimelineChannel
 
         db = self._legacy_db()
@@ -188,11 +188,10 @@ class TimelineChannelTest(unittest.TestCase):
             ],
         )
 
-        result = asyncio.run(TimelineChannel(db=db).build(self._ctx(now=now)))
+        result = asyncio.run(TimelineChannel(db=db, cross_group_enabled=False).build(self._ctx(now=now)))
 
-        self.assertEqual(result.status, "hit")
-        self.assertIn("当前群旧事件", result.text)
-        self.assertNotIn("其他群旧事件", result.text)
+        self.assertEqual(result.status, "empty")
+        self.assertEqual(result.text, "")
 
     def test_formal_scope_isolated_with_same_group_legacy_fallback(self):
         from services.injection.channels.timeline import TimelineChannel
@@ -213,10 +212,11 @@ class TimelineChannelTest(unittest.TestCase):
             ],
         )
 
-        result = asyncio.run(TimelineChannel(db=db).build(self._ctx(now=now)))
+        result = asyncio.run(TimelineChannel(db=db, cross_group_enabled=False).build(self._ctx(now=now)))
 
         self.assertEqual(result.status, "hit")
         self.assertIn("当前正式范围事件", result.text)
+        # 关闭跨群时仍保留当前群 fully-unscoped legacy 兼容读取。
         self.assertIn("当前群旧行回退事件", result.text)
         self.assertNotIn("其他机器人正式范围事件", result.text)
         self.assertNotIn("其他会话正式范围事件", result.text)
@@ -238,7 +238,7 @@ class TimelineChannelTest(unittest.TestCase):
                 self._row(3, "用户最近在研究 Timeline 通道", now - 3400, "g1", "u1", "安全"),
             ],
         )
-        channel = TimelineChannel(db=db)
+        channel = TimelineChannel(db=db, cross_group_enabled=False)
         ctx = self._ctx(now=now, recent_context=["用户刚才说自己喜欢黑巧"])
 
         result = asyncio.run(channel.build(ctx))
@@ -264,7 +264,7 @@ class TimelineChannelTest(unittest.TestCase):
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             self._row(1, "纯记忆模式仍可选 timeline", now - 3600, "g1", "u1", "安全"),
         )
-        channel = TimelineChannel(db=db)
+        channel = TimelineChannel(db=db, cross_group_enabled=False)
 
         hit = asyncio.run(channel.build(self._ctx(now=now, mode="memory_only")))
         zero = asyncio.run(channel.build(self._ctx(now=now, config={"channels": {"timeline": {"max_items": 0}}})))

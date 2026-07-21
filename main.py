@@ -56,6 +56,7 @@ from .services.persona_evolution import PersonaEvolution
 from .tools.memory_search import WaveMemorySearchTool, WaveMemoryRememberTool
 from .tools.deep_search import WaveMemoryDeepSearchTool
 from .tools.extra_tools import WaveMemoryFactsTool
+from .tools.person_search import WaveMemoryPersonSearchTool
 from .tools.injection_explain import WaveMemoryExplainInjectionTool
 from .tools.memory_feedback import WaveMemoryFeedbackMemoryTool
 from .tools.config_suggestion import WaveMemorySuggestConfigTool
@@ -206,7 +207,7 @@ def _build_bot_registry(config: dict) -> dict[str, BotProfile]:
     "astrbot_plugin_wave_memory",
     "vivy1024",
     "高性能记忆 + 灵魂引擎 + 知识图谱插件。五阶段零 LLM 检索管线、BDI 心智架构（信念/欲望/关切）、黑话学习、风格范例注入、Three.js 3D 交互式知识图谱可视化。",
-    "4.6.0",
+    "4.6.3",
     "https://github.com/vivy1024/astrbot_plugin_wave_memory",
 )
 class WaveMemoryPlugin(Star):
@@ -400,8 +401,16 @@ class WaveMemoryPlugin(Star):
         self.embedding_batch_size = int(perf_cfg.get("embedding_batch_size", 10))
         self.write_flush_interval = int(perf_cfg.get("write_flush_interval", 30))
 
-        # 跨群记忆配置
-        self.cross_group_enabled = cross_group_cfg.get("cross_group_enabled", True)
+        # 跨群记忆配置：显式 False 必须覆盖缺失项的兼容默认 True。
+        self.cross_group_enabled = _parse_bool_config_value(
+            cross_group_cfg.get("cross_group_enabled"),
+            True,
+        )
+        # 共享只读 grant：默认 False；缺失与显式 False 均保持关闭（不沿用跨群默认 True）。
+        self.shared_memory_grants_enabled = _parse_bool_config_value(
+            cross_group_cfg.get("shared_memory_grants_enabled"),
+            False,
+        )
         self.cross_group_persona_merge = cross_group_cfg.get("cross_group_persona_merge", True)
 
         # 好感度引擎配置
@@ -654,6 +663,7 @@ class WaveMemoryPlugin(Star):
             config={
                 **query_cfg,
                 "cross_group_enabled": self.cross_group_enabled,
+                "shared_memory_grants_enabled": self.shared_memory_grants_enabled,
                 "cold_recall_enabled": self.cold_recall_enabled,
                 "cold_candidate_limit": self.memory_index_policy.candidate_limit,
             },
@@ -1033,8 +1043,17 @@ class WaveMemoryPlugin(Star):
             self.injection_shadow_channels = [
                 safety,
                 MemoryRecallChannel(query_engine=self.query_engine, safety_channel=safety),
-                FTS5Channel(db=self.db),
-                TimelineChannel(db=self.db, safety_channel=safety),
+                FTS5Channel(
+                    db=self.db,
+                    cross_group_enabled=self.cross_group_enabled,
+                    shared_memory_grants_enabled=self.shared_memory_grants_enabled,
+                ),
+                TimelineChannel(
+                    db=self.db,
+                    safety_channel=safety,
+                    cross_group_enabled=self.cross_group_enabled,
+                    shared_memory_grants_enabled=self.shared_memory_grants_enabled,
+                ),
                 FactsChannel(db=self.db, facts_decay_rate=getattr(self, "_facts_decay_rate", 0.005)),
                 # PersonaEvolution 仍依赖 legacy social/facts read-model，不能进入正式注入。
                 PersonaChannel(composer=persona_composer, persona_evolution=None),
@@ -1112,6 +1131,10 @@ class WaveMemoryPlugin(Star):
         # ``timeline_days=0`` is deliberate: retain full legacy-compatible
         # history while the Timeline channel itself enforces item/token budgets.
         config["timeline"] = {"days": int(config.get("timeline_days", 0) or 0)}
+        # Active/shadow contexts expose the same normalized setting used by
+        # QueryEngine and the FTS5/Timeline channel instances.
+        config["cross_group_enabled"] = self.cross_group_enabled
+        config["shared_memory_grants_enabled"] = self.shared_memory_grants_enabled
         config["persona"] = {"realtime_ctx": realtime_ctx}
         return config
 
@@ -1439,6 +1462,7 @@ class WaveMemoryPlugin(Star):
                 WaveMemoryRememberTool(writer=self.writer),
                 WaveMemoryDeepSearchTool(db=self.db),
                 WaveMemoryFactsTool(db=self.db),
+                WaveMemoryPersonSearchTool(db=self.db),
             ])
         if runtime_capability_enabled(self.runtime_mode, "agent_feedback_tools", True):
             llm_tools.extend([

@@ -369,19 +369,19 @@ async def list_memories():
             offset=offset,
             unavailable_reason="scope_schema_unavailable",
         ))
-    where = [
-        "bot_id = ?",
-        "session_id = ?",
-        "visibility = ?",
-        "group_id = ?",
-        "resolution_state = 'resolved'",
-    ]
-    params = [
-        scope.bot_id,
-        scope.session.id,
-        scope.visibility,
-        scope.session.conversation_id,
-    ]
+    # List path is group-open: historical sessions use 羽书:group:… while runtime
+    # emits qq:group:…. Exact bot/session filters would empty the management UI.
+    where = ["COALESCE(group_id, '') = ?"]
+    params: list = [scope.session.conversation_id]
+    if "quarantine" in columns:
+        where.append("COALESCE(quarantine, 0) = 0")
+    if "memory_type" in columns:
+        where.append(
+            "COALESCE(memory_type, 'message') NOT IN "
+            "('archived', 'evicted', 'deleted', 'noise')"
+        )
+    if "source" in columns:
+        where.append("COALESCE(source, '') != 'noise'")
     before_id = request.args.get("before_id")
     if before_id:
         where.append("id < ?")

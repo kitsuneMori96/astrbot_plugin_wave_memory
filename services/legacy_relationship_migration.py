@@ -127,16 +127,26 @@ def stage(
     target_scopes: Sequence[Mapping[str, Any]],
     expected_source_hash: str,
     confirmation: str,
+    *,
+    mode: str = "full",
 ) -> dict[str, Any]:
     """Create a staged SQLite copy and migrate only high-fidelity relationship data.
 
     ``source_db_path`` is copied before any SQLite operation on the staged database;
     the source is never opened writable.  ``confirmation`` must equal
     :data:`CONFIRMATION` (currently ``"migrate"``).
+
+    ``mode``:
+      - ``full``: profiles + event audit (default; may merge formal snapshots on staged copy)
+      - ``event_audit_only``: only insert ``scoped_soul_relationship_legacy_events``;
+        never rewrite formal relationships/values/affinity
     """
     source = Path(source_db_path).resolve()
     output = Path(output_db_path).resolve()
     run_path = Path(run_dir).resolve()
+    mode_norm = str(mode or "full").strip().lower()
+    if mode_norm not in {"full", "event_audit_only"}:
+        raise LegacyRelationshipMigrationError("legacy_relationship_migration_mode_invalid")
     if source == output:
         raise LegacyRelationshipMigrationError("source_and_output_db_must_differ")
     if confirmation != CONFIRMATION:
@@ -173,6 +183,7 @@ def stage(
         # before preview decisions are converted into writes.  This never touches source.
         ensure_scoped_relationship_calibration_schema_connection(conn)
         before_legacy_state = _legacy_table_state(conn)
+        before_formal_fingerprint = _formal_fingerprint(conn, scopes)
         plan = preview(conn, scopes)
         _ensure_audit_tables(conn)
         now = time.time()
@@ -183,11 +194,24 @@ def stage(
             (run_id, RULE_VERSION, source_hash, _canonical(list(scopes)), now),
         )
 
-        profile_result = _stage_profiles(conn, plan["profiles"], run_id, source_hash)
+        if mode_norm == "event_audit_only":
+            profile_result = {
+                "migrated": 0,
+                "review": 0,
+                "already_migrated": 0,
+                "merged_existing_formal": 0,
+                "skipped": True,
+                "reason": "event_audit_only",
+            }
+        else:
+            profile_result = _stage_profiles(conn, plan["profiles"], run_id, source_hash)
         event_result = _stage_events(conn, plan["events"], run_id, source_hash)
         after_legacy_state = _legacy_table_state(conn)
         if before_legacy_state != after_legacy_state:
             raise LegacyRelationshipMigrationError("legacy_tables_must_not_be_changed")
+        after_formal_fingerprint = _formal_fingerprint(conn, scopes)
+        if mode_norm == "event_audit_only" and before_formal_fingerprint != after_formal_fingerprint:
+            raise LegacyRelationshipMigrationError("event_audit_only_must_not_change_formal_relationships")
         quick_check = str(conn.execute("PRAGMA quick_check").fetchone()[0])
         if quick_check != "ok":
             raise LegacyRelationshipMigrationError(f"staged_sqlite_quick_check_failed:{quick_check}")
@@ -195,6 +219,7 @@ def stage(
         report = {
             "run_id": run_id,
             "rule_version": RULE_VERSION,
+            "mode": mode_norm,
             "source_hash": source_hash,
             "source_backup_path": str(source_backup),
             "target_scopes": [dict(scope) for scope in scopes],
@@ -202,6 +227,8 @@ def stage(
             "event_result": event_result,
             "preview_summary": plan["summary"],
             "legacy_table_state": before_legacy_state,
+            "formal_fingerprint_before": before_formal_fingerprint,
+            "formal_fingerprint_after": after_formal_fingerprint,
             "legacy_rows_deleted": 0,
             "quick_check": quick_check,
         }
@@ -702,6 +729,14 @@ def _ensure_audit_tables(conn: sqlite3.Connection) -> None:
             created_at REAL NOT NULL,
             UNIQUE(legacy_event_id, scope_key, event_hash)
         );
+        CREATE INDEX IF NOT EXISTS idx_legacy_rel_events_subject
+            ON scoped_soul_relationship_legacy_events(
+                bot_id, session_id, visibility, subject_principal_id, occurred_at DESC, id DESC
+            );
+        CREATE INDEX IF NOT EXISTS idx_legacy_rel_events_scope_type
+            ON scoped_soul_relationship_legacy_events(
+                bot_id, session_id, visibility, event_type
+            );
         CREATE TABLE IF NOT EXISTS legacy_relationship_migration_runs (
             run_id TEXT PRIMARY KEY,
             rule_version TEXT NOT NULL,
@@ -818,6 +853,58 @@ def _legacy_table_state(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
             count += 1
         state[table] = {"count": count, "sha256": "sha256:" + digest.hexdigest()}
     return state
+
+
+def _formal_fingerprint(
+    conn: sqlite3.Connection,
+    scopes: Sequence[Mapping[str, str]],
+) -> dict[str, Any]:
+    """Fingerprint formal relationship rows/values for event_audit_only guards."""
+    tables = _tables(conn)
+    if "scoped_soul_relationships" not in tables:
+        return {"relationships": {"count": 0, "sha256": "sha256:" + hashlib.sha256(b"").hexdigest()}}
+
+    digest = hashlib.sha256()
+    count = 0
+    affinity_sum = 0
+    for scope in scopes:
+        rows = conn.execute(
+            """SELECT bot_id, session_id, visibility, subject_principal_id,
+                      affinity, state, dimensions, revision, evidence, updated_at
+                 FROM scoped_soul_relationships
+                WHERE bot_id=? AND session_id=? AND visibility=?
+                ORDER BY subject_principal_id""",
+            (scope["bot_id"], scope["session_id"], scope["visibility"]),
+        ).fetchall()
+        for row in rows:
+            digest.update(_canonical(list(row)).encode("utf-8"))
+            digest.update(b"\n")
+            count += 1
+            try:
+                affinity_sum += int(row[4] or 0)
+            except (TypeError, ValueError):
+                pass
+        if "scoped_soul_relationship_values" in tables:
+            value_rows = conn.execute(
+                """SELECT bot_id, session_id, visibility, subject_principal_id, dimension,
+                          automatic_value, manual_adjustment, manual_override, effective_value,
+                          relationship_revision, evidence, updated_at
+                     FROM scoped_soul_relationship_values
+                    WHERE bot_id=? AND session_id=? AND visibility=?
+                    ORDER BY subject_principal_id, dimension""",
+                (scope["bot_id"], scope["session_id"], scope["visibility"]),
+            ).fetchall()
+            for row in value_rows:
+                digest.update(b"V")
+                digest.update(_canonical(list(row)).encode("utf-8"))
+                digest.update(b"\n")
+    return {
+        "relationships": {
+            "count": count,
+            "affinity_sum": affinity_sum,
+            "sha256": "sha256:" + digest.hexdigest(),
+        }
+    }
 
 
 def _json_object(value: Any) -> dict[str, Any]:

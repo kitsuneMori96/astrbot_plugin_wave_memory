@@ -83,6 +83,17 @@ export interface SoulStatePayload {
   concerns: PageResponse<SoulRecord>
   timeline: PageResponse<SoulRecord> & { revision?: number | string | null }
   relationship_history: PageResponse<RelationshipHistoryItem> & { revision?: number | string | null }
+  /** Side-channel only; never mixed into relationship_history / affinity. */
+  historical_audit?: {
+    available: boolean
+    total: number
+    by_type: Array<{ event_type: string; count: number }>
+    recent: Array<Record<string, unknown>>
+    readonly: boolean
+    affects_affinity: boolean
+    source_table?: string
+    reason_code?: string | null
+  }
   soul_context: {
     status: 'available' | 'unknown' | 'unavailable' | string
     reason_code: string | null
@@ -96,6 +107,8 @@ export interface SoulStatePayload {
     state: 'known' | 'unknown' | string
     revision: number | string | null
     evidence: EvidenceRef[]
+    /** historical_audit_summary texts; read-only, never affects affinity */
+    evidence_summaries?: string[]
     people_ref: (ObjectRefDescriptor & { kind: 'relationship' }) | null
     dimensions?: Record<string, number> | null
     values?: Record<string, { dimension: string; automatic_value: number; manual_adjustment: number | null; manual_override: number | null; effective_value: number; relationship_revision: number; evidence: unknown[] }> | null

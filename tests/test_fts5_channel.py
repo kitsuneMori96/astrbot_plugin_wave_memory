@@ -89,7 +89,7 @@ class FTS5ChannelTest(unittest.TestCase):
         db = self._db()
         self._insert_memory(db, (1, "用户提到明光甲是稀有词", "u1", "用户", 1000.0, 1.0, "live", "g1", "message"))
         self._insert_memory(db, (2, "其他群也提过明光甲", "u2", "路人", 900.0, 1.0, "live", "g2", "message"))
-        channel = FTS5Channel(db=db)
+        channel = FTS5Channel(db=db, cross_group_enabled=False)
 
         result = asyncio.run(channel.build(self._ctx()))
 

@@ -11,10 +11,9 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 try:
-    from ..engine.db.job_repo import JobRepository, JobRequest, JobRun
+    from ..engine.db.job_repo import JobLeaseLostError, JobRepository, JobRequest, JobRun
 except ImportError:  # pragma: no cover - focused tests import top-level packages
-    from engine.db.job_repo import JobRepository, JobRequest, JobRun
-
+    from engine.db.job_repo import JobLeaseLostError, JobRepository, JobRequest, JobRun
 
 logger = logging.getLogger(__name__)
 
@@ -380,6 +379,16 @@ class DurableJobRunner:
                 await self._execute(run)
             except asyncio.CancelledError:
                 raise
+            except JobLeaseLostError as exc:
+                # Expected when AstrBot restarts mid-rebuild: the old runner dies,
+                # lease recovery requeues, and a new owner continues. Do not dump
+                # a full traceback as if the control plane crashed.
+                logger.warning(
+                    "durable job lease lost (will recover/retry): %s",
+                    exc,
+                )
+                if self._running:
+                    await asyncio.sleep(self.poll_interval)
             except Exception:
                 # A stale lease or one failed terminal mark belongs to that run; it
                 # must not take down the process-wide durable polling loop.

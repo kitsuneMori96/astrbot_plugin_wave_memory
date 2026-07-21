@@ -269,6 +269,15 @@ async def soul_state():
             "concerns": unavailable_page,
             "timeline": unavailable_page,
             "relationship_history": unavailable_page,
+            "historical_audit": {
+                "available": False,
+                "total": 0,
+                "by_type": [],
+                "recent": [],
+                "readonly": True,
+                "affects_affinity": False,
+                "reason_code": reason,
+            },
             "relationship": {"affinity": None, "state": "unknown", "revision": None,
                              "evidence": [], "people_ref": None, "values": None,
                              "calibration": {"available": False, "reason_code": "relationship_repository_unavailable"}},
@@ -306,6 +315,20 @@ async def soul_state():
     concerns = state["concerns"]
     timeline = state["timeline"]
     relationship_history = state.get("relationship_history", {"items": [], "total": 0, "revision": None})
+    historical_audit = state.get("historical_audit") or {
+        "available": False,
+        "total": 0,
+        "by_type": [],
+        "recent": [],
+        "readonly": True,
+        "affects_affinity": False,
+    }
+    if isinstance(historical_audit, dict):
+        historical_audit = {
+            **historical_audit,
+            "readonly": True,
+            "affects_affinity": False,
+        }
     relationship = dict(state["relationship"])
     refs = _object_refs()
     if relationship.get("revision") is not None and relationship.get("people_ref") and refs is not None:
@@ -329,6 +352,7 @@ async def soul_state():
             **page_response(relationship_history["items"], total=relationship_history["total"], limit=limit, offset=offset),
             "revision": relationship_history.get("revision"),
         },
+        "historical_audit": historical_audit,
         "relationship": relationship,
         "soul_context": state.get("soul_context", {"status": "unavailable", "reason_code": "formal_soul_context_unavailable", "timezone": None, "circadian": None, "energy": None, "sleepiness": None}),
         "capabilities": {

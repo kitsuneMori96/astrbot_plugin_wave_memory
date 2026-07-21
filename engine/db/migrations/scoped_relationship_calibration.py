@@ -185,6 +185,25 @@ def _apply(connection: sqlite3.Connection) -> None:
             "CREATE INDEX IF NOT EXISTS idx_scoped_relationship_events_operation "
             "ON scoped_soul_relationship_events (operation_id)"
         )
+    # Historical audit table (may be absent on fresh DBs). Indexes serve affinity
+    # read-path summaries without replaying scores.
+    tables = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if "scoped_soul_relationship_legacy_events" in tables:
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_legacy_rel_events_subject "
+            "ON scoped_soul_relationship_legacy_events("
+            "bot_id, session_id, visibility, subject_principal_id, occurred_at DESC, id DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_legacy_rel_events_scope_type "
+            "ON scoped_soul_relationship_legacy_events("
+            "bot_id, session_id, visibility, event_type)"
+        )
     _initialize_formal_values(connection)
 
 

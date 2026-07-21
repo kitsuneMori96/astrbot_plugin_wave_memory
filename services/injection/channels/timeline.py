@@ -53,10 +53,18 @@ def _timeline_cfg(ctx: Any) -> Mapping[str, Any]:
 
 
 def _group_scope(ctx: Any) -> RuntimeScope | None:
+    """仅接受完整、已解析的 group RuntimeScope。"""
     scope = getattr(ctx, "scope", None)
     if not isinstance(scope, RuntimeScope):
         return None
-    if scope.visibility != "group" or scope.session is None:
+    if (
+        scope.visibility != "group"
+        or scope.session is None
+        or scope.session.kind != "group"
+        or not scope.bot_id
+        or not scope.session.id
+        or not scope.session.conversation_id
+    ):
         return None
     return scope
 
@@ -66,13 +74,76 @@ class TimelineChannel:
 
     name = "timeline"
 
-    def __init__(self, *, db: Any, safety_channel: SafetyChannel | None = None):
+    def __init__(
+        self,
+        *,
+        db: Any,
+        safety_channel: SafetyChannel | None = None,
+        cross_group_enabled: bool = True,
+        shared_memory_grants_enabled: bool = False,
+    ):
         self.db = db
         self.safety = safety_channel or SafetyChannel()
+        self.cross_group_enabled = _as_bool(cross_group_enabled, True)
+        self.shared_memory_grants_enabled = _as_bool(shared_memory_grants_enabled, False)
 
     def _memory_columns(self) -> set[str]:
         rows = self.db.conn.execute("PRAGMA table_info(memories)").fetchall()
         return {str(row[1]) for row in rows}
+
+    def _grant_ids_for_scope(self, scope: RuntimeScope) -> list[int]:
+        if self.cross_group_enabled or not self.shared_memory_grants_enabled:
+            return []
+        if scope.session is None:
+            return []
+        try:
+            from engine.shared_grant_recall import load_active_grant_memory_ids
+        except ImportError:  # pragma: no cover
+            from ....engine.shared_grant_recall import load_active_grant_memory_ids
+        return load_active_grant_memory_ids(
+            self.db,
+            bot_id=scope.bot_id,
+            session_id=scope.session.id,
+            visibility=scope.visibility,
+            group_id=scope.session.conversation_id,
+        )
+
+    def _scope_predicate(
+        self,
+        scope: RuntimeScope,
+        columns: set[str],
+        *,
+        grant_ids: list[int] | None = None,
+    ) -> tuple[str, tuple[Any, ...]]:
+        """Timeline read filter: active rows only; Scope is not a hard gate.
+
+        Prefer current group when cross-group is off. Fully-scoped, partial, and
+        unscoped rows are all eligible as long as they are not quarantined noise.
+        """
+        assert scope.session is not None
+        parts = ["COALESCE(quarantine, 0) = 0"]
+        if "memory_type" in columns:
+            parts.append(
+                "COALESCE(memory_type, 'message') NOT IN "
+                "('archived', 'evicted', 'deleted', 'noise')"
+            )
+        if "source" in columns:
+            parts.append("COALESCE(source, '') != 'noise'")
+        active = " AND ".join(parts)
+        if self.cross_group_enabled:
+            return f"({active})", ()
+        current_group = scope.session.conversation_id
+        local = f"({active}) AND COALESCE(group_id, '') = ?"
+        params: list[Any] = [current_group]
+        ids = list(grant_ids or [])
+        if ids:
+            try:
+                from engine.shared_grant_recall import formal_grant_id_predicate
+            except ImportError:  # pragma: no cover
+                from ....engine.shared_grant_recall import formal_grant_id_predicate
+            grant_sql, grant_params = formal_grant_id_predicate(ids, alias="")
+            return f"(({local}) OR ({grant_sql}))", tuple(params) + grant_params
+        return local, tuple(params)
 
     async def build(self, ctx: Any) -> InjectionResult:
         started = time.perf_counter()
@@ -92,11 +163,23 @@ class TimelineChannel:
             return InjectionResult.empty(self.name, reason="timeline requires resolved group RuntimeScope")
 
         try:
-            items = self._query(ctx, max_items=max_items)
+            # Over-fetch when cross-group is on so summary-level fanout clones can
+            # be collapsed without starving unique events.
+            fetch_n = max_items * 4 if self.cross_group_enabled else max_items
+            items = self._query(ctx, max_items=fetch_n)
+            scope = _group_scope(ctx)
+            current_group = ""
+            if scope is not None and scope.session is not None:
+                current_group = scope.session.conversation_id
+            items = self._collapse_summary_fanout(items, current_group_id=current_group)[:max_items]
             kept, filtered = self.safety.filter_items(items, ctx=ctx, text_fields=("summary",))
             if not kept:
                 return InjectionResult.empty(self.name, latency_ms=self._latency_ms(started), reason="no safe timeline summaries")
-            lines = [f"- {item.get('day', '')}: {str(item.get('summary', ''))[:60]}" for item in kept]
+            lines = [
+                f"- {item.get('day', '')} [群 {item.get('group_id') or 'unknown-group'}]: "
+                f"{str(item.get('summary', ''))[:60]}"
+                for item in kept
+            ]
             text = "[最近与此人的事件]\n" + "\n".join(lines)
             return InjectionResult.hit(
                 self.name,
@@ -126,55 +209,30 @@ class TimelineChannel:
             if not required_columns.issubset(columns):
                 return []
 
-            scope_columns = {"bot_id", "session_id", "visibility", "resolution_state", "quarantine"}
-            if scope_columns.issubset(columns):
-                formal_scope_clause = """
-                      (bot_id = ? AND session_id = ? AND visibility = ?
-                       AND resolution_state = 'resolved' AND quarantine = 0)"""
-                formal_scope_params: tuple[Any, ...] = (
-                    scope.bot_id,
-                    scope.session.id,
-                    scope.visibility,
-                )
-                if "group_id" in columns:
-                    scope_clause = f"""
-                      AND (
-                          {formal_scope_clause}
-                          OR (
-                              group_id = ?
-                              AND (bot_id IS NULL OR bot_id = '')
-                              AND (session_id IS NULL OR session_id = '')
-                              AND (visibility IS NULL OR visibility = '')
-                              AND (resolution_state IS NULL OR resolution_state = 'resolved')
-                              AND (quarantine IS NULL OR quarantine = 0)
-                          )
-                      )"""
-                    scope_params = (*formal_scope_params, str(getattr(ctx, "group_id", "") or ""))
-                else:
-                    # Formal rows remain safely queryable in reduced schemas that
-                    # do not carry the legacy ``group_id`` compatibility column.
-                    scope_clause = f"AND {formal_scope_clause}"
-                    scope_params = formal_scope_params
-            else:
-                if "group_id" not in columns:
-                    return []
-                scope_clause = "AND group_id = ?"
-                scope_params = (str(getattr(ctx, "group_id", "") or ""),)
+            scope_columns = {"bot_id", "session_id", "visibility", "resolution_state", "quarantine", "group_id"}
+            if not scope_columns.issubset(columns):
+                # No legacy group_id fallback: unresolved or partial Scope rows
+                # must never be promoted into either exact or cross-group recall.
+                return []
+            grant_ids = self._grant_ids_for_scope(scope)
+            scope_clause, scope_params = self._scope_predicate(
+                scope, columns, grant_ids=grant_ids
+            )
 
             days_clause = "AND timestamp > ?" if days > 0 else ""
             params = (*scope_params, sender_id, like_value)
             if days > 0:
                 params = (*params, now - days * 86400)
             rows = self.db.conn.execute(
-                f"""SELECT summary,
+                f"""SELECT summary, group_id,
                           DATE(MAX(timestamp), 'unixepoch', 'localtime') AS day,
                           MAX(timestamp) AS ts
                      FROM memories
                     WHERE summary IS NOT NULL AND summary != '' AND summary != '日常灌水'
-                      {scope_clause}
+                      AND ({scope_clause})
                       AND (sender_id = ? OR content LIKE ?)
                       {days_clause}
-                    GROUP BY summary
+                    GROUP BY summary, group_id
                     ORDER BY MAX(timestamp) DESC
                     LIMIT ?""",
                 (*params, max_items),
@@ -182,14 +240,57 @@ class TimelineChannel:
         except Exception:
             return []
         return [
-            {"summary": row[0], "day": row[1], "timestamp": row[2], "source": "timeline"}
+            {
+                "summary": row[0],
+                "group_id": row[1],
+                "day": row[2],
+                "timestamp": row[3],
+                "source": "timeline",
+            }
             for row in rows
         ]
+
+    @staticmethod
+    def _collapse_summary_fanout(
+        items: list[dict[str, Any]],
+        *,
+        current_group_id: str = "",
+    ) -> list[dict[str, Any]]:
+        """Keep one timeline row per summary text, preferring the current group.
+
+        Historical Phase-2 fanout copied the same summary into many groups. Grouping
+        only by (summary, group_id) therefore re-injects the same event N times.
+        """
+        if not items:
+            return []
+        current = str(current_group_id or "").strip()
+
+        def sort_key(item: Mapping[str, Any]) -> tuple:
+            group_id = str(item.get("group_id") or "")
+            in_current = 0 if current and group_id == current else 1
+            try:
+                ts = -float(item.get("timestamp") or 0.0)
+            except (TypeError, ValueError):
+                ts = 0.0
+            return (in_current, ts, group_id)
+
+        ordered = sorted(items, key=sort_key)
+        seen: set[str] = set()
+        result: list[dict[str, Any]] = []
+        for item in ordered:
+            summary = " ".join(str(item.get("summary") or "").split())
+            key = summary.casefold() if summary else f"empty:{item.get('group_id')}:{item.get('timestamp')}"
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(item)
+        return result
 
     @staticmethod
     def _audit_item(item: Mapping[str, Any]) -> dict[str, Any]:
         return {
             "summary": item.get("summary", ""),
+            "group_id": item.get("group_id", ""),
             "day": item.get("day", ""),
             "timestamp": item.get("timestamp"),
             "preview": _preview(item.get("summary", "")),

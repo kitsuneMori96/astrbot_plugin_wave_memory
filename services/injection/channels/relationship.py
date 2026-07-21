@@ -86,6 +86,18 @@ class RelationshipChannel:
                     recent_events.append(f"{event_type}：{reason}")
             if recent_events:
                 text += "\n最近互动线索（仅用于保持连续性）：" + "；".join(recent_events)
+            # Prefer durable evidence summary if present; never affects affinity.
+            try:
+                from ...relationship_evidence_display import relationship_injection_summary_snippet
+            except ImportError:  # pragma: no cover
+                from services.relationship_evidence_display import (
+                    relationship_injection_summary_snippet,
+                )
+            evidence_snip = relationship_injection_summary_snippet(
+                relationship.get("evidence"), max_chars=160
+            )
+            if evidence_snip and not is_identity_contamination(evidence_snip):
+                text += f"\n历史关系摘要（只读，不改变好感度）：{evidence_snip}"
             timeline = _mapping(_mapping(state).get("timeline")).get("items") or []
             shared_events: list[str] = []
             for item in timeline[:2]:

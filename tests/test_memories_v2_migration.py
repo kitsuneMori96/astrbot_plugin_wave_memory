@@ -260,6 +260,47 @@ def test_hnsw_post_filter_keeps_same_group_legacy_rows_without_cross_bot_leakage
     assert next(row for row in rows if row["id"] == legacy_id)["_tag_lane"] == "legacy"
 
 
+def test_cross_group_hot_recall_is_opt_in_and_rejects_non_group_partial_unresolved_and_quarantined_rows(manager):
+    repo = _repo_with_legacy_memories(manager)
+    ensure_memories_v2_schema(manager)
+    alpha = _group_scope(bot_id="bot-alpha", group_id="group-1")
+    beta = _group_scope(bot_id="bot-beta", group_id="group-2")
+    alpha_id = repo.add_memory("group-1", "alpha", scope=alpha)
+    beta_id = repo.add_memory("group-2", "beta", scope=beta)
+    vector = np.asarray([0.1, 0.2], dtype=np.float32).tobytes()
+    invalid_rows = [
+        ("private", "private", "qq:private:1", "bot_private", "resolved", 0),
+        ("partial", "", "qq:group:partial", "group", "resolved", 0),
+        ("unresolved", "bot-u", "qq:group:unresolved", "group", "unresolved", 0),
+        ("quarantined", "bot-q", "qq:group:quarantined", "group", "resolved", 1),
+    ]
+    invalid_ids = []
+    for group_id, bot_id, session_id, visibility, resolution_state, quarantine in invalid_rows:
+        cursor = manager.execute_write(
+            """INSERT INTO memories(group_id, content, vector, timestamp, bot_id, session_id, visibility,
+                                      resolution_state, quarantine)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (group_id, group_id, vector, 1000.0, bot_id, session_id, visibility, resolution_state, quarantine),
+        )
+        invalid_ids.append(cursor.lastrowid)
+    legacy = manager.execute_write(
+        "INSERT INTO memories(group_id, content, vector, timestamp, resolution_state) VALUES (?, ?, ?, ?, ?)",
+        ("legacy-group", "fully unscoped legacy", vector, 1000.0, "resolved"),
+    ).lastrowid
+    manager.commit()
+
+    exact = repo.get_memories_by_ids([alpha_id, beta_id, legacy], scope=alpha)
+    expanded = repo.get_memories_by_ids(
+        [alpha_id, beta_id, legacy, *invalid_ids],
+        scope=alpha,
+        allow_cross_group_recall=True,
+    )
+
+    assert [row["id"] for row in exact] == [alpha_id]
+    assert {row["id"] for row in expanded} == {alpha_id, beta_id, legacy}
+    assert next(row for row in expanded if row["id"] == legacy)["_tag_lane"] == "legacy"
+
+
 def test_legacy_tag_cold_candidates_stay_group_scoped_and_allow_explicit_global_reads(manager):
     repo = _repo_with_legacy_memories(manager)
     vector = np.asarray([0.1, 0.2], dtype=np.float32).tobytes()
@@ -278,10 +319,18 @@ def test_legacy_tag_cold_candidates_stay_group_scoped_and_allow_explicit_global_
     manager.commit()
     ensure_memories_v2_schema(manager)
 
-    scoped = repo.list_legacy_cold_memory_candidates(_group_scope(group_id="group-1"), [1], limit=10)
+    scope = _group_scope(group_id="group-1")
+    scoped = repo.list_legacy_cold_memory_candidates(scope, [1], limit=10)
+    cross_group = repo.list_legacy_cold_memory_candidates(
+        scope,
+        [1],
+        limit=10,
+        allow_cross_group_recall=True,
+    )
     global_denied = repo.list_legacy_cold_memory_candidates(None, [1], limit=10)
     global_allowed = repo.list_legacy_cold_memory_candidates(None, [1], limit=10, allow_unscoped=True)
 
     assert [row["content"] for row in scoped] == ["legacy group one"]
+    assert {row["content"] for row in cross_group} == {"legacy group one", "legacy group two"}
     assert global_denied == []
     assert {row["content"] for row in global_allowed} == {"legacy group one", "legacy group two"}

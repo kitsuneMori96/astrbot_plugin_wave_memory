@@ -73,6 +73,26 @@ class _Repository:
             },
         }
 
+    def list_legacy_relationship_audit_summary(self, _scope, **_kwargs):
+        return {
+            "available": True,
+            "total": 12,
+            "by_type": [
+                {"event_type": "direct_reply", "count": 10},
+                {"event_type": "bot_attacked", "count": 2},
+            ],
+            "recent": [
+                {
+                    "event_type": "direct_reply",
+                    "dimension": "familiarity",
+                    "delta": 0.5,
+                    "reason": "看见一条群友消息",
+                    "occurred_at": 1.0,
+                    "legacy_event_id": "10",
+                }
+            ],
+        }
+
 
 def _context() -> SimpleNamespace:
     scope = RuntimeScope(
@@ -128,3 +148,6 @@ def test_formal_affinity_tool_keeps_single_query_in_current_scope():
 
     assert "关系对象：甲（u1）" in result
     assert "hostility: 0" in result
+    assert "历史事件审计：12 条" in result
+    assert "direct_reply×10" in result
+    assert "不改变好感度" in result

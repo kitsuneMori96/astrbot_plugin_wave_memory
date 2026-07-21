@@ -5,7 +5,12 @@ import { Bar, BarChart, CartesianGrid, Line, LineChart, XAxis, YAxis } from 'rec
 
 import { isRequestCancelled } from '@/api/client'
 import { getScopeOptions, scopeOptionsFor } from '@/api/options'
-import { getRelationships, type RelationshipItem } from '@/api/people'
+import {
+  getRelationshipHistoricalAudit,
+  getRelationships,
+  type HistoricalAuditPage,
+  type RelationshipItem,
+} from '@/api/people'
 import { getSoulState, type RelationshipHistoryItem, type SoulScopeSelection, type SoulStatePayload } from '@/api/soul'
 import { RelationshipCalibrationPanel } from '@/components/relationship/RelationshipCalibrationPanel'
 import { EvidenceList, ObjectDeepLink, PaginationControls, QueryState, ScopeSelect } from '@/components/shared'
@@ -119,6 +124,139 @@ function RelationshipHistoryList({ history }: { history: RelationshipHistoryItem
   return <div className="flex flex-col gap-3">{history.map((item) => <div key={item.id} className="rounded-lg border bg-muted/10 p-3"><div className="flex flex-wrap items-center gap-2"><Badge variant={item.kind === 'manual' ? 'secondary' : 'outline'}>{item.kind === 'manual' ? 'manual calibration' : 'automatic RelationshipEvent'}</Badge><Badge variant="outline">{dimensionLabel(item.dimension)}</Badge>{item.action ? <Badge variant="outline">{item.action}</Badge> : null}<span className="text-[10px] text-muted-foreground">{formatTime(item.timestamp)} · revision {item.revision ?? '未记录'}</span></div><p className="mt-2 text-sm font-medium">{item.reason || '服务端未提供原因'}</p><div className="mt-2 grid gap-2 text-xs sm:grid-cols-2"><div className="rounded border bg-background/60 p-2"><span className="text-muted-foreground">变化</span><span className="ml-2 font-mono">{item.delta === null ? '人工层变更' : displayRelationshipValue(item.delta)}</span></div><div className="rounded border bg-background/60 p-2"><span className="text-muted-foreground">来源</span><span className="ml-2 font-mono">{item.source_memory_id !== null ? `memory:${item.source_memory_id}` : item.source_episode_id !== null ? `episode:${item.source_episode_id}` : '未提供真实消息引用'}</span></div></div><div className="mt-2 flex flex-wrap gap-2 text-[10px] text-muted-foreground">{item.operation_id ? <span className="font-mono">operation:{item.operation_id}</span> : null}{item.actor ? <span>actor:{item.actor}</span> : null}</div><div className="mt-3"><EvidenceList evidence={item.evidence} /></div></div>)}</div>
 }
 
+function HistoricalAuditSideChannel({
+  botId,
+  sessionId,
+  subjectPrincipalId,
+  embedded,
+}: {
+  botId: string
+  sessionId: string
+  subjectPrincipalId: string
+  /** Preferred: summary from /api/soul/state (no second request). */
+  embedded?: SoulStatePayload['historical_audit'] | null
+}) {
+  const [data, setData] = useState<HistoricalAuditPage | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const hasEmbedded = Boolean(embedded && typeof embedded === 'object')
+
+  useEffect(() => {
+    // When soul/state already carried historical_audit, skip extra API call.
+    if (hasEmbedded) {
+      setData(null)
+      setLoading(false)
+      setError(null)
+      return
+    }
+    if (!botId || !sessionId || !subjectPrincipalId) {
+      setData(null)
+      setLoading(false)
+      setError(null)
+      return
+    }
+    let active = true
+    setLoading(true)
+    setError(null)
+    getRelationshipHistoricalAudit({
+      bot_id: botId,
+      session_id: sessionId,
+      visibility: 'group',
+      subject_principal_id: subjectPrincipalId,
+      limit: 25,
+      offset: 0,
+    })
+      .then((page) => {
+        if (active) setData(page)
+      })
+      .catch((reason: unknown) => {
+        if (active) {
+          setData(null)
+          setError(reason instanceof Error ? reason.message : '历史审计读取失败')
+        }
+      })
+      .finally(() => {
+        if (active) setLoading(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [botId, hasEmbedded, sessionId, subjectPrincipalId])
+
+  const summary = hasEmbedded ? embedded : data?.summary
+  const total = summary?.total ?? 0
+  const typeBits = (summary?.by_type ?? [])
+    .slice(0, 4)
+    .map((item) => `${item.event_type}×${item.count}`)
+    .join('，')
+  const recentRows = hasEmbedded
+    ? (embedded?.recent ?? []).slice(0, 8)
+    : (data?.items ?? []).slice(0, 8)
+
+  return (
+    <Card className="overflow-hidden border-amber-500/20 bg-gradient-to-br from-card to-amber-500/[0.04]">
+      <CardHeader className="border-b bg-muted/10 py-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <MessageSquareQuoteIcon className="size-4 text-amber-600" />
+          <CardTitle className="text-sm">历史事件审计（侧写）</CardTitle>
+          <Badge variant="outline">只读</Badge>
+          <Badge variant="secondary">不改变好感度</Badge>
+          {hasEmbedded ? <Badge variant="outline">来自 soul/state</Badge> : null}
+        </div>
+        <CardDescription>
+          来自 scoped_soul_relationship_legacy_events；与上方 live RelationshipEvent 轨迹分离，不参与 affinity 计算。
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="pt-5">
+        {loading ? (
+          <p className="text-sm text-muted-foreground">正在读取 historical audit…</p>
+        ) : error ? (
+          <p className="text-sm text-muted-foreground">{error}</p>
+        ) : !summary?.available || total <= 0 ? (
+          <p className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">
+            当前 subject 没有 historical audit 记录。
+          </p>
+        ) : (
+          <div className="grid gap-3 text-sm">
+            <p>
+              共 <span className="font-mono font-semibold">{total}</span> 条侧写事件
+              {typeBits ? <span className="text-muted-foreground"> · {typeBits}</span> : null}
+            </p>
+            <div className="grid gap-2">
+              {recentRows.map((item, index) => {
+                const row = item as Record<string, unknown>
+                const key = String(row.id ?? row.legacy_event_id ?? index)
+                const eventType = String(row.event_type ?? '?')
+                const dimension = String(row.dimension ?? '?')
+                const delta = row.delta
+                const reason = String(row.reason ?? '无原因')
+                const occurredAt = row.occurred_at
+                return (
+                  <div key={key} className="rounded-lg border bg-muted/10 p-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="outline" className="font-mono text-[10px]">{eventType}</Badge>
+                      <Badge variant="secondary" className="font-mono text-[10px]">{dimension}</Badge>
+                      <span className="font-mono text-[10px] text-muted-foreground">
+                        {typeof delta === 'number'
+                          ? delta > 0
+                            ? `+${delta}`
+                            : String(delta)
+                          : String(delta ?? '')}
+                      </span>
+                      <span className="text-[10px] text-muted-foreground">{formatTime(occurredAt)}</span>
+                    </div>
+                    <p className="mt-2 text-xs text-muted-foreground">{reason}</p>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 function SoulContextCard({ context }: { context: SoulStatePayload['soul_context'] | undefined }) {
   const current = context ?? { status: 'unavailable', reason_code: 'formal_soul_context_unavailable', timezone: null, circadian: null, energy: null, sleepiness: null }
   const available = current.status === 'available'
@@ -157,6 +295,7 @@ export function SoulPage() {
       revision: Number(relationship.revision),
       values: relationship.values,
       evidence: relationship.evidence,
+      evidence_summaries: relationship.evidence_summaries ?? selected.evidence_summaries,
       object_ref: ref,
       calibration: relationship.calibration ?? { available: false, reason_code: 'relationship_unknown' },
     }
@@ -247,7 +386,7 @@ export function SoulPage() {
             <Card className="overflow-hidden border-pink-500/15 bg-gradient-to-br from-card to-pink-500/5">
               <CardHeader className="border-b bg-muted/10 py-4"><div className="flex items-center gap-2"><HeartHandshakeIcon className="size-4 text-pink-500" /><CardTitle className="text-sm">关系投影</CardTitle></div><CardDescription>正式 SoulScope · revision {payload.relationship.revision ?? '未记录'}</CardDescription></CardHeader>
               <CardContent className="flex flex-col gap-4 pt-5">
-                {formalUnavailable ? <SectionUnavailable reason={payload.source.reason_code} /> : <><div className="rounded-xl border bg-background/50 p-4 text-center"><Badge variant={payload.relationship.state === 'known' ? 'secondary' : 'outline'}>{payload.relationship.state}</Badge><p className="mt-3 text-3xl font-bold font-mono">{payload.relationship.affinity ?? '—'}</p><p className="text-xs text-muted-foreground">Affinity</p>{typeof payload.relationship.affinity === 'number' ? <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-pink-500" style={{ width: `${Math.max(0, Math.min(100, payload.relationship.affinity <= 1 ? payload.relationship.affinity * 100 : payload.relationship.affinity))}%` }} /></div> : null}</div><EvidenceList evidence={payload.relationship.evidence} />{payload.relationship.people_ref ? <ObjectDeepLink to="/people" objectRef={payload.relationship.people_ref}>打开当前人物关系</ObjectDeepLink> : null}{relationshipItem ? <RelationshipCalibrationPanel item={relationshipItem} query={{ bot_id: botId, session_id: sessionId, visibility: 'group', user_id: relationshipItem.person.user_id, subject_principal_id: relationshipItem.subject_principal_id }} onChanged={() => void loadFormal()} /> : <Alert><AlertTitle>当前关系未知</AlertTitle><AlertDescription>请输入当前群友的 canonical subject principal；没有正式关系行时不会创建默认 0，也不会提供校准写入口。</AlertDescription></Alert>}</>}
+                {formalUnavailable ? <SectionUnavailable reason={payload.source.reason_code} /> : <><div className="rounded-xl border bg-background/50 p-4 text-center"><Badge variant={payload.relationship.state === 'known' ? 'secondary' : 'outline'}>{payload.relationship.state}</Badge><p className="mt-3 text-3xl font-bold font-mono">{payload.relationship.affinity ?? '—'}</p><p className="text-xs text-muted-foreground">Affinity</p>{typeof payload.relationship.affinity === 'number' ? <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-pink-500" style={{ width: `${Math.max(0, Math.min(100, payload.relationship.affinity <= 1 ? payload.relationship.affinity * 100 : payload.relationship.affinity))}%` }} /></div> : null}</div><EvidenceList evidence={payload.relationship.evidence} />{(payload.relationship.evidence_summaries?.length ?? 0) > 0 ? <div className="rounded-lg border bg-muted/10 p-3"><div className="mb-2 flex flex-wrap items-center gap-2"><Badge variant="outline">可读历史摘要</Badge><Badge variant="secondary">只读</Badge><Badge variant="outline">不改变好感度</Badge></div><div className="grid gap-1.5 text-xs text-muted-foreground">{payload.relationship.evidence_summaries!.map((summary, index) => <p key={`${index}-${summary.slice(0, 24)}`} className="rounded border bg-background/70 px-2 py-1.5">{summary}</p>)}</div></div> : null}{payload.relationship.people_ref ? <ObjectDeepLink to="/people" objectRef={payload.relationship.people_ref}>打开当前人物关系</ObjectDeepLink> : null}{relationshipItem ? <RelationshipCalibrationPanel item={relationshipItem} query={{ bot_id: botId, session_id: sessionId, visibility: 'group', user_id: relationshipItem.person.user_id, subject_principal_id: relationshipItem.subject_principal_id }} onChanged={() => void loadFormal()} /> : <Alert><AlertTitle>当前关系未知</AlertTitle><AlertDescription>请输入当前群友的 canonical subject principal；没有正式关系行时不会创建默认 0，也不会提供校准写入口。</AlertDescription></Alert>}</>}
               </CardContent>
             </Card>
           </div>
@@ -256,6 +395,15 @@ export function SoulPage() {
             <CardHeader className="border-b bg-muted/10 py-4"><div className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-2"><GitBranchIcon className="size-4 text-violet-500" /><CardTitle className="text-sm">关系可解释轨迹</CardTitle></div><label className="flex items-center gap-2 text-xs font-medium"><span>维度</span><select className="h-8 rounded-md border bg-background px-2 font-mono text-xs" value={relationshipDimension} onChange={(event) => pagination.setFilters({ relationship_dimension: event.target.value })}>{RELATIONSHIP_DIMENSIONS.map(([key, label]) => <option key={key} value={key}>{label} · {key}</option>)}</select></label></div><CardDescription>automatic / manual / effective 来自同一 Scope 的真实 RelationshipEvent 与 calibration audit；空层保持断点</CardDescription></CardHeader>
             <CardContent className="grid gap-5 pt-5 lg:grid-cols-[minmax(0,1.2fr)_minmax(20rem,0.8fr)]">{formalUnavailable || !subjectId ? <SectionUnavailable reason={!subjectId ? 'relationship_subject_required' : payload.source.reason_code} /> : <><div className="min-w-0"><RelationshipTrajectory history={payload.relationship_history?.items ?? []} dimension={relationshipDimension} /></div><div className="min-w-0"><div className="mb-3 flex items-center gap-2 text-xs font-semibold"><MessageSquareQuoteIcon className="size-4 text-muted-foreground" />导致变化的真实来源</div><RelationshipHistoryList history={payload.relationship_history?.items ?? []} /></div></>}</CardContent>
           </Card>
+
+          {!formalUnavailable && subjectId ? (
+            <HistoricalAuditSideChannel
+              botId={botId}
+              sessionId={sessionId}
+              subjectPrincipalId={subjectId}
+              embedded={payload.historical_audit}
+            />
+          ) : null}
 
           <div className="grid gap-4 lg:grid-cols-3">
             <Card>

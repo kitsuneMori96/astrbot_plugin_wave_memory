@@ -82,6 +82,15 @@ def _audit_item(memory: Mapping[str, Any]) -> dict[str, Any]:
     }
     if "timestamp" in memory:
         item["timestamp"] = memory.get("timestamp")
+    if "group_id" in memory:
+        item["group_id"] = memory.get("group_id")
+    # Align with FTS audit: keep grant/cross markers for observability only.
+    if memory.get("_shared_grant") or memory.get("shared_grant"):
+        item["_shared_grant"] = True
+    if memory.get("_is_cross_group") or memory.get("is_cross_group"):
+        item["_is_cross_group"] = True
+    if memory.get("_fanout_duplicate") or memory.get("fanout_duplicate"):
+        item["_fanout_duplicate"] = True
     return item
 
 

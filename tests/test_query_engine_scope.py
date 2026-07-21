@@ -36,7 +36,7 @@ class _ScopedDb:
     def get_memories_by_ids(self, ids, *, scope):
         self.scopes.append(scope)
         # Simulates repository-side exact Bot/session filtering of HNSW IDs.
-        return [{"id": 1, "content": "本 Bot 本会话", "timestamp": 1, "importance": 1.0}]
+        return [{"id": 1, "group_id": "g1", "content": "本 Bot 本会话", "timestamp": 1, "importance": 1.0}]
 
     def touch_memories(self, ids):
         self.touched.append(ids)
@@ -183,6 +183,71 @@ class QueryEngineScopeTest(unittest.TestCase):
 
         engine = QueryEngine(LegacyDb(), _Index(), _Embedding(), {"min_similarity": 0.0})
         self.assertEqual(asyncio.run(engine.query("关键词", scope=self._scope())), [])
+
+    def test_cross_group_hot_and_shotgun_recall_marks_results_and_never_touches_cross_scope(self):
+        from engine.query_engine import QueryEngine
+
+        class CrossGroupDb(_ScopedDb):
+            def __init__(self):
+                super().__init__()
+                self.cross_group_flags = []
+
+            def get_memories_by_ids(self, ids, *, scope, allow_cross_group_recall=False):
+                self.scopes.append(scope)
+                self.cross_group_flags.append(allow_cross_group_recall)
+                rows = [
+                    {"id": 1, "group_id": "g1", "content": "当前群", "timestamp": 1, "importance": 1.0},
+                    {"id": 2, "group_id": "g2", "content": "另群另 Bot", "timestamp": 1, "importance": 1.0},
+                ]
+                return rows if allow_cross_group_recall else rows[:1]
+
+        class Gateway:
+            def __init__(self):
+                self.calls = []
+
+            async def touch_memories(self, *, scope, memory_ids):
+                self.calls.append((scope, memory_ids))
+
+        scope = self._scope()
+        db = CrossGroupDb()
+        gateway = Gateway()
+        engine = QueryEngine(
+            db,
+            _Index(),
+            _Embedding(),
+            {"min_similarity": 0.0, "cross_group_enabled": True},
+            write_gateway=gateway,
+        )
+
+        hot = asyncio.run(engine.query("关键词", scope=scope))
+        shotgun = asyncio.run(engine.shotgun_query("关键词", scope=scope))
+
+        self.assertEqual({memory["id"] for memory in hot}, {1, 2})
+        self.assertEqual({memory["id"] for memory in shotgun}, {1, 2})
+        self.assertFalse(next(memory for memory in hot if memory["id"] == 1)["_is_cross_group"])
+        self.assertTrue(next(memory for memory in hot if memory["id"] == 2)["_is_cross_group"])
+        self.assertEqual(db.cross_group_flags, [True, True])
+        self.assertEqual([memory_ids for _scope, memory_ids in gateway.calls], [[1], [1]])
+
+    def test_cross_group_disabled_keeps_hot_recall_exact_scope(self):
+        from engine.query_engine import QueryEngine
+
+        class ExactDb(_ScopedDb):
+            def __init__(self):
+                super().__init__()
+                self.cross_group_flags = []
+
+            def get_memories_by_ids(self, ids, *, scope, allow_cross_group_recall=False):
+                self.cross_group_flags.append(allow_cross_group_recall)
+                return [{"id": 1, "group_id": "g1", "content": "当前群", "timestamp": 1, "importance": 1.0}]
+
+        db = ExactDb()
+        engine = QueryEngine(db, _Index(), _Embedding(), {"min_similarity": 0.0, "cross_group_enabled": False})
+        result = asyncio.run(engine.query("关键词", scope=self._scope()))
+
+        self.assertEqual([memory["id"] for memory in result], [1])
+        self.assertEqual(db.cross_group_flags, [False])
+        self.assertFalse(result[0]["_is_cross_group"])
 
 
 if __name__ == "__main__":
