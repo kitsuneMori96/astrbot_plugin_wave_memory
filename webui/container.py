@@ -47,6 +47,12 @@ class ServiceContainer:
         self.livingmemory_alias_tools_registered: bool = False
         self.detected_memory_plugins: list[dict[str, Any]] = []
 
+        # ─── 灵魂子系统 ───
+        self.desire_engine: Any = None
+        self.concern_tracker: Any = None
+        self.mood_trajectory: Any = None
+        self.subjective_time: Any = None
+
         # ─── 认证 ───
         self.password: str = ""
         self.sessions: set = set()
@@ -74,6 +80,10 @@ class ServiceContainer:
         livingmemory_facade_enabled: bool | None = None,
         livingmemory_alias_tools_registered: bool = False,
         detected_memory_plugins: list[dict[str, Any]] | None = None,
+        desire_engine=None,
+        concern_tracker=None,
+        mood_trajectory=None,
+        subjective_time=None,
     ) -> None:
         """注入所有服务引用。"""
         self.db = db
@@ -97,6 +107,10 @@ class ServiceContainer:
         self.livingmemory_facade_enabled = bool(livingmemory_facade if livingmemory_facade_enabled is None else livingmemory_facade_enabled)
         self.livingmemory_alias_tools_registered = bool(livingmemory_alias_tools_registered)
         self.detected_memory_plugins = list(detected_memory_plugins or [])
+        self.desire_engine = desire_engine
+        self.concern_tracker = concern_tracker
+        self.mood_trajectory = mood_trajectory
+        self.subjective_time = subjective_time
 
     @classmethod
     def reset(cls) -> None:

@@ -107,6 +107,21 @@ async def system_status():
         "SELECT nickname, interaction_count FROM user_profiles WHERE interaction_count > 0 ORDER BY interaction_count DESC LIMIT 5"
     ).fetchall()
 
+    # 内心念头（来自 DesireEngine）
+    unspoken_desire = None
+    if getattr(c, "desire_engine", None):
+        try:
+            active = c.desire_engine._active_desires
+            if active:
+                strongest = max(active, key=lambda d: d.intensity)
+                unspoken_desire = {
+                    "topic": strongest.trigger,
+                    "motive": strongest.type,
+                    "intensity": strongest.intensity,
+                }
+        except Exception:
+            pass
+
     return jsonify({
         "memories": {"total": total_mem, "with_vector": with_vec, "with_tags": tagged_memories},
         "tags": {"total": total_tags, "structured": structured_tags, "type_distribution": {r[0]: r[1] for r in type_dist}},
@@ -130,6 +145,7 @@ async def system_status():
             "active_users": active_users,
             "top_users": [{"name": r[0] or "?", "interactions": r[1]} for r in top_users],
             "active_moods": [{"group_id": m[0], "type": m[1], "intensity": m[2], "desc": m[3]} for m in active_moods],
+            "unspoken_desire": unspoken_desire,
         },
     })
 

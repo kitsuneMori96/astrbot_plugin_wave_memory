@@ -286,17 +286,21 @@ async def mood_trajectory():
     bot_id = request.args.get("bot_id")
 
     if _table_exists(c.db.conn, "mood_snapshots"):
+        group_id = request.args.get("group_id")
         sql = "SELECT id, bot_id, timestamp, valence, arousal, cause FROM mood_snapshots WHERE 1=1"
         params = []
-        if bot_id:
+        if group_id:
+            sql += " AND bot_id = ?"
+            params.append(group_id)
+        elif bot_id:
             sql += " AND bot_id = ?"
             params.append(bot_id)
         sql += " ORDER BY timestamp DESC LIMIT ?"
         params.append(limit)
         rows = c.db.conn.execute(sql, params).fetchall()
         items = [
-            {"id": r[0], "group_id": r[1] or "", "bot_id": r[1] or "", "type": "positive" if (r[3] or 0) > 0.1 else "negative" if (r[3] or 0) < -0.1 else "neutral",
-             "intensity": min(1.0, max(0.0, abs(float(r[3] or 0)) + float(r[4] or 0) * 0.5)), "valence": r[3], "arousal": r[4], "desc": r[5] or "", "ts": r[2], "is_active": False}
+            {"id": r[0], "group_id": "", "bot_id": r[1] or "", "type": "positive" if (r[3] or 0) > 0.1 else "negative" if (r[3] or 0) < -0.1 else "neutral",
+             "intensity": min(1.0, max(0.0, abs(float(r[3] or 0)) + float(r[4] or 0) * 0.5)), "valence": r[3], "arousal": r[4], "description": r[5] or "", "timestamp": r[2], "is_active": False}
             for r in rows
         ]
         items.reverse()
@@ -315,8 +319,8 @@ async def mood_trajectory():
 
     rows = c.db.conn.execute(sql, params).fetchall()
     items = [
-        {"id": r[0], "group_id": r[1], "type": r[2], "intensity": r[3], "desc": r[4],
-         "ts": r[5], "end_time": r[6], "is_active": bool(r[7])}
+        {"id": r[0], "group_id": r[1], "type": r[2], "intensity": r[3], "description": r[4],
+         "timestamp": r[5], "end_time": r[6], "is_active": bool(r[7])}
         for r in rows
     ]
     items.reverse()

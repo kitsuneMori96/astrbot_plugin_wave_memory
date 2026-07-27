@@ -573,6 +573,7 @@ class LifecycleService:
         self.positive_emotion_threshold = positive_emotion_threshold
         self.negative_emotion_threshold = negative_emotion_threshold
         self.run_global_jobs = run_global_jobs
+        self.mood_trajectory = None  # 外部注入：MoodTrajectory 实例
 
     def start(self):
         if self._running:
@@ -640,6 +641,32 @@ class LifecycleService:
             self._update_mood(now)
         except Exception as e:
             logger.debug(f"[WaveMemory] Mood update failed: {e}")
+
+        # 5. Mood 快照记录（喂给 MoodTrajectory）
+        if self.mood_trajectory:
+            try:
+                row = self.db.conn.execute(
+                    "SELECT mood_type, intensity, description FROM bot_mood WHERE is_active = 1 ORDER BY start_time DESC LIMIT 1"
+                ).fetchone()
+                valence = 0.0
+                arousal = 0.5
+                cause = ""
+                if row:
+                    mtype = row[0] or ""
+                    intensity = row[1] or 0.5
+                    cause = row[2] or ""
+                    if mtype in ("cheerful", "energetic"):
+                        valence = 0.5 + float(intensity) * 0.3
+                        arousal = 0.5 + float(intensity) * 0.3
+                    elif mtype in ("concerned", "sad"):
+                        valence = -0.3 - float(intensity) * 0.4
+                        arousal = 0.3 + float(intensity) * 0.2
+                    else:
+                        valence = float(intensity) * 0.2
+                        arousal = float(intensity) * 0.3
+                self.mood_trajectory.record(valence=round(valence, 3), arousal=round(arousal, 3), cause=cause)
+            except Exception as e:
+                logger.debug(f"[WaveMemory] Mood snapshot record failed: {e}")
 
     def _run_decay(self) -> int:
         """标记过期记忆为 archived 并且对 user_profiles 执行多维情感衰减。"""

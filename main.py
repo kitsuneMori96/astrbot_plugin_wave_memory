@@ -1315,6 +1315,28 @@ class WaveMemoryPlugin(Star):
             logger.warning(f"[WaveMemory] DesireEngine init failed: {e}")
             _record_err("DesireEngine", e)
             self.desire_engine = None
+        if not soul_bot_id:
+            logger.warning("[WaveMemory] soul_bot_id 为空（无可用 bot），灵魂子系统全部跳过")
+        else:
+            # 将 MoodTrajectory 注入 LifecycleService（MoodTrajectory 晚于 Lifecycle 创建）
+            if getattr(self, "lifecycle", None) and getattr(self, "mood_trajectory", None):
+                self.lifecycle.mood_trajectory = self.mood_trajectory
+
+            # 灵魂子系统后台维护任务（每小时 tick）
+            self._spawn(self._soul_maintenance_loop())
+
+        # 注入灵魂服务到 WebUI 容器
+        if getattr(self, "webui", None):
+            try:
+                from .webui.container import get_container
+                c = get_container()
+                c.desire_engine = getattr(self, "desire_engine", None)
+                c.concern_tracker = getattr(self, "concern_tracker", None)
+                c.mood_trajectory = getattr(self, "mood_trajectory", None)
+                c.subjective_time = getattr(self, "subjective_time", None)
+            except Exception:
+                pass
+
         logger.info(
             f"[WaveMemory] 灵魂子系统就绪: belief={bool(self.belief_engine)} "
             f"concern={bool(self.concern_tracker)} mood_traj={bool(self.mood_trajectory)} "
@@ -1351,6 +1373,26 @@ class WaveMemoryPlugin(Star):
         self._spawn(self._async_cache_warmup())
 
         logger.info("[WaveMemory] Fully initialized")
+
+    async def _soul_maintenance_loop(self):
+        """灵魂子系统维护循环：每小时衰减关切、记录基线情绪快照。"""
+        try:
+            while not getattr(self, "_terminated", False):
+                await asyncio.sleep(3600)
+                if getattr(self, "concern_tracker", None):
+                    try:
+                        self.concern_tracker.tick()
+                    except Exception as e:
+                        logger.debug(f"[WaveMemory] concern_tracker tick failed: {e}")
+                if getattr(self, "mood_trajectory", None):
+                    try:
+                        self.mood_trajectory.record(
+                            valence=0.0, arousal=0.0, cause="hourly_baseline"
+                        )
+                    except Exception as e:
+                        logger.debug(f"[WaveMemory] mood_trajectory baseline failed: {e}")
+        except asyncio.CancelledError:
+            pass
 
     async def terminate(self):
         """插件卸载时清理 — 防重入 + 各资源独立 try-except。"""
