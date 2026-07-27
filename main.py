@@ -1386,6 +1386,7 @@ class WaveMemoryPlugin(Star):
         """用历史数据回填灵魂页面（bot_mood → mood_snapshots, tags → concerns, episodes → anchors）。
         仅在对应目标表为空时执行，避免重复注入。
         """
+        import math as _math
         import time as _time
 
         conn = self.db.conn
@@ -1413,6 +1414,11 @@ class WaveMemoryPlugin(Star):
                         else:
                             valence = float(intensity or 0.5) * 0.2
                             arousal = float(intensity or 0.5) * 0.3
+                        # 时间调制：利用 start_time 时段让同 mood_type 也产生自然起伏
+                        if st:
+                            hour = _time.localtime(st).tm_hour
+                            mod = 0.70 + 0.30 * _math.sin((hour - 18) / 24 * 2 * _math.pi)
+                            arousal *= mod
                         conn.execute(
                             "INSERT INTO mood_snapshots (bot_id, timestamp, valence, arousal, cause) VALUES (?, ?, ?, ?, ?)",
                             (bot_id, st or _time.time(), round(valence, 3), round(arousal, 3), desc),

@@ -664,6 +664,8 @@ class LifecycleService:
                     else:
                         valence = float(intensity) * 0.2
                         arousal = float(intensity) * 0.3
+                mod = 0.70 + 0.30 * math.sin((time.localtime().tm_hour - 18) / 24 * 2 * math.pi)
+                arousal = min(1.0, max(0.0, arousal * mod))
                 self.mood_trajectory.record(valence=round(valence, 3), arousal=round(arousal, 3), cause=cause)
             except Exception as e:
                 logger.debug(f"[WaveMemory] Mood snapshot record failed: {e}")
