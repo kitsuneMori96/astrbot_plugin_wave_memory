@@ -426,20 +426,6 @@ async def list_people():
     return jsonify(build_people_payload(conn, **_query_options("qq_id")))
 
 
-@blackbox_bp.route("/people/<person_id>", methods=["GET"])
-@require_auth
-async def get_person_detail(person_id: str):
-    conn = _conn_from_container()
-    if not conn:
-        return jsonify(_error_payload("database_unavailable")), 503
-    payload = build_people_payload(conn, limit=200, search=person_id)
-    for item in payload.get("items", []):
-        if person_id in {str(item.get("qq_id", "")), str(item.get("user_id", ""))}:
-            item["readonly"] = True
-            return jsonify(item)
-    return jsonify({"ok": False, "error": "person_not_found", "readonly": True}), 404
-
-
 @blackbox_bp.route("/people/<person_id>/detail", methods=["GET"])
 @require_auth
 async def get_person_aggregated(person_id: str):
@@ -480,7 +466,6 @@ async def get_person_aggregated(person_id: str):
         "last_seen": max((p.get("last_seen") or 0 for p in profiles if p.get("last_seen")), default=0),
     }
 
-    # pick profile with highest affection as current
     current = max(profiles, key=lambda p: p.get("affection") or 0) if profiles else {}
     meta = _safe_json(current.get("metadata", "{}")) or {}
     result.update({
@@ -550,7 +535,6 @@ async def get_person_dimension_trend(person_id: str):
     except Exception:
         rows = []
 
-    # aggregate by day and dimension
     daily: dict[str, dict[str, float]] = {}
     for dim, delta, ts in rows:
         day = time.strftime("%Y-%m-%d", time.localtime(ts))
@@ -558,7 +542,6 @@ async def get_person_dimension_trend(person_id: str):
             daily[day] = {}
         daily[day][dim] = daily[day].get(dim, 0) + (delta or 0)
 
-    # also get current dimensions as baseline
     baseline = {}
     try:
         meta_row = conn.execute(
@@ -570,7 +553,6 @@ async def get_person_dimension_trend(person_id: str):
     except Exception:
         pass
 
-    # build cumulative trend
     dim_names = ["familiarity", "trust", "fun", "hostility", "depth"]
     cum: dict[str, float] = {d: baseline.get(d, 0) for d in dim_names}
     points: list[dict[str, Any]] = []
@@ -578,7 +560,6 @@ async def get_person_dimension_trend(person_id: str):
     for day in sorted_days:
         for dim in dim_names:
             cum[dim] = cum.get(dim, 0) + daily[day].get(dim, 0)
-        # compute synthetic affection for this day
         score = sum(cum.get(d, 0) * w for d, w in [("familiarity", 0.25), ("trust", 0.30), ("fun", 0.20), ("depth", 0.25)])
         score -= cum.get("hostility", 0) * 0.5
         points.append({
@@ -737,6 +718,20 @@ async def update_person_aliases(person_id: str):
         return jsonify({"ok": True, "aliases": aliases, "display_name": display_name})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@blackbox_bp.route("/people/<person_id>", methods=["GET"])
+@require_auth
+async def get_person_detail(person_id: str):
+    conn = _conn_from_container()
+    if not conn:
+        return jsonify(_error_payload("database_unavailable")), 503
+    payload = build_people_payload(conn, limit=200, search=person_id)
+    for item in payload.get("items", []):
+        if person_id in {str(item.get("qq_id", "")), str(item.get("user_id", ""))}:
+            item["readonly"] = True
+            return jsonify(item)
+    return jsonify({"ok": False, "error": "person_not_found", "readonly": True}), 404
 
 
 @blackbox_bp.route("/indexes/summary", methods=["GET"])
