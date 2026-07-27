@@ -514,5 +514,54 @@
         "default": ""
       }
     }
+  },
+  "Memory_Decay_Settings": {
+    "description": "记忆连续衰减配置",
+    "hint": "所有记忆按重要性分档以不同半衰期连续衰减。低于 archive_threshold 的记忆变为 archived（可解封），低于 evict_threshold 且超过 90 天的记忆自动淘汰。访问会重置衰减时钟。（升级用户需检查配置）",
+    "type": "object",
+    "items": {
+      "half_life_core_days": {
+        "description": "核心记忆半衰期（天）",
+        "hint": "重要性 > 2.0 的记忆以此速度衰减",
+        "type": "int",
+        "default": 90
+      },
+      "half_life_normal_days": {
+        "description": "普通记忆半衰期（天）",
+        "hint": "重要性 1.0~2.0 的记忆",
+        "type": "int",
+        "default": 30
+      },
+      "half_life_fleeting_days": {
+        "description": "短暂记忆半衰期（天）",
+        "hint": "重要性 0.3~1.0 的记忆",
+        "type": "int",
+        "default": 7
+      },
+      "half_life_noise_days": {
+        "description": "噪声记忆半衰期（天）",
+        "hint": "重要性 < 0.3 的记忆",
+        "type": "int",
+        "default": 1
+      },
+      "archive_threshold": {
+        "description": "归档阈值",
+        "hint": "重要性低于此值且超过 30 天的记忆自动归档",
+        "type": "float",
+        "default": 0.15
+      },
+      "evict_threshold": {
+        "description": "淘汰阈值",
+        "hint": "重要性低于此值且超过 90 天的记忆自动淘汰",
+        "type": "float",
+        "default": 0.05
+      },
+      "review_boost_factor": {
+        "description": "复习提升系数",
+        "hint": "每次访问 = 延长 effective_hl 的 multiplier（0~1）",
+        "type": "float",
+        "default": 0.15
+      }
+    }
   }
 }

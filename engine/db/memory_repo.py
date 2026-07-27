@@ -120,12 +120,12 @@ class MemoryRepo:
         ]
 
     def touch_memories(self, ids: list, importance_boost: float = 0.01):
-        """标记记忆被访问 + 微量提升 importance。"""
+        """标记记忆被访问 + 微量提升 importance + 重置衰减时钟。"""
         now = time.time()
         for mid in ids:
             self.cm.execute_write(
-                "UPDATE memories SET access_count = access_count + 1, last_accessed = ?, importance = MIN(3.0, importance + ?) WHERE id = ?",
-                (now, importance_boost, mid),
+                "UPDATE memories SET access_count = access_count + 1, last_accessed = ?, importance = MIN(3.0, importance + ?), last_decay_at = ? WHERE id = ?",
+                (now, importance_boost, now, mid),
             )
         self.cm.commit()
 
@@ -247,3 +247,96 @@ class MemoryRepo:
             GROUP BY a.tag_id, b.tag_id
         """).fetchall()
         return rows
+
+    def apply_memory_decay(self, config: dict) -> dict:
+        """对所有 activity='message' 的记忆执行连续重要性衰减。
+        配置参数（_conf_schema.json Memory_Decay_Settings）：
+          half_life_core, half_life_normal, half_life_fleeting, half_life_noise (天)
+          archive_threshold, evict_threshold, review_boost_factor
+        返回 {decayed, archived, evicted} 计数。
+        """
+        now = time.time()
+        one_day_ago = now - 86400
+
+        rows = self.cm.execute_read(
+            "SELECT id, importance, access_count, timestamp, last_decay_at, memory_type "
+            "FROM memories WHERE memory_type = 'message' AND last_decay_at < ?",
+            (one_day_ago,),
+        ).fetchall()
+
+        hl_core = float(config.get("half_life_core_days", 90))
+        hl_normal = float(config.get("half_life_normal_days", 30))
+        hl_fleeting = float(config.get("half_life_fleeting_days", 7))
+        hl_noise = float(config.get("half_life_noise_days", 1))
+        archive_th = float(config.get("archive_threshold", 0.15))
+        evict_th = float(config.get("evict_threshold", 0.05))
+        review_factor = float(config.get("review_boost_factor", 0.15))
+
+        decayed = archived = evicted = 0
+
+        for mem_id, imp, acc_cnt, ts, last_decay, mtype in rows:
+            try:
+                imp = float(imp or 1.0)
+                acc_cnt = int(acc_cnt or 0)
+                last_decay = float(last_decay or 0)
+                ts = float(ts or 0)
+
+                days_since = (now - max(last_decay, ts)) / 86400
+                if days_since < 1:
+                    continue
+
+                if imp > 2.0:
+                    base_hl = hl_core
+                elif imp > 1.0:
+                    base_hl = hl_normal
+                elif imp > 0.3:
+                    base_hl = hl_fleeting
+                else:
+                    base_hl = hl_noise
+
+                effective_hl = base_hl * (1.0 + acc_cnt * review_factor)
+                decay_factor = 0.5 ** (days_since / effective_hl)
+                new_imp = max(0.01, imp * decay_factor)
+
+                if new_imp < evict_th and (now - ts) > 90 * 86400:
+                    self.cm.execute_write(
+                        "UPDATE memories SET importance = ?, memory_type = 'evicted', last_decay_at = ? WHERE id = ?",
+                        (round(new_imp, 4), now, mem_id),
+                    )
+                    evicted += 1
+                elif new_imp < archive_th and (now - ts) > 30 * 86400:
+                    self.cm.execute_write(
+                        "UPDATE memories SET importance = ?, memory_type = 'archived', last_decay_at = ? WHERE id = ?",
+                        (round(new_imp, 4), now, mem_id),
+                    )
+                    archived += 1
+                else:
+                    self.cm.execute_write(
+                        "UPDATE memories SET importance = ?, last_decay_at = ? WHERE id = ?",
+                        (round(new_imp, 4), now, mem_id),
+                    )
+                    decayed += 1
+            except Exception:
+                continue
+
+        if decayed or archived or evicted:
+            self.cm.commit()
+
+        return {"decayed": decayed, "archived": archived, "evicted": evicted}
+
+    def unarchive_memory(self, memory_id: int) -> bool:
+        """将 archived/evicted 记忆恢复为 message，重置衰减时钟。"""
+        now = time.time()
+        row = self.cm.execute_read(
+            "SELECT id, importance FROM memories WHERE id = ? AND memory_type IN ('archived', 'evicted')",
+            (memory_id,),
+        ).fetchone()
+        if not row:
+            return False
+        new_imp = max(0.20, float(row[1] or 0))
+        self.cm.execute_write(
+            "UPDATE memories SET memory_type = 'message', importance = ?, last_decay_at = ? WHERE id = ?",
+            (round(new_imp, 4), now, memory_id),
+        )
+        self.cm.commit()
+        return True

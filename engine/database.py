@@ -101,6 +101,12 @@ class WaveMemoryDB:
     def touch_memories(self, ids, importance_boost: float = 0.01):
         return self._memory_repo.touch_memories(ids, importance_boost=importance_boost)
 
+    def apply_memory_decay(self, config: dict) -> dict:
+        return self._memory_repo.apply_memory_decay(config)
+
+    def unarchive_memory(self, memory_id: int) -> bool:
+        return self._memory_repo.unarchive_memory(memory_id)
+
     def get_memory_count(self, group_id=None):
         return self._memory_repo.get_memory_count(group_id)
 

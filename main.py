@@ -906,6 +906,26 @@ class WaveMemoryPlugin(Star):
             except Exception as e:
                 logger.warning(f"[WaveMemory] v2.2 migration failed (non-fatal): {e}")
 
+        # ─── 一次性数据迁移（v2.3：记忆衰减 last_decay_at 列）───
+        migration_marker_v23 = Path(self.data_dir) / ".v2_3_migrated"
+        if not migration_marker_v23.exists():
+            try:
+                conn = self.db.conn
+                col_check = conn.execute(
+                    "SELECT name FROM pragma_table_info('memories') WHERE name='last_decay_at'"
+                ).fetchone()
+                if not col_check:
+                    conn.execute("ALTER TABLE memories ADD COLUMN last_decay_at REAL")
+                    # 为所有现有记忆设置初始值
+                    now = time.time()
+                    conn.execute("UPDATE memories SET last_decay_at = ? WHERE last_decay_at IS NULL", (now,))
+                    conn.commit()
+                    logger.info("[WaveMemory] v2.3 migration: added last_decay_at column")
+                migration_marker_v23.touch()
+                logger.info("[WaveMemory] v2.3 migration completed, marker created")
+            except Exception as e:
+                logger.warning(f"[WaveMemory] v2.3 migration failed (non-fatal): {e}")
+
         # 启动写入器
         self.writer.start()
 
@@ -1490,7 +1510,7 @@ class WaveMemoryPlugin(Star):
                 logger.debug(f"[WaveMemory] Anchor inject failed: {e}")
 
     async def _soul_maintenance_loop(self):
-        """灵魂子系统维护循环：每小时衰减关切、记录基线情绪快照。"""
+        """灵魂子系统维护循环：每小时衰减关切、记录基线情绪快照、记忆衰减。"""
         try:
             while not getattr(self, "_terminated", False):
                 await asyncio.sleep(3600)
@@ -1513,6 +1533,14 @@ class WaveMemoryPlugin(Star):
                         )
                     except Exception as e:
                         logger.debug(f"[WaveMemory] few_shot extract failed: {e}")
+                if getattr(self, "db", None):
+                    try:
+                        decay_cfg = getattr(self, "query_cfg", {}).get("Memory_Decay_Settings", {})
+                        result = self.db.apply_memory_decay(decay_cfg)
+                        if result and result.get("decayed", 0) + result.get("archived", 0) + result.get("evicted", 0) > 0:
+                            logger.info(f"[WaveMemory] 记忆衰减: {result}")
+                    except Exception as e:
+                        logger.debug(f"[WaveMemory] apply_memory_decay failed: {e}")
         except asyncio.CancelledError:
             pass
 

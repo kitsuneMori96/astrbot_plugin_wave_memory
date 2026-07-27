@@ -185,6 +185,16 @@ async def delete_memory(memory_id: int):
     return jsonify({"ok": True, "deleted": memory_id})
 
 
+@memories_bp.route("/memories/<int:memory_id>/unarchive", methods=["POST"])
+@require_auth
+async def unarchive_memory(memory_id: int):
+    """将 archived/evicted 记忆恢复为活跃状态。"""
+    c = get_container()
+    ok = c.db.unarchive_memory(memory_id)
+    if not ok:
+        return jsonify({"error": "not found or not archived/evicted"}), 404
+    return jsonify({"ok": True, "memory_id": memory_id})
+
 @memories_bp.route("/memories/<int:memory_id>/re-embed", methods=["POST"])
 @require_auth
 async def re_embed_memory(memory_id: int):
