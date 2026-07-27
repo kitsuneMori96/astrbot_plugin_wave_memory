@@ -158,9 +158,13 @@ class QueryEngine:
         logic_depth = 0.5
         entropy = 0.5
         if self.enable_epa and self.epa and self.epa.initialized:
-            epa_result = self.epa.analyze(query_vec)
-            logic_depth = epa_result.get("logic_depth", 0.5)
-            entropy = epa_result.get("entropy", 0.5)
+            try:
+                epa_result = self.epa.analyze(query_vec)
+                logic_depth = epa_result.get("logic_depth", 0.5)
+                entropy = epa_result.get("entropy", 0.5)
+            except Exception:
+                logic_depth = 0.5
+                entropy = 0.5
 
         matched_tags = []
 
