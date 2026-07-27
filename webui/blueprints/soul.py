@@ -46,11 +46,13 @@ async def list_concerns():
     if not _table_exists(c.db.conn, "concerns"):
         return jsonify({"items": []})
     bot_id = request.args.get("bot_id")
-    sql = "SELECT id, topic, intensity, bot_id, origin_memory_id, created_at, last_triggered FROM concerns WHERE 1=1"
-    params = []
-    if bot_id:
-        sql += " AND bot_id = ?"
-        params.append(bot_id)
+    # 占位 bot_id 不过滤（前端硬编码 'bot'/'assistant' 占位值）
+    if bot_id and bot_id not in ("bot", "assistant"):
+        sql = "SELECT id, topic, intensity, bot_id, origin_memory_id, created_at, last_triggered FROM concerns WHERE bot_id = ?"
+        params = [bot_id]
+    else:
+        sql = "SELECT id, topic, intensity, bot_id, origin_memory_id, created_at, last_triggered FROM concerns WHERE 1=1"
+        params = []
     sql += " ORDER BY intensity DESC, created_at DESC LIMIT 50"
     rows = c.db.conn.execute(sql, params).fetchall()
     items = [
@@ -165,11 +167,12 @@ async def time_anchors():
         return jsonify({"items": []})
     bot_id = request.args.get("bot_id")
     limit = max(1, min(500, _safe_int(request.args.get("limit", 50), 50)))
-    sql = "SELECT id, event_summary, timestamp, emotional_weight, bot_id FROM time_anchors WHERE 1=1"
-    params = []
-    if bot_id:
-        sql += " AND bot_id = ?"
-        params.append(bot_id)
+    if bot_id and bot_id not in ("bot", "assistant"):
+        sql = "SELECT id, event_summary, timestamp, emotional_weight, bot_id FROM time_anchors WHERE bot_id = ?"
+        params = [bot_id]
+    else:
+        sql = "SELECT id, event_summary, timestamp, emotional_weight, bot_id FROM time_anchors WHERE 1=1"
+        params = []
     sql += " ORDER BY timestamp DESC LIMIT ?"
     params.append(limit)
     rows = c.db.conn.execute(sql, params).fetchall()

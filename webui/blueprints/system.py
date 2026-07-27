@@ -107,6 +107,14 @@ async def system_status():
         "SELECT nickname, interaction_count FROM user_profiles WHERE interaction_count > 0 ORDER BY interaction_count DESC LIMIT 5"
     ).fetchall()
 
+    # 可用 bot 列表（灵魂页面筛选用）
+    available_bots = []
+    try:
+        rows = c.db.conn.execute("SELECT DISTINCT bot_id FROM user_profiles WHERE bot_id IS NOT NULL AND bot_id != ''").fetchall()
+        available_bots = [r[0] for r in rows]
+    except Exception:
+        pass
+
     # 内心念头（来自 DesireEngine）
     unspoken_desire = None
     if getattr(c, "desire_engine", None):
@@ -147,6 +155,7 @@ async def system_status():
             "active_moods": [{"group_id": m[0], "type": m[1], "intensity": m[2], "desc": m[3]} for m in active_moods],
             "unspoken_desire": unspoken_desire,
         },
+        "available_bots": available_bots,
     })
 
 

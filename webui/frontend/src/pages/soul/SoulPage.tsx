@@ -52,7 +52,7 @@ export function SoulPage() {
   const [moods, setMoods] = useState<MoodItem[]>([])
   
   // 筛选器
-  const [botFilter, setBotFilter] = useState('bot')
+  const [botFilter, setBotFilter] = useState('')
   const [moodGroupFilter, setMoodGroupFilter] = useState('')
 
   const [loading, setLoading] = useState(true)
@@ -505,13 +505,15 @@ export function SoulPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2 text-xs">
           <span className="text-muted-foreground">切换 Bot 灵魂：</span>
-          <Select value={botFilter} onValueChange={setBotFilter}>
+           <Select value={botFilter} onValueChange={setBotFilter}>
             <SelectTrigger className="w-36 h-8">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="bot">主 AI 人格 (bot)</SelectItem>
-              <SelectItem value="assistant">备用 AI 人格 (assistant)</SelectItem>
+              <SelectItem value="">全部 Bot</SelectItem>
+              {[...new Set(sys?.available_bots ?? [])].map((b) => (
+                <SelectItem key={b} value={b}>{b}</SelectItem>
+              ))}
             </SelectContent>
           </Select>
           <Input

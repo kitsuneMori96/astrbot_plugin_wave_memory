@@ -23,6 +23,7 @@ export interface SystemPayload {
     active_moods?: Array<{ group_id?: string; type?: string; intensity?: number; desc?: string }>
     unspoken_desire?: { topic?: string; motive?: string }
   }
+  available_bots?: string[]
 }
 
 export interface ErrorPayload {
