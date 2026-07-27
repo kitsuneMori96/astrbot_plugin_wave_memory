@@ -256,7 +256,18 @@ def build_people_payload(conn: Any, *, limit: int = 50, offset: int = 0, search:
                 qq_id = str(item.get("qq_id") or item.get("user_id") or "")
                 pgid = str(item.get("group_id", ""))
                 pbid = str(item.get("bot_id", ""))
-                prof = profiles_by_key.get(f"{qq_id}\x00{pgid}\x00{pbid}") or profiles_by_uid.get(qq_id, {})
+                prof = profiles_by_key.get(f"{qq_id}\x00{pgid}\x00{pbid}")
+                if not prof:
+                    prof = profiles_by_uid.get(qq_id)
+                # 兜底：qq_id 与 user_id 可能带不同前缀
+                if not prof and qq_id:
+                    for p in profiles_by_uid.values():
+                        puid = str(p.get("user_id", ""))
+                        if puid and (puid == qq_id or puid.endswith(qq_id) or qq_id.endswith(puid)):
+                            prof = p
+                            break
+                if not prof:
+                    prof = {}
                 item.update({
                     "user_id": prof.get("user_id", qq_id),
                     "group_id": prof.get("group_id", pgid),
