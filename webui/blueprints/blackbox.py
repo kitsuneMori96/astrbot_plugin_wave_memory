@@ -492,6 +492,43 @@ async def get_person_aggregated(person_id: str):
         "meta_updated": meta.get("meta_updated", ""),
     })
 
+    # 三级回退：MetaThinking 未写入时从其他字段补数据
+    if not result.get("impression"):
+        # L2: user_profiles.notes
+        imp = (current.get("notes") or "").strip()
+        if imp:
+            result["impression"] = imp
+        else:
+            # L3: personality_tags
+            pt = (current.get("personality_tags") or "").strip()
+            if pt:
+                result["impression"] = pt[:200]
+
+    if not result.get("tags"):
+        # L2: person_registry.tag_ids → {name: "untagged", confidence: 0.5}
+        pr_tags = result.get("person_registry_tags") or []
+        if pr_tags:
+            result["tags"] = {t: 1.0 for t in pr_tags if t}
+        else:
+            # L3: personality_tags → 逗号分隔
+            pt = (current.get("personality_tags") or "").strip()
+            if pt:
+                result["tags"] = {t.strip(): 0.5 for t in pt.split(",") if t.strip()}
+            else:
+                # L4: memory_mentions → memory_tags → tags
+                try:
+                    rows = conn.execute(
+                        "SELECT DISTINCT t.name FROM memory_mentions m "
+                        "JOIN memory_tags mt ON m.memory_id = mt.memory_id "
+                        "JOIN tags t ON mt.tag_id = t.id "
+                        "WHERE m.qq_id = ? AND t.name IS NOT NULL",
+                        (person_id,),
+                    ).fetchall()
+                    if rows:
+                        result["tags"] = {r[0]: 0.6 for r in rows}
+                except Exception:
+                    pass
+
     return jsonify(result)
 
 
