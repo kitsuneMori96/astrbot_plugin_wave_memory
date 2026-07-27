@@ -250,23 +250,25 @@ def build_people_payload(conn: Any, *, limit: int = 50, offset: int = 0, search:
             rows = conn.execute("SELECT * FROM person_registry").fetchall()
         except Exception:
             rows = []
-        for row in rows:
-            item = _row_dict(row)
-            qq_id = str(item.get("qq_id") or item.get("user_id") or "")
-            pgid = str(item.get("group_id", ""))
-            pbid = str(item.get("bot_id", ""))
-            # 优先精确匹配 (user_id, group_id, bot_id)，再回退到仅 user_id
-            prof = profiles_by_key.get(f"{qq_id}\x00{pgid}\x00{pbid}") or profiles_by_uid.get(qq_id, {})
-            item.update({
-                "user_id": prof.get("user_id", qq_id),
-                "group_id": prof.get("group_id", pgid),
-                "bot_id": prof.get("bot_id", pbid),
-                "nickname": prof.get("nickname", item.get("display_name")),
-                "affection": prof.get("affection"),
-                "interaction_count": prof.get("interaction_count", item.get("message_count")),
-                "metadata": _safe_json(prof.get("metadata")),
-            })
-            items.append(item)
+        if rows:
+            for row in rows:
+                item = _row_dict(row)
+                qq_id = str(item.get("qq_id") or item.get("user_id") or "")
+                pgid = str(item.get("group_id", ""))
+                pbid = str(item.get("bot_id", ""))
+                prof = profiles_by_key.get(f"{qq_id}\x00{pgid}\x00{pbid}") or profiles_by_uid.get(qq_id, {})
+                item.update({
+                    "user_id": prof.get("user_id", qq_id),
+                    "group_id": prof.get("group_id", pgid),
+                    "bot_id": prof.get("bot_id", pbid),
+                    "nickname": prof.get("nickname", item.get("display_name")),
+                    "affection": prof.get("affection"),
+                    "interaction_count": prof.get("interaction_count", item.get("message_count")),
+                    "metadata": _safe_json(prof.get("metadata")),
+                })
+                items.append(item)
+        else:
+            items = list(profiles_by_key.values())
     else:
         items = list(profiles_by_key.values())
 
