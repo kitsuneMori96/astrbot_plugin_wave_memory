@@ -1337,6 +1337,14 @@ class WaveMemoryPlugin(Star):
             except Exception:
                 pass
 
+        # 用历史数据回填灵魂页面（仅首次、异步）
+        if soul_bot_id and (
+            getattr(self, "concern_tracker", None)
+            or getattr(self, "mood_trajectory", None)
+            or getattr(self, "subjective_time", None)
+        ):
+            self._spawn(self._inject_historical_soul_data(soul_bot_id))
+
         logger.info(
             f"[WaveMemory] 灵魂子系统就绪: belief={bool(self.belief_engine)} "
             f"concern={bool(self.concern_tracker)} mood_traj={bool(self.mood_trajectory)} "
@@ -1373,6 +1381,102 @@ class WaveMemoryPlugin(Star):
         self._spawn(self._async_cache_warmup())
 
         logger.info("[WaveMemory] Fully initialized")
+
+    async def _inject_historical_soul_data(self, bot_id: str):
+        """用历史数据回填灵魂页面（bot_mood → mood_snapshots, tags → concerns, episodes → anchors）。
+        仅在对应目标表为空时执行，避免重复注入。
+        """
+        import time as _time
+
+        conn = self.db.conn
+
+        # ─── 1. Mood Snapshots ← bot_mood ───
+        mt = getattr(self, "mood_trajectory", None)
+        if mt:
+            try:
+                has_data = conn.execute("SELECT 1 FROM mood_snapshots LIMIT 1").fetchone()
+                if not has_data:
+                    rows = conn.execute(
+                        "SELECT mood_type, intensity, description, start_time, end_time "
+                        "FROM bot_mood ORDER BY start_time ASC"
+                    ).fetchall()
+                    count = 0
+                    for r in rows:
+                        mtype, intensity, desc, st, et = r
+                        desc = desc or ""
+                        if mtype in ("cheerful", "energetic"):
+                            valence = 0.5 + float(intensity or 0.5) * 0.3
+                            arousal = 0.5 + float(intensity or 0.5) * 0.3
+                        elif mtype in ("concerned", "sad"):
+                            valence = -0.3 - float(intensity or 0.5) * 0.4
+                            arousal = 0.3 + float(intensity or 0.5) * 0.2
+                        else:
+                            valence = float(intensity or 0.5) * 0.2
+                            arousal = float(intensity or 0.5) * 0.3
+                        conn.execute(
+                            "INSERT INTO mood_snapshots (bot_id, timestamp, valence, arousal, cause) VALUES (?, ?, ?, ?, ?)",
+                            (bot_id, st or _time.time(), round(valence, 3), round(arousal, 3), desc),
+                        )
+                        count += 1
+                    conn.commit()
+                    if count:
+                        logger.info(f"[WaveMemory] 历史注入: mood_snapshots ← bot_mood ({count} 条)")
+            except Exception as e:
+                logger.debug(f"[WaveMemory] Mood inject failed: {e}")
+
+        # ─── 2. Concerns ← tags（按频率取前 10 个非 person 类 tag）───
+        ct = getattr(self, "concern_tracker", None)
+        if ct:
+            try:
+                has_data = conn.execute("SELECT 1 FROM concerns LIMIT 1").fetchone()
+                if not has_data:
+                    rows = conn.execute(
+                        "SELECT name, frequency, created_at, last_seen, tag_type FROM tags "
+                        "WHERE tag_type NOT IN ('person', 'entity') AND frequency > 0 "
+                        "ORDER BY frequency DESC LIMIT 10"
+                    ).fetchall()
+                    if rows:
+                        max_freq = max(r[1] or 1 for r in rows)
+                        for r in rows:
+                            name, freq, created, last_seen, _ = r
+                            intensity = min(1.0, max(0.1, (freq or 0) / max_freq * 0.7))
+                            conn.execute(
+                                "INSERT INTO concerns (topic, intensity, bot_id, created_at, last_triggered) VALUES (?, ?, ?, ?, ?)",
+                                (name, round(intensity, 3), bot_id, created or _time.time(), last_seen or _time.time()),
+                            )
+                        conn.commit()
+                        logger.info(f"[WaveMemory] 历史注入: concerns ← tags ({len(rows)} 条)")
+            except Exception as e:
+                logger.debug(f"[WaveMemory] Concern inject failed: {e}")
+
+        # ─── 3. Time Anchors ← experience_episodes ───
+        st = getattr(self, "subjective_time", None)
+        if st:
+            try:
+                has_data = conn.execute("SELECT 1 FROM time_anchors LIMIT 1").fetchone()
+                if not has_data:
+                    rows = conn.execute(
+                        "SELECT trigger_text, bot_action, created_at, emotional_weight FROM experience_episodes "
+                        "WHERE emotional_weight > 0.3 ORDER BY created_at ASC"
+                    ).fetchall()
+                    count = 0
+                    for r in rows:
+                        trigger_text, bot_action, created, ew = r
+                        summary = (trigger_text or "")[:80]
+                        if not summary and bot_action:
+                            summary = (bot_action or "")[:80]
+                        if not summary:
+                            summary = "历史重要事件"
+                        conn.execute(
+                            "INSERT INTO time_anchors (event_summary, timestamp, emotional_weight, bot_id) VALUES (?, ?, ?, ?)",
+                            (summary, created, round(float(ew), 3), bot_id),
+                        )
+                        count += 1
+                    conn.commit()
+                    if count:
+                        logger.info(f"[WaveMemory] 历史注入: time_anchors ← experience_episodes ({count} 条)")
+            except Exception as e:
+                logger.debug(f"[WaveMemory] Anchor inject failed: {e}")
 
     async def _soul_maintenance_loop(self):
         """灵魂子系统维护循环：每小时衰减关切、记录基线情绪快照。"""
