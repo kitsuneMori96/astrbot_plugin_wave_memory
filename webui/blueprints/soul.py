@@ -303,7 +303,7 @@ async def mood_trajectory():
         rows = c.db.conn.execute(sql, params).fetchall()
         items = [
             {"id": r[0], "group_id": "", "bot_id": r[1] or "", "type": "positive" if (r[3] or 0) > 0.1 else "negative" if (r[3] or 0) < -0.1 else "neutral",
-             "intensity": min(1.0, max(0.0, abs(float(r[3] or 0)) + float(r[4] or 0) * 0.5)), "valence": r[3], "arousal": r[4], "description": r[5] or "", "timestamp": r[2], "is_active": False}
+             "intensity": min(1.0, max(0.0, float(r[4] or 0))), "valence": r[3], "arousal": r[4], "description": r[5] or "", "timestamp": r[2], "is_active": False}
             for r in rows
         ]
         items.reverse()
