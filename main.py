@@ -1265,6 +1265,7 @@ class WaveMemoryPlugin(Star):
             logger.warning("[WaveMemory] consolidation 未就绪（LLM 不可用？），belief_engine 将独立运行")
         soul_bot = experience_bot or reflect_bot
         soul_bot_id = soul_bot.db_id if soul_bot else ""
+        self._soul_bot_id = soul_bot_id  # 供维护循环使用
         # 信念引擎（提取在 consolidation 内触发，注入在 on_llm_request）
         try:
             if runtime_capability_enabled(self.runtime_mode, "belief", True) and self.tag_llm_provider_id and soul_bot_id:
@@ -1344,6 +1345,10 @@ class WaveMemoryPlugin(Star):
             or getattr(self, "subjective_time", None)
         ):
             self._spawn(self._inject_historical_soul_data(soul_bot_id))
+
+        # FewShot 首次提取（异步，内置 24h 冷却）
+        if getattr(self, "few_shot_service", None):
+            self._spawn(self.few_shot_service.extract_candidates(bot_id=soul_bot_id))
 
         logger.info(
             f"[WaveMemory] 灵魂子系统就绪: belief={bool(self.belief_engine)} "
@@ -1501,6 +1506,13 @@ class WaveMemoryPlugin(Star):
                         )
                     except Exception as e:
                         logger.debug(f"[WaveMemory] mood_trajectory baseline failed: {e}")
+                if getattr(self, "few_shot_service", None):
+                    try:
+                        await self.few_shot_service.extract_candidates(
+                            bot_id=getattr(self, "_soul_bot_id", "")
+                        )
+                    except Exception as e:
+                        logger.debug(f"[WaveMemory] few_shot extract failed: {e}")
         except asyncio.CancelledError:
             pass
 
