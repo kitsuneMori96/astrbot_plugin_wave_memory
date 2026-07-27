@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 try:
@@ -437,6 +438,305 @@ async def get_person_detail(person_id: str):
             item["readonly"] = True
             return jsonify(item)
     return jsonify({"ok": False, "error": "person_not_found", "readonly": True}), 404
+
+
+@blackbox_bp.route("/people/<person_id>/detail", methods=["GET"])
+@require_auth
+async def get_person_aggregated(person_id: str):
+    conn = _conn_from_container()
+    if not conn:
+        return jsonify(_error_payload("database_unavailable")), 503
+
+    profiles = []
+    if _table_exists(conn, "user_profiles"):
+        try:
+            for row in conn.execute(
+                "SELECT * FROM user_profiles WHERE user_id = ?", (person_id,)
+            ).fetchall():
+                profiles.append(_row_dict(row))
+        except Exception:
+            pass
+
+    registry = None
+    if _table_exists(conn, "person_registry"):
+        try:
+            row = conn.execute(
+                "SELECT * FROM person_registry WHERE qq_id = ?", (person_id,)
+            ).fetchone()
+            if row:
+                registry = _row_dict(row)
+        except Exception:
+            pass
+
+    result = {
+        "qq_id": person_id,
+        "display_name": (registry or {}).get("display_name", ""),
+        "aliases": _safe_json((registry or {}).get("aliases", "[]")) or [],
+        "message_count": (registry or {}).get("message_count", 0),
+        "groups": _safe_json((registry or {}).get("groups", "[]")) or [],
+        "person_registry_tags": _safe_json((registry or {}).get("tag_ids", "[]")) or [],
+        "profiles": profiles,
+        "first_seen": min((p.get("first_seen") or 0 for p in profiles if p.get("first_seen")), default=0),
+        "last_seen": max((p.get("last_seen") or 0 for p in profiles if p.get("last_seen")), default=0),
+    }
+
+    # pick profile with highest affection as current
+    current = max(profiles, key=lambda p: p.get("affection") or 0) if profiles else {}
+    meta = _safe_json(current.get("metadata", "{}")) or {}
+    result.update({
+        "affection": current.get("affection", 0),
+        "interaction_count": current.get("interaction_count", 0),
+        "nickname": current.get("nickname", ""),
+        "attitude_level": meta.get("attitude_level", "neutral"),
+        "dimensions": meta.get("dimensions", {}),
+        "impression": meta.get("impression", ""),
+        "tags": meta.get("tags", {}),
+        "meta_updated": meta.get("meta_updated", ""),
+    })
+
+    return jsonify(result)
+
+
+@blackbox_bp.route("/people/<person_id>/events", methods=["GET"])
+@require_auth
+async def get_person_events(person_id: str):
+    conn = _conn_from_container()
+    if not conn:
+        return jsonify(_error_payload("database_unavailable")), 503
+    args = _request_args()
+    limit = int(args.get("limit", 50))
+    offset = int(args.get("offset", 0))
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM relationship_events WHERE user_id = ?", (person_id,)
+        ).fetchone()
+        total = row[0] if row else 0
+        rows = conn.execute(
+            """SELECT id, bot_id, group_id, event_type, dimension, delta, reason,
+                      source_episode_id, source_memory_id, created_at
+               FROM relationship_events
+               WHERE user_id = ?
+               ORDER BY created_at DESC LIMIT ? OFFSET ?""",
+            (person_id, limit, offset),
+        ).fetchall()
+        items = [_row_dict(r) for r in rows]
+    except Exception:
+        items = []
+        total = 0
+    return jsonify({"items": items, "total": total, "limit": limit, "offset": offset})
+
+
+@blackbox_bp.route("/people/<person_id>/dimension-trend", methods=["GET"])
+@require_auth
+async def get_person_dimension_trend(person_id: str):
+    conn = _conn_from_container()
+    if not conn:
+        return jsonify(_error_payload("database_unavailable")), 503
+    args = _request_args()
+    days = int(args.get("days", 30))
+    days = max(7, min(365, days))
+    since = time.time() - days * 86400
+
+    try:
+        rows = conn.execute(
+            """SELECT dimension, delta, created_at
+               FROM relationship_events
+               WHERE user_id = ? AND created_at >= ?
+               ORDER BY created_at ASC""",
+            (person_id, since),
+        ).fetchall()
+    except Exception:
+        rows = []
+
+    # aggregate by day and dimension
+    daily: dict[str, dict[str, float]] = {}
+    for dim, delta, ts in rows:
+        day = time.strftime("%Y-%m-%d", time.localtime(ts))
+        if day not in daily:
+            daily[day] = {}
+        daily[day][dim] = daily[day].get(dim, 0) + (delta or 0)
+
+    # also get current dimensions as baseline
+    baseline = {}
+    try:
+        meta_row = conn.execute(
+            "SELECT metadata FROM user_profiles WHERE user_id = ? LIMIT 1", (person_id,)
+        ).fetchone()
+        if meta_row and meta_row[0]:
+            meta = json.loads(meta_row[0])
+            baseline = meta.get("dimensions", {})
+    except Exception:
+        pass
+
+    # build cumulative trend
+    dim_names = ["familiarity", "trust", "fun", "hostility", "depth"]
+    cum: dict[str, float] = {d: baseline.get(d, 0) for d in dim_names}
+    points: list[dict[str, Any]] = []
+    sorted_days = sorted(daily.keys())
+    for day in sorted_days:
+        for dim in dim_names:
+            cum[dim] = cum.get(dim, 0) + daily[day].get(dim, 0)
+        # compute synthetic affection for this day
+        score = sum(cum.get(d, 0) * w for d, w in [("familiarity", 0.25), ("trust", 0.30), ("fun", 0.20), ("depth", 0.25)])
+        score -= cum.get("hostility", 0) * 0.5
+        points.append({
+            "date": day,
+            "affection": round(max(-100, min(100, score)), 1),
+            "familiarity": round(cum["familiarity"], 2),
+            "trust": round(cum["trust"], 2),
+            "fun": round(cum["fun"], 2),
+            "hostility": round(cum["hostility"], 2),
+            "depth": round(cum["depth"], 2),
+        })
+
+    return jsonify({"points": points, "days": days})
+
+
+@blackbox_bp.route("/people/<person_id>/expression", methods=["GET"])
+@require_auth
+async def get_person_expression(person_id: str):
+    conn = _conn_from_container()
+    if not conn:
+        return jsonify(_error_payload("database_unavailable")), 503
+    try:
+        row = conn.execute(
+            "SELECT expression, group_id FROM expression_patterns WHERE situation = ? LIMIT 1",
+            (f"user:{person_id}",),
+        ).fetchone()
+        if row and row[0]:
+            return jsonify({
+                "expression": _safe_json(row[0]),
+                "group_id": row[1],
+                "found": True,
+            })
+    except Exception:
+        pass
+    return jsonify({"found": False, "expression": None, "group_id": None})
+
+
+@blackbox_bp.route("/people/<person_id>/notes", methods=["PUT"])
+@require_auth
+async def update_person_notes(person_id: str):
+    conn = _conn_from_container()
+    if not conn:
+        return jsonify(_error_payload("database_unavailable")), 503
+    body = await request.get_json(silent=True) or {}
+    notes = str(body.get("notes", "") or "")
+    bot_id = str(body.get("bot_id", "yushu") or "yushu")
+    group_id = str(body.get("group_id", "") or "")
+    if not group_id:
+        return jsonify({"ok": False, "error": "group_id_required"}), 400
+    try:
+        conn.execute(
+            "UPDATE user_profiles SET notes = ? WHERE user_id = ? AND group_id = ? AND bot_id = ?",
+            (notes, person_id, group_id, bot_id),
+        )
+        conn.commit()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@blackbox_bp.route("/people/<person_id>/impression", methods=["PUT"])
+@require_auth
+async def update_person_impression(person_id: str):
+    conn = _conn_from_container()
+    if not conn:
+        return jsonify(_error_payload("database_unavailable")), 503
+    body = await request.get_json(silent=True) or {}
+    impression = str(body.get("impression", "") or "")
+    bot_id = str(body.get("bot_id", "yushu") or "yushu")
+    group_id = str(body.get("group_id", "") or "")
+    if not group_id:
+        return jsonify({"ok": False, "error": "group_id_required"}), 400
+    try:
+        row = conn.execute(
+            "SELECT metadata FROM user_profiles WHERE user_id = ? AND group_id = ? AND bot_id = ?",
+            (person_id, group_id, bot_id),
+        ).fetchone()
+        meta = json.loads(row[0]) if row and row[0] else {}
+        meta["impression"] = impression
+        meta["meta_updated"] = time.strftime("%Y-%m-%d %H:%M")
+        conn.execute(
+            "UPDATE user_profiles SET metadata = ? WHERE user_id = ? AND group_id = ? AND bot_id = ?",
+            (json.dumps(meta, ensure_ascii=False), person_id, group_id, bot_id),
+        )
+        conn.commit()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@blackbox_bp.route("/people/<person_id>/tags", methods=["PUT"])
+@require_auth
+async def update_person_tags(person_id: str):
+    conn = _conn_from_container()
+    if not conn:
+        return jsonify(_error_payload("database_unavailable")), 503
+    body = await request.get_json(silent=True) or {}
+    tags = body.get("tags", {})
+    if not isinstance(tags, dict):
+        return jsonify({"ok": False, "error": "tags_must_be_dict"}), 400
+    bot_id = str(body.get("bot_id", "yushu") or "yushu")
+    group_id = str(body.get("group_id", "") or "")
+    if not group_id:
+        return jsonify({"ok": False, "error": "group_id_required"}), 400
+    try:
+        row = conn.execute(
+            "SELECT metadata FROM user_profiles WHERE user_id = ? AND group_id = ? AND bot_id = ?",
+            (person_id, group_id, bot_id),
+        ).fetchone()
+        meta = json.loads(row[0]) if row and row[0] else {}
+        meta["tags"] = {k: max(0, int(v)) for k, v in tags.items()}
+        meta["meta_updated"] = time.strftime("%Y-%m-%d %H:%M")
+        conn.execute(
+            "UPDATE user_profiles SET metadata = ? WHERE user_id = ? AND group_id = ? AND bot_id = ?",
+            (json.dumps(meta, ensure_ascii=False), person_id, group_id, bot_id),
+        )
+        conn.commit()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@blackbox_bp.route("/people/<person_id>/aliases", methods=["PUT"])
+@require_auth
+async def update_person_aliases(person_id: str):
+    conn = _conn_from_container()
+    if not conn:
+        return jsonify(_error_payload("database_unavailable")), 503
+    body = await request.get_json(silent=True) or {}
+    action = str(body.get("action", "add") or "add")
+    alias = str(body.get("alias", "") or "").strip()
+    if not alias:
+        return jsonify({"ok": False, "error": "alias_required"}), 400
+    if len(alias) > 20:
+        return jsonify({"ok": False, "error": "alias_too_long"}), 400
+    try:
+        row = conn.execute(
+            "SELECT aliases, display_name FROM person_registry WHERE qq_id = ?", (person_id,)
+        ).fetchone()
+        aliases: list[str] = _safe_json(row[0]) if row and row[0] else []
+        display_name = row[1] if row else ""
+        if action == "add":
+            if alias not in aliases:
+                aliases.append(alias)
+        elif action == "remove":
+            aliases = [a for a in aliases if a != alias]
+        elif action == "set_display":
+            display_name = alias
+        else:
+            return jsonify({"ok": False, "error": "invalid_action"}), 400
+        conn.execute(
+            "INSERT OR REPLACE INTO person_registry (qq_id, display_name, aliases, last_seen) VALUES (?, ?, ?, ?)",
+            (person_id, display_name, json.dumps(aliases, ensure_ascii=False), time.time()),
+        )
+        conn.commit()
+        return jsonify({"ok": True, "aliases": aliases, "display_name": display_name})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @blackbox_bp.route("/indexes/summary", methods=["GET"])

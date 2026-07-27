@@ -96,6 +96,56 @@ export interface BlackboxFewShotExample {
   [key: string]: unknown
 }
 
+export interface BlackboxPersonDetail {
+  qq_id: string
+  display_name?: string
+  aliases?: string[]
+  message_count?: number
+  groups?: string[]
+  person_registry_tags?: string[]
+  profiles?: Record<string, unknown>[]
+  first_seen?: number
+  last_seen?: number
+  affection?: number
+  interaction_count?: number
+  nickname?: string
+  attitude_level?: string
+  dimensions?: Record<string, number>
+  impression?: string
+  tags?: Record<string, number>
+  meta_updated?: string
+}
+
+export interface RelationshipEventItem {
+  id?: number | string
+  bot_id?: string
+  group_id?: string
+  event_type?: string
+  dimension?: string
+  delta?: number
+  reason?: string
+  source_episode_id?: number | string
+  source_memory_id?: number | string
+  created_at?: number | string
+  [key: string]: unknown
+}
+
+export interface DimensionTrendPoint {
+  date: string
+  affection: number
+  familiarity: number
+  trust: number
+  fun: number
+  hostility: number
+  depth: number
+}
+
+export interface PersonExpression {
+  found: boolean
+  expression: Record<string, unknown> | null
+  group_id: string | null
+}
+
 export interface BlackboxFactItem {
   id?: number | string
   subject?: string
@@ -202,4 +252,72 @@ export function getBlackboxIndexesSummary(): Promise<BlackboxIndexesSummary> {
 
 export function getBlackboxIndexesCheck(): Promise<BlackboxIndexesSummary> {
   return fetchJson<BlackboxIndexesSummary>('/api/blackbox/indexes/check')
+}
+
+export function getBlackboxPersonDetail(personId: string): Promise<BlackboxPersonDetail> {
+  return fetchJson<BlackboxPersonDetail>(`/api/blackbox/people/${encodeURIComponent(personId)}/detail`)
+}
+
+export function getBlackboxPersonEvents(
+  personId: string,
+  query: { limit?: number; offset?: number } = {},
+): Promise<{ items: RelationshipEventItem[]; total: number; limit: number; offset: number }> {
+  const params = new URLSearchParams()
+  if (query.limit !== undefined) params.set('limit', String(query.limit))
+  if (query.offset !== undefined) params.set('offset', String(query.offset))
+  const qs = params.toString()
+  return fetchJson(`/api/blackbox/people/${encodeURIComponent(personId)}/events${qs ? `?${qs}` : ''}`)
+}
+
+export function getBlackboxPersonDimensionTrend(
+  personId: string,
+  days: number = 30,
+): Promise<{ points: DimensionTrendPoint[]; days: number }> {
+  return fetchJson(`/api/blackbox/people/${encodeURIComponent(personId)}/dimension-trend?days=${days}`)
+}
+
+export function getBlackboxPersonExpression(personId: string): Promise<PersonExpression> {
+  return fetchJson<PersonExpression>(`/api/blackbox/people/${encodeURIComponent(personId)}/expression`)
+}
+
+export function updatePersonNotes(personId: string, notes: string, groupId: string, botId: string = 'yushu'): Promise<{ ok: boolean }> {
+  return fetchJson(`/api/blackbox/people/${encodeURIComponent(personId)}/notes`, {
+    method: 'PUT',
+    body: JSON.stringify({ notes, group_id: groupId, bot_id: botId }),
+  })
+}
+
+export function updatePersonImpression(
+  personId: string,
+  impression: string,
+  groupId: string,
+  botId: string = 'yushu',
+): Promise<{ ok: boolean }> {
+  return fetchJson(`/api/blackbox/people/${encodeURIComponent(personId)}/impression`, {
+    method: 'PUT',
+    body: JSON.stringify({ impression, group_id: groupId, bot_id: botId }),
+  })
+}
+
+export function updatePersonTags(
+  personId: string,
+  tags: Record<string, number>,
+  groupId: string,
+  botId: string = 'yushu',
+): Promise<{ ok: boolean }> {
+  return fetchJson(`/api/blackbox/people/${encodeURIComponent(personId)}/tags`, {
+    method: 'PUT',
+    body: JSON.stringify({ tags, group_id: groupId, bot_id: botId }),
+  })
+}
+
+export function updatePersonAliases(
+  personId: string,
+  action: 'add' | 'remove' | 'set_display',
+  alias: string,
+): Promise<{ ok: boolean; aliases?: string[]; display_name?: string }> {
+  return fetchJson(`/api/blackbox/people/${encodeURIComponent(personId)}/aliases`, {
+    method: 'PUT',
+    body: JSON.stringify({ action, alias }),
+  })
 }

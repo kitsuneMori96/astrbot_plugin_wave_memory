@@ -34,7 +34,7 @@ import { BlackboxHubPage } from '@/pages/blackbox/BlackboxHubPage'
 import { BlackboxBookLorePage } from '@/pages/blackbox/BlackboxBookLorePage'
 import { BlackboxFewShotPage } from '@/pages/blackbox/BlackboxFewShotPage'
 import { BlackboxFactsPage } from '@/pages/blackbox/BlackboxFactsPage'
-import { BlackboxPeoplePage } from '@/pages/blackbox/BlackboxPeoplePage'
+import { BlackboxPeoplePage, BlackboxPersonDetailPage } from '@/pages/blackbox'
 import { BlackboxIndexesPage } from '@/pages/blackbox/BlackboxIndexesPage'
 
 export interface AppRoute {
@@ -150,6 +150,13 @@ export const appRoutes: AppRoute[] = [
     description: '人物画像、UserProfile、Affinity、关系事件与别名入口',
     icon: UsersIcon,
     element: BlackboxPeoplePage,
+  },
+  {
+    path: '/blackbox/people/:id',
+    title: '人物详情',
+    description: '人物完整画像：维度雷达、好感趋势、关系事件、表达模式',
+    icon: UsersIcon,
+    element: BlackboxPersonDetailPage,
   },
   {
     path: '/blackbox/indexes',
