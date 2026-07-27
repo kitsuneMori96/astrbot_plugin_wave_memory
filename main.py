@@ -584,8 +584,8 @@ class WaveMemoryPlugin(Star):
             admins = cfg.get("admins_id", [])
             if admins:
                 return [str(a) for a in admins if a and a != "astrbot"]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[WaveMemory] 读取 admin 配置失败，回退到 bot 自身 QQ 号: {e}")
         # fallback: bot 自身 QQ 号
         return list(self._bot_qq_ids)
 
@@ -1048,31 +1048,31 @@ class WaveMemoryPlugin(Star):
                 negative_emotion_threshold=self.negative_emotion_threshold,
             )
             self.lifecycle.start()
-            # LLM 摘要整合
-            if self.enable_consolidation and self.tag_llm_provider_id:
-                # 构建 bot 标识集合，用于排除 bot 自己作为 fact subject
-                _bot_ids_set = set()
-                for _bp in self._bot_registry.values():
-                    _bot_ids_set.add(_bp.qq_id)
-                    if _bp.db_id:
-                        _bot_ids_set.add(_bp.db_id)
-                    if _bp.name:
-                        _bot_ids_set.add(_bp.name)
-                    _bot_ids_set.update(_bp.aliases)
-                _bot_ids_set.discard("")
+        else:
+            self.lifecycle = None
 
-                self.consolidation = ConsolidationService(
-                    db=self.db,
-                    context=self.context,
-                    provider_id=self.tag_llm_provider_id,
-                    interval_hours=self.consolidation_interval_hours,
-                    topic_backfill=self.consolidation_topic_backfill,
-                    skip_topics=self.consolidation_skip_topics,
-                    bot_identifiers=_bot_ids_set,
-                )
-                self.consolidation.start()
-            else:
-                self.consolidation = None
+        # LLM 摘要整合（独立于 affinity 门控）
+        if self.enable_consolidation and self.tag_llm_provider_id:
+            _bot_ids_set = set()
+            for _bp in self._bot_registry.values():
+                _bot_ids_set.add(_bp.qq_id)
+                if _bp.db_id:
+                    _bot_ids_set.add(_bp.db_id)
+                if _bp.name:
+                    _bot_ids_set.add(_bp.name)
+                _bot_ids_set.update(_bp.aliases)
+            _bot_ids_set.discard("")
+
+            self.consolidation = ConsolidationService(
+                db=self.db,
+                context=self.context,
+                provider_id=self.tag_llm_provider_id,
+                interval_hours=self.consolidation_interval_hours,
+                topic_backfill=self.consolidation_topic_backfill,
+                skip_topics=self.consolidation_skip_topics,
+                bot_identifiers=_bot_ids_set,
+            )
+            self.consolidation.start()
         else:
             self.consolidation = None
 
@@ -2025,7 +2025,10 @@ class WaveMemoryPlugin(Star):
                 if not words:
                     return
                 # 构建 FTS5 MATCH 表达式（OR 连接）
-                match_expr = " OR ".join(words)
+                # 转义 FTS5 特殊字符防止语法注入
+                esc_words = [w.replace('"', '""') for w in words]
+                quoted = [f'"{w}"' for w in esc_words]
+                match_expr = " OR ".join(quoted)
                 rows = self.db.conn.execute(
                     """SELECT rowid, content, sender_name, group_id FROM fts_memories
                        WHERE fts_memories MATCH ? LIMIT 20""",

@@ -74,7 +74,6 @@ class BeliefEmergenceService:
                     status="pending",
                 )
                 self._mark_relationship_evidence(belief_id, source_ids)
-            self._mark_relationship_evidence(belief_id, source_ids)
             created.append({"id": belief_id, "content": content, "evidence_event_ids": source_ids})
             logger.info("[BeliefEmergence] Pending belief: %s", content[:80])
         return created

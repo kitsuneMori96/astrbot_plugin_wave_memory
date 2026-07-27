@@ -23,6 +23,10 @@ class HotConfig:
 
     def __init__(self, initial_config: dict = None):
         if hasattr(self, "_initialized"):
+            if initial_config:
+                self._config.clear()
+                self._callbacks.clear()
+                self._config.update(initial_config)
             return
         self._initialized = True
         self._config: dict = {}
