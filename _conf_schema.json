@@ -536,7 +536,7 @@
         "description": "短暂记忆半衰期（天）",
         "hint": "重要性 0.3~1.0 的记忆",
         "type": "int",
-        "default": 7
+        "default": 3
       },
       "half_life_noise_days": {
         "description": "噪声记忆半衰期（天）",
@@ -560,7 +560,7 @@
         "description": "复习提升系数",
         "hint": "每次访问 = 延长 effective_hl 的 multiplier（0~1）",
         "type": "float",
-        "default": 0.15
+        "default": 0.3
       }
     }
   }

@@ -266,11 +266,11 @@ class MemoryRepo:
 
         hl_core = float(config.get("half_life_core_days", 90))
         hl_normal = float(config.get("half_life_normal_days", 30))
-        hl_fleeting = float(config.get("half_life_fleeting_days", 7))
+        hl_fleeting = float(config.get("half_life_fleeting_days", 3))
         hl_noise = float(config.get("half_life_noise_days", 1))
         archive_th = float(config.get("archive_threshold", 0.15))
         evict_th = float(config.get("evict_threshold", 0.05))
-        review_factor = float(config.get("review_boost_factor", 0.15))
+        review_factor = float(config.get("review_boost_factor", 0.3))
 
         decayed = archived = evicted = 0
 
@@ -298,13 +298,13 @@ class MemoryRepo:
                 decay_factor = 0.5 ** (days_since / effective_hl)
                 new_imp = max(0.01, imp * decay_factor)
 
-                if new_imp < evict_th and (now - ts) > 90 * 86400:
+                if new_imp < evict_th and (now - ts) > max(90 - imp * 100, 7) * 86400:
                     self.cm.execute_write(
                         "UPDATE memories SET importance = ?, memory_type = 'evicted', last_decay_at = ? WHERE id = ?",
                         (round(new_imp, 4), now, mem_id),
                     )
                     evicted += 1
-                elif new_imp < archive_th and (now - ts) > 30 * 86400:
+                elif new_imp < archive_th and (now - ts) > max(30 - imp * 30, 3) * 86400:
                     self.cm.execute_write(
                         "UPDATE memories SET importance = ?, memory_type = 'archived', last_decay_at = ? WHERE id = ?",
                         (round(new_imp, 4), now, mem_id),
