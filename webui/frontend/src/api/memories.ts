@@ -133,6 +133,39 @@ export function batchDeleteMemories(ids: number[]): Promise<{ ok: boolean; delet
   })
 }
 
+export interface SimilarMemoryItem {
+  id: number
+  content: string
+  sender_name?: string
+  timestamp?: number
+  score: number
+}
+
+export interface SimilarMemoriesResponse {
+  items: SimilarMemoryItem[]
+}
+
+export interface RelatedFactItem {
+  id: number
+  subject?: string
+  predicate?: string
+  object?: string
+  fact_type?: string
+  confidence?: number
+}
+
+export interface RelatedFactsResponse {
+  items: RelatedFactItem[]
+}
+
+export function getSimilarMemories(id: number, topK = 6): Promise<SimilarMemoriesResponse> {
+  return fetchJson<SimilarMemoriesResponse>(`/api/memories/${id}/similar?top_k=${topK}`)
+}
+
+export function getRelatedFacts(id: number, limit = 5): Promise<RelatedFactsResponse> {
+  return fetchJson<RelatedFactsResponse>(`/api/memories/${id}/related-facts?limit=${limit}`)
+}
+
 export function getMemoryClusters(): Promise<MemoriesNebulaResponse> {
   return fetchJson<MemoriesNebulaResponse>('/api/memories/clusters')
 }

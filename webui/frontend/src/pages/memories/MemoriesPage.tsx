@@ -22,6 +22,8 @@ import { toast } from 'sonner'
 import {
   deleteMemory,
   getMemoryDetail,
+  getRelatedFacts,
+  getSimilarMemories,
   listMemories,
   listSenders,
   reEmbedMemory,
@@ -31,7 +33,9 @@ import {
   getMemoryClusters,
   type MemoryItem,
   type MemoryDetail,
+  type RelatedFactItem,
   type SenderItem,
+  type SimilarMemoryItem,
   type StreamProgress,
   type NebulaPoint,
   type NebulaCluster,
@@ -60,8 +64,6 @@ const sourceAssetMetadata: Record<string, { label: string; handling: string; rou
   bot_reply: { label: 'Bot 回复素材', handling: '可送入 FewShot 候选', route: '/blackbox/fewshot' },
   fewshot: { label: '风格范例', handling: '提示去 FewShot 管理', route: '/blackbox/fewshot' },
 }
-
-const associationPlaceholders = ['Tags', 'Facts', 'Beliefs', 'Person links', 'Injection traces', 'Similar memories']
 
 const managementConversions = [
   { label: 'Bot 回复 -> FewShot 候选', route: '/blackbox/fewshot' },
@@ -149,6 +151,8 @@ export function MemoriesPage() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailSaving, setDetailSaving] = useState(false)
   const [detailError, setDetailError] = useState('')
+  const [similarMemories, setSimilarMemories] = useState<SimilarMemoryItem[]>([])
+  const [relatedFacts, setRelatedFacts] = useState<RelatedFactItem[]>([])
 
   // 4. SSE 异步流进度模态弹窗状态
   const [streamOpen, setStreamOpen] = useState(false)
@@ -455,9 +459,17 @@ export function MemoriesPage() {
     setDetail(null)
     setDetailLoading(true)
     setDetailError('')
+    setSimilarMemories([])
+    setRelatedFacts([])
     try {
-      const res = await getMemoryDetail(id)
-      setDetail(res)
+      const [detailRes, similarRes, factsRes] = await Promise.all([
+        getMemoryDetail(id),
+        getSimilarMemories(id).catch(() => ({ items: [] })),
+        getRelatedFacts(id).catch(() => ({ items: [] })),
+      ])
+      setDetail(detailRes)
+      setSimilarMemories(similarRes.items ?? [])
+      setRelatedFacts(factsRes.items ?? [])
     } catch (err) {
       setDetailError(err instanceof Error ? err.message : '加载详情失败')
     } finally {
@@ -1061,15 +1073,57 @@ export function MemoriesPage() {
 
                   <Card>
                     <CardHeader>
-                      <CardTitle>详情关联区</CardTitle>
-                      <CardDescription>只读占位：后续接入关联对象 API，不在记忆详情里直接改黑盒对象。</CardDescription>
+                      <CardTitle>相似记忆</CardTitle>
+                      <CardDescription>基于向量相似度的近似记忆。</CardDescription>
                     </CardHeader>
-                    <CardContent className="grid gap-2 sm:grid-cols-2">
-                      {associationPlaceholders.map((item) => (
-                        <div key={item} className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
-                          {item}
+                    <CardContent>
+                      {similarMemories.length === 0 ? (
+                        <span className="text-xs text-muted-foreground">无相似记忆。</span>
+                      ) : (
+                        <div className="flex flex-col gap-2">
+                          {similarMemories.map((sm) => (
+                            <div
+                              key={sm.id}
+                              className="cursor-pointer rounded-lg border p-2.5 text-xs hover:bg-accent"
+                              onClick={() => handleOpenDetail(sm.id)}
+                            >
+                              <div className="flex items-center justify-between gap-2 mb-1">
+                                <span className="font-medium truncate">{sm.sender_name || '未知'}</span>
+                                <Badge variant="outline" className="shrink-0 font-mono">
+                                  {Math.round(sm.score * 100)}%
+                                </Badge>
+                              </div>
+                              <p className="line-clamp-2 text-muted-foreground">{sm.content}</p>
+                            </div>
+                          ))}
                         </div>
-                      ))}
+                      )}
+                    </CardContent>
+                  </Card>
+
+                  <Card>
+                    <CardHeader>
+                      <CardTitle>关联事实</CardTitle>
+                      <CardDescription>source_memory_id 指向此记忆的 facts 记录。</CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      {relatedFacts.length === 0 ? (
+                        <span className="text-xs text-muted-foreground">暂无关联事实。</span>
+                      ) : (
+                        <div className="flex flex-col gap-2">
+                          {relatedFacts.map((f) => (
+                            <div key={f.id} className="rounded-lg border p-2.5 text-xs">
+                              <div className="flex items-center gap-2 mb-0.5">
+                                <Badge variant="secondary" className="text-[10px]">{f.fact_type || 'fact'}</Badge>
+                                <span className="text-muted-foreground">confidence: {f.confidence?.toFixed(2) ?? '-'}</span>
+                              </div>
+                              <p className="truncate">
+                                {f.subject} → {f.predicate} → {f.object}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </CardContent>
                   </Card>
 

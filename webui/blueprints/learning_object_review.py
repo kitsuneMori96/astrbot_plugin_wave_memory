@@ -62,9 +62,18 @@ def _pending_candidates(candidate_store: Any = None, *, limit: int = 100) -> lis
 
 
 def _duplicate_entries(objects: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """检测学习对象中的重复相关审计发现。
+
+    排除纯文档说明性质（以“风险：”结尾的描述头）的静态文字，
+    只返回实际运行时检测到的重复问题（如内容哈希碰撞、相似度匹配等）。
+    """
     entries: list[dict[str, Any]] = []
     for item in objects:
-        findings = [finding for finding in item.get("audit_findings", []) if "重复" in str(finding)]
+        findings = [
+            finding for finding in item.get("audit_findings", [])
+            if "重复" in str(finding)
+            and not str(finding).startswith(("重复写入风险", "重复登记风险"))
+        ]
         if findings:
             entries.append({
                 "key": item.get("key"),

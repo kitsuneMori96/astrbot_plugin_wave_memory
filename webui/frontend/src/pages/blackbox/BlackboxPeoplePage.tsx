@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { AlertTriangleIcon, ArrowDownIcon, ArrowUpIcon, EyeIcon, SearchIcon } from 'lucide-react'
+import { AlertTriangleIcon, ArrowDownIcon, ArrowUpIcon, EyeIcon, Link2Icon, SearchIcon } from 'lucide-react'
 
 import { getBlackboxPeople, type BlackboxListPayload, type BlackboxPersonItem } from '@/api/blackbox'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -11,15 +11,19 @@ import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Separator } from '@/components/ui/separator'
 import { BlackboxCapabilityPage } from './BlackboxCapabilityPage'
+import { IdentityBindingSection } from '@/pages/bindings'
 
-const governance = [
-  { label: '影响范围', value: 'person_registry、user_profiles、affinity dimensions、relationship events 和 person aliases。' },
-  { label: '生效时机', value: '只读诊断立即展示；合并人物、修正昵称、禁用错误别名后续实现。' },
-  { label: '是否持久化', value: '本页不写入；合并人物为高风险。' },
-  { label: '是否需要重启', value: '只读查看不需要重启；画像生成链路仍由运行时服务控制。' },
-  { label: '回滚方式', value: '后续合并必须先 merge-preview，并记录旧 user_id/group_id/bot_id 映射。' },
-]
+function governance(readonly: boolean) {
+  return [
+    { label: '影响范围', value: 'person_registry、user_profiles、affinity dimensions、relationship events。' },
+    { label: '读取模式', value: readonly ? '只读诊断' : '可写' },
+    { label: '生效时机', value: '只读诊断即时展示；合并人物等高危操作后续接入。' },
+    { label: '是否需要重启', value: '只读查看不需要重启。' },
+    { label: '回滚方式', value: '合并操作必须先 merge-preview，记录旧映射。' },
+  ]
+}
 
 const PAGE_SIZE = 50
 
@@ -104,6 +108,10 @@ export function BlackboxPeoplePage() {
   const total = peoplePayload?.total ?? 0
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1
+  const withBotCount = people.filter(p => p.bot_id).length
+  const withAffection = people.filter(p => p.affection != null).length
+  const highAffection = people.filter(p => (p.affection ?? 0) >= 60).length
+  const negativeAffection = people.filter(p => (p.affection ?? 0) < 0).length
 
   const sortIcon = (key: SortKey) => {
     if (sort !== key) return null
@@ -118,16 +126,34 @@ export function BlackboxPeoplePage() {
         badges={['只读诊断', '治理配置', '合并人物为高风险']}
         metrics={[
           { label: 'person_registry', value: loading ? '加载中' : String(total), description: '人物登记表、别名和实体归属。' },
-          { label: 'user_profiles', value: loading ? '加载中' : String(people.filter(p => p.bot_id).length), description: 'QQ/user_id、display_name、group_id 与 bot_id。' },
-          { label: 'affinity dimensions', value: loading ? '加载中' : String(people.filter(p => p.aliases).length), description: '好感维度、score、interaction_count 与 last_seen。' },
+          { label: 'user_profiles', value: loading ? '加载中' : String(withBotCount), description: 'QQ/user_id、display_name、group_id 与 bot_id。' },
+          { label: 'affinity dimensions', value: loading ? '加载中' : String(withAffection), description: '好感维度、score、interaction_count 与 last_seen。' },
         ]}
-        sections={[
-          { title: '人物列表', description: 'bot_id 必须明确显示：BotProfile.db_id，不是 QQ 号。', items: ['QQ/user_id', 'display_name/nickname', 'group_id', 'BotProfile.db_id'] },
-          { title: '好感与关系摘要', description: '展示 affection score、attitude_level、interaction_count、last_seen 和 dimensions。', items: ['affection score', 'attitude_level', 'interaction_count', 'last_seen', 'dimensions'] },
-          { title: '关系事件时间线', description: '只读查看 relationship events、别名列表和关联记忆入口。', items: ['关系事件时间线', '别名列表', '关联记忆', '合并人物为高风险'] },
+        sections={!loading ? [
+          {
+            title: '好感分布',
+            description: '当前列表页好感度分布（affection score）。',
+            items: [
+              `高好感 (≥60): ${highAffection}`,
+              `中立 (0~59): ${withAffection - highAffection - negativeAffection}`,
+              `负好感 (<0): ${negativeAffection}`,
+              `未记录: ${people.length - withAffection}`,
+            ],
+          },
+          {
+            title: '交互概览',
+            description: '人物交互与 bot 绑定情况。',
+            items: [
+              `绑定 bot: ${withBotCount}`,
+              `有别名: ${people.filter(p => p.aliases).length}`,
+              `最近活跃: ${people.filter(p => p.last_seen && Number(p.last_seen) > (Date.now() / 1000 - 86400 * 7)).length}/周`,
+            ],
+          },
+        ] : [
+          { title: '加载中', description: '正在读取人物数据…', items: ['请稍候'] },
+          { title: '加载中', description: '正在读取人物数据…', items: ['请稍候'] },
         ]}
-        governance={governance}
-        states={['加载中', '读取失败', '暂无数据']}
+        governance={governance(!loading && total > 0)}
       />
 
       {loading ? (
@@ -275,6 +301,14 @@ export function BlackboxPeoplePage() {
           </CardContent>
         </Card>
       )}
+
+      <Separator className="my-2" />
+
+      <div className="flex items-center gap-2">
+        <Link2Icon className="h-5 w-5 text-muted-foreground" />
+        <h2 className="text-lg font-semibold">身份绑定</h2>
+      </div>
+      <IdentityBindingSection />
     </div>
   )
 }

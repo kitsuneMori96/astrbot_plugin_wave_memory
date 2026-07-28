@@ -117,6 +117,20 @@ async def list_memories():
     has_more = len(rows) > limit
     rows = rows[:limit]
 
+    # 批量查 tags
+    ids = [r[0] for r in rows]
+    tag_map: dict[int, list[dict]] = {}
+    if ids:
+        placeholders = ",".join("?" * len(ids))
+        tag_rows = c.db.conn.execute(
+            f"""SELECT mt.memory_id, t.name, t.tag_type
+                FROM memory_tags mt JOIN tags t ON t.id = mt.tag_id
+                WHERE mt.memory_id IN ({placeholders}) ORDER BY mt.position""",
+            ids,
+        ).fetchall()
+        for mid, tname, ttype in tag_rows:
+            tag_map.setdefault(mid, []).append({"name": tname, "type": ttype})
+
     # total：无筛选时用带缓存的全表计数（~110ms）；有筛选时跳过精确 COUNT
     # （LIKE / vector IS NULL 全表扫描需 ~2.7s），返回 null + has_more 供前端游标翻页
     if real_filter:
@@ -132,7 +146,8 @@ async def list_memories():
 
     items = [
         {"id": r[0], "content": r[1], "sender_id": r[2], "sender_name": r[3],
-         "group_id": r[4], "source": r[5], "timestamp": r[6], "has_vector": bool(r[7])}
+         "group_id": r[4], "source": r[5], "timestamp": r[6], "has_vector": bool(r[7]),
+         "tags": tag_map.get(r[0], [])}
         for r in rows
     ]
     return jsonify({"items": items, "total": total, "has_more": has_more, "limit": limit, "offset": offset})
@@ -213,6 +228,73 @@ async def re_embed_memory(memory_id: int):
     except Exception:
         pass
     return jsonify({"ok": True, "memory_id": memory_id})
+
+
+@memories_bp.route("/memories/<int:memory_id>/similar", methods=["GET"])
+@require_auth
+async def similar_memories(memory_id: int):
+    """相似记忆：用 memory_index 做向量检索。"""
+    c = get_container()
+    top_k = _safe_int(request.args.get("top_k", 6), 6)
+
+    detail = c.db.get_memory_detail(memory_id)
+    if not detail:
+        return jsonify({"error": "not found"}), 404
+    if not detail.get("has_vector"):
+        return jsonify({"items": []})
+
+    vecs = c.db.get_memory_vectors([memory_id])
+    query_vec = vecs.get(memory_id)
+    if query_vec is None or not c.memory_index:
+        return jsonify({"items": []})
+
+    results = c.memory_index.search(query_vec.reshape(1, -1), k=top_k + 1)
+    if not results:
+        return jsonify({"items": []})
+
+    similar_ids = [int(r[0]) for r in results if int(r[0]) != memory_id][:top_k]
+    distances = {int(r[0]): float(r[1]) for r in results}
+
+    memories = c.db.get_memories_by_ids(similar_ids)
+    # map distance to similarity score (0-1, higher = more similar)
+    max_dist = max(distances.values()) if distances else 1.0
+    items = []
+    for m in memories:
+        mid = m["id"]
+        raw_dist = distances.get(mid, 1.0)
+        score = 1.0 - (raw_dist / max_dist) if max_dist > 0 else 0.0
+        items.append({
+            "id": mid,
+            "content": (m.get("content") or "")[:200],
+            "sender_name": m.get("sender_name"),
+            "timestamp": m.get("timestamp"),
+            "score": round(score, 4),
+        })
+    items.sort(key=lambda x: x["score"], reverse=True)
+    return jsonify({"items": items})
+
+
+@memories_bp.route("/memories/<int:memory_id>/related-facts", methods=["GET"])
+@require_auth
+async def related_facts(memory_id: int):
+    """关联事实：查询 facts 表中 source_memory_id 指向该记忆的记录。"""
+    c = get_container()
+    limit = _safe_int(request.args.get("limit", 5), 5)
+
+    if not _table_exists(c.db.conn, "facts"):
+        return jsonify({"items": []})
+
+    rows = c.db.conn.execute(
+        """SELECT id, subject, predicate, object, fact_type, confidence
+           FROM facts WHERE source_memory_id = ? ORDER BY id DESC LIMIT ?""",
+        (memory_id, limit),
+    ).fetchall()
+    items = [
+        {"id": r[0], "subject": r[1], "predicate": r[2],
+         "object": r[3], "fact_type": r[4], "confidence": r[5]}
+        for r in rows
+    ]
+    return jsonify({"items": items})
 
 
 @memories_bp.route("/memories/batch/delete", methods=["POST"])

@@ -30,17 +30,6 @@ const importWizardSteps = ['配置检查', '数据源发现', '导入预览', '�
 
 const dryRunPreviewFields = ['数据源', '总条数', '已导入估计', '重复估计', '将写入 source 类型', '是否会 re-embed']
 
-const taskModelFields = [
-  'task_id',
-  'task_type: import | tag_extract',
-  'status: running | done | error | stopped',
-  'progress',
-  'processed',
-  'total',
-  'errors',
-  'message',
-]
-
 export function ImportPage() {
   const [sys, setSys] = useState<SystemPayload | null>(null)
   const [config, setConfig] = useState<ChannelConfigData | null>(null)
@@ -428,22 +417,57 @@ export function ImportPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-sm font-semibold">统一任务模型</CardTitle>
-          <CardDescription>导入和 Tag 提取都应该回传同一套任务结构，便于进度条、日志和错误展示复用。</CardDescription>
+          <CardTitle className="text-sm font-semibold">发现的数据源</CardTitle>
+          <CardDescription>可导入的记忆数据源及其当前状态。</CardDescription>
         </CardHeader>
-        <CardContent className="flex flex-col gap-4">
-          <div className="grid gap-3 md:grid-cols-4">
-            {taskModelFields.map((field) => (
-              <div key={field} className="rounded-lg border bg-muted/20 p-3 font-mono text-xs">
-                {field}
+        <CardContent className="flex flex-col gap-3">
+          {loading ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              扫描中…
+            </div>
+          ) : sources.length === 0 ? (
+            <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground text-center">未发现可导入的数据源</div>
+          ) : (
+            sources.map((s) => (
+              <div key={s.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3">
+                <div className="flex flex-col gap-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-sm truncate">{s.name}</span>
+                    <Badge variant={s.has_adapter ? 'secondary' : 'outline'}>
+                      {s.has_adapter ? '适配器就绪' : '无适配器'}
+                    </Badge>
+                  </div>
+                  <div className="flex gap-3 text-xs text-muted-foreground">
+                    <span>总计: {s.count.toLocaleString()}</span>
+                    {s.imported_pct != null && (
+                      <span>已导入: {s.imported_pct.toFixed(1)}%</span>
+                    )}
+                    {s.remaining != null && (
+                      <span>剩余: {s.remaining.toLocaleString()}</span>
+                    )}
+                  </div>
+                  {s.imported_pct != null && (
+                    <div className="h-1.5 w-full max-w-40 rounded-full bg-muted overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-primary transition-all"
+                        style={{ width: `${Math.min(s.imported_pct, 100)}%` }}
+                      />
+                    </div>
+                  )}
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={importing || !s.has_adapter}
+                  onClick={() => handleStartImport(s)}
+                >
+                  <PlayIcon data-icon="inline-start" />
+                  导入
+                </Button>
               </div>
-            ))}
-          </div>
-          <Alert>
-            <AlertCircleIcon />
-            <AlertTitle>中止按钮只对可中止任务显示</AlertTitle>
-            <AlertDescription>当前只有 task_type 为 tag_extract 且 status 为 running 的任务显示中止入口；导入任务保持只读进度。</AlertDescription>
-          </Alert>
+            ))
+          )}
         </CardContent>
       </Card>
 

@@ -57,7 +57,13 @@ let lastActionRingPoint = { x: null, y: null };
 let transientHoverLabelNode = null;
 
 // 粒子流和动画辅助结构
-let flowParticles = []; // { curve, mesh, progress, speed, color }
+let flowInstance = null; // InstancedMesh
+let flowCount = 0;
+let particleCurves = [];
+let particleProgress = [];
+let particleSpeeds = [];
+let particleSourceIds = [];
+let particleTargetIds = [];
 const LAYOUT_MODES = {
     semantic: '语义群岛',
     type: '类型分层',
@@ -78,7 +84,7 @@ const graphState = {
     labelIndex: new Map(),
 };
 
-const NODE_GEOMETRY = typeof THREE !== 'undefined' ? new THREE.SphereGeometry(1, 24, 16) : null;
+const NODE_GEOMETRY = typeof THREE !== 'undefined' ? new THREE.SphereGeometry(1, 12, 8) : null;
 const DEG2RAD = Math.PI / 180;
 
 // ─── 基础工具与自愈映射 ───
@@ -212,11 +218,15 @@ function clearGraphState() {
     pickableNodeObjects = [];
     pickableEdgeObjects = [];
     transientHoverLabelNode = null;
-    flowParticles.forEach(p => {
-        if (p.mesh && scene) scene.remove(p.mesh);
-        disposeSceneObject(p.mesh);
-    });
-    flowParticles = [];
+    if (flowInstance && scene) scene.remove(flowInstance);
+    disposeSceneObject(flowInstance);
+    flowInstance = null;
+    flowCount = 0;
+    particleCurves = [];
+    particleProgress = [];
+    particleSpeeds = [];
+    particleSourceIds = [];
+    particleTargetIds = [];
 }
 
 function refreshPickableObjects() {
@@ -361,7 +371,7 @@ function initGraph() {
         showGraphUnavailable(err?.message || 'WebGLRenderer 初始化失败。');
         return;
     }
-    webglRenderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    webglRenderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
     webglRenderer.setSize(window.innerWidth, window.innerHeight);
     webglRenderer.setClearColor(0x06080d, 1);
     galaxyContainer.appendChild(webglRenderer.domElement);
@@ -389,7 +399,7 @@ function initGraph() {
 
     buildNebulaField(); // 视差背景星野
     setupLights();
-    setupBloom(); // 赛博朋克后期光晕
+    // Bloom 默认关闭（性能优化），用户可通过 toggleBloom() 启用
     setupPointerEvents();
     window.addEventListener('resize', onWindowResize);
     animate();
@@ -405,28 +415,34 @@ function setupLights() {
     scene.add(rim);
 }
 
-function setupBloom() {
-    composer = null;
+window.toggleBloomEngine = function(enabled) {
+    if (!enabled) {
+        if (composer) {
+            composer.dispose?.();
+            composer = null;
+        }
+        return;
+    }
+    if (!webglRenderer || !scene || !camera) return;
     try {
         if (THREE.EffectComposer && THREE.RenderPass && THREE.UnrealBloomPass) {
             composer = new THREE.EffectComposer(webglRenderer);
             composer.addPass(new THREE.RenderPass(scene, camera));
-            // 极致赛博朋克霓虹光：强度1.1，平滑过渡0.4
             const bloom = new THREE.UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.1, 0.4, 0.15);
             composer.addPass(bloom);
         }
     } catch (e) {
-        console.warn('[WaveMemory] Bloom 初始化失败，降级为普通 WebGL 渲染', e);
+        console.warn('[WaveMemory] Bloom 初始化失败', e);
         composer = null;
     }
-}
+};
 
 // 极致美化 C：双图层视差星空背景 (Cosmic Nebula Background)
 function buildNebulaField() {
     const palette = [new THREE.Color('#8b5cf6'), new THREE.Color('#3b82f6'), new THREE.Color('#f472b6'), new THREE.Color('#94a3b8')];
     
     // 内星野
-    const count = 600;
+    const count = 300;
     const positions = new Float32Array(count * 3);
     const colors = new Float32Array(count * 3);
     for (let i = 0; i < count; i++) {
@@ -449,7 +465,7 @@ function buildNebulaField() {
     scene.add(starField);
 
     // 外星野 (产生拉远视差)
-    const countOuter = 400;
+    const countOuter = 200;
     const positionsOuter = new Float32Array(countOuter * 3);
     const colorsOuter = new Float32Array(countOuter * 3);
     for (let i = 0; i < countOuter; i++) {
@@ -622,23 +638,22 @@ function animate() {
         labelGroup.children.forEach(sprite => sprite.lookAt(camera.position));
     }
 
-    // 粒子沿 Curve 路径流淌机制
-    flowParticles.forEach(p => {
-        p.progress += p.speed;
-        if (p.progress > 1) {
-            p.progress = 0; // 重复流动
+    // 粒子沿 Curve 路径流淌机制（使用 InstancedMesh，1 Draw Call）
+    if (flowInstance && flowCount > 0) {
+        const dummy = new THREE.Object3D();
+        const hasHover = hoveredNode !== null;
+        for (let i = 0; i < flowCount; i++) {
+            particleProgress[i] += particleSpeeds[i];
+            if (particleProgress[i] > 1) particleProgress[i] = 0;
+            const point = particleCurves[i].getPointAt(particleProgress[i]);
+            dummy.position.copy(point).applyMatrix4(graphGroup.matrixWorld);
+            const isHoveredLine = hasHover && (particleSourceIds[i] === hoveredNode || particleTargetIds[i] === hoveredNode);
+            dummy.scale.setScalar(isHoveredLine ? 1.6 : 1);
+            dummy.updateMatrix();
+            flowInstance.setMatrixAt(i, dummy.matrix);
         }
-        if (p.curve && p.mesh) {
-            // 获取样条线当前进度的空间物理位置
-            const point = p.curve.getPointAt(p.progress);
-            // 补偿图组自转导致的物理世界位移
-            p.mesh.position.copy(point).applyMatrix4(graphGroup.matrixWorld);
-            
-            // 节点选定或悬停时，关联连线粒子呼吸闪烁
-            const isHoveredLine = hoveredNode && (p.sourceId === hoveredNode || p.targetId === hoveredNode);
-            p.mesh.scale.setScalar(isHoveredLine ? 1.6 : 1);
-        }
-    });
+        flowInstance.instanceMatrix.needsUpdate = true;
+    }
 
     if (controls) controls.update();
     if (composer) composer.render();
@@ -671,50 +686,66 @@ function renderGraph(nodes, edges, options={}) {
 }
 
 function createFlowParticles() {
-    flowParticles.forEach(p => {
-        if (p.mesh && scene) scene.remove(p.mesh);
-        disposeSceneObject(p.mesh);
-    });
-    flowParticles = [];
+    // 清理旧的 InstancedMesh
+    if (flowInstance && scene) scene.remove(flowInstance);
+    disposeSceneObject(flowInstance);
+    flowInstance = null;
+    particleCurves = [];
+    particleProgress = [];
+    particleSpeeds = [];
+    particleSourceIds = [];
+    particleTargetIds = [];
+    flowCount = 0;
 
-    // 精选前 80 条高权重连线渲染流动粒子，防止过载导致 Draw Call 骤增
     const sortedEdges = Array.from(graphState.edges.values())
         .filter(e => e.visible)
         .sort((a,b) => b.weight - a.weight)
         .slice(0, 80);
+    if (sortedEdges.length === 0) return;
 
-    const particleGeometry = new THREE.SphereGeometry(0.18, 8, 8);
-
+    // 收集有效边
+    const entries = [];
     sortedEdges.forEach(edge => {
         const sNode = getNodeRecord(edge.source);
         const tNode = getNodeRecord(edge.target);
         if (!sNode || !tNode) return;
+        entries.push({ edge, sNode, tNode });
+    });
+    flowCount = entries.length;
+    if (flowCount === 0) return;
 
-        // 建立二次贝塞尔曲线 Spline 连线路径，带有 12% 轴向上凸起
+    const geometry = new THREE.SphereGeometry(0.18, 8, 8);
+    const material = new THREE.MeshBasicMaterial({
+        transparent: true,
+        opacity: 0.9,
+        blending: THREE.AdditiveBlending,
+    });
+    flowInstance = new THREE.InstancedMesh(geometry, material, flowCount);
+    flowInstance.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    scene.add(flowInstance);
+
+    const dummy = new THREE.Object3D();
+    const color = new THREE.Color();
+    entries.forEach(({ edge, sNode, tNode }, i) => {
         const midPoint = sNode.position.clone().lerp(tNode.position, 0.5);
         midPoint.y += sNode.position.distanceTo(tNode.position) * 0.12;
-        const curve = new THREE.QuadraticBezierCurve3(sNode.position, midPoint, tNode.position);
+        particleCurves.push(new THREE.QuadraticBezierCurve3(sNode.position, midPoint, tNode.position));
+        particleProgress.push(Math.random());
+        particleSpeeds.push(0.0035 + Math.random() * 0.004);
+        particleSourceIds.push(edge.source);
+        particleTargetIds.push(edge.target);
 
-        const colorHex = edge.isPath ? '#fbbf24' : (edge.layer === 'jargon' ? '#fb7185' : sNode.color);
-        const mat = new THREE.MeshBasicMaterial({
-            color: new THREE.Color(colorHex),
-            transparent: true,
-            opacity: 0.9,
-            blending: THREE.AdditiveBlending,
-        });
+        const pt = particleCurves[i].getPointAt(particleProgress[i]);
+        dummy.position.copy(pt);
+        dummy.scale.setScalar(1);
+        dummy.updateMatrix();
+        flowInstance.setMatrixAt(i, dummy.matrix);
 
-        const mesh = new THREE.Mesh(particleGeometry, mat);
-        scene.add(mesh);
-
-        flowParticles.push({
-            curve,
-            mesh,
-            progress: Math.random(), // 随机起点避免整齐划一
-            speed: 0.0035 + Math.random() * 0.004, // 随机流速产生灵动感
-            sourceId: edge.source,
-            targetId: edge.target,
-        });
+        color.set(edge.isPath ? '#fbbf24' : (edge.layer === 'jargon' ? '#fb7185' : sNode.color));
+        flowInstance.setColorAt(i, color);
     });
+    flowInstance.instanceMatrix.needsUpdate = true;
+    flowInstance.instanceColor.needsUpdate = true;
 }
 
 function disposeSceneObject(child) {
@@ -867,7 +898,7 @@ function createEdgeObject(record) {
     const midPoint = a.position.clone().lerp(b.position, 0.5);
     midPoint.y += a.position.distanceTo(b.position) * 0.12;
     const curve = new THREE.QuadraticBezierCurve3(a.position, midPoint, b.position);
-    const geo = new THREE.BufferGeometry().setFromPoints(curve.getPoints(12));
+    const geo = new THREE.BufferGeometry().setFromPoints(curve.getPoints(6));
 
     const color = record.isPath ? '#fbbf24' : (record.raw.kind === 'fact' ? '#a78bfa' : (a.color || '#8b5cf6'));
     const mat = new THREE.LineBasicMaterial({

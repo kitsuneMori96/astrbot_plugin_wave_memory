@@ -76,8 +76,19 @@ class SocialRepo:
                 created_at REAL
             );
 
+            CREATE TABLE IF NOT EXISTS identity_bindings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                local_id TEXT NOT NULL,
+                platform TEXT NOT NULL DEFAULT 'qq',
+                master_id TEXT NOT NULL,
+                bot_id TEXT DEFAULT 'yushu',
+                created_at REAL NOT NULL,
+                UNIQUE(local_id, bot_id)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_user_profiles_user ON user_profiles(user_id);
             CREATE INDEX IF NOT EXISTS idx_expression_patterns_group ON expression_patterns(group_id);
+            CREATE INDEX IF NOT EXISTS idx_identity_bindings_master ON identity_bindings(master_id);
         """)
         self.cm.commit()
         # 迁移：旧表可能没有 bot_id 列
@@ -234,3 +245,56 @@ class SocialRepo:
             "role_counts": role_counts,
             "top_tags": [{"name": t[0], "count": t[1]} for t in top_tags],
         }
+
+    # ─── Identity Bindings ───
+
+    def add_binding(self, local_id: str, master_id: str, bot_id: str = "yushu", platform: str = "qq") -> dict:
+        now = time.time()
+        self.cm.execute_write(
+            "INSERT OR REPLACE INTO identity_bindings (local_id, platform, master_id, bot_id, created_at) VALUES (?, ?, ?, ?, ?)",
+            (local_id, platform, master_id, bot_id, now),
+        )
+        self.cm.commit()
+        return {"local_id": local_id, "platform": platform, "master_id": master_id, "bot_id": bot_id, "created_at": now}
+
+    def remove_binding(self, binding_id: int):
+        self.cm.execute_write("DELETE FROM identity_bindings WHERE id = ?", (binding_id,))
+        self.cm.commit()
+
+    def get_bindings(self, bot_id: Optional[str] = None, search: str = "", limit: int = 50, offset: int = 0) -> list[dict]:
+        query = "SELECT id, local_id, platform, master_id, bot_id, created_at FROM identity_bindings WHERE 1=1"
+        params = []
+        if bot_id:
+            query += " AND bot_id = ?"
+            params.append(bot_id)
+        if search:
+            query += " AND (local_id LIKE ? OR master_id LIKE ?)"
+            params.extend([f"%{search}%", f"%{search}%"])
+        query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        rows = self.cm.execute_read(query, params).fetchall()
+        return [
+            {"id": r[0], "local_id": r[1], "platform": r[2], "master_id": r[3], "bot_id": r[4], "created_at": r[5]}
+            for r in rows
+        ]
+
+    def count_bindings(self, bot_id: Optional[str] = None, search: str = "") -> int:
+        query = "SELECT COUNT(*) FROM identity_bindings WHERE 1=1"
+        params = []
+        if bot_id:
+            query += " AND bot_id = ?"
+            params.append(bot_id)
+        if search:
+            query += " AND (local_id LIKE ? OR master_id LIKE ?)"
+            params.extend([f"%{search}%", f"%{search}%"])
+        row = self.cm.execute_read(query, params).fetchone()
+        return row[0] if row else 0
+
+    def resolve_canonical_id(self, local_id: str, bot_id: str = "yushu") -> str:
+        row = self.cm.execute_read(
+            "SELECT master_id FROM identity_bindings WHERE local_id = ? AND bot_id = ?",
+            (local_id, bot_id),
+        ).fetchone()
+        if row:
+            return row[0]
+        return local_id

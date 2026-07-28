@@ -524,6 +524,7 @@ class WaveMemoryPlugin(Star):
                 tag_extractor=self.tag_extractor,
                 embedding_service=self.embedding_service,
                 tag_index=self.tag_index,
+                memory_index=self.memory_index,
                 config=tag_worker_cfg,
                 bot_keywords=all_bot_keywords,
             )
@@ -1825,6 +1826,8 @@ class WaveMemoryPlugin(Star):
             sender_name = event.message_obj.sender.nickname or ""
 
         bot_profile = self._get_bot(bot_id)
+        if bot_profile:
+            sender_id = self.db.resolve_canonical_id(sender_id, bot_profile.db_id)
         exclude_sources = bot_profile.exclude_sources if bot_profile and bot_profile.exclude_sources else None
         if await self._run_injection_active_trace(
             event=event,
@@ -2513,6 +2516,10 @@ class WaveMemoryPlugin(Star):
                     "timestamp": time.time(),
                 })
             return
+
+        bp = self._get_bot(bot_id)
+        if bp:
+            sender_id = self.db.resolve_canonical_id(sender_id, bp.db_id)
 
         if self.group_whitelist and group_id not in self.group_whitelist:
             return

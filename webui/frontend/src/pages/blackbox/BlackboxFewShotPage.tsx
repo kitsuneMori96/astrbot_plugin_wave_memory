@@ -9,13 +9,15 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { BlackboxCapabilityPage } from './BlackboxCapabilityPage'
 
-const governance = [
-  { label: '影响范围', value: 'FewShot 风格范例召回、fewshot 注入通道和候选治理。' },
-  { label: '生效时机', value: '只读诊断立即展示；批准、拒绝、提取和漂移检测后续接 API。' },
-  { label: '是否持久化', value: '本页不写入；批准/拒绝属于后续写操作。' },
-  { label: '是否需要重启', value: '只读查看不需要重启；通道启用仍由热配置控制。' },
-  { label: '回滚方式', value: '后续写操作必须记录 rollback_hint 和候选来源。' },
-]
+function governance(readonly: boolean) {
+  return [
+    { label: '影响范围', value: 'FewShot 风格范例召回、fewshot 注入通道和候选治理。' },
+    { label: '读取模式', value: readonly ? '只读诊断' : '可写' },
+    { label: '生效时机', value: '只读诊断即时展示；批准/拒绝后续接入。' },
+    { label: '是否需要重启', value: '只读查看不需要重启。' },
+    { label: '回滚方式', value: '写操作必须记录 rollback_hint 和候选来源。' },
+  ]
+}
 
 function formatValue(value: unknown): string {
   if (value === undefined || value === null || value === '') {
@@ -83,25 +85,31 @@ export function BlackboxFewShotPage() {
           { label: '平均 score', value: loading ? '加载中' : formatScore(summary?.average_score), description: '已批准风格范例的平均质量分。' },
           { label: '最近提取时间', value: '只读未记录', description: 'FewShotService.extract_candidates 最近任务时间后续接入。' },
         ]}
-        sections={[
+        sections={summary ? [
           {
-            title: '候选列表',
-            description: '展示 content、score、traits、status、bot_id、created_at、approved_at。',
-            items: ['status 筛选', 'bot_id 筛选', 'trait 筛选', 'score range 筛选'],
+            title: '状态分布',
+            description: '各审核状态的范例数量。',
+            items: [
+              `Pending: ${formatValue(summary.counts?.pending)}`,
+              `Approved: ${formatValue(summary.counts?.approved)}`,
+              `Rejected: ${formatValue(summary.counts?.rejected)}`,
+              `总计: ${formatValue(summary.counts?.total)}`,
+            ],
           },
           {
-            title: '漂移检测',
-            description: '后续输入近期回复，运行 check_drift()，只展示结果不自动改库。',
-            items: ['近期回复输入', '风格漂移摘要', '风险 warning', '建议处理动作'],
+            title: '质量概览',
+            description: '已批准范例的平均质量分。',
+            items: [
+              `平均分: ${formatScore(summary.average_score)}`,
+              `漂移检测: ${summary.drift_detection ?? '-'}`,
+              `安全: ${summary.safety ?? '-'}`,
+            ],
           },
-          {
-            title: '测试匹配',
-            description: '模拟某 bot_id 会注入哪些 few-shot。',
-            items: ['bot_id 输入', 'max_items 预览', '命中示例', '过滤原因'],
-          },
+        ] : [
+          { title: '加载中', description: '正在读取 FewShot 摘要…', items: ['请稍候'] },
+          { title: '加载中', description: '正在读取 FewShot 摘要…', items: ['请稍候'] },
         ]}
-        governance={governance}
-        states={['加载中', '读取失败', '暂无数据']}
+        governance={governance(summary?.readonly ?? true)}
       />
 
       {loading ? (

@@ -3,6 +3,7 @@ import {
   AlertCircleIcon,
   CheckCircle2Icon,
   Loader2Icon,
+  PlusIcon,
   RefreshCwIcon,
   SearchIcon,
   Undo2Icon,
@@ -720,6 +721,16 @@ export function JargonPage() {
             对聊天中自动捕获、清洗的待审黑话词条进行人工裁决核对，并支持同步 Holyman 广域抽象黑话分层资产。
           </CardDescription>
         </CardHeader>
+        <CardContent className="py-3 flex flex-wrap items-center gap-2">
+          <Button size="sm" onClick={handleOpenCreate}>
+            <PlusIcon data-icon="inline-start" />
+            新建黑话
+          </Button>
+          <Button size="sm" variant="outline" disabled={holymanLoading || holymanLoading} onClick={() => { setActiveTab('global'); void handleSyncHolyman(); }}>
+            <RefreshCwIcon data-icon="inline-start" />
+            同步 Holyman
+          </Button>
+        </CardContent>
       </Card>
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>

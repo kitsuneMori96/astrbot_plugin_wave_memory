@@ -21,14 +21,6 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { BlackboxCapabilityPage } from './BlackboxCapabilityPage'
 
-const governance = [
-  { label: '影响范围', value: 'BookLore 书设知识召回、book_lore 注入通道和世界观查询。' },
-  { label: '生效时机', value: '只读诊断立即展示；索引重建、导入/刷新后续单独实现。' },
-  { label: '是否持久化', value: '本页不写入；后续写操作才会改变 BookLore DB 或索引文件。' },
-  { label: '是否需要重启', value: '只读查看不需要重启；静态导入配置仍以 AstrBot 配置为准。' },
-  { label: '回滚方式', value: '重建索引需二次确认，并保留旧索引备份/重建说明。' },
-]
-
 function formatCount(value: unknown): string {
   if (value === undefined || value === null || value === '') {
     return '0'
@@ -103,25 +95,38 @@ export function BlackboxBookLorePage() {
           { label: '社区数', value: loading ? '加载中' : formatCount(summary?.counts?.communities), description: 'book_communities 可注入世界观摘要数量。' },
           { label: 'notes 数', value: loading ? '加载中' : formatCount(summary?.counts?.notes), description: 'book_notes 原始笔记和来源章节数量。' },
         ]}
-        sections={[
+        sections={summary ? [
           {
             title: '索引健康',
-            description: '检查 BookLore 向量索引和 DB 计数是否匹配。',
-            items: ['HNSW 文件存在性', 'id map 存在性', 'DB count vs index count', 'source_book 覆盖率'],
+            description: 'BookLore 向量索引与 DB 状态。',
+            items: [
+              `HNSW 文件: ${summary.index_health?.hnsw_file ?? 'unknown'}`,
+              `ID map: ${summary.index_health?.id_map ?? 'unknown'}`,
+              `索引范围: ${summary.index_health?.scope ?? 'unknown'}`,
+              `安全提示: ${summary.safety ?? '-'}`,
+            ],
           },
           {
-            title: 'BookLore-only 查询',
-            description: '后续输入 query，只查 BookLore，显示命中和分数。',
-            items: ['关键词搜索', '向量测试召回', '命中 community 分数', 'relations 详情预览'],
+            title: '数量统计',
+            description: '各数据表当前条目数。',
+            items: [
+              `实体: ${formatCount(summary.counts?.entities)}`,
+              `关系: ${formatCount(summary.counts?.relations)}`,
+              `社区: ${formatCount(summary.counts?.communities)}`,
+              `笔记: ${formatCount(summary.counts?.notes)}`,
+            ],
           },
-          {
-            title: '后续操作边界',
-            description: '危险写操作只列契约，不在本只读切片执行。',
-            items: ['重建索引需二次确认', '禁用条目需确认', '删除条目需确认', '导入/刷新需任务记录'],
-          },
+        ] : [
+          { title: '加载中', description: '正在读取 BookLore 摘要…', items: ['请稍候'] },
+          { title: '加载中', description: '正在读取 BookLore 摘要…', items: ['请稍候'] },
         ]}
-        governance={governance}
-        states={['加载中', '读取失败', '暂无数据']}
+        governance={[
+          { label: '影响范围', value: 'BookLore 世界观/书设知识库，索引与社区摘要。' },
+          { label: '读取模式', value: summary?.readonly ? '只读诊断' : '可写' },
+          { label: '生效时机', value: '只读诊断即时展示；重建/导入后续实现。' },
+          { label: '是否需要重启', value: '只读查看不需要重启。' },
+          { label: '回滚方式', value: '重建索引需二次确认，保留旧索引备份。' },
+        ]}
       />
 
       {loading ? (

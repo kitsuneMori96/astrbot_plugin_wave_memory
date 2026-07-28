@@ -265,6 +265,10 @@
                     <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" data-layer="communities" class="accent-purple-500"> <span class="text-[10px] text-slate-300">社区</span> <span class="text-[9px] text-slate-600">tag 共现聚类</span></label>
                 </div>
             </div>
+            <div class="flex items-center justify-between pt-1">
+                <span class="text-[10px] text-slate-500">Bloom 光晕</span>
+                <button id="btn-bloom" onclick="toggleBloom()" class="text-[10px] px-2 py-0.5 rounded border border-white/10 bg-nebula-700 text-slate-400 hover:text-white">关闭</button>
+            </div>
             <div>
                 <label class="text-[10px] text-slate-500 block mb-1">关系类型（点击取消=隐藏该类）</label>
                 <div id="cfg-rel-types" class="flex flex-wrap gap-1"></div>
@@ -506,6 +510,14 @@
 <script src="/static/kg.js?v=3.0.0-3d"></script>
 <script src="/static/kg-config.js"></script>
 <script>
+function toggleBloom() {
+    const btn = document.getElementById('btn-bloom');
+    if (!btn) return;
+    const on = btn.textContent === '开启';
+    if (typeof window.toggleBloomEngine === 'function') window.toggleBloomEngine(!on);
+    btn.textContent = on ? '关闭' : '开启';
+}
+
 initLegend();
 initGraph();
 switchView('galaxy');

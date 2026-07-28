@@ -31,10 +31,9 @@ interface BlackboxCapabilityPageProps {
   metrics: MetricItem[]
   sections: InfoSection[]
   governance: GovernanceRow[]
-  states: string[]
 }
 
-export function BlackboxCapabilityPage({ title, description, badges, metrics, sections, governance, states }: BlackboxCapabilityPageProps) {
+export function BlackboxCapabilityPage({ title, description, badges, metrics, sections, governance }: BlackboxCapabilityPageProps) {
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -116,19 +115,6 @@ export function BlackboxCapabilityPage({ title, description, badges, metrics, se
             </CardContent>
           </Card>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>页面状态契约</CardTitle>
-              <CardDescription>后续接入 API 时必须覆盖 loading / error / empty。</CardDescription>
-            </CardHeader>
-            <CardContent className="flex flex-col gap-2">
-              {states.map((state) => (
-                <Badge key={state} variant="outline" className="w-fit">
-                  {state}
-                </Badge>
-              ))}
-            </CardContent>
-          </Card>
         </div>
       </div>
 

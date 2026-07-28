@@ -9,14 +9,6 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { BlackboxCapabilityPage } from './BlackboxCapabilityPage'
 
-const governance = [
-  { label: '影响范围', value: 'memory vector index、tag vector index、cooccurrence graph、EPA basis、FTS5 index、BookLore HNSW index。' },
-  { label: '生效时机', value: '只读诊断默认开启；重建和 re-embed 任务后续实现。' },
-  { label: '是否持久化', value: '本页不写入；重建需二次确认。' },
-  { label: '是否需要重启', value: '只读检查不需要重启；索引重建是否需重载由后续任务说明。' },
-  { label: '回滚方式', value: '后续重建必须先 preview，保留旧索引路径和恢复说明。' },
-]
-
 function formatValue(value: unknown): string {
   if (value === undefined || value === null || value === '') {
     return '0'
@@ -85,25 +77,47 @@ export function BlackboxIndexesPage() {
           { label: 'EPA basis', value: loading ? '加载中' : healthValue(summary, 'epa_basis'), description: `Tag ${formatValue(summary?.counts?.tags)} 条，缺向量 ${formatValue(summary?.counts?.tags_missing_vector)} 条。` },
           { label: 'BookLore HNSW index', value: loading ? '加载中' : healthValue(summary, 'book_lore_hnsw_index'), description: `书设实体 ${formatValue(summary?.counts?.book_entities)} 条。` },
         ]}
-        sections={[
+        sections={summary ? [
           {
-            title: '索引状态矩阵',
-            description: '集中展示 DB 行数、索引 count 和缺失向量摘要。',
-            items: ['DB 行数 vs index count', '缺失向量列表摘要', 'FTS5 可用性检查', 'BookLore HNSW index'],
+            title: '索引状态',
+            description: '各索引当前健康状态。',
+            items: [
+              `Memory vector: ${healthValue(summary, 'memory_vector_index')}`,
+              `FTS5: ${healthValue(summary, 'fts5_index')}`,
+              `EPA basis: ${healthValue(summary, 'epa_basis')}`,
+              `BookLore HNSW: ${healthValue(summary, 'book_lore_hnsw_index')}`,
+            ],
           },
           {
-            title: '重建任务入口',
-            description: '重建需二次确认，本切片只声明任务边界。',
-            items: ['rebuild preview', 'reembed preview', '单条 re-embed', '批量 re-embed'],
+            title: '缺失向量',
+            description: '缺少特征向量（无法检索）的条目数。',
+            items: [
+              `记忆缺向量: ${formatValue(summary.counts?.memories_missing_vector)}`,
+              `Tag 缺向量: ${formatValue(summary.counts?.tags_missing_vector)}`,
+              `记忆总数: ${formatValue(summary.counts?.memories)}`,
+              `Tag 总数: ${formatValue(summary.counts?.tags)}`,
+            ],
           },
           {
-            title: '受管索引对象',
-            description: '后续按对象展示检查结果和恢复建议。',
-            items: ['tag vector index', 'cooccurrence graph', 'EPA basis', 'FTS5 index'],
+            title: '索引检查',
+            description: '综合检查结果。',
+            items: check ? [
+              `状态: ${check.ok ? '正常' : '异常'}`,
+              `消息: ${check.message ?? '-'}`,
+            ] : ['检查未完成'],
           },
+        ] : [
+          { title: '加载中', description: '正在读取索引摘要…', items: ['请稍候'] },
+          { title: '加载中', description: '正在读取索引摘要…', items: ['请稍候'] },
+          { title: '加载中', description: '正在读取索引摘要…', items: ['请稍候'] },
         ]}
-        governance={governance}
-        states={['加载中', '读取失败', '暂无数据']}
+        governance={[
+          { label: '影响范围', value: 'memory vector index、tag vector index、FTS5、EPA basis、cooccurrence graph。' },
+          { label: '读取模式', value: summary?.readonly ? '只读诊断' : '可写' },
+          { label: '生效时机', value: '只读诊断即时展示；重建/re-embed 任务后续实现。' },
+          { label: '是否需要重启', value: '只读查看不需要重启；重建是否需重载由后续确定。' },
+          { label: '回滚方式', value: '重建必须先 preview，保留旧索引路径。' },
+        ]}
       />
 
       {loading ? (

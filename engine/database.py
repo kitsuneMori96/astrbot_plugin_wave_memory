@@ -233,6 +233,21 @@ class WaveMemoryDB:
     def get_person_stats(self, qq_id):
         return self._social_repo.get_person_stats(qq_id)
 
+    def resolve_canonical_id(self, local_id: str, bot_id: str = "yushu") -> str:
+        return self._social_repo.resolve_canonical_id(local_id, bot_id)
+
+    def add_binding(self, local_id: str, master_id: str, bot_id: str = "yushu", platform: str = "qq") -> dict:
+        return self._social_repo.add_binding(local_id, master_id, bot_id, platform)
+
+    def remove_binding(self, binding_id: int):
+        self._social_repo.remove_binding(binding_id)
+
+    def get_bindings(self, bot_id: Optional[str] = None, search: str = "", limit: int = 50, offset: int = 0) -> list[dict]:
+        return self._social_repo.get_bindings(bot_id, search, limit, offset)
+
+    def count_bindings(self, bot_id: Optional[str] = None, search: str = "") -> int:
+        return self._social_repo.count_bindings(bot_id, search)
+
     # ═══════════════════════════════════════════════════════
     # Knowledge 委托
     # ═══════════════════════════════════════════════════════
@@ -345,14 +360,14 @@ class WaveMemoryDB:
         if not row:
             return None
         tags = self.conn.execute(
-            """SELECT t.id, t.name FROM tags t JOIN memory_tags mt ON t.id = mt.tag_id
+            """SELECT t.id, t.name, t.tag_type FROM tags t JOIN memory_tags mt ON t.id = mt.tag_id
                WHERE mt.memory_id = ? ORDER BY mt.position""", (memory_id,)
         ).fetchall()
         return {
             "id": row[0], "group_id": row[1], "sender_id": row[2], "sender_name": row[3],
             "content": row[4], "source": row[5], "has_vector": bool(row[6]), "timestamp": row[7],
             "importance": row[8], "access_count": row[9], "last_accessed": row[10],
-            "tags": [{"id": t[0], "name": t[1]} for t in tags],
+            "tags": [{"id": t[0], "name": t[1], "type": t[2]} for t in tags],
         }
 
     def get_memory_brief(self, memory_id):

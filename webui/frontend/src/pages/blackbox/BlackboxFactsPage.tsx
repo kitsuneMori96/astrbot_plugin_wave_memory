@@ -9,14 +9,6 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { BlackboxCapabilityPage } from './BlackboxCapabilityPage'
 
-const governance = [
-  { label: '影响范围', value: '稳定事实关系、facts 注入通道和人物/实体关系解释。' },
-  { label: '生效时机', value: '只读诊断立即展示；编辑 confidence、归档、删除和合并后续实现。' },
-  { label: '是否持久化', value: '本页不写入；删除、合并重复 facts 需二次确认。' },
-  { label: '是否需要重启', value: '只读查看不需要重启；通道参数由 /channels 热配置控制。' },
-  { label: '回滚方式', value: '后续写操作需保留证据记忆、旧 confidence 和 rollback_hint。' },
-]
-
 function formatValue(value: unknown): string {
   if (value === undefined || value === null || value === '') {
     return '0'
@@ -68,6 +60,11 @@ export function BlackboxFactsPage() {
   const facts = factsPayload?.items ?? []
   const aliasCount = facts.filter((fact) => String(fact.fact_type ?? '').includes('PERSON_ALIAS')).length
   const lowConfidenceCount = facts.filter((fact) => Number(fact.confidence ?? 1) < 0.5).length
+  const typeCounts: Record<string, number> = {}
+  for (const f of facts) {
+    const t = String(f.fact_type ?? 'unknown')
+    typeCounts[t] = (typeCounts[t] ?? 0) + 1
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -80,25 +77,34 @@ export function BlackboxFactsPage() {
           { label: 'PERSON_ALIAS', value: loading ? '加载中' : formatValue(aliasCount), description: '昵称/别名分流结果与候选数量。' },
           { label: '低置信关系', value: loading ? '加载中' : formatValue(lowConfidenceCount), description: 'confidence 低于治理阈值的关系数量。' },
         ]}
-        sections={[
+        sections={!loading ? [
           {
-            title: 'facts 列表字段',
-            description: '列表必须能解释关系三元组、类型和证据来源。',
-            items: ['subject', 'predicate', 'object', 'fact_type', 'confidence', 'source_memory_id'],
+            title: '类型分布',
+            description: '各类 fact_type 的条目数量。',
+            items: Object.entries(typeCounts).length > 0
+              ? Object.entries(typeCounts).map(([t, c]) => `${t}: ${c}`)
+              : ['暂无 facts 数据'],
           },
           {
-            title: '详情与证据',
-            description: '详情页后续展示证据记忆、更新时间和关联 tag。',
-            items: ['证据记忆', '更新时间', '关联 tag', '来源 source'],
+            title: '置信度与来源',
+            description: 'facts 的置信度分布与证据关联。',
+            items: [
+              `低置信度 (<0.5): ${lowConfidenceCount}`,
+              `有证据来源: ${facts.filter(f => f.source_memory_id != null && f.source_memory_id !== '').length}`,
+              `总数: ${formatValue(factsPayload?.total)}`,
+            ],
           },
-          {
-            title: 'facts channel 测试',
-            description: '后续输入当前消息，查看 facts channel 会注入什么。',
-            items: ['测试消息', '命中 facts', '过滤原因', '注入预览'],
-          },
+        ] : [
+          { title: '加载中', description: '正在读取 Facts…', items: ['请稍候'] },
+          { title: '加载中', description: '正在读取 Facts…', items: ['请稍候'] },
         ]}
-        governance={governance}
-        states={['加载中', '读取失败', '暂无数据']}
+        governance={[
+          { label: '影响范围', value: 'facts 稳定关系事实，不是自由文本记忆。' },
+          { label: '读取模式', value: '只读诊断' },
+          { label: '生效时机', value: '只读诊断即时展示；编辑/归档后续接入。' },
+          { label: '是否需要重启', value: '只读查看不需要重启。' },
+          { label: '回滚方式', value: '删除/合并操作需二次确认。' },
+        ]}
       />
 
       {loading ? (

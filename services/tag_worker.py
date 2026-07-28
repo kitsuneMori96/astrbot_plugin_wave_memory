@@ -1,4 +1,4 @@
-"""TagWorker — 匀速后台标签提取 + source 升级判断"""
+"""TagWorker — 匀速后台标签提取 + source 升级 + 向量补生 + 索引重建"""
 
 from __future__ import annotations
 
@@ -12,16 +12,18 @@ from astrbot.api import logger
 class TagWorker:
     """匀速标签提取工作线程。
 
-    每 interval_seconds 秒醒一次，取无标签记忆（< 2个标签），
-    一次 batch LLM 调用打完，写回。
-    打完标签后检查是否应将 chat → core（bot 相关标签升级）。
+    每 interval_seconds 秒醒一次：
+    1. 取无标签记忆（< 2个标签）batch LLM 打完写回
+    2. 补生 missing vector（memory / tag）
+    3. 重建向量索引
     """
 
-    def __init__(self, db, tag_extractor, embedding_service, tag_index, config: dict = None, bot_keywords: set = None):
+    def __init__(self, db, tag_extractor, embedding_service, tag_index, memory_index=None, config: dict = None, bot_keywords: set = None):
         self.db = db
         self.extractor = tag_extractor
         self.embedding = embedding_service
         self.tag_index = tag_index
+        self.memory_index = memory_index
         cfg = config or {}
         self.wake_interval = int(cfg.get("interval_seconds", 300))
         self.batch_size = int(cfg.get("max_batch_per_cycle", cfg.get("tag_worker_batch_size", 100)))
@@ -43,18 +45,21 @@ class TagWorker:
             self._task.cancel()
 
     async def _loop(self):
-        # 首次等 60s 让系统稳定
         await asyncio.sleep(60)
         while self._running:
             try:
                 batch = self._fetch_untagged_batch()
                 if batch:
                     await self._process_batch(batch)
+
+                # 补生缺失向量，有修复则重建索引
+                fixed = await self._backfill_vectors()
+                if fixed:
+                    await self._rebuild_indexes()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.warning(f"[WaveMemory] TagWorker error: {e}")
-            # 固定间隔休眠
             try:
                 await asyncio.sleep(self.wake_interval)
             except asyncio.CancelledError:
@@ -62,7 +67,12 @@ class TagWorker:
         logger.info("[WaveMemory] TagWorker stopped")
 
     def _fetch_untagged_batch(self) -> list:
-        """获取标签不足(< 2个)的记忆。跳过 source=noise（低价值消息不打标签）。"""
+        """获取标签不足(< 2个)的记忆。
+
+        永久排除 skipped；failed 条目在冷却期（1小时）后会被重试。
+        跳过 source=noise。
+        """
+        cutoff = time.time() - 3600  # 1h cooldown
         return self.db.conn.execute("""
             SELECT m.id, m.content, m.sender_name
             FROM memories m
@@ -73,13 +83,14 @@ class TagWorker:
             WHERE COALESCE(tc.tag_cnt, 0) < 2
             AND m.id NOT IN (
                 SELECT memory_id FROM tag_extraction_status
-                WHERE status IN ('failed', 'skipped')
+                WHERE status = 'skipped'
+                OR (status = 'failed' AND updated_at > ?)
             )
             AND LENGTH(m.content) >= 10
             AND COALESCE(m.source, '') != 'noise'
             ORDER BY m.id DESC
             LIMIT ?
-        """, (self.batch_size,)).fetchall()
+        """, (cutoff, self.batch_size)).fetchall()
 
     async def _process_batch(self, batch: list):
         """处理一批记忆。"""
@@ -161,10 +172,76 @@ class TagWorker:
         tag_names = {t.get("name", "").lower() for t in tags}
         bot_kw_lower = {kw.lower() for kw in self.bot_keywords if kw}
         if tag_names & bot_kw_lower:
-            # 只升级 chat → core，不动其他 source
             row = self.db.conn.execute(
                 "SELECT source FROM memories WHERE id = ?", (memory_id,)
             ).fetchone()
             if row and row[0] == "chat":
                 self.db.update_source(memory_id, "core")
                 logger.debug(f"[TagWorker] Upgraded memory {memory_id} to core (bot-related tags)")
+
+    async def _backfill_vectors(self, batch_size: int = 50) -> int:
+        """补生 memory 和 tag 的缺失向量。返回修复数量。"""
+        fixed = 0
+
+        mem_ids = self.db.get_memories_without_vector(batch_size)
+        if mem_ids:
+            ph = ",".join("?" * len(mem_ids))
+            rows = self.db.conn.execute(
+                f"SELECT id, content FROM memories WHERE id IN ({ph})", mem_ids
+            ).fetchall()
+            texts = [r[1] for r in rows if r[1]]
+            if texts:
+                vecs = await self.embedding.get_embeddings(texts)
+                for (mid, _), vec in zip(rows, vecs):
+                    if vec is not None:
+                        self.db.update_memory_vector(mid, vec)
+                        fixed += 1
+            self.db.conn.commit()
+
+        tag_rows = self.db.conn.execute(
+            "SELECT id, name FROM tags WHERE vector IS NULL LIMIT ?", (batch_size,)
+        ).fetchall()
+        if tag_rows:
+            names = [r[1] for r in tag_rows if r[1]]
+            if names:
+                vecs = await self.embedding.get_embeddings(names)
+                for (tid, name), vec in zip(tag_rows, vecs):
+                    if vec is not None:
+                        self.db.add_tag_extended(name=name, vector=vec)
+                        fixed += 1
+            self.db.conn.commit()
+
+        if fixed:
+            logger.info(f"[WaveMemory] TagWorker backfilled {fixed} vectors")
+        return fixed
+
+    async def _rebuild_indexes(self):
+        """重建 memory 和 tag 向量索引。"""
+        import numpy as np
+
+        def _sync_mem():
+            all_vecs = self.db.get_all_memory_vectors()
+            if all_vecs and self.memory_index:
+                ids = [v[0] for v in all_vecs]
+                vectors = np.array([v[1] for v in all_vecs], dtype=np.float32)
+                self.memory_index.add(ids, vectors)
+                self.memory_index.save()
+                return len(ids)
+            return 0
+
+        def _sync_tag():
+            tag_data = self.db.get_all_tag_vectors()
+            if tag_data:
+                ids = [t[0] for t in tag_data]
+                vectors = np.array([t[2] for t in tag_data], dtype=np.float32)
+                self.tag_index.add(ids, vectors)
+                self.tag_index.save()
+                return len(ids)
+            return 0
+
+        count = await asyncio.to_thread(_sync_mem)
+        if count:
+            logger.info(f"[WaveMemory] TagWorker rebuilt memory index: {count} vectors")
+        count = await asyncio.to_thread(_sync_tag)
+        if count:
+            logger.info(f"[WaveMemory] TagWorker rebuilt tag index: {count} vectors")

@@ -10,6 +10,7 @@ import {
   GitBranchIcon,
   GitCompareArrowsIcon,
   HeartIcon,
+
   MessageSquareWarningIcon,
   SearchCheckIcon,
   Settings2Icon,
@@ -37,6 +38,7 @@ import { BlackboxFactsPage } from '@/pages/blackbox/BlackboxFactsPage'
 import { BlackboxPeoplePage, BlackboxPersonDetailPage } from '@/pages/blackbox'
 import { BlackboxIndexesPage } from '@/pages/blackbox/BlackboxIndexesPage'
 
+
 export interface AppRoute {
   path: string
   title: string
@@ -60,6 +62,7 @@ export const appRoutes: AppRoute[] = [
     icon: DatabaseIcon,
     element: MemoriesPage,
   },
+
   {
     path: '/import',
     title: '智能导入',

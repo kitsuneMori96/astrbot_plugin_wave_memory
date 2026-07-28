@@ -295,9 +295,27 @@ def build_people_payload(conn: Any, *, limit: int = 50, offset: int = 0, search:
     return {"items": items[offset:offset + limit], "total": total, "limit": limit, "offset": offset, "search": search, "sort": sort, "filter": filter, "readonly": True, "route_prefix": "/api/blackbox/people"}
 
 
-def build_indexes_summary(conn: Any) -> dict[str, Any]:
+def build_indexes_summary(conn: Any, container=None) -> dict[str, Any]:
     mem_cols = _columns(conn, "memories")
     tag_cols = _columns(conn, "tags")
+
+    memory_index = getattr(container, "memory_index", None) if container else None
+    epa = getattr(container, "epa", None) if container else None
+
+    if memory_index is not None and memory_index.count:
+        memory_vector_status = "present"
+    elif "vector" in mem_cols:
+        memory_vector_status = "inspectable"
+    else:
+        memory_vector_status = "unknown"
+
+    fts5_present = _table_exists(conn, "fts_memories") or _table_exists(conn, "memories_fts") or _table_exists(conn, "memory_fts")
+
+    epa_status = "present" if (epa and getattr(epa, "initialized", False)) else "missing"
+
+    book_lore_vec = _count(conn, "book_entities", "vector IS NOT NULL")
+    book_lore_status = "present" if book_lore_vec > 0 else "missing"
+
     return {
         "readonly": True,
         "route_prefix": "/api/blackbox/indexes",
@@ -312,10 +330,10 @@ def build_indexes_summary(conn: Any) -> dict[str, Any]:
             "book_entities": _count(conn, "book_entities"),
         },
         "health": {
-            "memory_vector_index": "unknown" if "vector" not in mem_cols else "inspectable",
-            "fts5_index": "present" if _table_exists(conn, "memories_fts") or _table_exists(conn, "memory_fts") else "missing_or_external",
-            "epa_basis": "unknown",
-            "book_lore_hnsw_index": "unknown",
+            "memory_vector_index": memory_vector_status,
+            "fts5_index": "present" if fts5_present else "missing_or_external",
+            "epa_basis": epa_status,
+            "book_lore_hnsw_index": book_lore_status,
         },
     }
 
@@ -787,19 +805,31 @@ async def get_person_detail(person_id: str):
 @blackbox_bp.route("/indexes/summary", methods=["GET"])
 @require_auth
 async def get_indexes_summary():
-    conn = _conn_from_container()
-    if not conn:
+    c = get_container()
+    db = getattr(c, "db", None)
+    if not db:
         return jsonify(_error_payload("database_unavailable")), 503
-    return jsonify(build_indexes_summary(conn))
+    if getattr(db, "closed", False):
+        try:
+            db.reopen()
+        except Exception:
+            return jsonify(_error_payload("database_unavailable")), 503
+    return jsonify(build_indexes_summary(db.conn, container=c))
 
 
 @blackbox_bp.route("/indexes/check", methods=["GET"])
 @require_auth
 async def check_indexes():
-    conn = _conn_from_container()
-    if not conn:
+    c = get_container()
+    db = getattr(c, "db", None)
+    if not db:
         return jsonify(_error_payload("database_unavailable")), 503
-    payload = build_indexes_summary(conn)
+    if getattr(db, "closed", False):
+        try:
+            db.reopen()
+        except Exception:
+            return jsonify(_error_payload("database_unavailable")), 503
+    payload = build_indexes_summary(db.conn, container=c)
     payload["ok"] = True
     payload["message"] = "只读诊断完成；重建、修复、清理等写操作必须二次确认。"
     return jsonify(payload)

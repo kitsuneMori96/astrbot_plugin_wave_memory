@@ -242,10 +242,10 @@ export function LearningObjectsPage() {
       </Card>
 
       {duplicates.length > 0 ? (
-        <Alert variant="destructive">
+        <Alert>
           <AlertTriangleIcon />
           <AlertTitle>发现重复登记提示</AlertTitle>
-          <AlertDescription>{duplicates.length} 个学习对象存在重复相关审计发现。</AlertDescription>
+          <AlertDescription>{duplicates.length} 个学习对象存在运行时重复检测发现。</AlertDescription>
         </Alert>
       ) : null}
 
