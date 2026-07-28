@@ -137,7 +137,15 @@ async def system_status():
             "vector_pct": round(with_vec / total_mem * 100, 1) if total_mem > 0 else 0,
             "tag_pct": round(tagged_memories / total_mem * 100, 1) if total_mem > 0 else 0,
         },
-        "cooccurrence": {"nodes": cooc_nodes, "edges": cooc_edges},
+        "cooccurrence": {
+            "nodes": cooc_nodes, "edges": cooc_edges,
+            **({} if not c.cooccurrence else {
+                "density": c.cooccurrence.stats.get("density", 0),
+                "avg_degree": c.cooccurrence.stats.get("avg_degree", 0),
+                "reciprocity": c.cooccurrence.stats.get("reciprocity", 0),
+                "global_clustering": round(c.cooccurrence.global_clustering, 4),
+            }),
+        },
         "db_size_mb": db_size_mb,
         "epa": {
             "initialized": c.epa.initialized if c.epa else False,

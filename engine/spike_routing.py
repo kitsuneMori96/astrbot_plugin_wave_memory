@@ -75,15 +75,22 @@ class SpikeRouter:
         else:
             dynamic_momentum = self.base_momentum
 
+        # 图指标自适应：高聚类 → 传播衰减降低（紧密社区信息流通好）
+        gc = getattr(self.cooccurrence, "global_clustering", 0.0)
+        adaptive_decay = self.base_decay * (1.0 - gc * 0.3)
+
         # 初始化能量场
         energy_field: dict[int, float] = {}
         seed_ids = set()
 
-        # 注入种子能量
+        # 注入种子能量（高中心性种子获得更高初始能量）
+        cent = getattr(self.cooccurrence, "centrality", {})
         active_nodes: list[dict] = []
         for seed in seed_tags:
             tid = seed["tag_id"]
-            energy = seed["weight"]
+            base_energy = seed["weight"]
+            centrality_boost = 1.0 + cent.get(tid, 0.5) * 0.5  # [1.0, 1.5]
+            energy = base_energy * centrality_boost
             momentum = dynamic_momentum
             energy_field[tid] = energy
             seed_ids.add(tid)
@@ -109,9 +116,10 @@ class SpikeRouter:
                 )
 
                 for neighbor_id, cooc_weight in neighbors:
-                    # 计算张力（残差加权：高残差邻居更容易触发虫洞）
+                    # 计算张力（残差加权 + PageRank 高优节点加成）
                     neighbor_residual = self.residual_map.get(neighbor_id, 0.5)
-                    tension = cooc_weight * node["energy"] * (0.5 + neighbor_residual)
+                    pr_boost = 1.0 + getattr(self.cooccurrence, "pagerank", {}).get(neighbor_id, 0.0) * 0.3
+                    tension = cooc_weight * node["energy"] * (0.5 + neighbor_residual) * pr_boost
 
                     # 决定衰减方式
                     if tension >= self.tension_threshold:
@@ -119,8 +127,8 @@ class SpikeRouter:
                         propagated_energy = node["energy"] * self.wormhole_decay * cooc_weight
                         new_momentum = node["momentum"]
                     else:
-                        # 常规传播：高衰减，扣动量
-                        propagated_energy = node["energy"] * self.base_decay * cooc_weight
+                        # 常规传播：高衰减，扣动量（聚类自适应）
+                        propagated_energy = node["energy"] * adaptive_decay * cooc_weight
                         new_momentum = node["momentum"] - 1.0
 
                     # 微电流过滤

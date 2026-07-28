@@ -68,7 +68,19 @@ async def community(community_id: int):
             f"SELECT id, name, tag_type FROM tags WHERE id IN ({placeholders})",
             list(selected),
         ).fetchall()
-        nodes = [{"id": r[0], "name": r[1], "type": r[2], "degree": degree.get(r[0], 0), "community": community_id} for r in rows]
+        cent = getattr(c.cooccurrence, "centrality", {})
+        pr = getattr(c.cooccurrence, "pagerank", {})
+        cc = getattr(c.cooccurrence, "clustering", {})
+        nodes = [
+            {
+                "id": r[0], "name": r[1], "type": r[2], "degree": degree.get(r[0], 0),
+                "community": community_id,
+                "centrality": round(cent.get(r[0], 0), 4),
+                "pagerank": round(pr.get(r[0], 0), 4),
+                "clustering": round(cc.get(r[0], 0), 4),
+            }
+            for r in rows
+        ]
     else:
         nodes = []
 

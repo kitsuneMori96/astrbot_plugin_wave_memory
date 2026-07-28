@@ -11,6 +11,14 @@ from typing import Optional
 from astrbot.api import logger
 
 from .database import WaveMemoryDB
+from .graph_metrics import (
+    degree_centrality,
+    pagerank,
+    clustering_coefficient,
+    global_avg_clustering,
+    graph_stats,
+    sampled_edge_betweenness,
+)
 from .semantic_gain import bell_gain, SemanticGainConfig
 
 
@@ -39,6 +47,13 @@ class DirectedCooccurrence:
         # 反向索引
         self.backward: dict[int, dict[int, float]] = defaultdict(lambda: defaultdict(float))
         self._tag_count = 0
+
+        self.centrality: dict[int, float] = {}
+        self.pagerank: dict[int, float] = {}
+        self.clustering: dict[int, float] = {}
+        self.global_clustering: float = 0.0
+        self.stats: dict = {}
+        self.edge_betweenness: dict[tuple, float] = {}
 
     def rebuild(self):
         """从 memory_tags 构建有向共现矩阵，加入语义增益调制。"""
@@ -121,6 +136,20 @@ class DirectedCooccurrence:
             f"[WaveMemory] DirectedCooccurrence rebuilt: "
             f"{len(self.forward)} nodes, {sum(len(v) for v in self.forward.values())} directed edges"
         )
+
+        self._compute_metrics()
+
+    def _compute_metrics(self):
+        """重建后计算轻量图指标。"""
+        try:
+            self.centrality = degree_centrality(self.forward, self.backward)
+            self.pagerank = pagerank(self.forward, self.backward)
+            self.clustering = clustering_coefficient(self.forward, self.backward)
+            self.global_clustering = global_avg_clustering(self.forward, self.backward)
+            self.stats = graph_stats(self.forward, self.backward)
+            self.edge_betweenness = sampled_edge_betweenness(self.forward, self.backward, samples=50)
+        except Exception as e:
+            logger.debug(f"[WaveMemory] graph metrics compute failed: {e}")
 
     def get_neighbors(self, tag_id: int, max_neighbors: int = 20) -> list[tuple[int, float]]:
         """获取某个 Tag 的有向出边邻居，按权重降序。"""
@@ -225,7 +254,12 @@ class DirectedCooccurrence:
                 list(selected_nodes),
             ).fetchall()
             for r in rows:
-                node_info[r[0]] = {"id": r[0], "name": r[1], "type": r[2], "degree": degree.get(r[0], 0)}
+                node_info[r[0]] = {
+                    "id": r[0], "name": r[1], "type": r[2], "degree": degree.get(r[0], 0),
+                    "centrality": round(self.centrality.get(r[0], 0), 4),
+                    "pagerank": round(self.pagerank.get(r[0], 0), 4),
+                    "clustering": round(self.clustering.get(r[0], 0), 4),
+                }
 
         node_community: dict[int, int] = {}
         for cid, members in communities.items():
