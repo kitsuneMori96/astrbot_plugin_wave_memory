@@ -64,7 +64,9 @@ class FewShotService:
         # 从配置读取参数
         self._min_score = float(self._config.get("min_score", 0.7))
         self._max_inject = int(self._config.get("max_inject", 3))
-        self._drift_threshold = float(self._config.get("drift_threshold", 0.5))
+        self._drift_threshold = float(self._config.get("drift_threshold", 0.65))
+        self._extract_sample = int(self._config.get("extract_sample", 80))
+        self._extract_top_k = int(self._config.get("extract_top_k", 10))
         self._ensure_table()
 
     def _ensure_table(self) -> None:
@@ -104,8 +106,8 @@ class FewShotService:
             """SELECT id, content FROM memories
                WHERE source IN ('bot_reply', 'bzz_experience', 'bzz_evolution')
                AND timestamp > ? AND LENGTH(content) >= 20
-               ORDER BY RANDOM() LIMIT 50""",
-            (seven_days_ago,),
+                ORDER BY RANDOM() LIMIT ?""",
+            (seven_days_ago, self._extract_sample),
         ).fetchall()
 
         if not rows:
@@ -128,7 +130,7 @@ class FewShotService:
             except Exception:
                 continue
 
-            if len(candidates) >= 10:
+            if len(candidates) >= self._extract_top_k:
                 break
 
         # 写入 DB

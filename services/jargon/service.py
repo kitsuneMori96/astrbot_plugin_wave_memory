@@ -42,14 +42,14 @@ class JargonService:
 
         # 从配置读取参数（改动4：全部参数配置化）
         self._min_frequency = int(self._config.get("min_frequency", 5))
-        self._global_threshold = int(self._config.get("global_threshold", 3))
+        self._global_threshold = int(self._config.get("global_threshold", 5))
         self._min_messages = int(self._config.get("min_messages", 10))
-        self._mine_cooldown = int(self._config.get("mine_cooldown", 20))
+        self._mine_cooldown = int(self._config.get("mine_cooldown", 300))
         self._top_k = int(self._config.get("top_k", 20))
         self._max_context = int(self._config.get("max_context", 15))
         self._context_keep = int(self._config.get("context_keep", 10))
         self._window_days = int(self._config.get("window_days", 7))
-        self._jieba_threshold = int(self._config.get("jieba_threshold", 100))
+        self._jieba_threshold = int(self._config.get("jieba_threshold", 500))
         _llm_validate_cfg = self._config.get("llm_validate", True)
         self._llm_validate = True if _llm_validate_cfg is None else bool(_llm_validate_cfg)
         self._confidence_threshold = float(self._config.get("confidence_threshold", 0.5))
@@ -57,7 +57,7 @@ class JargonService:
         self._holyman_reference_only = True if self._config.get("holyman_reference_only", True) is None else bool(self._config.get("holyman_reference_only", True))
 
         # 递进推断阈值（改动1）
-        thresholds_str = str(self._config.get("inference_thresholds", "3,6,10,20,40,60,100"))
+        thresholds_str = str(self._config.get("inference_thresholds", "5,10,20,40,60,100"))
         self._inference_thresholds = [int(x.strip()) for x in thresholds_str.split(",") if x.strip()]
 
         # 权重参数
@@ -160,7 +160,7 @@ class JargonService:
         if not self._warmed_up:
             self._warmed_up = True
             try:
-                self._warmup_from_memories(days=3, max_rows=10000)
+                self._warmup_from_memories(days=7, max_rows=10000)
             except Exception as e:
                 logger.debug(f"[Jargon] warmup skipped: {e}")
         self._filter.feed(text, group_id, sender_id, timestamp=timestamp or time.time())
@@ -535,6 +535,13 @@ class JargonService:
             return True
         # 常见 2-4 字中文姓名/昵称形态：不直接确认成黑话，交给 facts 保守记录。
         if re.match(r"^[\u4e00-\u9fff]{2,4}$", word):
+            # 复姓
+            compound_surnames = {"欧阳", "慕容", "上官", "夏侯", "诸葛", "司马", "司徒", "令狐", "独孤", "南宫", "轩辕", "尉迟", "公孙", "长孙", "端木"}
+            if len(word) == 4 and word[:2] in compound_surnames:
+                return True
+            if len(word) == 3 and word[:2] in compound_surnames:
+                return True
+            # 单姓
             surname = word[0]
             common_surnames = "赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦尤许何吕施张孔曹严华金魏陶姜谢邹喻柏水窦章云苏潘葛奚范彭郎鲁韦昌马苗凤花方俞任袁柳鲍史唐费廉岑薛雷贺倪汤滕殷罗毕郝邬安常乐于时傅皮卞齐康伍余元卜顾孟平黄和穆萧尹"
             return surname in common_surnames and len(word) <= 3

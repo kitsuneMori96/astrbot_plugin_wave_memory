@@ -42,7 +42,7 @@ class HolymanReference:
         ".md", ".json", "http://", "https://", "详见", "Opening**", "Closing**", "Resolution**",
         "Response Hints", "Core Rules", "Output Rules", "Hard Boundaries", "Language (", "Mode ",
     )
-    _ENGLISH_ALLOWLIST = {"Ciallo", "Ciallo～", "Galgame", "NGA", "KPL", "CSGO", "CNCS", "DeepSeek", "AstraAI", "Bilibili"}
+    _ENGLISH_ALLOWLIST = {"Ciallo", "Ciallo～", "Galgame", "NGA", "KPL", "CSGO", "CNCS", "DeepSeek", "AstraAI", "Bilibili", "yyds", "awsl", "xswl", "yygq", "wzry", "kfc", "v50", "v我50", "dddd", "yysy", "ky", "aoe", "tql"}
     _SHORT_SUBSTRING_ALLOWLIST = {"原神", "黄油", "神人", "抽象", "狗粉丝", "孙笑川", "急了", "鼠鼠", "叠甲", "丁真"}
 
     def __init__(self, root_path: str | None = None, max_examples: int = 3):

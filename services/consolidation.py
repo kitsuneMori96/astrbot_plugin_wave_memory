@@ -261,7 +261,7 @@ class ConsolidationService:
         nicknames = structured.get("nicknames", [])
         def _write_nicknames():
             written = 0
-            for nn in (nicknames or [])[:3]:
+            for nn in (nicknames or [])[:5]:
                 person = nn.get("person", "").strip()
                 called = nn.get("called", "").strip()
                 if person and called and len(called) >= 2:
