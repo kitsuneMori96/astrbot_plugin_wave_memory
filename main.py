@@ -189,7 +189,8 @@ class WaveMemoryPlugin(Star):
         self.min_similarity = float(query_cfg.get("min_similarity", "0.35"))
         self.injection_format = query_cfg.get("injection_format", "[记忆] {sender}({time}): {content}")
         # v2.0: inject 控制参数
-        self.skip_recent_minutes = int(inject_cfg.get("skip_recent_minutes", 30))
+        self.skip_recent_minutes = int(inject_cfg.get("skip_recent_minutes") or query_cfg.get("skip_recent_minutes", 30))
+        self.time_filter_enabled = query_cfg.get("time_filter_enabled", True)
         self.timeline_max = int(inject_cfg.get("timeline_max", 5))
         self.facts_max = int(inject_cfg.get("facts_max", 5))
         self.enable_timeline = inject_cfg.get("enable_timeline", True)
@@ -1897,21 +1898,35 @@ class WaveMemoryPlugin(Star):
         from .utils.perf import estimate_tokens
         t_start = _time.perf_counter()
 
-        # ─── 时间感知检索：检测时间词，设置时间过滤 ───
+        # ─── 时间感知检索（可选）：检测时间词，设置时间过滤 ───
         _time_filter_ts = 0  # 0 = 不过滤
-        _time_patterns = [
-            (r'昨天|昨晚', 2 * 86400),
-            (r'前天', 3 * 86400),
-            (r'上周|前几天|这几天', 7 * 86400),
-            (r'之前|以前|那次|上次', 30 * 86400),
-        ]
-        for pattern, seconds in _time_patterns:
-            if _re.search(pattern, message[:50]):
-                _time_filter_ts = _time.time() - seconds
-                break
+        if self.time_filter_enabled:
+            _time_patterns = [
+                (r'昨天|昨晚', 1 * 86400),
+                (r'前天', 2 * 86400),
+                (r'上周|前几天|这几天|一周前', 7 * 86400),
+                (r'之前|以前|上次|那次|上个月', 30 * 86400),
+            ]
+            for pattern, seconds in _time_patterns:
+                if _re.search(pattern, message[:50]):
+                    _time_filter_ts = _time.time() - seconds
+                    break
+            if not _time_filter_ts:
+                _match = _re.search(r'(\d+)天前', message[:50])
+                if _match:
+                    _time_filter_ts = _time.time() - int(_match.group(1)) * 86400
+                else:
+                    _match = _re.search(r'(\d+)小时前', message[:50])
+                    if _match:
+                        _time_filter_ts = _time.time() - int(_match.group(1)) * 3600
 
         # ─── v2.0: 去重——跳过最近 N 分钟的记忆（AstrBot 对话历史已覆盖）───
         _skip_before_ts = _time.time() - self.skip_recent_minutes * 60
+
+        # 读取群权重（下沉到 QueryEngine）
+        _gw_current = float(self.hot_config.get("query.group_weight_current", 1.5))
+        _gw_cross = float(self.hot_config.get("query.group_weight_cross", 0.8))
+        _group_boost = {"current": _gw_current, "cross": _gw_cross, "group_id": group_id} if group_id else None
 
         # ─── 通道 1: 主搜索 ───
         async def _ch_main_search():
@@ -1924,6 +1939,8 @@ class WaveMemoryPlugin(Star):
                         self.query_engine.shotgun_query(
                             text=message, context_messages=context_messages,
                             group_id=group_id, top_k=self.inject_top_k,
+                            time_filter_ts=_time_filter_ts,
+                            group_boost=_group_boost,
                         ), timeout=_CHANNEL_TIMEOUT)
                 else:
                     # 只搜高价值记忆（不搜 chat/noise，避免复读群友的话）
@@ -1934,6 +1951,8 @@ class WaveMemoryPlugin(Star):
                             top_k=self.inject_top_k,
                             exclude_sources=exclude_sources,
                             source_filter=default_sources if not exclude_sources else None,
+                            time_filter_ts=_time_filter_ts,
+                            group_boost=_group_boost,
                         ), timeout=_CHANNEL_TIMEOUT)
                 if memories:
                     memories = filter_identity_contamination_memories(memories)
@@ -2320,31 +2339,16 @@ class WaveMemoryPlugin(Star):
                     memories = []
                 memories = memories + relation_memories
 
-            # ─── 参与者相关性加权 + 群隔离 + 时间过滤 ───
+            # ─── 参与者相关性加权 + 去重 ───
             if memories and sender_id:
                 for m in memories:
                     m_sender = m.get("sender_id") or m.get("sender_name", "")
                     base_score = m.get("score", 0.5)
-                    # 参与者加权
                     if m_sender == sender_id or m.get("sender_name") == sender_name:
-                        base_score *= 1.4  # 自己说的更相关
+                        base_score *= 1.4
                     elif m_sender == bot_id:
-                        base_score *= 1.2  # bot 对该用户说的
-                    # 群隔离加权（从 HotConfig 读取）
-                    _gw_current = float(self.hot_config.get("query.group_weight_current", 1.5))
-                    _gw_cross = float(self.hot_config.get("query.group_weight_cross", 0.8))
-                    m_group = m.get("group_id", "")
-                    if m_group == group_id:
-                        base_score *= _gw_current
-                    elif m_group and m_group != group_id:
-                        base_score *= _gw_cross
+                        base_score *= 1.2
                     m["score"] = base_score
-
-                # 时间过滤（有时间词时）
-                if _time_filter_ts > 0:
-                    time_filtered = [m for m in memories if m.get("timestamp", 0) >= _time_filter_ts]
-                    if time_filtered:
-                        memories = time_filtered
 
                 # v2.0 去重：跳过最近 N 分钟的记忆（AstrBot 对话历史已覆盖）
                 filtered = [m for m in memories if m.get("timestamp", 0) < _skip_before_ts]

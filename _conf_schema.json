@@ -186,6 +186,18 @@
         "hint": "支持多角度、碎片化的快速上下文分割并发查询。开启会略微增加 30ms 响应耗时，但在大群活跃吹水场景下体验极佳。",
         "type": "bool",
         "default": false
+      },
+      "skip_recent_minutes": {
+        "description": "跳过最近 N 分钟的记忆（对话历史去重）",
+        "hint": "AstrBot 的对话历史已经包含了最近几条消息，因此不需要再从记忆库中召回。此参数控制跳过多长时间内的记忆（分钟）。设为 0 不过滤。",
+        "type": "int",
+        "default": 30
+      },
+      "time_filter_enabled": {
+        "description": "启用时间词感知过滤",
+        "hint": "开启后当用户消息中出现「昨天」「上周」「3天前」等时间词时，自动过滤检索范围为对应时间段内的记忆。",
+        "type": "bool",
+        "default": true
       }
     }
   },

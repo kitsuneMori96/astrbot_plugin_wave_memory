@@ -61,12 +61,16 @@ class QueryEngine:
         top_k: int = 5,
         exclude_sources: Optional[list[str]] = None,
         source_filter: Optional[str | list[str]] = None,
+        time_filter_ts: float = 0,
+        group_boost: Optional[dict] = None,
     ) -> list[dict]:
         """执行完整的浪潮查询管线。
         
         Args:
             exclude_sources: 排除特定 source 类型的记忆（如 ["bzz_experience"]）
             source_filter: 只保留特定 source 类型的记忆，支持单个或列表
+            time_filter_ts: 时间戳阈值，>0 时只返回 timestamp >= 此值的记忆
+            group_boost: 群权重字典，如 {"current": 1.5, "cross": 0.8, "group_id": "gid"}
         """
         start = time.time()
 
@@ -116,8 +120,11 @@ class QueryEngine:
                     ts = time.time()
             elif ts is None:
                 ts = time.time()
+            mem["_parsed_ts"] = ts
             days_old = (time.time() - ts) / 86400.0
             time_decay = 0.997 ** max(0, days_old)
+            if time_filter_ts > 0 and ts < time_filter_ts:
+                time_decay = 0
 
             access_count = mem.get("access_count", 0) or 0
             import math
@@ -133,8 +140,19 @@ class QueryEngine:
                 if mem["id"] in rerank_scores:
                     mem["score"] = rerank_scores[mem["id"]]
 
+        # 时间过滤 + 群权重（Geodesic 后执行防止绕过，非 Geodesic 时也在此统一应用）
+        for mem in memories:
+            if time_filter_ts > 0 and mem.get("_parsed_ts", 0) < time_filter_ts:
+                mem["score"] = -1
+            if group_boost and group_boost.get("group_id"):
+                m_group = mem.get("group_id", "")
+                if m_group == group_boost["group_id"]:
+                    mem["score"] *= float(group_boost.get("current", 1.5))
+                elif m_group and m_group != group_boost["group_id"]:
+                    mem["score"] *= float(group_boost.get("cross", 0.8))
+
         # 过滤：只看相似度 >= min_similarity
-        memories = [m for m in memories if m["similarity"] >= self.min_similarity]
+        memories = [m for m in memories if m["similarity"] >= self.min_similarity and m["score"] > 0]
         memories.sort(key=lambda m: m["score"], reverse=True)
         memories = memories[:top_k]
 
@@ -241,6 +259,8 @@ class QueryEngine:
         context_messages: list[str] = None,
         group_id: Optional[str] = None,
         top_k: int = 5,
+        time_filter_ts: float = 0,
+        group_boost: Optional[dict] = None,
     ) -> list[dict]:
         """多路霰弹枪检索。"""
         start = time.time()
@@ -283,7 +303,23 @@ class QueryEngine:
         for mem in memories:
             dist = all_candidates.get(mem["id"], 1.0)
             mem["similarity"] = 1.0 - dist
-            mem["score"] = mem["similarity"] * mem.get("importance", 1.0)
+
+            ts = mem.get("timestamp", None)
+            if isinstance(ts, str):
+                try:
+                    from datetime import datetime
+                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+                except (ValueError, TypeError):
+                    ts = time.time()
+            elif ts is None:
+                ts = time.time()
+            mem["_parsed_ts"] = ts
+            days_old = (time.time() - ts) / 86400.0
+            time_decay = 0.997 ** max(0, days_old)
+            if time_filter_ts > 0 and ts < time_filter_ts:
+                time_decay = 0
+
+            mem["score"] = mem["similarity"] * mem.get("importance", 1.0) * time_decay
 
         if self.enable_geodesic and self.geodesic and energy_field:
             candidates_for_rerank = [{"id": m["id"], "score": m["score"]} for m in memories]
@@ -293,7 +329,18 @@ class QueryEngine:
                 if mem["id"] in rerank_scores:
                     mem["score"] = rerank_scores[mem["id"]]
 
-        memories = [m for m in memories if m["similarity"] >= self.min_similarity]
+        # 时间过滤 + 群权重（Geodesic 后执行防止绕过，非 Geodesic 时也在此统一应用）
+        for mem in memories:
+            if time_filter_ts > 0 and mem.get("_parsed_ts", 0) < time_filter_ts:
+                mem["score"] = -1
+            if group_boost and group_boost.get("group_id"):
+                m_group = mem.get("group_id", "")
+                if m_group == group_boost["group_id"]:
+                    mem["score"] *= float(group_boost.get("current", 1.5))
+                elif m_group and m_group != group_boost["group_id"]:
+                    mem["score"] *= float(group_boost.get("cross", 0.8))
+
+        memories = [m for m in memories if m["similarity"] >= self.min_similarity and m["score"] > 0]
         if len(memories) > top_k:
             memories = self._svd_dedup(memories, query_vec, top_k)
         else:
