@@ -52,7 +52,7 @@ class BeliefEmergenceService:
             if not content or self._duplicate(content):
                 continue
             source_ids = [int(e[0]) for e in events]
-            strength = min(0.4 + min(abs(total), 20) / 80, 0.7)
+            strength = min(0.4 + min(abs(total), 20) / 80, 0.85)
             try:
                 belief_id = self.db.add_belief(
                     content=content,

@@ -30,7 +30,7 @@ class MoodSnapshot:
 class MoodTrajectory:
     """情绪轨迹 — 维护最近 N 个情绪快照。"""
 
-    def __init__(self, db: WaveMemoryDB, bot_id: str = "", window_size: int = 20):
+    def __init__(self, db: WaveMemoryDB, bot_id: str = "", window_size: int = 72):
         self.db = db
         self.bot_id = bot_id
         self.snapshots: deque[MoodSnapshot] = deque(maxlen=window_size)

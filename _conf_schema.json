@@ -227,9 +227,9 @@
       },
       "mood_duration_hours": {
         "description": "情绪状态自然半衰退天数",
-        "hint": "情绪突发后，在没有后续高强度互动刺激下，多少小时后平复并重置为平静温和状态（默认 2.0 小时）",
+        "hint": "情绪突发后，在没有后续高强度互动刺激下，多少小时后平复并重置为平静温和状态（默认 4.0 小时）",
         "type": "float",
-        "default": 2.0
+        "default": 4.0
       },
       "mood_msg_threshold": {
         "description": "情绪爆发活跃消息门限",
@@ -247,7 +247,7 @@
         "description": "CONCERNED 悲伤触发临界值",
         "hint": "对话中负面、关切、悲伤情感占比超过此比例时，情绪自动偏向 CONCERNED（0.0 ~ 1.0）",
         "type": "float",
-        "default": 0.4
+        "default": 0.5
       },
       "relationship_single_delta_cap": {
         "description": "单次互动关系变化极大值",
@@ -263,9 +263,9 @@
       },
       "relationship_hostility_delta_cap": {
         "description": "单次辱骂敌意增加上限",
-        "hint": "单次检测到辱骂或恶意调戏时，敌意/敌对值正向拉升的最大限值（默认 8.0 分）。达到 3 次后自动进入保护性冷却。",
+        "hint": "单次检测到辱骂或恶意调戏时，敌意/敌对值正向拉升的最大限值（默认 5.0 分）。达到 3 次后自动进入保护性冷却。",
         "type": "float",
-        "default": 8.0
+        "default": 5.0
       },
       "enable_dream": {
         "description": "启用深夜做梦引擎 (Dreaming)",

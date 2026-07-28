@@ -103,7 +103,7 @@ class DreamService:
             if wave_vectors:
                 wave_vector = np.mean(wave_vectors, axis=0).astype(np.float32)
                 wave_vector /= np.linalg.norm(wave_vector) + 1e-10
-                deep_results = self.memory_index.search(wave_vector, k=3)
+                deep_results = self.memory_index.search(wave_vector, k=5)
                 deep_associations = [r[0] for r in deep_results]
 
         # 找共振桥梁：被多个种子同时联想到的记忆
@@ -115,7 +115,7 @@ class DreamService:
         # 强化被联想到的记忆（增加 importance）
         reinforced_ids = list(set(all_associations + deep_associations))
         if reinforced_ids:
-            self.db.touch_memories(reinforced_ids[:50], importance_boost=0.05)
+            self.db.touch_memories(reinforced_ids[:50], importance_boost=0.15)
 
         result = {
             "recent_seeds": len(recent_seeds),

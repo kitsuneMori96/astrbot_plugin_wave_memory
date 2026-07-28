@@ -25,7 +25,7 @@ DIMENSION_WEIGHTS = {
     "fun": 0.20,
     "depth": 0.25,
 }
-HOSTILITY_WEIGHT = 0.5
+HOSTILITY_WEIGHT = 1.0
 
 DIM_RANGES = {
     "familiarity": (0, 100),
