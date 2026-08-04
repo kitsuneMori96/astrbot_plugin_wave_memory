@@ -2880,6 +2880,34 @@ class WaveMemoryPlugin(Star):
             "event_id": getattr(event, "message_id", None),
         })
 
+        # 解析并提取 [impression:...] 标记，写入用户画像
+        import re as _re
+        _impression_match = _re.search(r'\[impression[:：](.+?)\]\s*$', bot_text, _re.DOTALL)
+        if _impression_match and sender_id and group_id:
+            _impression_text = _impression_match.group(1).strip()[:120]
+            if _impression_text and len(_impression_text) >= 4:
+                try:
+                    _row = self.db.conn.execute(
+                        "SELECT metadata FROM user_profiles WHERE user_id=? AND group_id=? AND bot_id=?",
+                        (sender_id, group_id, bot_db_id),
+                    ).fetchone()
+                    _meta = json.loads(_row[0]) if _row and _row[0] else {}
+                    _meta["impression"] = _impression_text
+                    _meta["impression_updated_at"] = time.time()
+                    self.db.conn.execute(
+                        "UPDATE user_profiles SET metadata=? WHERE user_id=? AND group_id=? AND bot_id=?",
+                        (json.dumps(_meta, ensure_ascii=False), sender_id, group_id, bot_db_id),
+                    )
+                    self.db.conn.commit()
+                except Exception as _e:
+                    logger.debug(f"[WaveMemory] impression update failed: {_e}")
+            # 从实际发送的回复中移除 impression 标记（用户不应看到）
+            if result and result.chain:
+                from astrbot.core.message.components import Plain
+                for comp in result.chain:
+                    if isinstance(comp, Plain) and comp.text:
+                        comp.text = _re.sub(r'\n?\[impression[:：].+?\]\s*$', '', comp.text, flags=_re.DOTALL)
+
         # 自省 read-model 仅支持群聊，private 不记录派生回复状态。
         if runtime_scope.visibility == "group" and self.self_reflect:
             self.self_reflect.record_reply(
