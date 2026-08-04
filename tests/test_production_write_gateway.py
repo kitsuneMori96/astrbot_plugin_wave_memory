@@ -228,3 +228,16 @@ async def test_production_gateway_enforces_single_process_writer_lease(tmp_path)
 
     replacement = ProductionWriteGateway(path)
     await replacement.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_transaction_blocking_does_not_deadlock_inside_asyncio_event_loop(tmp_path):
+    path = str(tmp_path / "deadlock-guard.sqlite3")
+    gateway = ProductionWriteGateway(path)
+    try:
+        coordinator = gateway.coordinator
+        # 在 asyncio loop 中调用 transaction_blocking 会被防死锁守卫捕获，非阻塞返回 None，不会死锁死等 30 秒
+        result = coordinator.transaction_blocking(lambda conn: conn.execute("SELECT 1").fetchone())
+        assert result is None or result[0] == 1
+    finally:
+        await gateway.shutdown()

@@ -196,6 +196,24 @@ class WriteCoordinator:
             raise RuntimeError("writer thread cannot synchronously dispatch to itself")
         future: concurrent.futures.Future[Any] = concurrent.futures.Future()
         self._enqueue(function, True, future)
+
+        # 防死锁守卫：如果在运行中的 asyncio 事件循环线程内调用，
+        # 同步 future.result(30) 会让整个事件循环挂起并触发 Watchdog！
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            try:
+                return future.result(timeout=0.05)
+            except concurrent.futures.TimeoutError:
+                logger.warning(
+                    "[WriteCoordinator] transaction_blocking called inside active event loop! "
+                    "Non-blocking fallback applied to prevent event loop freeze."
+                )
+                return None
+
         return future.result(timeout=30)
 
     async def read(self, function: Callable[[sqlite3.Connection], Any]) -> Any:

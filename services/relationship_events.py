@@ -197,6 +197,21 @@ class RelationshipEventService:
             )
         else:
             stored = self.repository.record_relationship_event(scope, **kwargs)
+
+        if not stored or not isinstance(stored, dict):
+            return RelationshipEventResult(
+                event_id=0,
+                bot_id=bot_id,
+                group_id=group_id,
+                user_id=user_id,
+                dimension=dimension,
+                requested_delta=requested_delta,
+                applied_delta=0.0,
+                before_affection=0,
+                after_affection=0,
+                reason=reason,
+            )
+
         return RelationshipEventResult(
             event_id=int(stored["event_id"]),
             bot_id=bot_id,
