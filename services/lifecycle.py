@@ -46,14 +46,18 @@ DIM_RANGES = {
 }
 
 HALF_LIVES = {
-    "familiarity": 200,
-    "trust": 90,
-    "fun": 30,
-    "hostility": 60,
-    "depth": 150,
+    "familiarity": 60,
+    "trust": 45,
+    "fun": 14,
+    "hostility": 30,
+    "depth": 90,
 }
 
 DAILY_DECAY = {k: 0.5 ** (1.0 / v) for k, v in HALF_LIVES.items()}
+
+# 分段衰减：intimate 阶段衰减减速系数（老朋友衰减慢）
+INTIMATE_DECAY_SLOWDOWN = 0.7
+FRIENDLY_DECAY_SLOWDOWN = 0.85
 
 POSITIVE_EMOTION_KW = frozenset([
     '夸', '鼓励', '积极', '开心', '感谢', '认同', '推崇', '好奇', '热情',
@@ -196,8 +200,9 @@ class AffinityEngine:
         before = dict(buf)
         event_reasons: dict[str, list[str]] = defaultdict(list)
 
-        # 基础：每条消息 familiarity +0.5
-        buf["familiarity"] += 0.5
+        # 基础：不涉及 Bot 的群消息 familiarity 微涨（被动观察）
+        # 与 Bot 互动的涨幅在后续规则中单独给出
+        buf["familiarity"] += 0.05
         event_reasons["familiarity"].append("看见一条群友消息")
 
         # 主动@bot
@@ -375,24 +380,50 @@ class AffinityEngine:
                 dims = meta.get("dimensions", {"familiarity": 0, "trust": 0, "fun": 0, "hostility": 0, "depth": 0})
                 last_seen = row[2] or now
 
-            # 执行时间衰减
+            # 执行时间衰减（分段：intimate 阶段衰减更慢，neutral 更快）
             days_silent = (now - last_seen) / 86400.0
             if days_silent > 3:
                 effective_days = days_silent - 3
+                # 根据当前态度阶段调整衰减速度
+                current_attitude = meta.get("attitude_level", "neutral") if row else "neutral"
+                if current_attitude == "intimate":
+                    decay_factor = INTIMATE_DECAY_SLOWDOWN
+                elif current_attitude == "friendly":
+                    decay_factor = FRIENDLY_DECAY_SLOWDOWN
+                else:
+                    decay_factor = 1.0
                 for dim_name in dims:
                     decay = DAILY_DECAY[dim_name]
+                    adjusted_decay = 1.0 - (1.0 - decay) * decay_factor
                     if days_silent > 14:
-                        # 长期冷淡加速
-                        normal_decay = decay ** 11
-                        extra_decay = (decay * 0.995) ** (effective_days - 11)
+                        normal_decay = adjusted_decay ** 11
+                        extra_decay = (adjusted_decay * 0.995) ** (effective_days - 11)
                         dims[dim_name] *= normal_decay * extra_decay
                     else:
-                        dims[dim_name] *= decay ** effective_days
+                        dims[dim_name] *= adjusted_decay ** effective_days
 
-            # 应用增量
+            # 应用增量（边际递减：越接近上限涨越慢）
             for dim_name, delta in deltas.items():
-                if dim_name in dims:
+                if dim_name not in dims:
+                    continue
+                if delta > 0:
+                    _, hi = DIM_RANGES.get(dim_name, (-100, 100))
+                    saturation = 1.0 / (1.0 + max(0, dims[dim_name]) / (hi * 0.6))
+                    dims[dim_name] += delta * saturation
+                else:
                     dims[dim_name] += delta
+
+            # 维度耦合
+            # hostility 增加 → trust 惩罚性衰减
+            hostility_delta = deltas.get("hostility", 0)
+            if hostility_delta > 0:
+                dims["trust"] -= hostility_delta * 0.3
+            # depth 持续高 → trust 自然微涨
+            if dims.get("depth", 0) > 50:
+                dims["trust"] = dims.get("trust", 0) + 0.1
+            # fun 高 → familiarity 衰减补偿（已在衰减时处理，此处给微涨）
+            if dims.get("fun", 0) > 20:
+                dims["familiarity"] = dims.get("familiarity", 0) + 0.05
 
             # 钳位
             for dim_name in dims:
