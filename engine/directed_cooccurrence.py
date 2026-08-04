@@ -496,6 +496,15 @@ class CooccurrenceScheduler:
         forced = False
         try:
             async with self._rebuild_lock:
+                # 防循环保护：如果无变更且非强制请求，跳过无意义的全量重建
+                if not self._force_requested and self._accumulated_changes == 0 and self._last_rebuild_ts > 0:
+                    elapsed = time.time() - self._last_rebuild_ts
+                    if elapsed < self.cooldown_sec:
+                        logger.debug(
+                            "[WaveMemory] CooccurrenceScheduler: skipping redundant rebuild (no changes, %.0fs since last)",
+                            elapsed,
+                        )
+                        return True
                 generation = self._change_generation
                 snapshot_reasons = self._pending_reasons
                 self._pending_reasons = {}
