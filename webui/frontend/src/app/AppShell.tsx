@@ -49,7 +49,6 @@ export function AppRoutes() {
         })}
         <Route path="/injection" element={<RenamedPath to="/observatory" />} />
         <Route path="/maintain" element={<RenamedPath to="/maintenance" />} />
-        <Route path="/learning-center" element={<RenamedPath to="/learning" />} />
         <Route path="/knowledge/fewshot" element={<RenamedPath to="/knowledge/style-examples" />} />
         <Route path="/login" element={<RenamedPath to={defaultRoute} />} />
       </Route>

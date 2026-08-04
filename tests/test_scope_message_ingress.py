@@ -119,6 +119,14 @@ class _FakeEvent:
         self.stopped = True
 
 
+class _FakePrivateEvent(_FakeEvent):
+    def get_message_type(self):
+        return SimpleNamespace(value="FriendMessage")
+
+    def get_session_id(self):
+        return "private-event"
+
+
 class _FakePlain:
     def __init__(self, text):
         self.text = text
@@ -135,6 +143,14 @@ class _FakeBotSentEvent(_FakeEvent):
 
     def get_result(self):
         return self._result
+
+
+class _FakePrivateBotSentEvent(_FakeBotSentEvent):
+    def get_message_type(self):
+        return SimpleNamespace(value="FriendMessage")
+
+    def get_session_id(self):
+        return "private-event"
 
 
 class _CountingResolver:
@@ -310,6 +326,60 @@ class ScopeMessageIngressTest(unittest.TestCase):
         self.assertFalse(event.stopped)
         self.assertNotIn(False, event.llm_calls)
 
+    def test_duplicate_platform_event_id_stops_second_delivery_before_llm(self):
+        on_message, _, _ = _load_on_message()
+        resolver = self._resolver()
+        plugin = _IngressPlugin(resolver)
+        first = _FakeEvent()
+        duplicate = _FakeEvent()
+
+        asyncio.run(on_message(plugin, first))
+        asyncio.run(on_message(plugin, duplicate))
+
+        self.assertEqual(resolver.calls, [first, duplicate])
+        self.assertEqual(len(plugin.writer.items), 1)
+        self.assertTrue(duplicate.stopped)
+        self.assertIn(False, duplicate.llm_calls)
+
+    def test_same_event_id_in_another_scope_is_not_deduplicated(self):
+        on_message, _, _ = _load_on_message()
+        resolver = self._resolver()
+        plugin = _IngressPlugin(resolver)
+        first = _FakeEvent(group_id="group-one")
+        other_scope = _FakeEvent(group_id="group-two")
+
+        asyncio.run(on_message(plugin, first))
+        asyncio.run(on_message(plugin, other_scope))
+
+        self.assertEqual(len(plugin.writer.items), 2)
+        self.assertFalse(other_scope.stopped)
+        self.assertNotIn(False, other_scope.llm_calls)
+
+    def test_private_message_enters_exact_memory_writer_without_group_derivations(self):
+        on_message, _, recorded_errors = _load_on_message()
+        resolver = self._resolver()
+        plugin = _IngressPlugin(resolver)
+        lifecycle = _FakeLifecycle()
+        reflection = _FakeSelfReflect()
+        plugin.lifecycle = lifecycle
+        plugin.self_reflect = reflection
+        event = _FakePrivateEvent()
+
+        asyncio.run(on_message(plugin, event))
+
+        self.assertEqual(resolver.calls, [event])
+        self.assertEqual(len(plugin.writer.items), 1)
+        payload = plugin.writer.items[0]
+        self.assertEqual(payload["scope"].visibility, "private")
+        self.assertEqual(payload["scope"].session.id, "qq:private:private-event")
+        self.assertEqual(payload["group_id"], "private-event")
+        self.assertEqual(payload["sender_id"], "user-event")
+        self.assertEqual(payload["content"], "作用域入口测试")
+        self.assertEqual(recorded_errors, [])
+        self.assertIs(event._wave_memory_runtime_scope, payload["scope"])
+        self.assertEqual(lifecycle.calls, [])
+        self.assertEqual(reflection.corrections, [])
+
     def test_self_reflect_receives_event_resolved_scope_without_rederivation(self):
         on_message, _, _ = _load_on_message()
         resolver = self._resolver()
@@ -427,6 +497,26 @@ class ScopeMessageIngressTest(unittest.TestCase):
         _, reply_kwargs = recorder.replies[0]
         self.assertEqual(reply_kwargs["bot_id"], "bot-profile")
         self.assertIs(reply_kwargs["scope"], payload["scope"])
+        self.assertEqual(recorded_errors, [])
+
+    def test_private_bot_sent_writes_exact_memory_without_group_reflection(self):
+        on_bot_sent, _, recorded_errors = _load_on_bot_sent()
+        resolver = self._resolver()
+        plugin = _BotSentPlugin(resolver)
+        reflection = _FakeSelfReflect()
+        plugin.self_reflect = reflection
+        event = _FakePrivateBotSentEvent(sender_id="user-event", self_id="bot-event")
+
+        asyncio.run(on_bot_sent(plugin, event))
+
+        self.assertEqual(resolver.calls, [event])
+        self.assertEqual(len(plugin.writer.items), 1)
+        payload = plugin.writer.items[0]
+        self.assertEqual(payload["scope"].visibility, "private")
+        self.assertEqual(payload["scope"].session.id, "qq:private:private-event")
+        self.assertEqual(payload["group_id"], "private-event")
+        self.assertEqual(payload["sender_id"], "bot")
+        self.assertEqual(reflection.replies, [])
         self.assertEqual(recorded_errors, [])
 
     def test_bot_sent_unknown_bot_fails_closed_without_pseudo_private_group(self):

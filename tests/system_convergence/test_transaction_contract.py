@@ -313,7 +313,6 @@ async def test_jargon_mutation_returns_nontrivial_id_from_its_write_cursor(tmp_p
             cooccurrence=None,
             password="",
         )
-        container.configure_learning_services(repositories=None)
         from webui.app import create_app
 
         app = create_app()

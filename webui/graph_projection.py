@@ -148,10 +148,21 @@ def _bot_node(graph: GraphProjection, layer: str) -> str:
 def _memory_node(graph: GraphProjection, row: dict[str, Any], layer: str = "memories") -> str:
     memory_id = int(row["id"])
     content = _clip(row.get("content"), 500)
-    label = content[:64] or f"记忆 #{memory_id}"
+    sender_name = str(row.get("sender_name") or "").strip()
+    # 标签优化：去掉 @昵称(QQ号) 前缀噪声，用发送者昵称 + 摘要
+    import re
+    clean = re.sub(r"@[^\s(]*\(\d+\)\s*", "", content).strip()
+    if sender_name and clean:
+        label = f"{sender_name}: {clean[:30]}"
+    elif sender_name:
+        label = sender_name
+    elif clean:
+        label = clean[:40]
+    else:
+        label = f"记忆 #{memory_id}"
     return graph.node(
         f"memory:{memory_id}", label, "memory", layer, memory_id=memory_id,
-        content=content, sender_id=row.get("sender_id"), sender_name=row.get("sender_name"),
+        content=content, sender_id=row.get("sender_id"), sender_name=sender_name,
         importance=float(row.get("importance") or 0), source=row.get("source"),
         ts=float(row.get("timestamp") or 0), timestamp=float(row.get("timestamp") or 0),
     )
@@ -486,7 +497,7 @@ def _evidence_memory_ids(items: Any) -> list[int]:
     return result
 
 
-def _project_repository_layers(graph: GraphProjection, fewshot_repository: Any, book_lore_repository: Any) -> None:
+def _project_repository_layers(graph: GraphProjection, fewshot_repository: Any) -> None:
     if "few_shot" in graph.layers:
         bot = _bot_node(graph, "few_shot")
         if fewshot_repository is None or not callable(getattr(fewshot_repository, "list_approved", None)):
@@ -507,29 +518,9 @@ def _project_repository_layers(graph: GraphProjection, fewshot_repository: Any, 
                         graph.edge(f"few-shot-evidence:{item['id']}:{memory_id}", memory, node, "证据", "few_shot", "evidence", source_type="memory", target_type="few_shot")
             except Exception as exc:
                 graph.warn("few_shot", f"scoped_fewshot_projection_failed:{type(exc).__name__}")
-
     if "book_lore" in graph.layers:
-        bot = _bot_node(graph, "book_lore")
-        if book_lore_repository is None or not callable(getattr(book_lore_repository, "list_approved", None)):
-            graph.warn("book_lore", "reviewed_book_lore_repository_unavailable")
-        else:
-            try:
-                for item in book_lore_repository.list_approved(scope=graph.scope, limit=500, offset=0):
-                    node = graph.node(f"book-lore:{item['id']}", item.get("title") or _clip(item.get("summary"), 120), "book_lore", "book_lore",
-                                      projection_id=item["id"], title=item.get("title"), summary=_clip(item.get("summary")),
-                                      content=_clip(item.get("content")), rank=float(item.get("rank") or 0), revision=item.get("revision"),
-                                      community_id=item.get("community_id"), ts=float(item.get("updated_at") or 0))
-                    graph.edge(f"bot-book-lore:{item['id']}", bot, node, "内化知识", "book_lore", "book_lore",
-                               weight=float(item.get("rank") or 0), source_type="bot", target_type="book_lore")
-                    community_id = str(item.get("community_id") or "").strip()
-                    if community_id:
-                        community = graph.node(f"book-community:{community_id}", community_id, "community", "book_lore")
-                        graph.edge(f"book-lore-community:{item['id']}", community, node, "知识社区", "book_lore", "book_lore_community", source_type="community", target_type="book_lore")
-                    for memory_id in _evidence_memory_ids(item.get("evidence_refs")):
-                        memory = graph.node(f"memory:{memory_id}", f"记忆 #{memory_id}", "memory", "book_lore", memory_id=memory_id)
-                        graph.edge(f"book-lore-evidence:{item['id']}:{memory_id}", memory, node, "证据", "book_lore", "evidence", source_type="memory", target_type="book_lore")
-            except Exception as exc:
-                graph.warn("book_lore", f"reviewed_book_lore_projection_failed:{type(exc).__name__}")
+        # 书设是独立 Catalog 直读源，不再投影 reviewed_book_lore_projections。
+        graph.warn("book_lore", "book_lore_is_catalog_readonly_not_projection")
 
 
 def _project_communities(graph: GraphProjection, conn: Any) -> None:
@@ -582,6 +573,7 @@ def build_graph_projection(
     min_confidence: float = 0.0, memory_limit: int = 150,
     similarity_k: int = 3, similarity_threshold: float = 0.65,
 ) -> dict[str, Any]:
+    # book_lore_repository 参数仅兼容旧调用方，不再读取 reviewed projection。
     requested = tuple(dict.fromkeys(str(layer).strip() for layer in layers if str(layer).strip()))
     invalid = sorted(set(requested) - set(SUPPORTED_LAYERS))
     if invalid:
@@ -601,7 +593,7 @@ def build_graph_projection(
             similarity_k=similarity_k, similarity_threshold=similarity_threshold,
         )
     _project_simple_scoped_layers(graph, conn)
-    _project_repository_layers(graph, fewshot_repository, book_lore_repository)
+    _project_repository_layers(graph, fewshot_repository)
     if "communities" in requested:
         _project_communities(graph, conn)
     return graph.payload()
@@ -613,10 +605,10 @@ def scoped_layer_counts(conn: Any, scope: RuntimeScope) -> dict[str, int | None]
         "facts": "scoped_facts", "memories": "memories", "beliefs": "scoped_beliefs",
         "jargon": "scoped_jargon", "concerns": "scoped_soul_concerns", "mood": "scoped_soul_mood",
         "timeline": "scoped_soul_timeline", "affinity": "scoped_soul_relationships",
-        "few_shot": "scoped_few_shot_examples", "book_lore": "reviewed_book_lore_projections",
+        "few_shot": "scoped_few_shot_examples",
         "communities": "scoped_tag_relations",
     }
-    result: dict[str, int | None] = {}
+    result: dict[str, int | None] = {"book_lore": None}
     for layer, table in table_map.items():
         columns = _columns(conn, table)
         try:
@@ -628,8 +620,6 @@ def scoped_layer_counts(conn: Any, scope: RuntimeScope) -> dict[str, int | None]
                     f"SELECT COUNT(*) FROM {table} WHERE bot_id=? AND session_id=? AND visibility=?{extra}", params
                 ).fetchone()[0])
             elif table == "scoped_few_shot_examples" and "runtime_scope_key" in columns:
-                result[layer] = None
-            elif table == "reviewed_book_lore_projections" and "target_runtime_scope_key" in columns:
                 result[layer] = None
             else:
                 result[layer] = None

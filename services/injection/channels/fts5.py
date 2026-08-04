@@ -15,6 +15,7 @@ except ImportError:  # 兼容独立测试/插件顶级加载
 
 from ...identity_safety import is_identity_contamination
 from ..channel_base import InjectionResult, estimate_injection_tokens
+from ..query_gate import should_skip_retrieval
 from .safety import is_channel_allowed_in_mode
 
 
@@ -55,15 +56,14 @@ def _channel_cfg(ctx: Any) -> Mapping[str, Any]:
     return _mapping(_mapping(config.get("channels", {})).get("fts5", {}))
 
 
-def _group_scope(ctx: Any) -> RuntimeScope | None:
-    """仅接受完整、已解析的 group RuntimeScope。"""
+def _memory_scope(ctx: Any) -> RuntimeScope | None:
+    """仅接受完整、已解析的 group/private RuntimeScope。"""
     scope = getattr(ctx, "scope", None)
-    if not isinstance(scope, RuntimeScope):
+    if not isinstance(scope, RuntimeScope) or scope.visibility not in {"group", "private"}:
         return None
     if (
-        scope.visibility != "group"
-        or scope.session is None
-        or scope.session.kind != "group"
+        scope.session is None
+        or scope.session.kind != scope.visibility
         or not scope.bot_id
         or not scope.session.id
         or not scope.session.conversation_id
@@ -143,8 +143,21 @@ class FTS5Channel:
         self.cross_group_enabled = _as_bool(cross_group_enabled, True)
         self.shared_memory_grants_enabled = _as_bool(shared_memory_grants_enabled, False)
 
+    def _memory_columns(self) -> set[str]:
+        try:
+            return {
+                str(row[1])
+                for row in self.db.conn.execute("PRAGMA table_info(memories)").fetchall()
+            }
+        except Exception:
+            return set()
+
+    @staticmethod
+    def _column_expr(columns: set[str], name: str, fallback: str = "''") -> str:
+        return f"m.{name}" if name in columns else fallback
+
     def _grant_ids_for_scope(self, scope: RuntimeScope) -> list[int]:
-        if self.cross_group_enabled or not self.shared_memory_grants_enabled:
+        if scope.visibility == "private" or self.cross_group_enabled or not self.shared_memory_grants_enabled:
             return []
         if scope.session is None:
             return []
@@ -164,6 +177,7 @@ class FTS5Channel:
         self,
         scope: RuntimeScope,
         *,
+        columns: set[str],
         alias: str = "m",
         grant_ids: list[int] | None = None,
     ) -> tuple[str, tuple[Any, ...]]:
@@ -180,11 +194,30 @@ class FTS5Channel:
         prefix = f"{alias}." if alias else ""
         # Retrieval is not Scope-gated: any non-quarantined, non-deleted row is
         # searchable. Scope only narrows to current group when cross-group is off.
-        active = f"""
+        active_base = f"""
             COALESCE({prefix}quarantine, 0) = 0
             AND COALESCE({prefix}memory_type, 'message') NOT IN
                 ('archived', 'evicted', 'deleted', 'noise')
             AND COALESCE({prefix}source, '') != 'noise'
+        """
+        if scope.visibility == "private":
+            # Private MATCH and LIKE fallback share this exact owner predicate;
+            # grants/cross-group/legacy lanes are intentionally unreachable.
+            required = {"bot_id", "session_id", "visibility", "group_id"}
+            if not required <= columns:
+                return "0=1", ()
+            return (
+                f"({active_base}) AND {prefix}bot_id = ? AND {prefix}session_id = ? "
+                f"AND {prefix}visibility = ? AND COALESCE({prefix}group_id, '') = ?",
+                (scope.bot_id, scope.session.id, "private", scope.session.conversation_id),
+            )
+        visibility_exclusion = (
+            f"COALESCE({prefix}visibility, '') != 'private'"
+            if "visibility" in columns else "1=1"
+        )
+        active = f"""{active_base}
+            AND {visibility_exclusion}
+            AND COALESCE({prefix}group_id, '') NOT LIKE 'private:%'
         """
         if self.cross_group_enabled:
             return f"({active})", ()
@@ -198,7 +231,11 @@ class FTS5Channel:
             except ImportError:  # pragma: no cover
                 from ....engine.shared_grant_recall import formal_grant_id_predicate
             grant_sql, grant_params = formal_grant_id_predicate(ids, alias=alias)
-            return f"(({local}) OR ({grant_sql}))", tuple(params) + grant_params
+            grant_safe = (
+                f"{visibility_exclusion} "
+                f"AND COALESCE({prefix}group_id, '') NOT LIKE 'private:%'"
+            )
+            return f"(({local}) OR (({grant_sql}) AND {grant_safe}))", tuple(params) + grant_params
         return local, tuple(params)
 
     async def build(self, ctx: Any) -> InjectionResult:
@@ -215,8 +252,14 @@ class FTS5Channel:
         min_score = _as_float(cfg.get("min_score"), 0.0)
         if top_k <= 0:
             return InjectionResult.empty(self.name, reason="fts5 top_k is zero")
-        if _group_scope(ctx) is None:
-            return InjectionResult.empty(self.name, reason="fts5 requires resolved group RuntimeScope")
+        if _memory_scope(ctx) is None:
+            return InjectionResult.empty(self.name, reason="fts5 requires resolved group/private RuntimeScope")
+        # Generic short utterances match on filler words and crowd out real hits.
+        skip, skip_reason = should_skip_retrieval(ctx)
+        if skip:
+            return InjectionResult.empty(
+                self.name, latency_ms=self._latency_ms(started), reason=skip_reason
+            )
 
         try:
             words = _keywords(getattr(ctx, "message", "") or "")
@@ -231,7 +274,7 @@ class FTS5Channel:
             except ImportError:  # pragma: no cover - package import path
                 from ....engine.memory_collapse import collapse_memories
             current_group_id = ""
-            scope = _group_scope(ctx)
+            scope = _memory_scope(ctx)
             if scope is not None and scope.session is not None:
                 current_group_id = scope.session.conversation_id
             memories = collapse_memories(memories, current_group_id=current_group_id)
@@ -254,17 +297,30 @@ class FTS5Channel:
             return result
 
     def _query_memories(self, ctx: Any, *, expr: str, words: list[str], top_k: int) -> list[dict[str, Any]]:
-        scope = _group_scope(ctx)
+        scope = _memory_scope(ctx)
         if scope is None:  # build() guards this too; keep direct callers fail-closed.
             return []
         limit = max(20, top_k * 3)
+        columns = self._memory_columns()
+        if not {"id", "content", "group_id"} <= columns:
+            return []
+        if scope.visibility == "private" and not {"bot_id", "session_id", "visibility"} <= columns:
+            return []
         grant_ids = self._grant_ids_for_scope(scope)
-        predicate, params = self._scope_predicate(scope, grant_ids=grant_ids)
+        predicate, params = self._scope_predicate(scope, columns=columns, grant_ids=grant_ids)
+        visibility_expr = self._column_expr(columns, "visibility")
+        origin_expr = (
+            "COALESCE(m.origin_fingerprint, '')"
+            if "origin_fingerprint" in columns else "''"
+        )
+        provenance_expr = (
+            "COALESCE(m.provenance, '')" if "provenance" in columns else "''"
+        )
         try:
             rows = self.db.conn.execute(
                 f"""SELECT m.id, m.content, m.sender_id, m.sender_name, m.timestamp,
-                           m.importance, m.source, m.group_id, m.memory_type,
-                           COALESCE(m.origin_fingerprint, ''), COALESCE(m.provenance, '')
+                           m.importance, m.source, m.group_id, m.memory_type, {visibility_expr},
+                           {origin_expr}, {provenance_expr}
                       FROM fts_memories
                       JOIN memories AS m ON m.id = fts_memories.rowid
                      WHERE fts_memories MATCH ? AND {predicate}
@@ -273,7 +329,7 @@ class FTS5Channel:
             ).fetchall()
             if not rows:
                 rows = self._scoped_like_search(
-                    words=words, limit=limit, scope=scope, grant_ids=grant_ids
+                    words=words, limit=limit, scope=scope, columns=columns, grant_ids=grant_ids
                 )
         except Exception:
             # Missing schema or an invalid FTS expression fails closed; never fall
@@ -283,7 +339,7 @@ class FTS5Channel:
         result: list[dict[str, Any]] = []
         for row in rows:
             provenance: dict[str, Any] = {}
-            raw_prov = row[10] if len(row) > 10 else ""
+            raw_prov = row[11] if len(row) > 11 else ""
             if isinstance(raw_prov, str) and raw_prov.strip():
                 try:
                     loaded = json.loads(raw_prov)
@@ -294,8 +350,9 @@ class FTS5Channel:
             item = {
                 "id": row[0], "content": row[1] or "", "sender_id": row[2],
                 "sender_name": row[3], "timestamp": row[4], "importance": row[5],
-                "source": row[6], "group_id": row[7], "memory_type": row[8], "score": 1.0,
-                "origin_fingerprint": row[9] if len(row) > 9 else "",
+                "source": row[6], "group_id": row[7], "memory_type": row[8],
+                "visibility": row[9] if len(row) > 9 else "", "score": 1.0,
+                "origin_fingerprint": row[10] if len(row) > 10 else "",
                 "provenance": provenance,
             }
             if str(provenance.get("projection_kind") or "") == "fanout_duplicate":
@@ -318,18 +375,25 @@ class FTS5Channel:
         words: list[str],
         limit: int,
         scope: RuntimeScope,
+        columns: set[str] | None = None,
         grant_ids: list[int] | None = None,
     ) -> list[tuple[Any, ...]]:
         if not words or scope.session is None:
             return []
+        columns = columns if columns is not None else self._memory_columns()
+        if scope.visibility == "private" and not {"bot_id", "session_id", "visibility"} <= columns:
+            return []
         ids = list(grant_ids) if grant_ids is not None else self._grant_ids_for_scope(scope)
-        predicate, scope_params = self._scope_predicate(scope, grant_ids=ids)
+        predicate, scope_params = self._scope_predicate(scope, columns=columns, grant_ids=ids)
         conditions = " OR ".join(["m.content LIKE ?"] * len(words))
         params = [f"%{word}%" for word in words]
+        visibility_expr = self._column_expr(columns, "visibility")
+        origin_expr = "COALESCE(m.origin_fingerprint, '')" if "origin_fingerprint" in columns else "''"
+        provenance_expr = "COALESCE(m.provenance, '')" if "provenance" in columns else "''"
         return self.db.conn.execute(
             f"""SELECT m.id, m.content, m.sender_id, m.sender_name, m.timestamp,
-                       m.importance, m.source, m.group_id, m.memory_type,
-                       COALESCE(m.origin_fingerprint, ''), COALESCE(m.provenance, '')
+                       m.importance, m.source, m.group_id, m.memory_type, {visibility_expr},
+                       {origin_expr}, {provenance_expr}
                   FROM memories AS m
                  WHERE {predicate} AND ({conditions})
                  ORDER BY m.timestamp DESC LIMIT ?""",
@@ -371,9 +435,10 @@ class FTS5Channel:
         for memory in memories:
             sender = memory.get("sender_name") or memory.get("sender_id") or "unknown"
             ts = time.strftime("%m-%d %H:%M", time.localtime(float(memory.get("timestamp") or 0)))
-            group_id = memory.get("group_id") or "unknown-group"
+            private = memory.get("visibility") == "private"
+            location = "[记忆]" if private else f"[记忆][群 {memory.get('group_id') or 'unknown-group'}]"
             lines.append(
-                f"[记忆][群 {group_id}] {sender}({ts}): {memory.get('content', '')} "
+                f"{location} {sender}({ts}): {memory.get('content', '')} "
                 f"(relevance: {float(memory.get('score') or 0):.2f})"
             )
         lines.append("</wave_memory>")

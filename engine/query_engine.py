@@ -40,6 +40,9 @@ _QUERY_STAGE_NAMES = ("epa", "pyramid", "spike", "geodesic")
 # Inject path budget is ~2s for the memory channel. Embedding must fail soft
 # before remote providers sit on multi-second HTTP retries (seen ~12s).
 _INJECT_EMBEDDING_TIMEOUT_SEC = 1.5
+# Upper bound for source-filtered knn fan-out. Without it a large top_k turned the
+# hot search into the dominant cost of the bounded memory channel.
+_MAX_FILTERED_CANDIDATES = 200
 _QUERY_PARAM_LIMITS = {
     "pyramid_max_levels": (int, 1, 10),
     "pyramid_top_k": (int, 1, 50),
@@ -211,17 +214,14 @@ class QueryEngine:
         write_gateway: Any | None = None,
         *,
         tag_catalog_index: Optional[VectorIndex] = None,
-        legacy_tag_index: Optional[VectorIndex] = None,
     ):
         self.db = db
         self.memory_index = memory_index
         self.embedding = embedding_service
         self.config = config
         # ``tag_index`` remains the public compatibility argument and now means
-        # the formal Catalog index. Legacy tags use an independent physical HNSW
-        # with their own integer label space.
+        # the formal Catalog index.
         self.tag_catalog_index = tag_catalog_index or tag_index
-        self.legacy_tag_index = legacy_tag_index
         self.tag_index = self.tag_catalog_index
         self.cooccurrence = cooccurrence
         self.spike_router = spike_router
@@ -238,11 +238,17 @@ class QueryEngine:
         self.enable_geodesic = config.get("enable_geodesic_rerank", True)
 
     @staticmethod
-    def _group_scope(scope: Any) -> RuntimeScope | None:
-        """Return only a resolved group RuntimeScope; all other reads fail closed."""
-        if not isinstance(scope, RuntimeScope):
+    def _memory_scope(scope: Any) -> RuntimeScope | None:
+        """Return a resolved canonical group/private memory Scope only."""
+        if not isinstance(scope, RuntimeScope) or scope.visibility not in {"group", "private"}:
             return None
-        if scope.visibility != "group" or scope.session is None:
+        if (
+            scope.session is None
+            or scope.session.kind != scope.visibility
+            or not scope.bot_id
+            or not scope.session.id
+            or not scope.session.conversation_id
+        ):
             return None
         return scope
 
@@ -313,6 +319,8 @@ class QueryEngine:
             if not isinstance(memory, dict):
                 continue
             item = dict(memory)
+            if not self._candidate_matches_memory_policy(item, policy):
+                continue
             try:
                 mid = int(item.get("id"))
             except (TypeError, ValueError):
@@ -321,6 +329,28 @@ class QueryEngine:
                 item["_shared_grant"] = True
             out.append(item)
         return out
+
+    @staticmethod
+    def _candidate_matches_memory_policy(memory: Mapping[str, Any], policy: RecallPolicy) -> bool:
+        """Treat every HNSW/adapter DTO as untrusted before recall rendering.
+
+        Production repositories already enforce these predicates in SQL.  This
+        second check protects private sessions from an incomplete custom adapter
+        or future retrieval path, while preserving group-focused test doubles
+        that intentionally omit formal owner fields.
+        """
+        scope = policy.scope
+        assert scope.session is not None
+        visibility = str(memory.get("visibility") or "")
+        group_id = str(memory.get("group_id") or "")
+        if scope.visibility == "private":
+            return (
+                visibility == "private"
+                and str(memory.get("bot_id") or "") == scope.bot_id
+                and str(memory.get("session_id") or "") == scope.session.id
+                and group_id == scope.session.conversation_id
+            )
+        return visibility != "private" and not group_id.casefold().startswith("private:")
 
     def _map_catalog_hits_to_scope(
         self,
@@ -406,32 +436,6 @@ class QueryEngine:
                 break
         return scoped
 
-    def _search_legacy_tags(
-        self,
-        query_vec: np.ndarray,
-        *,
-        k: int = 10,
-    ) -> list[tuple[int, float]]:
-        """Search only the legacy tag HNSW; IDs are never fed into Catalog APIs."""
-        if not self.legacy_tag_index:
-            return []
-        try:
-            raw = self.legacy_tag_index.search(query_vec, k=max(int(k) * 4, 24))
-        except Exception:
-            return []
-        result: list[tuple[int, float]] = []
-        for tag_id, distance in raw:
-            try:
-                parsed_id = int(tag_id)
-                similarity = 1.0 - float(distance)
-            except (TypeError, ValueError):
-                continue
-            if parsed_id > 0:
-                result.append((parsed_id, similarity))
-            if len(result) >= int(k):
-                break
-        return result
-
     def _load_tag_vectors(self, scope: RuntimeScope | None, tag_ids: list[Any]) -> dict[Any, Any]:
         scoped_getter = getattr(self.db, "get_scoped_tag_vectors_by_ids", None)
         if callable(scoped_getter) and isinstance(scope, RuntimeScope):
@@ -466,11 +470,10 @@ class QueryEngine:
         score_query_vec: np.ndarray,
         policy: RecallPolicy,
     ) -> tuple[list[tuple[dict[str, Any], float]], dict[str, Any]]:
-        """Cold-recall from independent Catalog and legacy-tag lanes.
+        """Cold-recall from the formal Catalog lane.
 
-        Catalog hits remain strictly mapped through formal Scope. Legacy tag hits
-        use only the legacy tag HNSW and are then group-filtered by the repository;
-        the two integer ID spaces never cross into each other's APIs.
+        Catalog hits remain strictly mapped through formal Scope. The legacy tag
+        lane was removed together with the legacy ``tags``/``memory_tags`` data.
         """
         details: dict[str, Any] = {
             "enabled": self._cold_recall_enabled(),
@@ -479,7 +482,6 @@ class QueryEngine:
             "candidate_count": 0,
             "accepted_count": 0,
             "catalog": {"available": False, "tag_count": 0, "candidate_count": 0, "accepted_count": 0},
-            "legacy": {"available": False, "tag_count": 0, "candidate_count": 0, "accepted_count": 0},
         }
         if not details["enabled"]:
             details["reason_code"] = "disabled_by_config"
@@ -565,44 +567,9 @@ class QueryEngine:
         else:
             details["catalog"]["reason_code"] = "catalog_lane_unavailable"
 
-        # Legacy tags keep their separate ID lane. The repository itself proves
-        # that each result is fully unscoped before the policy expands groups.
-        legacy_getter = getattr(self.db, "list_legacy_cold_memory_candidates", None)
-        if self.legacy_tag_index and callable(legacy_getter):
-            legacy = details["legacy"]
-            try:
-                legacy_hits = self._search_legacy_tags(tag_query_vec, k=12)
-                legacy_ids = [int(tag_id) for tag_id, similarity in legacy_hits if float(similarity) > 0.1]
-                legacy["tag_count"] = len(legacy_ids)
-                if legacy_ids:
-                    try:
-                        legacy_rows = legacy_getter(
-                            policy.scope,
-                            legacy_ids,
-                            limit=self._cold_candidate_limit(),
-                            allow_cross_group_recall=policy.cross_group_enabled,
-                        ) or []
-                    except TypeError:
-                        # Older facades remain on the safe same-group legacy path.
-                        legacy_rows = legacy_getter(
-                            policy.scope,
-                            legacy_ids,
-                            limit=self._cold_candidate_limit(),
-                        ) or []
-                    legacy["candidate_count"] = len(legacy_rows)
-                    legacy["accepted_count"] = rerank(legacy_rows, "legacy")
-                    legacy["available"] = True
-                else:
-                    legacy["reason_code"] = "no_legacy_semantic_tags"
-            except Exception as exc:
-                legacy["reason_code"] = "legacy_cold_query_failed"
-                legacy["error"] = str(exc)
-        else:
-            details["legacy"]["reason_code"] = "legacy_lane_unavailable"
-
-        details["tag_count"] = int(details["catalog"]["tag_count"]) + int(details["legacy"]["tag_count"])
-        details["candidate_count"] = int(details["catalog"]["candidate_count"]) + int(details["legacy"]["candidate_count"])
-        details["available"] = bool(details["catalog"]["available"] or details["legacy"]["available"])
+        details["tag_count"] = int(details["catalog"]["tag_count"])
+        details["candidate_count"] = int(details["catalog"]["candidate_count"])
+        details["available"] = bool(details["catalog"]["available"])
         paired = sorted(results_by_id.values(), key=lambda item: (item[1], int(item[0]["id"])))
         # Collapse multi-group fanout clones before cold candidates enter the main
         # hot/cold merge; otherwise one semantic event can monopolize the budget.
@@ -684,20 +651,21 @@ class QueryEngine:
     ) -> list[dict]:
         """执行完整查询；options/collector 均为请求级对象，不写共享 stage。"""
         call_options = options if isinstance(options, QueryOptions) else QueryOptions()
-        resolved_scope = self._group_scope(scope)
+        resolved_scope = self._memory_scope(scope)
         if resolved_scope is None:
-            logger.warning("[WaveMemory] Query rejected: resolved group RuntimeScope required")
-            self._trace_warning(collector, "scope", "canonical_group_scope_required", "Canonical group RuntimeScope is required")
-            self._trace_record(collector, "final", {"result_count": 0, "reason_code": "canonical_group_scope_required"})
+            logger.warning("[WaveMemory] Query rejected: resolved group/private RuntimeScope required")
+            self._trace_warning(collector, "scope", "canonical_memory_scope_required", "Canonical group/private RuntimeScope is required")
+            self._trace_record(collector, "final", {"result_count": 0, "reason_code": "canonical_memory_scope_required"})
             return []
 
         recall_policy = self._resolve_recall_policy(resolved_scope)
+        is_private = resolved_scope.visibility == "private"
         start = time.perf_counter()
         stage_flags = {
-            "epa": self._stage_enabled(call_options, "epa", self.enable_epa),
-            "pyramid": self._stage_enabled(call_options, "pyramid", self.enable_pyramid),
-            "spike": self._stage_enabled(call_options, "spike", self.enable_spike),
-            "geodesic": self._stage_enabled(call_options, "geodesic", self.enable_geodesic),
+            "epa": False if is_private else self._stage_enabled(call_options, "epa", self.enable_epa),
+            "pyramid": False if is_private else self._stage_enabled(call_options, "pyramid", self.enable_pyramid),
+            "spike": False if is_private else self._stage_enabled(call_options, "spike", self.enable_spike),
+            "geodesic": False if is_private else self._stage_enabled(call_options, "geodesic", self.enable_geodesic),
         }
         self._trace_record(collector, "query", {
             "text": text,
@@ -756,14 +724,21 @@ class QueryEngine:
             "latency_ms": round(embed_ms, 1),
         })
 
-        search_vec, energy_field = self._wave_boost(
-            query_vec,
-            scope=resolved_scope,
-            options=call_options,
-            collector=collector,
-            stage_flags=stage_flags,
-        )
-        candidates_k = top_k * 20 if source_filter else top_k * 3
+        if is_private:
+            # Private recall deliberately bypasses all tag-derived stages and uses
+            # the raw embedding; HNSW IDs are then exact-Scope filtered below.
+            search_vec, energy_field = query_vec, {}
+        else:
+            search_vec, energy_field = self._wave_boost(
+                query_vec,
+                scope=resolved_scope,
+                options=call_options,
+                collector=collector,
+                stage_flags=stage_flags,
+            )
+        # A source filter needs headroom because most knn hits get dropped, but an
+        # unbounded 20x fan-out made the hot search dominate the channel budget.
+        candidates_k = min(top_k * 20, _MAX_FILTERED_CANDIDATES) if source_filter else top_k * 3
         search_start = time.perf_counter()
 
         def _hot_and_cold_sync() -> tuple[list, list[tuple[dict[str, Any], float]], dict[str, Any], list[dict]]:
@@ -774,11 +749,18 @@ class QueryEngine:
                     raise
                 self._trace_warning(collector, "vector_search", "vector_search_failed", str(exc))
                 hot = []
-            cold, cold_meta = self._search_scoped_cold_memories(
-                tag_query_vec=query_vec,
-                score_query_vec=search_vec,
-                policy=recall_policy,
-            )
+            if is_private:
+                cold, cold_meta = [], {
+                    "enabled": False,
+                    "available": False,
+                    "reason_code": "private_raw_vector_only",
+                }
+            else:
+                cold, cold_meta = self._search_scoped_cold_memories(
+                    tag_query_vec=query_vec,
+                    score_query_vec=search_vec,
+                    policy=recall_policy,
+                )
             hot_ids = [item[0] for item in hot]
             hot_memories = self._get_scoped_memories_by_ids(hot_ids, recall_policy)
             return hot, cold, cold_meta, hot_memories
@@ -1171,23 +1153,27 @@ class QueryEngine:
         scope: RuntimeScope | None = None,
     ) -> list[dict]:
         """多路霰弹枪检索。"""
-        resolved_scope = self._group_scope(scope)
+        resolved_scope = self._memory_scope(scope)
         if resolved_scope is None:
-            logger.warning("[WaveMemory] Shotgun query rejected: resolved group RuntimeScope required")
+            logger.warning("[WaveMemory] Shotgun query rejected: resolved group/private RuntimeScope required")
             return []
 
         recall_policy = self._resolve_recall_policy(resolved_scope)
+        is_private = resolved_scope.visibility == "private"
         start = time.time()
 
         query_vec = await self.embedding.get_embedding(text)
         if query_vec is None:
             return []
 
-        search_vec, energy_field = self._wave_boost(query_vec, scope=resolved_scope)
+        if is_private:
+            search_vec, energy_field = query_vec, {}
+        else:
+            search_vec, energy_field = self._wave_boost(query_vec, scope=resolved_scope)
         main_results = self.memory_index.search(search_vec, k=top_k * 3)
 
         segment_results = []
-        if context_messages:
+        if context_messages and not is_private:
             segmenter = ContextSegmenter(
                 similarity_threshold=float(self.config.get("shotgun_similarity_threshold", 0.70)),
                 max_segments=int(self.config.get("shotgun_max_segments", 3)),
@@ -1204,11 +1190,14 @@ class QueryEngine:
             all_candidates[int(mem_id)] = min(all_candidates.get(int(mem_id), 999), float(dist))
         for mem_id, dist in segment_results:
             all_candidates[int(mem_id)] = min(all_candidates.get(int(mem_id), 999), float(dist))
-        cold_candidates, _cold_details = self._search_scoped_cold_memories(
-            tag_query_vec=np.asarray(query_vec, dtype=np.float32),
-            score_query_vec=np.asarray(search_vec, dtype=np.float32),
-            policy=recall_policy,
-        )
+        if is_private:
+            cold_candidates = []
+        else:
+            cold_candidates, _cold_details = self._search_scoped_cold_memories(
+                tag_query_vec=np.asarray(query_vec, dtype=np.float32),
+                score_query_vec=np.asarray(search_vec, dtype=np.float32),
+                policy=recall_policy,
+            )
 
         memory_ids = list(all_candidates)
         memories = self._get_scoped_memories_by_ids(memory_ids, recall_policy)
@@ -1344,8 +1333,20 @@ class QueryEngine:
                 m["score"] = m.get("importance", 1.0)
             return memories
 
-    def format_injection(self, memories: list[dict], template: str = "", current_group_id: str = "") -> str:
-        """将记忆列表格式化为注入文本，按 source 类型分段。"""
+    def format_injection(
+        self,
+        memories: list[dict],
+        template: str = "",
+        current_group_id: str = "",
+        speaker_id: str = "",
+        bot_ids: "set[str] | frozenset[str] | tuple[str, ...] | list[str] | None" = None,
+    ) -> str:
+        """将记忆列表格式化为注入文本，按 source 类型分段。
+
+        ``speaker_id`` / ``bot_ids`` 给出后，群聊记忆会标注归属（对话者本人 /
+        其他群友 / bot 自己）。不标注归属时，``[记忆] 某人(时间): ...`` 无法让模型
+        分辨这句话是不是当前对话者说的，模型会把别人的历史当成对方说过的话。
+        """
         if not memories:
             return ""
         if not template:
@@ -1381,6 +1382,9 @@ class QueryEngine:
 
         # 群聊记忆：标准格式
         if chat_memories:
+            speaker = str(speaker_id or "").strip()
+            bot_id_set = {str(b).strip() for b in (bot_ids or ()) if str(b or "").strip()}
+            annotate = bool(speaker or bot_id_set)
             lines = ["<wave_memory>"]
             for mem in chat_memories:
                 sender = mem.get("sender_name") or mem.get("sender_id") or "unknown"
@@ -1391,8 +1395,13 @@ class QueryEngine:
                 group_tag = ""
                 if mem.get("_is_cross_group") and group_id:
                     group_tag = f"[群{group_id}] "
+                owner_tag = ""
+                if annotate:
+                    owner_tag = self._attribution_tag(
+                        mem, speaker_id=speaker, bot_id_set=bot_id_set
+                    )
                 line = template.replace("{sender}", sender).replace("{time}", ts).replace("{content}", content)
-                lines.append(f"{group_tag}{line} (relevance: {score:.2f})")
+                lines.append(f"{group_tag}{owner_tag}{line} (relevance: {score:.2f})")
             lines.append("</wave_memory>")
             sections.append("\n".join(lines))
 
@@ -1406,6 +1415,30 @@ class QueryEngine:
             sections.append("\n".join(lines))
 
         return "\n\n".join(sections)
+
+    @staticmethod
+    def _attribution_tag(
+        memory: dict,
+        *,
+        speaker_id: str,
+        bot_id_set: set[str],
+    ) -> str:
+        """Return an ownership prefix so the model cannot misattribute a memory.
+
+        Without this, a recalled line from another member reads exactly like the
+        current speaker's own history, which is how "you said that" mistakes are
+        produced on the first reply.
+        """
+        sender_id = str(memory.get("sender_id") or "").strip()
+        if sender_id and sender_id in bot_id_set:
+            return "[你的历史回复] "
+        if str(memory.get("source") or "") == "bot" or sender_id == "bot":
+            return "[你的历史回复] "
+        if speaker_id and sender_id == speaker_id:
+            return "[对话者本人历史] "
+        if sender_id:
+            return "[其他群友历史] "
+        return ""
 
     @staticmethod
     def _prefer_current_group_and_dedupe(

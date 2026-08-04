@@ -48,6 +48,48 @@ class ChannelConfigTest(unittest.TestCase):
             self.assertFalse(config.channels[name].enabled, name)
             self.assertNotIn("memory_only", config.channels[name].modes, name)
 
+    def test_private_scope_forces_safe_channel_and_query_envelope(self):
+        from domain.scope import RuntimeScope, SessionRef
+        from services.config.channel_config import build_channel_config_from_plugin_config
+
+        scope = RuntimeScope(
+            "bot-alpha", "private", SessionRef("qq:private:u", "qq", "private", "u")
+        )
+        config = build_channel_config_from_plugin_config(
+            {
+                "Query_Settings": {"enable_epa": True, "enable_residual_pyramid": True},
+                "Channel_Settings": {
+                    "trace_enabled": True,
+                    "channels": {
+                        "timeline": {"enabled": True},
+                        "facts": {"enabled": True},
+                        "persona": {"enabled": True},
+                        "fts5": {"enabled": True},
+                    },
+                    "layers": {
+                        "session": [{
+                            "selector": {"bot_id": "bot-alpha", "session_id": "qq:private:u", "visibility": "private"},
+                            "patch": {
+                                "trace_enabled": True,
+                                "query_options": {"stages": {"epa": True, "spike": True}},
+                                "channels": {"timeline": {"enabled": True}, "belief": {"enabled": True}},
+                            },
+                        }],
+                    },
+                },
+            },
+            scope=scope,
+        )
+
+        self.assertTrue(config.channels["safety"].enabled)
+        self.assertTrue(config.channels["memory"].enabled)
+        self.assertTrue(config.channels["fts5"].enabled)
+        for name in ("timeline", "facts", "persona", "belief", "jargon", "fewshot", "book_lore", "affinity", "soul_state"):
+            self.assertFalse(config.channels[name].enabled, name)
+        self.assertFalse(config.trace_enabled)
+        self.assertEqual(config.query_stages, {"epa": False, "pyramid": False, "spike": False, "geodesic": False})
+        self.assertFalse(config.memory_recall["enable_shotgun"])
+
     def test_valid_hot_overrides_apply_without_losing_old_defaults(self):
         from services.config.channel_config import apply_channel_overrides, build_default_channel_config
 

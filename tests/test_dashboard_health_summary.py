@@ -59,7 +59,6 @@ def test_health_registry_reasons_distinguish_missing_bot_profile_from_llm_missin
 
     assert "tag_llm_provider_id 未配置" in source
     assert "未配置 Bot Profile" in source
-    assert "未配置经历 Bot Profile" in source
     assert "belief_engine 初始化失败或未启用" in source
 
 

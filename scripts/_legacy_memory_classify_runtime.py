@@ -56,7 +56,7 @@ def classify(row):
         return "evicted", "memory_type=evicted"
     if source == "explicit" or memory_type == "explicit":
         return "explicit_review", "explicit_source_or_memory_type_without_formal_scope"
-    if source in {"bzz_experience", "bzz_evolution", "experience"}:
+    if source in {"bzz_experience", "experience"}:
         return "experience_affinity", "source=experience_domain"
     if source in {"book_lore", "oni_lore"}:
         return "knowledge_lore", "source=knowledge_domain"

@@ -615,295 +615,23 @@ class ScopedFewShotRepository:
         }
 
 
-class ReviewedBookLoreProjectionRepository:
-    """Catalog raw 只读前提下，持久化经过审核的 Catalog→Runtime projection。"""
-
-    _SELECT = (
-        "id, source_catalog_scope_json, target_runtime_scope_json, community_id, "
-        "title, summary, content, rank, candidate_json, evidence_refs_json, "
-        "evidence_bindings_json, evidence_derivation_json, status, revision, "
-        "source_candidate_id, idempotency_key, created_at, updated_at, approved_at"
-    )
-    _STATUSES = frozenset({"pending", "approved", "rejected", "revoked"})
-
-    def __init__(
-        self,
-        connection,
-        *,
-        now: Callable[[], float] | None = None,
-        ensure_schema: bool = True,
-    ):
-        self.connection = connection
-        self.now = now or time.time
-        if ensure_schema:
-            ensure_scoped_learning_projection_schema(connection)
-
-    def ensure_schema(self, *, connection=None) -> None:
-        ensure_scoped_learning_projection_schema(connection or self.connection)
-
-    def write_reviewed_projection(
-        self,
-        *,
-        source_scope: CatalogScope,
-        target_scope: RuntimeScope,
-        candidate: Mapping[str, Any],
-        evidence_refs: Sequence[EvidenceRef],
-        evidence_bindings: Sequence[EvidenceBinding],
-        derivation: EvidenceDerivation,
-        community_id: str,
-        title: str,
-        summary: str,
-        content: str,
-        rank: float = 0.0,
-        status: str = "approved",
-        source_candidate_id: int | None = None,
-        idempotency_key: str,
-        connection=None,
-    ) -> int:
-        if not isinstance(source_scope, CatalogScope):
-            raise TypeError("source_scope must be CatalogScope")
-        if not isinstance(target_scope, RuntimeScope):
-            raise TypeError("target_scope must be RuntimeScope")
-        if not isinstance(candidate, Mapping):
-            raise TypeError("candidate must be a mapping")
-        if not isinstance(derivation, EvidenceDerivation):
-            raise TypeError("derivation must be EvidenceDerivation")
-        decision = ScopeValidator().compatibility(
-            catalog=source_scope,
-            runtime=target_scope,
-            evidence_derivation=derivation,
-        )
-        if not decision.allowed:
-            raise ValueError(decision.reason_code or "invalid reviewed derivation")
-        refs = _refs(evidence_refs)
-        bindings = _bindings(evidence_bindings)
-        _validate_evidence(
-            evidence_refs=refs,
-            evidence_bindings=bindings,
-            source_scope=source_scope,
-            target_scope=target_scope,
-        )
-        status = str(status or "").strip().lower()
-        if status not in self._STATUSES:
-            raise ValueError("invalid projection status")
-        community_id = _text(community_id, "community_id")
-        title = _text(title, "title")
-        summary = _text(summary, "summary")
-        content = _text(content, "content")
-        key = _text(idempotency_key, "idempotency_key")
-        now = float(self.now())
-        source_key = _scope_key(source_scope)
-        target_key = _scope_key(target_scope)
-        source_json = _json(source_scope)
-        target_json = _json(_runtime_owner(target_scope))
-        candidate_json = _json(dict(candidate))
-        refs_json = _json([item.to_dict() for item in refs])
-        bindings_json = _json([item.to_dict() for item in bindings])
-        derivation_json = _json(derivation)
-        approved_at = now if status == "approved" else None
-        mutable = (
-            source_key,
-            source_json,
-            target_json,
-            community_id,
-            title,
-            summary,
-            content,
-            float(rank),
-            candidate_json,
-            refs_json,
-            bindings_json,
-            derivation_json,
-            status,
-            source_candidate_id,
-        )
-        with _repository_write(self.connection, connection) as tx:
-            existing = tx.execute(
-                """SELECT id, source_catalog_scope_key, source_catalog_scope_json,
-                          target_runtime_scope_json, community_id, title, summary, content, rank,
-                          candidate_json, evidence_refs_json, evidence_bindings_json,
-                          evidence_derivation_json, status, source_candidate_id
-                   FROM reviewed_book_lore_projections
-                   WHERE target_runtime_scope_key=? AND idempotency_key=?""",
-                (target_key, key),
-            ).fetchone()
-            if existing:
-                projection_id = int(existing[0])
-                if tuple(existing[1:]) != mutable:
-                    tx.execute(
-                        """UPDATE reviewed_book_lore_projections
-                           SET source_catalog_scope_key=?, source_catalog_scope_json=?,
-                               target_runtime_scope_json=?, community_id=?, title=?, summary=?,
-                               content=?, rank=?, candidate_json=?, evidence_refs_json=?,
-                               evidence_bindings_json=?, evidence_derivation_json=?, status=?,
-                               source_candidate_id=?, revision=revision+1, updated_at=?,
-                               approved_at=?
-                           WHERE id=?""",
-                        (*mutable, now, approved_at, projection_id),
-                    )
-                return projection_id
-            result = tx.execute(
-                """INSERT INTO reviewed_book_lore_projections
-                   (source_catalog_scope_key, source_catalog_scope_json,
-                    target_runtime_scope_key, target_runtime_scope_json, community_id,
-                    title, summary, content, rank, candidate_json, evidence_refs_json,
-                    evidence_bindings_json, evidence_derivation_json, status, revision,
-                    source_candidate_id, idempotency_key, created_at, updated_at, approved_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)""",
-                (
-                    source_key,
-                    source_json,
-                    target_key,
-                    target_json,
-                    community_id,
-                    title,
-                    summary,
-                    content,
-                    float(rank),
-                    candidate_json,
-                    refs_json,
-                    bindings_json,
-                    derivation_json,
-                    status,
-                    source_candidate_id,
-                    key,
-                    now,
-                    now,
-                    approved_at,
-                ),
-            )
-            return int(result.lastrowid)
-
-    def get(self, projection_id: int) -> dict[str, Any] | None:
-        row = self.connection.execute(
-            f"SELECT {self._SELECT} FROM reviewed_book_lore_projections WHERE id=?",
-            (int(projection_id),),
-        ).fetchone()
-        return self._row(row) if row else None
-
-    def list_approved(
-        self,
-        *,
-        scope: RuntimeScope,
-        limit: int = 20,
-        offset: int = 0,
-        search: str = "",
-    ) -> list[dict[str, Any]]:
-        if not isinstance(scope, RuntimeScope):
-            raise TypeError("scope must be RuntimeScope")
-        limit = max(1, min(int(limit), 500))
-        offset = max(0, int(offset))
-        search = str(search or "").strip()
-        where = ["target_runtime_scope_key=?", "status='approved'"]
-        params: list[Any] = [_scope_key(scope)]
-        if search:
-            where.append("(title LIKE ? OR summary LIKE ? OR content LIKE ? OR community_id LIKE ?)")
-            params.extend((f"%{search}%",) * 4)
-        rows = self.connection.execute(
-            f"""SELECT {self._SELECT} FROM reviewed_book_lore_projections
-                WHERE {' AND '.join(where)}
-                ORDER BY rank DESC, updated_at DESC, id DESC LIMIT ? OFFSET ?""",
-            (*params, limit, offset),
-        ).fetchall()
-        result = [self._row(row) for row in rows]
-        return [item for item in result if _same_runtime_owner(item["target_scope"], scope)]
-
-    def search_approved(
-        self,
-        *,
-        scope: RuntimeScope,
-        query: str,
-        limit: int = 5,
-        min_score: float = 0.0,
-    ) -> list[dict[str, Any]]:
-        """Return relevant reviewed lore for the exact RuntimeScope.
-
-        Projection rows currently do not carry a shared embedding column, so the
-        formal fallback is deterministic token relevance over reviewed content. It
-        is intentionally not a top-k dump: an empty match returns no lore.
-        """
-        query = str(query or "").strip()
-        if not query:
-            return []
-        tokens = [token for token in re.findall(r"[\\w\\u4e00-\\u9fff]{2,}", query.casefold()) if token]
-        if not tokens:
-            return []
-        candidates = self.list_approved(scope=scope, limit=500, offset=0)
-        ranked: list[tuple[float, dict[str, Any]]] = []
-        for item in candidates:
-            haystack = " ".join(
-                str(item.get(field) or "") for field in ("title", "summary", "content", "community_id")
-            ).casefold()
-            hits = sum(1 for token in tokens if token in haystack)
-            if hits <= 0:
-                continue
-            lexical = hits / max(1, len(tokens))
-            score = min(1.0, lexical * 0.75 + min(0.25, float(item.get("rank") or 0.0) * 0.25))
-            if score >= float(min_score):
-                ranked.append((score, item))
-        ranked.sort(key=lambda pair: (pair[0], float(pair[1].get("rank") or 0.0), int(pair[1].get("id") or 0)), reverse=True)
-        return [item for _score, item in ranked[: max(1, min(int(limit), 50))]]
-
-    def count_approved(self, *, scope: RuntimeScope, search: str = "") -> int:
-        if not isinstance(scope, RuntimeScope):
-            raise TypeError("scope must be RuntimeScope")
-        search = str(search or "").strip()
-        where = ["target_runtime_scope_key=?", "status='approved'"]
-        params: list[Any] = [_scope_key(scope)]
-        if search:
-            where.append("(title LIKE ? OR summary LIKE ? OR content LIKE ? OR community_id LIKE ?)")
-            params.extend((f"%{search}%",) * 4)
-        return int(self.connection.execute(
-            f"SELECT COUNT(*) FROM reviewed_book_lore_projections WHERE {' AND '.join(where)}",
-            params,
-        ).fetchone()[0])
-
-    @staticmethod
-    def _row(row) -> dict[str, Any]:
-        return {
-            "id": int(row[0]),
-            "source_scope": CatalogScope.from_dict(_json_dict(row[1])),
-            "target_scope": RuntimeScope.from_dict(_json_dict(row[2])),
-            "community_id": row[3],
-            "title": row[4],
-            "summary": row[5],
-            "content": row[6],
-            "rank": float(row[7] or 0.0),
-            "candidate": _json_dict(row[8]),
-            "evidence_refs": tuple(EvidenceRef.from_dict(item) for item in _json_list(row[9])),
-            "evidence_bindings": tuple(
-                EvidenceBinding.from_dict(item) for item in _json_list(row[10])
-            ),
-            "derivation": EvidenceDerivation.from_dict(_json_dict(row[11])),
-            "status": row[12],
-            "revision": int(row[13]),
-            "source_candidate_id": row[14],
-            "idempotency_key": row[15],
-            "created_at": float(row[16]),
-            "updated_at": float(row[17]),
-            "approved_at": float(row[18]) if row[18] is not None else None,
-        }
-
-
 class CoordinatorScopedProjectionWriter:
-    """把 scoped projection 正式写入派发到 WriteCoordinator 独占事务。"""
+    """把 scoped FewShot projection 正式写入派发到 WriteCoordinator 独占事务。"""
 
     def __init__(
         self,
         coordinator: Any,
         *,
         fewshot_repository: ScopedFewShotRepository | None = None,
-        book_lore_repository: ReviewedBookLoreProjectionRepository | None = None,
     ) -> None:
         transaction_blocking = getattr(coordinator, "transaction_blocking", None)
         if not callable(transaction_blocking):
             raise TypeError("coordinator must provide transaction_blocking")
         self.coordinator = coordinator
         self.fewshot_repository = fewshot_repository
-        self.book_lore_repository = book_lore_repository
 
     def migrate(self) -> None:
-        """在 writer-owned transaction 内创建两张 projection 表。"""
+        """在 writer-owned transaction 内创建 FewShot projection 表并清理废弃表。"""
         self.coordinator.transaction_blocking(ensure_scoped_learning_projection_schema)
 
     def write_approved(self, **kwargs: Any) -> int:
@@ -915,20 +643,10 @@ class CoordinatorScopedProjectionWriter:
             )
         ))
 
-    def write_reviewed_projection(self, **kwargs: Any) -> int:
-        if self.book_lore_repository is None:
-            raise RuntimeError("reviewed BookLore projection repository is unavailable")
-        return int(self.coordinator.transaction_blocking(
-            lambda connection: self.book_lore_repository.write_reviewed_projection(
-                connection=connection, **kwargs
-            )
-        ))
-
 
 __all__ = [
     "CoordinatorScopedProjectionWriter",
     "FewShotProjectionConflict",
-    "ReviewedBookLoreProjectionRepository",
     "ScopedBotReplyRepository",
     "ScopedFewShotRepository",
 ]

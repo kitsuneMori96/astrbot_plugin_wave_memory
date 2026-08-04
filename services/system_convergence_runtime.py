@@ -52,6 +52,16 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _require_memory_scope(scope: RuntimeScope) -> RuntimeScope:
+    if (
+        not isinstance(scope, RuntimeScope)
+        or scope.visibility not in {"group", "private"}
+        or scope.session is None
+    ):
+        raise ValueError("a canonical group/private RuntimeScope is required")
+    return scope
+
+
 def _require_group_scope(scope: RuntimeScope) -> RuntimeScope:
     if not isinstance(scope, RuntimeScope) or scope.visibility != "group" or scope.session is None:
         raise ValueError("a canonical group RuntimeScope is required")
@@ -59,13 +69,13 @@ def _require_group_scope(scope: RuntimeScope) -> RuntimeScope:
 
 
 def _scope_tuple(scope: RuntimeScope) -> tuple[str, str, str]:
-    scope = _require_group_scope(scope)
+    scope = _require_memory_scope(scope)
     assert scope.session is not None
     return scope.bot_id, scope.session.id, scope.visibility
 
 
 def _append_memory_handler(connection, command: DomainCommand, now: float) -> MutationOutcome:
-    scope = _require_group_scope(command.scope)
+    scope = _require_memory_scope(command.scope)
     assert scope.session is not None
     payload = command.payload
     group_id = str(payload["group_id"])
@@ -160,7 +170,7 @@ def _backfill_memory_vector_handler(connection, command: DomainCommand, now: flo
     A missing/deleted/replaced row is deliberately a no-op: the durable backfill
     runner must be able to continue past stale work without widening its Scope.
     """
-    scope = _require_group_scope(command.scope)
+    scope = _require_memory_scope(command.scope)
     payload = command.payload
     memory_id = int(payload["memory_id"])
     vector_blob = payload.get("vector_blob")
@@ -183,8 +193,9 @@ def _backfill_memory_vector_handler(connection, command: DomainCommand, now: flo
     previous_version = int(row[0] or MEMORIES_V2_VERSION)
     next_version = previous_version + 1
     connection.execute(
-        "UPDATE memories SET vector=?, version=? WHERE id=?",
-        (bytes(vector_blob), next_version, memory_id),
+        """UPDATE memories SET vector=?, version=?
+             WHERE id=? AND bot_id=? AND session_id=? AND visibility=? AND group_id=?""",
+        (bytes(vector_blob), next_version, memory_id, *_scope_tuple(scope), scope.session.conversation_id),
     )
     scope_payload = {
         "bot_id": scope.bot_id,
@@ -206,6 +217,50 @@ def _backfill_memory_vector_handler(connection, command: DomainCommand, now: flo
     )
 
 
+def _catalog_neighbors_for_admission(connection, *, tag_type: str, limit: int = 64):
+    """Load a bounded Catalog neighborhood for exact/semantic admission decisions."""
+    try:
+        from .tag_admission import CatalogNeighbor
+    except ImportError:  # pragma: no cover
+        from services.tag_admission import CatalogNeighbor
+
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tag_catalog'"
+    ).fetchone() is None:
+        return []
+    try:
+        rows = connection.execute(
+            """
+            SELECT id, normalized_name, display_name, tag_type, embedding
+              FROM tag_catalog
+             WHERE status='active' AND tag_type=?
+             ORDER BY COALESCE(updated_at, created_at, 0) DESC, id ASC
+             LIMIT ?
+            """,
+            (str(tag_type or "keyword"), max(1, int(limit))),
+        ).fetchall()
+    except Exception:
+        return []
+    neighbors: list[CatalogNeighbor] = []
+    for row in rows:
+        embedding = None
+        if row[4] is not None:
+            try:
+                embedding = np.frombuffer(row[4], dtype=np.float32).astype(float).tolist()
+            except (TypeError, ValueError):
+                embedding = None
+        neighbors.append(
+            CatalogNeighbor(
+                catalog_id=int(row[0]),
+                normalized_name=str(row[1] or ""),
+                display_name=str(row[2] or row[1] or ""),
+                tag_type=str(row[3] or "keyword"),
+                embedding=embedding,
+            )
+        )
+    return neighbors
+
+
 def _apply_tag_extraction_handler(connection, command: DomainCommand, now: float) -> MutationOutcome:
     scope = _require_group_scope(command.scope)
     payload = command.payload
@@ -219,41 +274,95 @@ def _apply_tag_extraction_handler(connection, command: DomainCommand, now: float
     if row is None:
         raise ValueError("memory is not a resolved member of the RuntimeScope")
 
+    try:
+        from .tag_admission import admit_tag_batch, normalize_admission_name
+    except ImportError:  # pragma: no cover
+        from services.tag_admission import admit_tag_batch, normalize_admission_name
+
+    # Neighbor pool is loaded once per batch; exact/semantic decisions stay pure.
+    raw_tags = [item for item in (payload.get("tags") or ()) if isinstance(item, Mapping)]
+    neighbor_types = {
+        str(item.get("type") or item.get("tag_type") or "keyword").strip().casefold() or "keyword"
+        for item in raw_tags
+    }
+    catalog_neighbors = []
+    for tag_type in neighbor_types:
+        catalog_neighbors.extend(_catalog_neighbors_for_admission(connection, tag_type=tag_type))
+    admitted_tags, decisions = admit_tag_batch(raw_tags, catalog=catalog_neighbors)
+    rejected = [decision.reason for decision in decisions if decision.action == "reject"]
+
     entities: list[EntityChange] = []
     tag_ids: list[int] = []
     catalog_ids: list[int] = []
-    for position, raw_tag in enumerate(payload.get("tags") or (), 1):
-        if not isinstance(raw_tag, Mapping):
-            continue
+    tag_columns = {str(item[1]) for item in connection.execute("PRAGMA table_info(scoped_tags)").fetchall()}
+    catalog_table = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tag_catalog'"
+    ).fetchone()
+
+    for position, raw_tag in enumerate(admitted_tags, 1):
         name = str(raw_tag.get("name") or "").strip()
         if not name:
             continue
         tag_type = str(raw_tag.get("type") or "keyword")
         confidence = float(raw_tag.get("confidence", 0.8))
-        metadata = _canonical_json({"producer": "tag_worker", "memory_id": memory_id})
+        metadata = _canonical_json({
+            "producer": "tag_worker",
+            "memory_id": memory_id,
+            "admission": raw_tag.get("admission"),
+            "admission_reason": raw_tag.get("admission_reason"),
+        })
         catalog_id = None
-        tag_columns = {str(item[1]) for item in connection.execute("PRAGMA table_info(scoped_tags)").fetchall()}
-        catalog_table = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tag_catalog'"
-        ).fetchone()
+        try:
+            explicit_catalog = raw_tag.get("catalog_id")
+            if explicit_catalog is not None:
+                catalog_id = int(explicit_catalog)
+        except (TypeError, ValueError):
+            catalog_id = None
+
         if catalog_table is not None and "catalog_id" in tag_columns:
-            normalized_name = unicodedata.normalize("NFKC", name).strip()
-            connection.execute(
-                """INSERT INTO tag_catalog(
-                       normalized_name, display_name, tag_type, description,
-                       status, created_at, updated_at
-                   ) VALUES (?, ?, ?, '', 'active', ?, ?)
-                   ON CONFLICT(normalized_name, tag_type) DO UPDATE SET
-                       display_name=CASE WHEN tag_catalog.display_name='' THEN excluded.display_name
-                                         ELSE tag_catalog.display_name END,
-                       updated_at=excluded.updated_at""",
-                (normalized_name, name, tag_type, now, now),
-            )
-            catalog_row = connection.execute(
-                "SELECT id FROM tag_catalog WHERE normalized_name=? AND tag_type=?",
-                (normalized_name, tag_type),
-            ).fetchone()
-            catalog_id = int(catalog_row[0]) if catalog_row is not None else None
+            normalized_name = normalize_admission_name(name)
+            if catalog_id is None:
+                connection.execute(
+                    """INSERT INTO tag_catalog(
+                           normalized_name, display_name, tag_type, description,
+                           status, created_at, updated_at
+                       ) VALUES (?, ?, ?, '', 'active', ?, ?)
+                       ON CONFLICT(normalized_name, tag_type) DO UPDATE SET
+                           display_name=CASE WHEN tag_catalog.display_name='' THEN excluded.display_name
+                                             ELSE tag_catalog.display_name END,
+                           updated_at=excluded.updated_at""",
+                    (normalized_name, name, tag_type, now, now),
+                )
+                catalog_row = connection.execute(
+                    "SELECT id, display_name FROM tag_catalog WHERE normalized_name=? AND tag_type=?",
+                    (normalized_name, tag_type),
+                ).fetchone()
+            else:
+                catalog_row = connection.execute(
+                    "SELECT id, display_name FROM tag_catalog WHERE id=? AND status='active'",
+                    (catalog_id,),
+                ).fetchone()
+                if catalog_row is None:
+                    # Stale catalog_id from the caller must not invent a new row by id.
+                    connection.execute(
+                        """INSERT INTO tag_catalog(
+                               normalized_name, display_name, tag_type, description,
+                               status, created_at, updated_at
+                           ) VALUES (?, ?, ?, '', 'active', ?, ?)
+                           ON CONFLICT(normalized_name, tag_type) DO UPDATE SET
+                               updated_at=excluded.updated_at""",
+                        (normalized_name, name, tag_type, now, now),
+                    )
+                    catalog_row = connection.execute(
+                        "SELECT id, display_name FROM tag_catalog WHERE normalized_name=? AND tag_type=?",
+                        (normalized_name, tag_type),
+                    ).fetchone()
+            if catalog_row is not None:
+                catalog_id = int(catalog_row[0])
+                # Prefer the Catalog display name so semantic reuse collapses aliases.
+                reused_name = str(catalog_row[1] or "").strip()
+                if reused_name:
+                    name = reused_name
             raw_vector = raw_tag.get("embedding")
             if catalog_id is not None and raw_vector is not None:
                 try:
@@ -261,7 +370,7 @@ def _apply_tag_extraction_handler(connection, command: DomainCommand, now: float
                     if vector.size:
                         connection.execute(
                             """UPDATE tag_catalog SET embedding=?, embedding_dim=?, updated_at=?
-                                WHERE id=? AND status='active'""",
+                                WHERE id=? AND status='active' AND embedding IS NULL""",
                             (vector.tobytes(), int(vector.size), now, catalog_id),
                         )
                 except (TypeError, ValueError):
@@ -314,6 +423,9 @@ def _apply_tag_extraction_handler(connection, command: DomainCommand, now: float
         entities.append(EntityChange("scoped_tag", str(tag_id), 1, "upserted"))
 
     status = str(payload.get("status") or ("done" if tag_ids else "skipped"))
+    # All candidates rejected by admission still counts as a completed extraction.
+    if not tag_ids and rejected and not str(payload.get("status") or "").strip():
+        status = "skipped"
     error = payload.get("error")
     connection.execute(
         """INSERT INTO tag_extraction_status(memory_id, status, attempts, last_error, updated_at)
@@ -350,6 +462,7 @@ def _apply_tag_extraction_handler(connection, command: DomainCommand, now: float
                     "tag_ids": tag_ids,
                     "catalog_ids": sorted(set(catalog_ids)),
                     "status": status,
+                    "rejected_count": len(rejected),
                     "scope": scope.to_dict(),
                 },
             ),
@@ -358,7 +471,7 @@ def _apply_tag_extraction_handler(connection, command: DomainCommand, now: float
 
 
 def _mutate_memories_handler(connection, command: DomainCommand, now: float) -> MutationOutcome:
-    scope = _require_group_scope(command.scope)
+    scope = _require_memory_scope(command.scope)
     payload = command.payload
     memory_ids = tuple(dict.fromkeys(int(value) for value in payload.get("memory_ids") or ()))
     if not memory_ids:
@@ -367,8 +480,8 @@ def _mutate_memories_handler(connection, command: DomainCommand, now: float) -> 
     rows = connection.execute(
         f"""SELECT id, COALESCE(version, 1) FROM memories
               WHERE id IN ({placeholders}) AND bot_id=? AND session_id=? AND visibility=?
-                AND resolution_state='resolved' AND COALESCE(quarantine, 0)=0""",
-        (*memory_ids, *_scope_tuple(scope)),
+                AND group_id=? AND resolution_state='resolved' AND COALESCE(quarantine, 0)=0""",
+        (*memory_ids, *_scope_tuple(scope), scope.session.conversation_id),
     ).fetchall()
     versions = {int(row[0]): int(row[1]) for row in rows}
     allowed_ids = tuple(memory_id for memory_id in memory_ids if memory_id in versions)
@@ -382,20 +495,23 @@ def _mutate_memories_handler(connection, command: DomainCommand, now: float) -> 
             f"""UPDATE memories
                    SET access_count=COALESCE(access_count, 0)+1,
                        last_accessed=?, importance=MIN(3.0, COALESCE(importance, 1.0)+?)
-                 WHERE id IN ({allowed_placeholders})""",
-            (now, boost, *allowed_ids),
+                 WHERE id IN ({allowed_placeholders})
+                   AND bot_id=? AND session_id=? AND visibility=? AND group_id=?""",
+            (now, boost, *allowed_ids, *_scope_tuple(scope), scope.session.conversation_id),
         )
     elif action == "set_importance":
         importance = float(payload["importance"])
         connection.execute(
-            f"UPDATE memories SET importance=? WHERE id IN ({allowed_placeholders})",
-            (importance, *allowed_ids),
+            f"""UPDATE memories SET importance=? WHERE id IN ({allowed_placeholders})
+                AND bot_id=? AND session_id=? AND visibility=? AND group_id=?""",
+            (importance, *allowed_ids, *_scope_tuple(scope), scope.session.conversation_id),
         )
     elif action in {"archive", "evict"}:
         memory_type = "archived" if action == "archive" else "evicted"
         connection.execute(
-            f"UPDATE memories SET memory_type=? WHERE id IN ({allowed_placeholders})",
-            (memory_type, *allowed_ids),
+            f"""UPDATE memories SET memory_type=? WHERE id IN ({allowed_placeholders})
+                AND bot_id=? AND session_id=? AND visibility=? AND group_id=?""",
+            (memory_type, *allowed_ids, *_scope_tuple(scope), scope.session.conversation_id),
         )
     elif action == "delete":
         connection.execute(
@@ -407,8 +523,9 @@ def _mutate_memories_handler(connection, command: DomainCommand, now: float) -> 
             allowed_ids,
         )
         connection.execute(
-            f"DELETE FROM memories WHERE id IN ({allowed_placeholders})",
-            allowed_ids,
+            f"""DELETE FROM memories WHERE id IN ({allowed_placeholders})
+                AND bot_id=? AND session_id=? AND visibility=? AND group_id=?""",
+            (*allowed_ids, *_scope_tuple(scope), scope.session.conversation_id),
         )
     else:
         raise ValueError(f"unsupported memory mutation: {action}")
@@ -416,8 +533,10 @@ def _mutate_memories_handler(connection, command: DomainCommand, now: float) -> 
     new_versions = {memory_id: versions[memory_id] + 1 for memory_id in allowed_ids}
     if action != "delete":
         connection.execute(
-            f"UPDATE memories SET version=COALESCE(version, 1)+1 WHERE id IN ({allowed_placeholders})",
-            allowed_ids,
+            f"""UPDATE memories SET version=COALESCE(version, 1)+1
+                WHERE id IN ({allowed_placeholders})
+                  AND bot_id=? AND session_id=? AND visibility=? AND group_id=?""",
+            (*allowed_ids, *_scope_tuple(scope), scope.session.conversation_id),
         )
     change_type = {
         "touch": "accessed",

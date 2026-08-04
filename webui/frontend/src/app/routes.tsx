@@ -1,5 +1,5 @@
 import type { ComponentType } from 'react'
-import { ActivityIcon, BookHeartIcon, BookOpenIcon, BrainCircuitIcon, DatabaseIcon, DownloadIcon, GaugeIcon, GitBranchIcon, GitCompareArrowsIcon, HeartIcon, SearchCheckIcon, Settings2Icon, SlidersIcon, SmileIcon, TagsIcon, UsersIcon, CompassIcon } from 'lucide-react'
+import { ActivityIcon, BookHeartIcon, BookOpenIcon, BrainCircuitIcon, DatabaseIcon, DownloadIcon, GaugeIcon, GitBranchIcon, GitCompareArrowsIcon, HeartIcon, SearchCheckIcon, Settings2Icon, SlidersIcon, SmileIcon, SparklesIcon, TagsIcon, UsersIcon, CompassIcon } from 'lucide-react'
 
 import { BeliefsPage } from '@/pages/beliefs/BeliefsPage'
 import { ChannelConfigPage } from '@/pages/channels/ChannelConfigPage'
@@ -9,9 +9,9 @@ import { ImportPage } from '@/pages/import/ImportPage'
 import { InjectionPage } from '@/pages/injection/InjectionPage'
 import { JargonPage } from '@/pages/jargon/JargonPage'
 import { BookLorePage } from '@/pages/knowledge/BookLorePage'
+import { ExperiencesPage } from '@/pages/knowledge/ExperiencesPage'
 import { FactsPage } from '@/pages/knowledge/FactsPage'
 import { FewShotPage } from '@/pages/knowledge/FewShotPage'
-import { LearningCenterPage } from '@/pages/learning/LearningCenterPage'
 import { MaintenancePage } from '@/pages/maintenance/MaintenancePage'
 import { MemoriesPage } from '@/pages/memories/MemoriesPage'
 import { PeoplePage } from '@/pages/people/PeoplePage'
@@ -35,11 +35,11 @@ export const appRoutes: AppRoute[] = [
   { path: '/maintenance', title: '维护任务', description: '可恢复任务、checkpoint、日志与取消语义', group: 'runtime', icon: SlidersIcon, element: MaintenancePage },
   { path: '/observatory', title: '注入观测台', description: '可复现筛选、完整 Trace 与配置 revision', group: 'runtime', icon: ActivityIcon, element: InjectionPage },
   { path: '/channels', title: '通道配置', description: '真实 descriptor、saved/effective 与 Trace 验证', group: 'runtime', icon: Settings2Icon, element: ChannelConfigPage },
-  { path: '/learning', title: '学习过程', description: '来源、任务、候选、审核与晋升账本', group: 'cognition', icon: BrainCircuitIcon, element: LearningCenterPage },
   { path: '/beliefs', title: '信念', description: '证据健康与生命周期审核', group: 'cognition', icon: BookHeartIcon, element: BeliefsPage },
   { path: '/jargon', title: '黑话与口癖', description: '群聊习得黑话、证据审核与 Holyman 广域资产审计', group: 'cognition', icon: SmileIcon, element: JargonPage },
   { path: '/soul', title: 'Soul 状态', description: '真实 Bot/会话 Mood、Concern、Timeline 与关系投影', group: 'cognition', icon: HeartIcon, element: SoulPage },
   { path: '/knowledge/book-lore', title: 'BookLore', description: '独立只读语料、解析、本地化与隔离', group: 'knowledge', icon: BookOpenIcon, element: BookLorePage },
+  { path: '/knowledge/experiences', title: '经历片段', description: '对话沉淀的个人经历与重要事件', group: 'knowledge', icon: SparklesIcon, element: ExperiencesPage },
   { path: '/knowledge/style-examples', title: '风格样例', description: '仅 approved/healthy 正式 FewShot', group: 'knowledge', icon: BrainCircuitIcon, element: FewShotPage },
   { path: '/knowledge/facts', title: '事实', description: 'Scoped subject/predicate/object 与证据', group: 'knowledge', icon: GitBranchIcon, element: FactsPage },
   { path: '/people', title: '人物与关系', description: '按 Bot/session/user 复合作用域展示', group: 'knowledge', icon: UsersIcon, element: PeoplePage },

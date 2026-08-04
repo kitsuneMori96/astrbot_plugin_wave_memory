@@ -47,6 +47,11 @@ class RecallPolicy:
 
     @classmethod
     def from_config(cls, scope: RuntimeScope, config: Mapping[str, Any]) -> "RecallPolicy":
+        # A private session is an exact owner boundary, never a group-sharing
+        # envelope. Do not let persisted/global switches reopen legacy, grant, or
+        # cross-group lanes for a private query.
+        if scope.visibility == "private":
+            return cls(scope=scope)
         return cls(
             scope=scope,
             cross_group_enabled=_enabled(config.get("cross_group_enabled", False)),
@@ -56,6 +61,8 @@ class RecallPolicy:
 
     def with_granted_memory_ids(self, memory_ids: list[int] | tuple[int, ...] | set[int]) -> "RecallPolicy":
         """Return a copy with an explicit grant allow-list (read path only)."""
+        if self.scope.visibility == "private":
+            return self
         cleaned: list[int] = []
         seen: set[int] = set()
         for raw in memory_ids or ():

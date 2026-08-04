@@ -134,3 +134,45 @@ def test_undone_correction_falls_back_to_automatic_rows():
     rows = effective_tag_rows(conn, scope=scope(), memory_id=1)
     assert [(row["tag_id"], row["source"]) for row in rows] == [(automatic_id, "automatic")]
     assert json.loads(conn.execute("SELECT after_tags_json FROM scoped_memory_tag_corrections").fetchone()[0]) == ["自动标签", "人工标签"]
+
+
+def test_tag_id_filter_is_pushed_into_sql_and_bounds_the_scan():
+    """Cold recall must not scan every scoped link to answer a few tag ids."""
+    conn = connection()
+    wanted_id = add_tag(conn, "命中标签")
+    other_id = add_tag(conn, "无关标签")
+    for memory_id in range(1, 51):
+        tag_id = wanted_id if memory_id == 1 else other_id
+        conn.execute(
+            """INSERT INTO scoped_memory_tags(
+                   bot_id, session_id, visibility, memory_id, tag_id, position, relevance, created_at)
+               VALUES ('bot-alpha', 'qq:group:g1', 'group', ?, ?, 1, 1, 1)""",
+            (memory_id, tag_id),
+        )
+    conn.commit()
+
+    class TracingConnection:
+        """Record SQL so the test proves the filter reached SQLite, not Python."""
+
+        def __init__(self, delegate: sqlite3.Connection) -> None:
+            self._delegate = delegate
+            self.statements: list[str] = []
+
+        def execute(self, sql, *args, **kwargs):
+            self.statements.append(sql)
+            return self._delegate.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._delegate, name)
+
+    tracing = TracingConnection(conn)
+    rows = effective_tag_rows(tracing, scope=scope(), tag_ids=[wanted_id])
+
+    assert [(row["memory_id"], row["tag_id"]) for row in rows] == [(1, wanted_id)]
+    baseline_sql = next(sql for sql in tracing.statements if "FROM scoped_memory_tags" in sql)
+    assert "mt.tag_id IN (" in baseline_sql
+
+    # An explicitly empty filter means "no tag matched", not "return everything".
+    assert effective_tag_rows(conn, scope=scope(), tag_ids=[]) == []
+    # No filter keeps the previous full-baseline behaviour for callers that need it.
+    assert len(effective_tag_rows(conn, scope=scope())) == 50

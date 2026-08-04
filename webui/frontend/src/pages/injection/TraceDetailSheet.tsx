@@ -224,8 +224,8 @@ export function TraceDetailSheet({
                   {!errors.length && !warnings.length ? <p className="text-sm text-muted-foreground">未记录错误或警告。</p> : <div className="grid gap-3 md:grid-cols-2"><div><p className="mb-2 text-sm font-medium">错误</p>{errors.length ? <ul className="list-disc space-y-1 pl-5 text-sm text-destructive">{errors.map((message, index) => <li key={`${message}-${index}`}>{message}</li>)}</ul> : <p className="text-sm text-muted-foreground">无</p>}</div><div><p className="mb-2 text-sm font-medium">警告</p>{warnings.length ? <ul className="list-disc space-y-1 pl-5 text-sm">{warnings.map((message, index) => <li key={`${message}-${index}`}>{message}</li>)}</ul> : <p className="text-sm text-muted-foreground">无</p>}</div></div>}
                 </Section>
 
-                <Section title="后续处理" description="学习候选、审核和晋升在学习中心处理；通道参数在通道配置中管理。">
-                  <div className="flex flex-wrap gap-2"><Button asChild variant="outline" size="sm"><Link to="/learning">查看学习过程<ArrowRightIcon data-icon="inline-end" aria-hidden="true" /></Link></Button><Button asChild variant="outline" size="sm"><Link to="/channels">调整通道配置<ArrowRightIcon data-icon="inline-end" aria-hidden="true" /></Link></Button></div>
+                <Section title="后续处理" description="通道参数在通道配置中管理。">
+                  <div className="flex flex-wrap gap-2"><Button asChild variant="outline" size="sm"><Link to="/channels">调整通道配置<ArrowRightIcon data-icon="inline-end" aria-hidden="true" /></Link></Button></div>
                 </Section>
 
                 <Section title="完整载荷（辅助核对）" description="结构化分区是主要阅读入口；复制与下载仍保留服务端完整内容。">

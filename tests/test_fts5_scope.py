@@ -53,6 +53,18 @@ class FTS5ChannelScopeTest(unittest.TestCase):
             "INSERT INTO memories VALUES (9, '咖啡 noise', 'u', '用户', 1, 1, 'noise', 'g2', 'message', 'bzz', 'qq:group:g2', 'group', 'resolved', 0, '', '')"
         )
         self.db.conn.execute("INSERT INTO fts_memories(rowid, content) VALUES (9, '咖啡 noise')")
+        self.db.conn.execute(
+            "INSERT INTO memories VALUES (10, '咖啡 私聊本会话', 'u', '用户', 1, 1, 'live', 'u', 'message', 'yushu', 'qq:private:u', 'private', 'resolved', 0, '', '')"
+        )
+        self.db.conn.execute("INSERT INTO fts_memories(rowid, content) VALUES (10, '咖啡 私聊本会话')")
+        self.db.conn.execute(
+            "INSERT INTO memories VALUES (11, '咖啡 私聊另一 Bot', 'u', '用户', 1, 1, 'live', 'u', 'message', 'bzz', 'qq:private:u', 'private', 'resolved', 0, '', '')"
+        )
+        self.db.conn.execute("INSERT INTO fts_memories(rowid, content) VALUES (11, '咖啡 私聊另一 Bot')")
+        self.db.conn.execute(
+            "INSERT INTO memories VALUES (12, '咖啡 私聊 legacy', 'u', '用户', 1, 1, 'live', 'private:u', 'message', '', '', '', '', 0, '', '')"
+        )
+        self.db.conn.execute("INSERT INTO fts_memories(rowid, content) VALUES (12, '咖啡 私聊 legacy')")
         self.db.conn.commit()
 
     @staticmethod
@@ -63,6 +75,14 @@ class FTS5ChannelScopeTest(unittest.TestCase):
             bot_id="yushu",
             visibility="group",
             session=SessionRef("qq:group:g1", "qq", "group", "g1"),
+        )
+
+    @staticmethod
+    def _private_scope():
+        from domain.scope import RuntimeScope, SessionRef
+
+        return RuntimeScope(
+            "yushu", "private", SessionRef("qq:private:u", "qq", "private", "u")
         )
 
     def _ctx(self, scope):
@@ -121,7 +141,7 @@ class FTS5ChannelScopeTest(unittest.TestCase):
 
         class GrantRepo:
             def active_memory_ids_for_consumer(self, *, consumer_scope, limit=5000):
-                return [3]  # g2 formal row only
+                return [3, 10]  # g2 formal row plus private row (must be excluded)
 
         self.db.shared_memory_grants = GrantRepo()
         channel = FTS5Channel(
@@ -165,16 +185,32 @@ class FTS5ChannelScopeTest(unittest.TestCase):
         )
         self.assertEqual({row[0] for row in rows}, {1, 2, 3, 5, 6, 7, 8})
 
-    def test_missing_or_non_group_scope_is_empty_not_a_legacy_group_query(self):
-        from domain.scope import RuntimeScope, SessionRef
+    def test_private_exact_predicate_excludes_other_bot_and_legacy(self):
+        from services.injection.channels.fts5 import FTS5Channel
+
+        result = asyncio.run(
+            FTS5Channel(
+                db=self.db,
+                cross_group_enabled=True,
+                shared_memory_grants_enabled=True,
+            ).build(self._ctx(self._private_scope()))
+        )
+
+        self.assertEqual(result.status, "hit")
+        self.assertEqual({item["id"] for item in result.items}, {10})
+        self.assertIn("私聊本会话", result.text)
+        self.assertNotIn("[群", result.text)
+        self.assertNotIn("另一 Bot", result.text)
+        self.assertNotIn("私聊 legacy", result.text)
+        like_rows = FTS5Channel(db=self.db, cross_group_enabled=True)._scoped_like_search(
+            words=["咖啡"], limit=20, scope=self._private_scope()
+        )
+        self.assertEqual({row[0] for row in like_rows}, {10})
+
+    def test_missing_scope_is_empty_not_a_legacy_group_query(self):
         from services.injection.channels.fts5 import FTS5Channel
 
         missing = asyncio.run(FTS5Channel(db=self.db).build(self._ctx(None)))
-        private_scope = RuntimeScope(
-            "yushu", "private", SessionRef("qq:private:u", "qq", "private", "u")
-        )
-        private = asyncio.run(FTS5Channel(db=self.db).build(self._ctx(private_scope)))
 
         self.assertEqual(missing.status, "empty")
-        self.assertEqual(private.status, "empty")
         self.assertTrue(any("RuntimeScope" in warning for warning in missing.warnings))

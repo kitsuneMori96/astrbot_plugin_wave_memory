@@ -58,6 +58,6 @@ async def maintain():
 async def handle_404(err):
     from quart import request
     path = request.path.strip("/")
-    if path.startswith("api/") or path.startswith("static/") or path.startswith("assets/"):
+    if path.startswith("api/") or path.startswith("static/"):
         return "Not Found", 404
     return _html_response(_STATIC_DIR / "app" / "index.html", _INDEX_MISSING)

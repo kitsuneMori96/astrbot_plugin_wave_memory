@@ -45,18 +45,28 @@ def _has_table_column(connection, table: str, column: str) -> bool:
     return any(str(row[1]) == column for row in connection.execute(f"PRAGMA table_info({table})").fetchall())
 
 
-def _require_group_scope(scope: RuntimeScope | None, group_id: str) -> RuntimeScope:
+def _require_memory_scope(scope: RuntimeScope | None, group_id: str) -> RuntimeScope:
     if not isinstance(scope, RuntimeScope):
-        raise MemoryScopeError("scope_required", "group RuntimeScope is required for new memory writes")
-    if scope.visibility != "group" or scope.session is None or scope.session.kind != "group":
+        raise MemoryScopeError("scope_required", "group/private RuntimeScope is required for memory writes")
+    if scope.visibility not in {"group", "private"} or scope.session is None:
         raise MemoryScopeError(
             "memory_scope_visibility_unsupported",
-            "memory writes only accept group RuntimeScope values",
+            "memory writes only accept group/private RuntimeScope values",
         )
     if not isinstance(group_id, str) or group_id != scope.session.conversation_id:
         raise MemoryScopeError(
             "scope_session_mismatch",
-            "group_id must equal the RuntimeScope canonical group id",
+            "group_id must equal the RuntimeScope canonical group id/conversation id",
+        )
+    return scope
+
+
+def _require_group_scope(scope: RuntimeScope | None, group_id: str) -> RuntimeScope:
+    scope = _require_memory_scope(scope, group_id)
+    if scope.visibility != "group":
+        raise MemoryScopeError(
+            "memory_scope_visibility_unsupported",
+            "this operation only accepts group RuntimeScope values",
         )
     return scope
 
@@ -219,7 +229,15 @@ class MemoryRepo:
         ``group_id`` 保留为 legacy 外形，但仅作为对 RuntimeScope canonical
         conversation ID 的断言，不能再独立决定新记录的归属。
         """
-        scope = _require_group_scope(scope, group_id)
+        scope = _require_memory_scope(scope, group_id)
+        if scope.visibility == "private":
+            required_v2 = {"bot_id", "session_id", "visibility", "resolution_state", "quarantine", "version"}
+            missing = required_v2 - self._memories_columns()
+            if missing:
+                raise MemoryScopeError(
+                    "memory_schema_v2_required",
+                    "private memory writes require the complete v2 schema",
+                )
         metadata = _require_mapping(provenance, "provenance")
         origin = _require_mapping(origin_metadata, "origin_metadata")
         ts = timestamp or time.time()
@@ -364,36 +382,92 @@ class MemoryRepo:
             "origin_fingerprint": _column_expression(columns, "origin_fingerprint", "''"),
             "provenance": _column_expression(columns, "provenance", "''"),
         }
-        # Read path: activity only (quarantine / deleted / noise). Scope is not a gate.
-        where = [
-            f"id IN ({placeholders})",
-            *_read_active_memory_predicates(columns),
-        ]
+        # Every formal group row is owner-scoped; fully unscoped legacy rows are
+        # retained as a separate compatibility lane.  Private is never a legacy
+        # fallback and always uses its exact owner tuple below.
+        where = [f"id IN ({placeholders})"]
         parameters: list[Any] = list(normalized_ids)
-        if isinstance(scope, RuntimeScope):
+        private_active = _memory_type_predicate(columns)
+
+        supplied_scope = scope
+        if supplied_scope is not None:
             try:
-                scope = _require_group_scope(
-                    scope, scope.session.conversation_id if scope.session else ""
+                scope = _require_memory_scope(
+                    supplied_scope,
+                    supplied_scope.session.conversation_id
+                    if isinstance(supplied_scope, RuntimeScope) and supplied_scope.session else "",
                 )
             except Exception:
-                # Incomplete scope must not blank out retrieval.
-                scope = None  # type: ignore[assignment]
-        if isinstance(scope, RuntimeScope) and scope.session is not None:
+                # A supplied but unsupported RuntimeScope (including bot_private)
+                # must never fall through to an unscoped compatibility read.
+                return []
+
+        if isinstance(scope, RuntimeScope) and scope.session is not None and scope.visibility == "private":
+            # Private reads are an exact v2 lane. Never widen them with grants,
+            # cross-group recall, unscoped compatibility, or missing-column fallbacks.
+            required_private = {"bot_id", "session_id", "visibility", "resolution_state", "quarantine"}
+            if required_private - columns or allow_cross_group_recall or grant_ids:
+                return []
+            where.extend([
+                "bot_id=? AND session_id=? AND visibility='private'",
+                "COALESCE(group_id, '')=?",
+                "resolution_state='resolved'",
+                "COALESCE(quarantine, 0)=0",
+                private_active,
+            ])
+            parameters.extend([
+                scope.bot_id,
+                scope.session.id,
+                scope.session.conversation_id,
+            ])
+        elif isinstance(scope, RuntimeScope) and scope.session is not None:
+            # Group reads allow only the exact formal owner plus fully-unscoped
+            # legacy rows in the current group.  Cross-group recall may expand to
+            # other canonical group owners, never private/partial/unresolved rows.
+            formal_lane = "0=1"
+            if {"bot_id", "session_id", "visibility", "resolution_state", "quarantine"} <= columns:
+                canonical_group_session = (
+                    "instr(session_id, ':group:') > 0 "
+                    "AND substr(session_id, instr(session_id, ':group:') + 7) = group_id"
+                )
+                formal_lane = " AND ".join([
+                    "COALESCE(bot_id, '')<>''",
+                    "COALESCE(session_id, '')<>''",
+                    "visibility='group'",
+                    "resolution_state='resolved'",
+                    canonical_group_session,
+                    *_read_active_memory_predicates(columns),
+                ])
+            legacy_lane = " AND ".join([
+                _legacy_unscoped_predicate(columns),
+                "COALESCE(group_id, '') NOT LIKE 'private:%'",
+                *_active_memory_predicates(columns, legacy_compat=True),
+            ])
             if allow_cross_group_recall:
-                # All active rows eligible; ranking/collapse handles duplicates.
-                pass
+                where.append(f"(({formal_lane}) OR ({legacy_lane}))")
             else:
-                # Prefer current group by id filter, not by bot/session identity.
-                where.append("COALESCE(group_id, '') = ?")
-                parameters.append(scope.session.conversation_id)
+                local_formal = f"(({formal_lane}) AND bot_id=? AND session_id=? AND group_id=?)"
+                local_legacy = f"(({legacy_lane}) AND group_id=?)"
+                local_lane = f"({local_formal} OR {local_legacy})"
+                parameters.extend([
+                    scope.bot_id,
+                    scope.session.id,
+                    scope.session.conversation_id,
+                    scope.session.conversation_id,
+                ])
                 if grant_ids:
                     g_placeholders = ",".join("?" * len(grant_ids))
-                    # Grants may pull specific foreign ids even when not cross-group.
-                    where[-1] = f"(COALESCE(group_id, '') = ? OR id IN ({g_placeholders}))"
+                    grant_lane = f"(({formal_lane}) AND id IN ({g_placeholders}))"
+                    where.append(f"({local_lane} OR {grant_lane})")
                     parameters.extend(grant_ids)
+                else:
+                    where.append(local_lane)
         elif allow_unscoped or scope is None:
-            # No usable group scope: still return active candidates by id.
-            pass
+            # No-Scope compatibility must not reveal either formal or legacy private rows.
+            where.extend(_read_active_memory_predicates(columns))
+            if "visibility" in columns:
+                where.append("COALESCE(visibility, '') != 'private'")
+            where.append("COALESCE(group_id, '') NOT LIKE 'private:%'")
         else:
             return []
 
@@ -444,109 +518,6 @@ class MemoryRepo:
             result.append(item)
         return result
 
-    def list_legacy_cold_memory_candidates(
-        self,
-        scope: RuntimeScope | None,
-        tag_ids: list[int],
-        *,
-        limit: int = 128,
-        allow_unscoped: bool = False,
-        allow_cross_group_recall: bool = False,
-    ) -> list[dict[str, Any]]:
-        """Fetch a bounded vector-bearing candidate set through legacy tags.
-
-        Legacy tags are global semantic IDs, but legacy memory rows are still
-        filtered by their persisted ``group_id`` when a group RuntimeScope is
-        present. This is a compatibility lane, not a substitute for formal Scope.
-        """
-        if not tag_ids:
-            return []
-        columns = self._memories_columns()
-        tag_columns = {
-            str(row[1]) for row in self.cm.execute_read("PRAGMA table_info(memory_tags)").fetchall()
-        }
-        if not {"id", "group_id", "vector"} <= columns or not {"memory_id", "tag_id"} <= tag_columns:
-            return []
-        try:
-            normalized_tags = sorted({int(tag_id) for tag_id in tag_ids if int(tag_id) > 0})
-            bounded_limit = min(512, max(1, int(limit)))
-        except (TypeError, ValueError):
-            return []
-        if not normalized_tags:
-            return []
-        placeholders = ",".join("?" * len(normalized_tags))
-        relevance = "COALESCE(mt.relevance, 1.0)" if "relevance" in tag_columns else "1.0"
-        selected = {
-            "sender_id": _column_expression(columns, "sender_id", "''"),
-            "sender_name": _column_expression(columns, "sender_name", "''"),
-            "timestamp": _column_expression(columns, "timestamp", "0"),
-            "importance": _column_expression(columns, "importance", "1.0"),
-            "access_count": _column_expression(columns, "access_count", "0"),
-            "source": _column_expression(columns, "source", "''"),
-            "memory_type": _column_expression(columns, "memory_type", "'message'"),
-        }
-        # Cold legacy lane: any active vector-bearing row with the tag, Scope optional.
-        where = [f"mt.tag_id IN ({placeholders})", "m.vector IS NOT NULL"]
-        where.extend(_read_active_memory_predicates(columns, table_alias="m"))
-        parameters: list[Any] = list(normalized_tags)
-        if isinstance(scope, RuntimeScope):
-            try:
-                scope = _require_group_scope(
-                    scope, scope.session.conversation_id if scope.session else ""
-                )
-            except Exception:
-                scope = None  # type: ignore[assignment]
-        if isinstance(scope, RuntimeScope) and scope.session is not None:
-            if allow_cross_group_recall:
-                where.append("COALESCE(m.group_id, '') != ''")
-            else:
-                where.append("m.group_id=?")
-                parameters.append(scope.session.conversation_id)
-        elif not allow_unscoped and scope is not None:
-            return []
-        origin_expr = _column_expression(columns, "origin_fingerprint", "''")
-        provenance_expr = _column_expression(columns, "provenance", "''")
-        rows = self.cm.execute_read(
-            f"""SELECT m.id, m.group_id, {selected['sender_id']} AS sender_id,
-                       {selected['sender_name']} AS sender_name, m.content, m.vector,
-                       {selected['timestamp']} AS timestamp, {selected['importance']} AS importance,
-                       {selected['access_count']} AS access_count, {selected['source']} AS source,
-                       {selected['memory_type']} AS memory_type,
-                       SUM({relevance}) AS tag_score, COUNT(*) AS tag_count,
-                       {origin_expr} AS origin_fingerprint,
-                       {provenance_expr} AS provenance
-                  FROM memory_tags mt JOIN memories m ON m.id=mt.memory_id
-                 WHERE {' AND '.join(where)}
-                 GROUP BY m.id
-                 ORDER BY tag_score DESC, m.importance DESC, m.timestamp DESC, m.id DESC
-                 LIMIT ?""",
-            [*parameters, bounded_limit],
-        ).fetchall()
-        result: list[dict[str, Any]] = []
-        for row in rows:
-            provenance: dict[str, Any] = {}
-            raw_prov = row[14]
-            if isinstance(raw_prov, str) and raw_prov.strip():
-                try:
-                    loaded = json.loads(raw_prov)
-                    if isinstance(loaded, dict):
-                        provenance = loaded
-                except Exception:
-                    provenance = {}
-            item = {
-                "id": row[0], "group_id": row[1], "sender_id": row[2], "sender_name": row[3],
-                "content": row[4], "vector": row[5], "timestamp": row[6],
-                "importance": row[7], "access_count": row[8], "source": row[9],
-                "memory_type": row[10], "tag_score": row[11], "tag_count": row[12],
-                "origin_fingerprint": row[13], "provenance": provenance,
-                "_tag_lane": "legacy",
-            }
-            if str(provenance.get("projection_kind") or "") == "fanout_duplicate":
-                item["_fanout_duplicate"] = True
-                item["fanout_family_id"] = provenance.get("fanout_family_id")
-            result.append(item)
-        return result
-
     def find_recent_duplicate_memory(
         self,
         *,
@@ -560,7 +531,7 @@ class MemoryRepo:
                 "scope_required",
                 "group RuntimeScope is required for scoped duplicate lookup",
             )
-        scope = _require_group_scope(scope, scope.session.conversation_id if scope.session else "")
+        scope = _require_memory_scope(scope, scope.session.conversation_id if scope.session else "")
         if not isinstance(normalized_content, str) or not normalized_content:
             return None
         required_v2 = {"bot_id", "session_id", "visibility", "resolution_state", "quarantine"}
@@ -650,7 +621,7 @@ class MemoryRepo:
         Content changes invalidate the canonical vector unless a replacement vector is
         supplied in the same transaction. The caller owns commit/rollback and outbox.
         """
-        scope = _require_group_scope(
+        scope = _require_memory_scope(
             scope,
             scope.session.conversation_id if isinstance(scope, RuntimeScope) and scope.session else "",
         )
@@ -718,7 +689,7 @@ class MemoryRepo:
         No row is changed until all targets pass the same Scope/revision predicate.
         The caller owns the surrounding transaction and committed outbox events.
         """
-        scope = _require_group_scope(
+        scope = _require_memory_scope(
             scope,
             scope.session.conversation_id if isinstance(scope, RuntimeScope) and scope.session else "",
         )

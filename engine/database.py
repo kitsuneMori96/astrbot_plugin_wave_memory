@@ -6,7 +6,13 @@
 import json
 import os
 import time
+import unicodedata
 from typing import Any, Optional
+
+
+def normalize_jargon_word(word: Any) -> str:
+    """全局黑话词形唯一规范：NFKC + casefold + trim。"""
+    return unicodedata.normalize("NFKC", str(word or "")).casefold().strip()
 
 import numpy as np
 try:
@@ -30,10 +36,7 @@ from .db.migrations.scoped_soul import ensure_scoped_soul_schema
 from .db.migrations.scoped_fact_history import ensure_scoped_fact_history_schema
 from .db.migrations.shared_memory_grants import ensure_shared_memory_grants_schema
 from .db.scoped_knowledge_repo import ScopedKnowledgeRepo
-from .db.scoped_learning_projection_repo import (
-    ReviewedBookLoreProjectionRepository,
-    ScopedFewShotRepository,
-)
+from .db.scoped_learning_projection_repo import ScopedFewShotRepository
 from .db.scoped_soul_repo import ScopedSoulRepository
 from .db.shared_memory_grant_repo import SharedMemoryGrantRepository
 from .db.tag_repo import TagRepo
@@ -41,7 +44,6 @@ from .db.social_repo import SocialRepo
 from .db.knowledge_repo import KnowledgeRepo
 from .db.booklore_repo import BookLoreRepo
 from .db.belief_repo import BeliefRepo
-from .db.learning_repository import LearningRepositories
 from .metrics_store import InjectionMetricStore
 
 
@@ -83,11 +85,6 @@ class WaveMemoryDB:
                 soul_context_provider=self._soul_context_provider,
             )
             self._fewshot_repository = ScopedFewShotRepository(self._cm, ensure_schema=False)
-            self._book_lore_repository = ReviewedBookLoreProjectionRepository(
-                self._cm, ensure_schema=False
-            )
-            # 学习中心 schema/repository 随数据库 Facade 初始化，迁移纯增量且不做 legacy backfill。
-            self.learning = LearningRepositories.from_connection(self._cm.conn)
             self._injection_metrics = InjectionMetricStore(self._cm)
 
             # FTS5 + 其他迁移
@@ -170,11 +167,6 @@ class WaveMemoryDB:
         return self._fewshot_repository
 
     @property
-    def book_lore_repository(self) -> ReviewedBookLoreProjectionRepository:
-        """正式 reviewed BookLore projection 仓储。"""
-        return self._book_lore_repository
-
-    @property
     def memory_index(self):
         return self._cm.memory_index
 
@@ -253,23 +245,6 @@ class WaveMemoryDB:
             allow_unscoped=allow_unscoped,
             allow_cross_group_recall=allow_cross_group_recall,
             shared_grant_memory_ids=shared_grant_memory_ids,
-        )
-
-    def list_legacy_cold_memory_candidates(
-        self,
-        scope,
-        tag_ids,
-        *,
-        limit=128,
-        allow_unscoped=False,
-        allow_cross_group_recall=False,
-    ):
-        return self._memory_repo.list_legacy_cold_memory_candidates(
-            scope,
-            tag_ids,
-            limit=limit,
-            allow_unscoped=allow_unscoped,
-            allow_cross_group_recall=allow_cross_group_recall,
         )
 
     def find_recent_duplicate_memory(self, *, scope, normalized_content, since_ts):
@@ -371,12 +346,6 @@ class WaveMemoryDB:
     def get_tag_vectors_by_ids(self, ids: list[int]) -> dict:
         return self._tag_repo.get_tag_vectors_by_ids(ids)
 
-    def get_legacy_tag_vectors_by_ids(self, ids: list[int]) -> dict:
-        return self._tag_repo.get_legacy_tag_vectors_by_ids(ids)
-
-    def list_legacy_memory_tags(self, memory_ids: list[int]) -> dict:
-        return self._tag_repo.list_legacy_memory_tags(memory_ids)
-
     def add_tag_relation(self, source_tag_id, target_tag_id, relation_type, weight=1.0, confidence=1.0, metadata=None):
         return self._tag_repo.add_tag_relation(source_tag_id, target_tag_id, relation_type, weight, confidence, metadata)
 
@@ -470,6 +439,12 @@ class WaveMemoryDB:
 
     def list_scoped_beliefs(self, scope, **kwargs):
         return self._scoped_knowledge_repo.list_scoped_beliefs(scope, **kwargs)
+
+    def record_scoped_belief_observation(self, scope, **kwargs):
+        return self._scoped_knowledge_repo.record_scoped_belief_observation(scope, **kwargs)
+
+    def list_scoped_belief_observations(self, scope, **kwargs):
+        return self._scoped_knowledge_repo.list_scoped_belief_observations(scope, **kwargs)
 
     def get_scoped_consolidation_cursor(self, scope, **kwargs):
         return self._scoped_knowledge_repo.get_scoped_consolidation_cursor(scope, **kwargs)
@@ -731,10 +706,11 @@ class WaveMemoryDB:
 
                 CREATE TABLE IF NOT EXISTS jargon_blocklist (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    word TEXT UNIQUE NOT NULL,
+                    word TEXT NOT NULL,
                     reason TEXT NOT NULL,
-                    source TEXT,
-                    created_at REAL
+                    source TEXT NOT NULL DEFAULT 'legacy',
+                    created_at REAL,
+                    UNIQUE(word, source)
                 );
 
                 CREATE TABLE IF NOT EXISTS jargon_sources (
@@ -751,9 +727,43 @@ class WaveMemoryDB:
                     updated_at REAL
                 );
             """)
+            self._migrate_jargon_blocklist_schema()
             self.conn.commit()
         except Exception as e:
             logger.debug(f"[WaveMemory] Jargon knowledge tables setup note: {e}")
+
+    def _migrate_jargon_blocklist_schema(self) -> None:
+        """把旧 UNIQUE(word) 表升级为按规范化词形+来源共存的可审计表。"""
+        table_sql_row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='jargon_blocklist'"
+        ).fetchone()
+        table_sql = "" if table_sql_row is None else "".join(str(table_sql_row[0] or "").lower().split())
+        if "unique(word,source)" in table_sql and "sourcetextnotnulldefault'legacy'" in table_sql:
+            return
+        rows = self.conn.execute(
+            "SELECT id, word, reason, source, created_at FROM jargon_blocklist ORDER BY id ASC"
+        ).fetchall()
+        self.conn.execute("DROP TABLE IF EXISTS jargon_blocklist_v2")
+        self.conn.execute("""
+            CREATE TABLE jargon_blocklist_v2 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                word TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'legacy',
+                created_at REAL,
+                UNIQUE(word, source)
+            )
+        """)
+        for row in rows:
+            word = normalize_jargon_word(row[1])
+            if not word:
+                continue
+            self.conn.execute(
+                "INSERT OR IGNORE INTO jargon_blocklist_v2 (id, word, reason, source, created_at) VALUES (?, ?, ?, ?, ?)",
+                (int(row[0]), word, str(row[2] or "legacy_block"), str(row[3] or "legacy"), row[4]),
+            )
+        self.conn.execute("DROP TABLE jargon_blocklist")
+        self.conn.execute("ALTER TABLE jargon_blocklist_v2 RENAME TO jargon_blocklist")
 
     def _upsert_jargon_knowledge_row(self, table: str, unique_col: str, unique_value: str, values: dict[str, Any]):
         cols = list(values.keys())
@@ -784,7 +794,114 @@ class WaveMemoryDB:
         self._upsert_jargon_knowledge_row("jargon_sources", "source_key", source_key, values)
         self.conn.commit()
 
+    def list_jargon_blocklist(self) -> list[dict[str, Any]]:
+        """返回按规范化词形去重的全局拉黑清单；手动来源优先于 Holyman。"""
+        rows = self.conn.execute(
+            "SELECT id, word, reason, source, created_at FROM jargon_blocklist "
+            "ORDER BY CASE WHEN source='holyman_skills' THEN 1 ELSE 0 END, created_at DESC, id DESC"
+        ).fetchall()
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in rows:
+            word = normalize_jargon_word(row[1])
+            if not word or word in seen:
+                continue
+            seen.add(word)
+            result.append({
+                "id": int(row[0]),
+                "word": word,
+                "reason": str(row[2] or "global_blocklist"),
+                "source": str(row[3] or "legacy"),
+                "created_at": row[4],
+            })
+        return result
+
+    def is_jargon_blocked(self, word: Any) -> bool:
+        normalized = normalize_jargon_word(word)
+        if not normalized:
+            return False
+        rows = self.conn.execute("SELECT word FROM jargon_blocklist").fetchall()
+        return any(normalize_jargon_word(row[0]) == normalized for row in rows)
+
+    def add_jargon_blocklist(
+        self,
+        word: Any,
+        *,
+        reason: str,
+        source: str = "user_global_reject",
+    ) -> dict[str, Any]:
+        normalized = normalize_jargon_word(word)
+        if not normalized:
+            raise ValueError("invalid_jargon_blocklist_word")
+        normalized_source = str(source or "user_global_reject").strip() or "user_global_reject"
+        now = time.time()
+        self.conn.execute(
+            "INSERT INTO jargon_blocklist (word, reason, source, created_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(word, source) DO UPDATE SET reason=excluded.reason, created_at=excluded.created_at",
+            (normalized, str(reason or "global_blocklist"), normalized_source, now),
+        )
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT id, word, reason, source, created_at FROM jargon_blocklist WHERE word=? AND source=?",
+            (normalized, normalized_source),
+        ).fetchone()
+        return {
+            "id": int(row[0]),
+            "word": normalize_jargon_word(row[1]),
+            "reason": str(row[2]),
+            "source": str(row[3]),
+            "created_at": row[4],
+        }
+
+    def remove_jargon_blocklist(
+        self,
+        word: Any | None = None,
+        *,
+        blocklist_id: int | None = None,
+        source: str | None = "user_global_reject",
+    ) -> int:
+        """解除指定来源拉黑；默认只解除用户手动项，保留同词 Holyman 项。"""
+        if blocklist_id is not None:
+            params: list[Any] = [int(blocklist_id)]
+            where = "id=?"
+        else:
+            normalized = normalize_jargon_word(word)
+            if not normalized:
+                raise ValueError("invalid_jargon_blocklist_word")
+            params = [normalized]
+            where = "word=?"
+        if source is not None:
+            where += " AND source=?"
+            params.append(str(source))
+        cursor = self.conn.execute(f"DELETE FROM jargon_blocklist WHERE {where}", params)
+        self.conn.commit()
+        return max(0, int(cursor.rowcount or 0))
+
+    def replace_jargon_blocklist_source(self, rows: list[dict[str, Any]], *, source: str) -> None:
+        """只替换一个同步来源；其他来源（尤其手动拉黑）绝不删除或覆盖。"""
+        normalized_source = str(source or "").strip()
+        if not normalized_source:
+            raise ValueError("jargon_blocklist_source_required")
+        self.conn.execute("DELETE FROM jargon_blocklist WHERE source=?", (normalized_source,))
+        now = time.time()
+        for row in rows:
+            word = normalize_jargon_word(row.get("word"))
+            if not word:
+                continue
+            self.conn.execute(
+                "INSERT INTO jargon_blocklist (word, reason, source, created_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(word, source) DO UPDATE SET reason=excluded.reason, created_at=excluded.created_at",
+                (word, str(row.get("reason") or "global_blocklist"), normalized_source, row.get("created_at") or now),
+            )
+        self.conn.commit()
+
     def replace_jargon_knowledge_table(self, table: str, rows: list[dict[str, Any]], *, unique_col: str = "word"):
+        if table == "jargon_blocklist":
+            sources = {str(row.get("source") or "holyman_skills") for row in rows} or {"holyman_skills"}
+            if len(sources) != 1:
+                raise ValueError("jargon_blocklist_single_source_required")
+            self.replace_jargon_blocklist_source(rows, source=next(iter(sources)))
+            return
         self.conn.execute(f"DELETE FROM {table}")
         table_cols = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
         now = time.time()

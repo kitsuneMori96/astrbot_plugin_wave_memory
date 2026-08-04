@@ -14,7 +14,6 @@ from typing import Any, Mapping
 import pytest
 
 from engine.db.connection import ConnectionManager
-from engine.db.learning_repository import LearningRepositories
 from engine.db.memory_repo import MemoryRepo
 from engine.db.outbox_repo import OutboxRepository
 from services.injection.trace_store import InjectionTraceStore
@@ -138,7 +137,6 @@ async def _api_context(
         # The temporary facade only adapts the current WebUI interface; all reads and writes still
         # execute in the inherited production MemoryRepo against a real SQLite database.
         memory_repository = _ApiMemoryRepo(manager)
-        repositories = LearningRepositories.from_connection(connection, now=lambda: 100.0)
         for ddl in (
             "ALTER TABLE memories ADD COLUMN bot_id TEXT",
             "ALTER TABLE memories ADD COLUMN session_id TEXT",
@@ -215,9 +213,6 @@ async def _api_context(
             write_gateway=SimpleNamespace(coordinator=_ApiWriteCoordinator(manager)),
             password="",
         )
-        container.configure_learning_services(
-            repositories=repositories if repositories_override is None else repositories_override
-        )
         from webui.app import create_app
 
         if use_api_binding:
@@ -239,7 +234,7 @@ async def _api_context(
         async with app.test_app():
             if close_backend_before_request:
                 manager.close()
-            yield app.test_client(), repositories, connection
+            yield app.test_client(), None, connection
     finally:
         try:
             ServiceContainer.reset()
@@ -325,42 +320,6 @@ async def _assert_page_endpoint(reason: str, label: str, url: str, *, use_api_bi
 async def test_memories_list_uses_complete_nested_page_response():
     await _assert_page_endpoint(
         "R13_PAGE_MEMORIES", "memories", "/api/memories?limit=2&offset=0"
-    )
-
-
-@pytest.mark.asyncio
-async def test_learning_sources_list_uses_complete_nested_page_response():
-    await _assert_page_endpoint(
-        "R13_PAGE_LEARNING_SOURCES",
-        "learning-sources",
-        "/api/learning-center/sources?bot_id=bot-alpha&limit=2&offset=0",
-    )
-
-
-@pytest.mark.asyncio
-async def test_learning_jobs_list_uses_complete_nested_page_response():
-    await _assert_page_endpoint(
-        "R13_PAGE_LEARNING_JOBS",
-        "learning-jobs",
-        "/api/learning-center/jobs?bot_id=bot-alpha&limit=2&offset=0",
-    )
-
-
-@pytest.mark.asyncio
-async def test_learning_candidates_list_uses_complete_nested_page_response():
-    await _assert_page_endpoint(
-        "R13_PAGE_LEARNING_CANDIDATES",
-        "learning-candidates",
-        "/api/learning-center/candidates?bot_id=bot-alpha&limit=2&offset=0",
-    )
-
-
-@pytest.mark.asyncio
-async def test_learning_promotions_list_uses_complete_nested_page_response():
-    await _assert_page_endpoint(
-        "R13_PAGE_LEARNING_PROMOTIONS",
-        "learning-promotions",
-        "/api/learning-center/promotions?bot_id=bot-alpha&limit=2&offset=0",
     )
 
 
@@ -772,56 +731,3 @@ class _ErrorCandidates:
 class _UnknownCandidates:
     def list(self, **kwargs):
         return [], None
-
-
-async def _candidate_state(reason: str, repositories_override=None):
-    async with _api_context(reason, repositories_override=repositories_override) as (client, _, _):
-        response = await client.get("/api/learning-center/candidates?bot_id=bot-alpha&limit=5&offset=0")
-        return response.status_code, await response.get_json()
-
-
-@pytest.mark.asyncio
-async def test_empty_state_is_known_exact_zero():
-    reason = "R13_STATE_EMPTY"
-    status, payload = await _candidate_state(reason)
-    contract_assert(isinstance(payload, dict), reason, "empty state body must be an object")
-    page = payload.get("page", {})
-    contract_assert(
-        status == 200
-        and payload.get("items") == []
-        and page.get("total") == 0
-        and page.get("total_status") == "exact"
-        and page.get("reason_code") is None,
-        reason,
-        f"empty semantics invalid: {status}/{payload!r}",
-    )
-
-
-@pytest.mark.asyncio
-async def test_backend_error_state_is_retryable_service_unavailable():
-    reason = "R13_STATE_ERROR"
-    status, payload = await _candidate_state(reason, SimpleNamespace(candidates=_ErrorCandidates()))
-    contract_assert(isinstance(payload, dict), reason, "error state body must be an object")
-    error = payload.get("error", {})
-    contract_assert(
-        status == 503 and error.get("code") == "service_unavailable" and error.get("retryable") is True and "items" not in payload,
-        reason,
-        f"error semantics invalid: {status}/{payload!r}",
-    )
-
-
-@pytest.mark.asyncio
-async def test_unknown_total_state_is_successful_unavailable_total():
-    reason = "R13_STATE_UNKNOWN"
-    status, payload = await _candidate_state(reason, SimpleNamespace(candidates=_UnknownCandidates()))
-    contract_assert(isinstance(payload, dict), reason, "unknown state body must be an object")
-    page = payload.get("page", {})
-    contract_assert(
-        status == 200
-        and payload.get("items") == []
-        and page.get("total") is None
-        and page.get("total_status") == "unavailable"
-        and page.get("reason_code") == "source_unknown",
-        reason,
-        f"unknown semantics invalid: {status}/{payload!r}",
-    )

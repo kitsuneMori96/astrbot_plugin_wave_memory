@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import sqlite3
 from types import SimpleNamespace
 
@@ -75,466 +74,13 @@ def _catalog_projection_evidence(target: RuntimeScope):
     return source, ref, binding, derivation
 
 
-def _fewshot_candidate(scope: RuntimeScope) -> dict:
-    from services.learning.fewshot_contract import (
-        FEWSHOT_BINDING_POLICY,
-        FEWSHOT_CONTRACT_VERSION,
-        FEWSHOT_DERIVATION_CHAIN,
-    )
-
-    content = "先核实事实，再用简短而克制的方式回应。"
-    reply_ref = EvidenceRef(
-        kind="bot_reply_memory",
-        id="memory:41",
-        content_hash="sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest(),
-        captured_at=100.0,
-        source_scope=scope,
-        available=True,
-    )
-    trace_ref = EvidenceRef(
-        kind="query_trace",
-        id="trace:trace-fewshot-41",
-        content_hash="sha256:trace-41",
-        captured_at=99.0,
-        source_scope=scope,
-        available=True,
-    )
-    bindings = [
-        EvidenceBinding(
-            evidence_id=ref.id,
-            target_scope=scope,
-            derivation_chain=FEWSHOT_DERIVATION_CHAIN,
-            policy_version=FEWSHOT_BINDING_POLICY,
-        )
-        for ref in (reply_ref, trace_ref)
-    ]
-    return {
-        "id": 11,
-        "candidate_type": "few_shot_style",
-        "content": content,
-        "evidence": {
-            "contract_version": FEWSHOT_CONTRACT_VERSION,
-            "scope": scope.to_dict(),
-            "target_scope": scope.to_dict(),
-            "source_reply": {"memory_id": 41, "content_hash": reply_ref.content_hash},
-            "source_tags": [{
-                "tag_id": 7,
-                "name": "克制表达",
-                "tag_type": "style",
-                "position": 1,
-                "relevance": 0.95,
-                "source": "automatic",
-            }],
-            "query_trace_id": "trace-fewshot-41",
-            "score": 0.92,
-            "traits": ["克制"],
-            "evidence_refs": [ref.to_dict() for ref in (reply_ref, trace_ref)],
-            "evidence_bindings": [binding.to_dict() for binding in bindings],
-        },
-    }
-
-
-def _book_lore_candidate(target: RuntimeScope) -> dict:
-    source, ref, binding, derivation = _catalog_projection_evidence(target)
-    return {
-        "id": 22,
-        "candidate_type": "book_lore",
-        "content": "旧港：潮汐改变商路。",
-        "evidence": {
-            "scope": target.to_dict(),
-            "target_scope": target.to_dict(),
-            "catalog_scope": source.to_dict(),
-            "community_id": 7,
-            "title": "旧港",
-            "summary_snapshot": "潮汐改变商路。",
-            "rank": 8.5,
-            "source_library_id": "lore-a",
-            "evidence_refs": [ref.to_dict()],
-            "evidence_bindings": [binding.to_dict()],
-            "evidence_derivation": derivation.to_dict(),
-        },
-    }
-
-
-def test_scoped_projection_migration_is_idempotent_and_does_not_create_raw_catalog(tmp_path):
-    from engine.db.migrations.scoped_learning_projections import run_migration
-
-    path = tmp_path / "scoped-projections.db"
-    assert run_migration(str(path)) is True
-    assert run_migration(str(path)) is True
-
-    conn = sqlite3.connect(path)
-    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    fewshot_columns = {
-        row[1] for row in conn.execute("PRAGMA table_info(scoped_few_shot_examples)")
-    }
-    book_columns = {
-        row[1] for row in conn.execute("PRAGMA table_info(reviewed_book_lore_projections)")
-    }
-    conn.close()
-
-    assert {
-        "scoped_few_shot_examples",
-        "scoped_few_shot_usage_events",
-        "scoped_few_shot_feedback_events",
-        "reviewed_book_lore_projections",
-    } <= tables
-    assert "book_communities" not in tables
-    assert {
-        "runtime_scope_json",
-        "evidence_refs_json",
-        "evidence_bindings_json",
-        "candidate_json",
-        "source_tags_json",
-        "query_trace_id",
-        "usage_count",
-        "positive_feedback_count",
-        "negative_feedback_count",
-        "retired_at",
-        "retirement_reason",
-        "status",
-        "revision",
-    } <= fewshot_columns
-    assert {
-        "source_catalog_scope_json",
-        "target_runtime_scope_json",
-        "evidence_derivation_json",
-        "evidence_refs_json",
-        "evidence_bindings_json",
-        "candidate_json",
-        "status",
-        "revision",
-    } <= book_columns
-
-
-def test_scoped_fewshot_migration_upgrades_existing_projection_without_data_loss():
-    from engine.db.migrations.scoped_learning_projections import (
-        ensure_scoped_learning_projection_schema,
-    )
-
-    conn = sqlite3.connect(":memory:")
-    conn.execute(
-        """CREATE TABLE scoped_few_shot_examples (
-               id INTEGER PRIMARY KEY AUTOINCREMENT,
-               runtime_scope_key TEXT NOT NULL,
-               runtime_scope_json TEXT NOT NULL,
-               content TEXT NOT NULL,
-               score REAL NOT NULL DEFAULT 0,
-               traits_json TEXT NOT NULL DEFAULT '[]',
-               candidate_json TEXT NOT NULL,
-               evidence_refs_json TEXT NOT NULL,
-               evidence_bindings_json TEXT NOT NULL,
-               status TEXT NOT NULL,
-               revision INTEGER NOT NULL DEFAULT 1,
-               source_candidate_id INTEGER,
-               idempotency_key TEXT NOT NULL,
-               created_at REAL NOT NULL,
-               updated_at REAL NOT NULL,
-               approved_at REAL NOT NULL
-           )"""
-    )
-    conn.execute(
-        """INSERT INTO scoped_few_shot_examples(
-               runtime_scope_key, runtime_scope_json, content, candidate_json,
-               evidence_refs_json, evidence_bindings_json, status, idempotency_key,
-               created_at, updated_at, approved_at)
-           VALUES ('scope-key', '{}', '旧样例', '{}', '[]', '[]', 'approved',
-                   'candidate:old', 1, 1, 1)"""
-    )
-    conn.commit()
-
-    ensure_scoped_learning_projection_schema(conn)
-    ensure_scoped_learning_projection_schema(conn)
-
-    row = conn.execute(
-        """SELECT content, source_tags_json, query_trace_id, usage_count,
-                  positive_feedback_count, negative_feedback_count
-             FROM scoped_few_shot_examples WHERE id=1"""
-    ).fetchone()
-    assert row == ("旧样例", "[]", "", 0, 0, 0)
-    assert conn.execute("SELECT COUNT(*) FROM scoped_few_shot_usage_events").fetchone()[0] == 0
-    assert conn.execute("SELECT COUNT(*) FROM scoped_few_shot_feedback_events").fetchone()[0] == 0
-    conn.close()
-
-
-def test_fewshot_repository_is_exact_scope_and_legacy_table_is_audit_only():
-    from engine.db.scoped_learning_projection_repo import ScopedFewShotRepository
-    from services.few_shot.service import FewShotService
-
-    conn = sqlite3.connect(":memory:")
-    conn.execute(
-        """CREATE TABLE few_shot_examples (
-               id INTEGER PRIMARY KEY, content TEXT, score REAL, traits TEXT,
-               status TEXT, bot_id TEXT, created_at INTEGER, approved_at INTEGER)"""
-    )
-    conn.execute(
-        "INSERT INTO few_shot_examples VALUES (1, 'legacy 不得注入', 1, '[]', 'approved', 'bot-a', 1, 1)"
-    )
-    conn.commit()
-    repository = ScopedFewShotRepository(conn, now=lambda: 100.0)
-    service = FewShotService(
-        db=SimpleNamespace(conn=conn),
-        repository=repository,
-        enabled=True,
-        config={"max_inject": 3},
-    )
-    scope = _runtime_scope()
-    other_scope = _runtime_scope("group-2")
-    candidate = _fewshot_candidate(scope)
-    refs = tuple(EvidenceRef.from_dict(item) for item in candidate["evidence"]["evidence_refs"])
-    bindings = tuple(EvidenceBinding.from_dict(item) for item in candidate["evidence"]["evidence_bindings"])
-
-    example_id = repository.write_approved(
-        scope=scope,
-        candidate=candidate,
-        evidence_refs=refs,
-        evidence_bindings=bindings,
-        source_tags=candidate["evidence"]["source_tags"],
-        query_trace_id=candidate["evidence"]["query_trace_id"],
-        content=candidate["content"],
-        score=0.92,
-        traits=("克制",),
-        source_candidate_id=11,
-        idempotency_key="candidate:11",
-    )
-
-    text = service.get_injection(scope=scope, max_items=3)
-    assert "先核实事实" in text
-    assert "legacy 不得注入" not in text
-    assert service.get_injection(scope=other_scope, max_items=3) == ""
-    row = repository.get(example_id)
-    assert row["scope"].bot_id == scope.bot_id
-    assert row["scope"].session == scope.session
-    assert row["scope"].subject_principal_id is None
-    assert row["evidence_refs"] == refs
-    assert row["evidence_bindings"] == bindings
-    assert row["source_tags"][0]["name"] == "克制表达"
-    assert row["query_trace_id"] == "trace-fewshot-41"
-    assert row["candidate"]["id"] == 11
-    assert row["status"] == "approved"
-    assert row["revision"] == 1
-    conn.close()
-
-
-def test_fewshot_promotion_uses_injected_formal_writer_with_complete_scope_and_evidence():
-    from services.learning.domain_promotions import FewShotStylePromotionService
-
-    class Writer:
-        def __init__(self):
-            self.calls = []
-
-        def write_approved(self, **kwargs):
-            self.calls.append(kwargs)
-            return 91
-
-    scope = _runtime_scope()
-    writer = Writer()
-    result = FewShotStylePromotionService(writer).promote(
-        candidate=_fewshot_candidate(scope), bot_id="bot-a", target_kind="few_shot"
-    )
-
-    assert result["target_id"] == "91"
-    assert writer.calls[0]["scope"] == scope
-    assert writer.calls[0]["candidate"]["id"] == 11
-    assert writer.calls[0]["evidence_refs"][0].source_scope == scope
-    assert writer.calls[0]["evidence_bindings"][0].target_scope == scope
-
-
-def test_coordinator_writer_owns_transaction_and_repository_never_commits_external_tx():
-    from engine.db.scoped_learning_projection_repo import (
-        CoordinatorScopedProjectionWriter,
-        ScopedFewShotRepository,
-    )
-
-    conn = sqlite3.connect(":memory:")
-    repository = ScopedFewShotRepository(conn, now=lambda: 100.0)
-
-    class NoCommitProxy:
-        def __init__(self, connection):
-            self.connection = connection
-
-        def execute(self, *args, **kwargs):
-            return self.connection.execute(*args, **kwargs)
-
-        def commit(self):
-            raise AssertionError("repository must not commit coordinator-owned tx")
-
-        def rollback(self):
-            raise AssertionError("repository must not rollback coordinator-owned tx")
-
-    class SpyCoordinator:
-        def __init__(self, connection):
-            self.connection = connection
-            self.calls = 0
-
-        def transaction_blocking(self, callback):
-            self.calls += 1
-            self.connection.execute("BEGIN IMMEDIATE")
-            try:
-                result = callback(NoCommitProxy(self.connection))
-            except BaseException:
-                self.connection.rollback()
-                raise
-            self.connection.commit()
-            return result
-
-    coordinator = SpyCoordinator(conn)
-    writer = CoordinatorScopedProjectionWriter(
-        coordinator, fewshot_repository=repository
-    )
-    scope = _runtime_scope()
-    candidate = _fewshot_candidate(scope)
-    refs = tuple(EvidenceRef.from_dict(item) for item in candidate["evidence"]["evidence_refs"])
-    bindings = tuple(EvidenceBinding.from_dict(item) for item in candidate["evidence"]["evidence_bindings"])
-
-    example_id = writer.write_approved(
-        scope=scope,
-        candidate=candidate,
-        evidence_refs=refs,
-        evidence_bindings=bindings,
-        source_tags=candidate["evidence"]["source_tags"],
-        query_trace_id=candidate["evidence"]["query_trace_id"],
-        content=candidate["content"],
-        score=0.92,
-        traits=("克制",),
-        source_candidate_id=11,
-        idempotency_key="candidate:11",
-    )
-
-    assert coordinator.calls == 1
-    assert repository.get(example_id)["status"] == "approved"
-    conn.close()
-
-
-def test_reviewed_book_lore_repository_persists_full_derivation_and_revisions():
-    from engine.db.scoped_learning_projection_repo import ReviewedBookLoreProjectionRepository
-
-    conn = sqlite3.connect(":memory:")
-    repository = ReviewedBookLoreProjectionRepository(conn, now=lambda: 100.0)
-    target = _runtime_scope()
-    candidate = _book_lore_candidate(target)
-    source, ref, binding, derivation = _catalog_projection_evidence(target)
-
-    projection_id = repository.write_reviewed_projection(
-        source_scope=source,
-        target_scope=target,
-        candidate=candidate,
-        evidence_refs=(ref,),
-        evidence_bindings=(binding,),
-        derivation=derivation,
-        community_id="7",
-        title="旧港",
-        summary="潮汐改变商路。",
-        content=candidate["content"],
-        rank=8.5,
-        status="approved",
-        source_candidate_id=22,
-        idempotency_key="candidate:22",
-    )
-    same_id = repository.write_reviewed_projection(
-        source_scope=source,
-        target_scope=target,
-        candidate=candidate,
-        evidence_refs=(ref,),
-        evidence_bindings=(binding,),
-        derivation=derivation,
-        community_id="7",
-        title="旧港",
-        summary="潮汐改变了商路。",
-        content="旧港：潮汐改变了商路。",
-        rank=8.6,
-        status="approved",
-        source_candidate_id=22,
-        idempotency_key="candidate:22",
-    )
-
-    row = repository.get(projection_id)
-    assert same_id == projection_id
-    assert row["source_scope"] == source
-    assert row["target_scope"].bot_id == target.bot_id
-    assert row["target_scope"].session == target.session
-    assert row["target_scope"].subject_principal_id is None
-    assert row["derivation"] == derivation
-    assert row["evidence_refs"] == (ref,)
-    assert row["evidence_bindings"] == (binding,)
-    assert row["candidate"]["id"] == 22
-    assert row["status"] == "approved"
-    assert row["revision"] == 2
-    conn.close()
-
-
-def test_book_lore_promotion_requires_reviewed_derivation_and_uses_projection_writer():
-    from services.learning.domain_promotions import BookLorePromotionService
-    from services.learning.promotion import PromotionTerminalError
-
-    class Writer:
-        def __init__(self):
-            self.calls = []
-
-        def write_reviewed_projection(self, **kwargs):
-            self.calls.append(kwargs)
-            return 92
-
-    target = _runtime_scope()
-    candidate = _book_lore_candidate(target)
-    writer = Writer()
-    result = BookLorePromotionService(writer).promote(
-        candidate=candidate, bot_id="bot-a", target_kind="book_lore"
-    )
-
-    assert result["target_id"] == "92"
-    assert writer.calls[0]["source_scope"] == CatalogScope(
-        catalog_id="book-lore", corpus_id="corpus-a", version="v1"
-    )
-    assert writer.calls[0]["target_scope"] == target
-    assert writer.calls[0]["derivation"].reviewed is True
-
-    invalid = _book_lore_candidate(target)
-    invalid["evidence"].pop("evidence_derivation")
-    with pytest.raises(PromotionTerminalError) as exc_info:
-        BookLorePromotionService(writer).promote(
-            candidate=invalid, bot_id="bot-a", target_kind="book_lore"
-        )
-    assert exc_info.value.code == "evidence_derivation_required"
-
-
-def test_book_lore_channel_reads_only_current_runtime_approved_projection():
-    from engine.db.scoped_learning_projection_repo import ReviewedBookLoreProjectionRepository
+def test_book_lore_channel_requires_raw_catalog_dependencies():
+    """书设注入不再接受 reviewed projection 作为数据源。"""
+    from domain.scope import CatalogScope
     from services.injection.channels.book_lore import BookLoreChannel
     from services.injection.context import InjectionContext
 
-    conn = sqlite3.connect(":memory:")
-    repository = ReviewedBookLoreProjectionRepository(conn, now=lambda: 100.0)
     current = _runtime_scope()
-    other = _runtime_scope("group-2")
-
-    for projection_target, candidate_id, title, status in (
-        (current, 31, "当前群设定", "approved"),
-        (current, 32, "待审核设定", "pending"),
-        (other, 33, "其他群设定", "approved"),
-    ):
-        source, ref, binding, derivation = _catalog_projection_evidence(projection_target)
-        repository.write_reviewed_projection(
-            source_scope=source,
-            target_scope=projection_target,
-            candidate={"id": candidate_id, "content": title},
-            evidence_refs=(ref,),
-            evidence_bindings=(binding,),
-            derivation=derivation,
-            community_id=str(candidate_id),
-            title=title,
-            summary=f"{title}摘要",
-            content=f"{title}：{title}摘要",
-            rank=9.0,
-            status=status,
-            source_candidate_id=candidate_id,
-            idempotency_key=f"candidate:{candidate_id}",
-        )
-
-    class ForbiddenRawDependency:
-        def __getattr__(self, name):
-            raise AssertionError(f"raw Catalog dependency must not be accessed: {name}")
-
     ctx = InjectionContext(
         event="event",
         req=object(),
@@ -549,41 +95,28 @@ def test_book_lore_channel_reads_only_current_runtime_approved_projection():
         config={"channels": {"book_lore": {"top_k": 5}}},
         trace_id="trace-book-lore",
     )
-    channel = BookLoreChannel(
-        projection_repository=repository,
-        book_lore_index=ForbiddenRawDependency(),
-        embedding_service=ForbiddenRawDependency(),
-        lore_store=ForbiddenRawDependency(),
-        lore_db_path="must-not-open.db",
+    projection_only = BookLoreChannel(
+        projection_repository=object(),
+        catalog_scope=CatalogScope(catalog_id="book-lore", corpus_id="corpus-a", version="v1"),
     )
-
-    result = asyncio.run(channel.build(ctx))
-
-    assert result.status == "hit"
-    assert "当前群设定" in result.text
-    assert "待审核设定" not in result.text
-    assert "其他群设定" not in result.text
-    assert result.items[0]["projection_id"] is not None
-    conn.close()
+    result = asyncio.run(projection_only.build(ctx))
+    assert result.status in {"empty", "disabled"}
+    assert "当前群设定" not in (result.text or "")
 
 
 @pytest.mark.asyncio
-async def test_webui_lists_only_formal_projections_for_exact_runtime_scope():
+async def test_webui_lists_only_formal_fewshot_for_exact_runtime_scope():
     quart = pytest.importorskip("quart")
     if not hasattr(getattr(quart, "Quart", None), "test_client"):
         pytest.skip("Quart runtime client is unavailable")
 
-    from engine.db.scoped_learning_projection_repo import (
-        ReviewedBookLoreProjectionRepository,
-        ScopedFewShotRepository,
-    )
+    from engine.db.scoped_learning_projection_repo import ScopedFewShotRepository
     from webui.app import create_app
     from webui.container import ServiceContainer, get_container
     from webui.scope_options import ExplicitRequestScopeProvider
 
     conn = sqlite3.connect(":memory:")
     fewshot = ScopedFewShotRepository(conn, now=lambda: 100.0)
-    book_lore = ReviewedBookLoreProjectionRepository(conn, now=lambda: 100.0)
     current = _runtime_scope()
     other = _runtime_scope("group-2")
 
@@ -611,30 +144,12 @@ async def test_webui_lists_only_formal_projections_for_exact_runtime_scope():
             source_candidate_id=candidate_id,
             idempotency_key=f"candidate:{candidate_id}",
         )
-        source, lore_ref, lore_binding, derivation = _catalog_projection_evidence(scope)
-        book_lore.write_reviewed_projection(
-            source_scope=source,
-            target_scope=scope,
-            candidate={"id": candidate_id},
-            evidence_refs=(lore_ref,),
-            evidence_bindings=(lore_binding,),
-            derivation=derivation,
-            community_id=str(candidate_id),
-            title=content,
-            summary=f"{content}摘要",
-            content=f"{content}正文",
-            rank=8.0,
-            status="approved",
-            source_candidate_id=candidate_id,
-            idempotency_key=f"candidate:{candidate_id}",
-        )
 
     ServiceContainer.reset()
     container = get_container()
     container.db = SimpleNamespace(conn=conn, closed=False)
     container.password = ""
     container.fewshot_repository = fewshot
-    container.book_lore_repository = book_lore
     provider = ExplicitRequestScopeProvider(
         bot_registry={"bot-a": SimpleNamespace(db_id="bot-a")}
     )
@@ -652,11 +167,7 @@ async def test_webui_lists_only_formal_projections_for_exact_runtime_scope():
         assert payload["items"][0]["session_id"] == "test:group:group-1"
 
         lore_response = await client.get(f"/api/knowledge/book-lore/projections?{query}")
-        assert lore_response.status_code == 200
-        lore_payload = await lore_response.get_json()
-        assert lore_payload["source"] == "reviewed_book_lore_projections"
-        assert lore_payload["page"]["total"] == 1
-        assert [item["title"] for item in lore_payload["items"]] == ["当前群的克制风格"]
+        assert lore_response.status_code == 404
 
         missing_scope = await client.get("/api/knowledge/few-shot")
         assert missing_scope.status_code == 400

@@ -117,11 +117,17 @@ class TimelineChannel:
     ) -> tuple[str, tuple[Any, ...]]:
         """Timeline read filter: active rows only; Scope is not a hard gate.
 
-        Prefer current group when cross-group is off. Fully-scoped, partial, and
-        unscoped rows are all eligible as long as they are not quarantined noise.
+        Existing group Timeline semantics intentionally remain open within the
+        current group (and may expand cross-group by configuration).  The only
+        new restriction is that private formal and private:* legacy rows cannot
+        enter either group path.
         """
         assert scope.session is not None
-        parts = ["COALESCE(quarantine, 0) = 0"]
+        parts = [
+            "COALESCE(quarantine, 0) = 0",
+            "COALESCE(visibility, '') != 'private'",
+            "COALESCE(group_id, '') NOT LIKE 'private:%'",
+        ]
         if "memory_type" in columns:
             parts.append(
                 "COALESCE(memory_type, 'message') NOT IN "
@@ -142,7 +148,8 @@ class TimelineChannel:
             except ImportError:  # pragma: no cover
                 from ....engine.shared_grant_recall import formal_grant_id_predicate
             grant_sql, grant_params = formal_grant_id_predicate(ids, alias="")
-            return f"(({local}) OR ({grant_sql}))", tuple(params) + grant_params
+            grant_safe = "COALESCE(visibility, '') != 'private' AND COALESCE(group_id, '') NOT LIKE 'private:%'"
+            return f"(({local}) OR (({grant_sql}) AND {grant_safe}))", tuple(params) + grant_params
         return local, tuple(params)
 
     async def build(self, ctx: Any) -> InjectionResult:
@@ -172,15 +179,26 @@ class TimelineChannel:
             if scope is not None and scope.session is not None:
                 current_group = scope.session.conversation_id
             items = self._collapse_summary_fanout(items, current_group_id=current_group)[:max_items]
+            # Dual-track fallback: when consolidation has not produced summaries for
+            # this speaker's recent activity, backfill with raw messages instead of
+            # silently reaching further into the past.
+            if len(items) < max_items:
+                newest_summary_ts = 0.0
+                for item in items:
+                    try:
+                        newest_summary_ts = max(newest_summary_ts, float(item.get("timestamp") or 0.0))
+                    except (TypeError, ValueError):
+                        continue
+                raw_items = self._query_raw_messages(
+                    ctx,
+                    limit=max_items - len(items),
+                    exclude_before=newest_summary_ts,
+                )
+                items = items + raw_items
             kept, filtered = self.safety.filter_items(items, ctx=ctx, text_fields=("summary",))
             if not kept:
                 return InjectionResult.empty(self.name, latency_ms=self._latency_ms(started), reason="no safe timeline summaries")
-            lines = [
-                f"- {item.get('day', '')} [群 {item.get('group_id') or 'unknown-group'}]: "
-                f"{str(item.get('summary', ''))[:60]}"
-                for item in kept
-            ]
-            text = "[最近与此人的事件]\n" + "\n".join(lines)
+            text = self._render(kept)
             return InjectionResult.hit(
                 self.name,
                 text,
@@ -229,6 +247,7 @@ class TimelineChannel:
                           MAX(timestamp) AS ts
                      FROM memories
                     WHERE summary IS NOT NULL AND summary != '' AND summary != '日常灌水'
+                      AND summary NOT LIKE 'quarantined%'
                       AND ({scope_clause})
                       AND (sender_id = ? OR content LIKE ?)
                       {days_clause}
@@ -249,6 +268,80 @@ class TimelineChannel:
             }
             for row in rows
         ]
+
+    def _query_raw_messages(
+        self, ctx: Any, *, limit: int, exclude_before: float = 0.0
+    ) -> list[dict[str, Any]]:
+        """Fall back to the speaker's own recent messages when summaries are missing.
+
+        Consolidation depends on an external LLM provider.  When that provider is
+        unavailable the ``summary`` column stops being filled, and a summary-only
+        timeline silently reaches further and further into the past.  Reading raw
+        content keeps the timeline anchored to what actually happened, and the
+        caller marks these rows as degraded so the outage stays visible in traces.
+        """
+        scope = _group_scope(ctx)
+        if scope is None or scope.session is None or limit <= 0:
+            return []
+        sender_id = str(getattr(ctx, "sender_id", "") or "")
+        if not sender_id:
+            return []
+        cfg = _timeline_cfg(ctx)
+        days = _as_int(cfg.get("days"), 0)
+        now = float(getattr(ctx, "now", 0.0) or time.time())
+        try:
+            columns = self._memory_columns()
+            if not {"summary", "timestamp", "sender_id", "content"}.issubset(columns):
+                return []
+            scope_columns = {"bot_id", "session_id", "visibility", "resolution_state", "quarantine", "group_id"}
+            if not scope_columns.issubset(columns):
+                return []
+            grant_ids = self._grant_ids_for_scope(scope)
+            scope_clause, scope_params = self._scope_predicate(
+                scope, columns, grant_ids=grant_ids
+            )
+            clauses = [f"({scope_clause})", "sender_id = ?", "content IS NOT NULL", "content != ''"]
+            params: list[Any] = [*scope_params, sender_id]
+            if days > 0:
+                clauses.append("timestamp > ?")
+                params.append(now - days * 86400)
+            if exclude_before > 0:
+                # Only fill the gap newer than the newest summary we already have.
+                clauses.append("timestamp > ?")
+                params.append(exclude_before)
+            rows = self.db.conn.execute(
+                f"""SELECT content, group_id, timestamp
+                     FROM memories
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY timestamp DESC
+                    LIMIT ?""",
+                (*params, limit),
+            ).fetchall()
+        except Exception:
+            return []
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for content, group_id, ts in rows:
+            text = " ".join(str(content or "").split())
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                day = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(ts)))
+            except (TypeError, ValueError, OSError, OverflowError):
+                day = ""
+            items.append({
+                "summary": text,
+                "group_id": group_id,
+                "day": day,
+                "timestamp": ts,
+                "source": "timeline_raw",
+                "degraded_to_raw_content": True,
+            })
+        return items
 
     @staticmethod
     def _collapse_summary_fanout(
@@ -287,14 +380,45 @@ class TimelineChannel:
         return result
 
     @staticmethod
+    def _render(items: list[dict[str, Any]]) -> str:
+        """Render summaries and raw fallback rows as clearly separated sections.
+
+        Raw messages are verbatim speech, not consolidated events.  Mixing them
+        under one heading would invite the model to treat quotes as conclusions.
+        """
+        event_lines: list[str] = []
+        raw_lines: list[str] = []
+        for item in items:
+            text = str(item.get("summary", ""))
+            if item.get("degraded_to_raw_content"):
+                raw_lines.append(f"- {item.get('day', '')}: {text[:60]}")
+            else:
+                group_id = item.get("group_id") or "unknown-group"
+                event_lines.append(f"- {item.get('day', '')} [群 {group_id}]: {text[:60]}")
+        sections: list[str] = []
+        if event_lines:
+            sections.append("[最近与此人的事件]\n" + "\n".join(event_lines))
+        if raw_lines:
+            sections.append(
+                "[最近发言片段（尚未生成事件摘要）]\n" + "\n".join(raw_lines)
+            )
+        return "\n".join(sections)
+
+    @staticmethod
     def _audit_item(item: Mapping[str, Any]) -> dict[str, Any]:
-        return {
+        payload = {
             "summary": item.get("summary", ""),
             "group_id": item.get("group_id", ""),
             "day": item.get("day", ""),
             "timestamp": item.get("timestamp"),
             "preview": _preview(item.get("summary", "")),
         }
+        if item.get("degraded_to_raw_content"):
+            # Surface the consolidation outage in injection_trace_channels.details
+            # so a stalled summary pipeline is observable instead of silent.
+            payload["degraded_to_raw_content"] = True
+            payload["source"] = item.get("source", "timeline_raw")
+        return payload
 
     @staticmethod
     def _audit_filtered(item: Mapping[str, Any]) -> dict[str, Any]:

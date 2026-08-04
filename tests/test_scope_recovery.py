@@ -455,7 +455,7 @@ def test_classified_recovery_projects_only_live_generic_and_single_bot_group_row
         recovered.close()
 
 
-def test_approved_group_scope_recovery_fans_out_and_retains_verified_external_projections(tmp_path):
+def test_approved_group_scope_recovery_rejects_ambiguous_fanout(tmp_path):
     source = tmp_path / "snapshot.sqlite3"
     plan_path = tmp_path / "approved-plan.json"
     output = tmp_path / "staged.sqlite3"
@@ -596,93 +596,11 @@ def test_approved_group_scope_recovery_fans_out_and_retains_verified_external_pr
         build_approved_scope_recovery_plan(frozen_snapshot, mappings)
     sidecar.unlink()
 
-    plan = build_approved_scope_recovery_plan(frozen_snapshot, mappings)
-    assert plan["summary"]["selected_source_memories"] == 2
-    assert plan["summary"]["projected_memory_rows"] == 4
-    assert plan["summary"]["skipped"]["partial_scope_requires_review"] == 1
-    write_approved_scope_recovery_plan(plan, plan_path)
-
-    # v2 approved artifacts encoded the deletion policy and must never be
-    # reinterpreted under v3 retain-only semantics, even with a valid hash.
-    legacy_plan = dict(plan)
-    legacy_plan["rule_version"] = "approved-group-scope-recovery/2"
-    legacy_plan["policy"] = "group-bound-core-chat-fanout/v2"
-    legacy_plan["plan_hash"] = "sha256:" + hashlib.sha256(
-        json.dumps(
-            {key: value for key, value in legacy_plan.items() if key != "plan_hash"},
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    legacy_plan_path = tmp_path / "v2-approved-plan.json"
-    legacy_plan_path.write_text(json.dumps(legacy_plan, ensure_ascii=False), encoding="utf-8")
-    with pytest.raises(ApprovedScopeRecoveryError, match="approved_plan_rule_unsupported"):
-        apply_approved_scope_recovery(
-            frozen_snapshot,
-            legacy_plan_path,
-            tmp_path / "v2-must-not-stage.sqlite3",
-            tmp_path / "v2-runs",
-            confirmation="retain-approved-group-scopes-non-destructive",
-        )
-
-    result = apply_approved_scope_recovery(
-        frozen_snapshot,
-        plan_path,
-        output,
-        tmp_path / "runs",
-        confirmation="retain-approved-group-scopes-non-destructive",
-    )
-    assert result["created_memory_rows"] == 2
-    assert result["preserved_memory_rows"] == 2
-    assert result["retained_plan_external_projection_rows"] == 1
-    assert result["removed_cross_scope_memory_rows"] == 0
-    assert result["verification"]["actual_mappings"] == 4
-
-    verification = verify_approved_scope_recovery(output, plan_path, result["run_id"])
-    assert verification["verification"]["foreign_key_violations"] == 0
-    assert verification["corrections"] == {"created": 2, "preserved": 2, "retained": 1}
-    staged = sqlite3.connect(output)
-    try:
-        # The plan does not target g2, but the verified group-visible projection
-        # is historical cross-group sharing.  Retain it and every dependent row.
-        assert staged.execute(
-            "SELECT COUNT(*) FROM memories WHERE id=202 AND group_id='g2' AND content='group-bound core'"
-        ).fetchone()[0] == 1
-        assert staged.execute(
-            "SELECT COUNT(*) FROM scoped_memory_tags WHERE session_id='c:group:g2' AND memory_id=202"
-        ).fetchone()[0] == 1
-        assert staged.execute("SELECT COUNT(*) FROM scoped_beliefs WHERE source_memory_id=202").fetchone()[0] == 1
-        assert staged.execute("SELECT COUNT(*) FROM memory_feedback WHERE memory_id=202").fetchone()[0] == 1
-        assert staged.execute("SELECT source_memory_ids FROM experience_episodes WHERE id=1").fetchone()[0] == "[202]"
-        assert staged.execute(
-            "SELECT COUNT(*) FROM scope_recovery_memory_map WHERE legacy_memory_id=1 AND target_scope_key='bot-c|c:group:g2|group'"
-        ).fetchone()[0] == 1
-        assert staged.execute(
-            "SELECT COUNT(*) FROM scope_recovery_approved_memory_map WHERE run_id=?",
-            (result["run_id"],),
-        ).fetchone()[0] == 4
-        assert staged.execute(
-            "SELECT COUNT(*) FROM memories WHERE content='group-bound chat' AND group_id='g1' AND visibility='group'"
-        ).fetchone()[0] == 2
-        assert staged.execute(
-            "SELECT COUNT(*) FROM memories WHERE content='partial Scope evidence' AND visibility='group'"
-        ).fetchone()[0] == 0
-    finally:
-        staged.close()
-
-    changed = sqlite3.connect(frozen_snapshot)
-    changed.execute("UPDATE memories SET content='changed after planning' WHERE id=1")
-    changed.commit()
-    changed.close()
-    with pytest.raises(ApprovedScopeRecoveryError, match="approved_snapshot_hash_mismatch"):
-        apply_approved_scope_recovery(
-            frozen_snapshot,
-            plan_path,
-            tmp_path / "must-not-exist.sqlite3",
-            tmp_path / "runs-unsafe",
-            confirmation="retain-approved-group-scopes-non-destructive",
-        )
+    # Ambiguous group mappings used to produce one copied row per Bot. That
+    # fanout model is retired: a legacy row may only be recovered into one
+    # explicitly owned formal Scope, never duplicated across matching scopes.
+    with pytest.raises(ApprovedScopeRecoveryError, match="no_approved_recoverable_memories"):
+        build_approved_scope_recovery_plan(frozen_snapshot, mappings)
 
 
 def test_tag_links_without_legacy_endpoints_are_review_samples():

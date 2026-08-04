@@ -118,7 +118,30 @@ def _active_corrections(connection: Any, scope: RuntimeScope | None = None) -> d
     return result
 
 
-def _automatic_rows(connection: Any, scope: RuntimeScope | None = None, memory_id: int | None = None) -> list[tuple[Any, ...]]:
+def _normalized_tag_ids(tag_ids: Iterable[Any] | None) -> list[int] | None:
+    """Return a bounded, de-duplicated positive tag id filter, or None."""
+    if tag_ids is None:
+        return None
+    normalized: set[int] = set()
+    for value in tag_ids:
+        if isinstance(value, bool):
+            continue
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            normalized.add(parsed)
+    # An explicitly empty filter means "no tag matches"; keep it distinct from None.
+    return sorted(normalized)
+
+
+def _automatic_rows(
+    connection: Any,
+    scope: RuntimeScope | None = None,
+    memory_id: int | None = None,
+    tag_ids: Iterable[Any] | None = None,
+) -> list[tuple[Any, ...]]:
     tag_columns = _table_columns(connection, "scoped_tags")
     memory_tag_columns = _table_columns(connection, "scoped_memory_tags")
     status_expression = "COALESCE(t.status, 'active')" if "status" in tag_columns else "'active'"
@@ -130,6 +153,17 @@ def _automatic_rows(connection: Any, scope: RuntimeScope | None = None, memory_i
     if memory_id is not None:
         memory_clause = " AND mt.memory_id=?"
         params.append(int(memory_id))
+    # Push the semantic tag filter into SQL. Cold recall only ever needs the rows
+    # for a handful of candidate tags; scanning every scoped link was the main
+    # source of multi-second injection latency.
+    tag_clause = ""
+    normalized_tags = _normalized_tag_ids(tag_ids)
+    if normalized_tags is not None:
+        if not normalized_tags:
+            return []
+        placeholders = ",".join("?" for _ in normalized_tags)
+        tag_clause = f" AND mt.tag_id IN ({placeholders})"
+        params.extend(normalized_tags)
     return connection.execute(
         f"""SELECT mt.bot_id, mt.session_id, mt.visibility, mt.memory_id,
                           mt.tag_id, {position_expression}, {relevance_expression}, t.name, {status_expression}
@@ -137,7 +171,7 @@ def _automatic_rows(connection: Any, scope: RuntimeScope | None = None, memory_i
                      JOIN scoped_tags t
                        ON t.id=mt.tag_id AND t.bot_id=mt.bot_id
                       AND t.session_id=mt.session_id AND t.visibility=mt.visibility
-                    WHERE 1=1{where}{memory_clause}
+                    WHERE 1=1{where}{memory_clause}{tag_clause}
                     ORDER BY mt.bot_id, mt.session_id, mt.visibility, mt.memory_id,
                                  {order_position_expression}, mt.tag_id""",
 
@@ -246,9 +280,16 @@ def effective_tag_rows(
     *,
     scope: RuntimeScope | None = None,
     memory_id: int | None = None,
+    tag_ids: Iterable[Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return effective Tag links, with automatic baseline fallback when needed."""
-    automatic = _automatic_rows(connection, scope, memory_id)
+    """Return effective Tag links, with automatic baseline fallback when needed.
+
+    ``tag_ids`` narrows the automatic baseline in SQL. Corrections are still read
+    for the affected memories so a manual override cannot be silently dropped,
+    and the final result is filtered back to the requested tag ids.
+    """
+    automatic = _automatic_rows(connection, scope, memory_id, tag_ids)
+    wanted_tags = _normalized_tag_ids(tag_ids)
     corrections = _active_corrections(connection, scope)
     if memory_id is not None:
         if scope is None:
@@ -258,7 +299,16 @@ def effective_tag_rows(
         else:
             scoped_key = (*_scope_tuple(scope), int(memory_id))
             corrections = {key: value for key, value in corrections.items() if key == scoped_key}
-    return _effective_from_rows(connection, automatic, corrections)
+    if wanted_tags is not None:
+        # Only corrections for memories that the narrowed baseline already touched
+        # can still change this tag slice; unrelated memories stay out of the scan.
+        touched = {(str(row[0]), str(row[1]), str(row[2]), int(row[3])) for row in automatic}
+        corrections = {key: value for key, value in corrections.items() if key in touched}
+    rows = _effective_from_rows(connection, automatic, corrections)
+    if wanted_tags is None:
+        return rows
+    allowed = set(wanted_tags)
+    return [row for row in rows if int(row.get("tag_id", 0)) in allowed]
 
 
 def rebuild_memory_effective_tags(

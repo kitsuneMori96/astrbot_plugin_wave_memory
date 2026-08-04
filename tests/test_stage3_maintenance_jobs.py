@@ -212,13 +212,40 @@ def test_pair_similarity_projection_builder_is_pure_and_filters_noise():
         (3, np.asarray([-1.0, 0.0], dtype=np.float32).tobytes()),
     ]
 
-    params, cache = compute_pair_similarity_projection(rows)
+    params, cache = compute_pair_similarity_projection(rows, top_k=4, min_similarity=0.1)
 
     assert len(params) == 1
     assert params[0][:2] == (1, 2)
     assert cache[(1, 2)] == pytest.approx(params[0][2])
     assert (1, 3) not in cache
     assert (2, 3) not in cache
+
+
+def test_pair_similarity_projection_is_sparse_top_k_not_full_triangle():
+    """Each tag keeps only top_k undirected neighbors; never n*(n-1)/2 edges."""
+    # Five near-orthogonal unit vectors so many pairs fail the floor, plus one
+    # cluster of three highly similar vectors that must still be sparse-capped.
+    rows = [
+        (1, np.asarray([1.0, 0.0, 0.0], dtype=np.float32).tobytes()),
+        (2, np.asarray([0.99, 0.01, 0.0], dtype=np.float32).tobytes()),
+        (3, np.asarray([0.98, 0.02, 0.0], dtype=np.float32).tobytes()),
+        (4, np.asarray([0.0, 1.0, 0.0], dtype=np.float32).tobytes()),
+        (5, np.asarray([0.0, 0.0, 1.0], dtype=np.float32).tobytes()),
+    ]
+    full_triangle = len(rows) * (len(rows) - 1) // 2
+    params, cache = compute_pair_similarity_projection(
+        rows,
+        top_k=1,
+        min_similarity=0.5,
+    )
+    assert len(params) == len(cache)
+    assert len(params) < full_triangle
+    # Only the mutually-similar cluster can produce retained edges; with top_k=1
+    # each of {1,2,3} keeps its single best neighbor and undirected dedupe keeps
+    # the set tiny (well under the previous O(n^2) dump).
+    assert len(params) <= 3
+    assert all(sim >= 0.5 for _, _, sim, _ in params)
+    assert all(a < b for a, b, _, _ in params)
 
 
 @pytest.mark.asyncio

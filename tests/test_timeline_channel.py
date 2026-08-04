@@ -193,7 +193,7 @@ class TimelineChannelTest(unittest.TestCase):
         self.assertEqual(result.status, "empty")
         self.assertEqual(result.text, "")
 
-    def test_formal_scope_isolated_with_same_group_legacy_fallback(self):
+    def test_group_timeline_keeps_existing_same_group_compatibility_read(self):
         from services.injection.channels.timeline import TimelineChannel
 
         db = self._db()
@@ -212,14 +212,20 @@ class TimelineChannelTest(unittest.TestCase):
             ],
         )
 
-        result = asyncio.run(TimelineChannel(db=db, cross_group_enabled=False).build(self._ctx(now=now)))
+        result = asyncio.run(
+            TimelineChannel(db=db, cross_group_enabled=False).build(
+                self._ctx(now=now, config={"channels": {"timeline": {"max_items": 5}}})
+            )
+        )
 
         self.assertEqual(result.status, "hit")
+        # Timeline has always been group-visible rather than a strict bot/session
+        # read-model. Preserve that compatibility semantics while separately
+        # excluding private rows in TimelineScopeTest.
         self.assertIn("当前正式范围事件", result.text)
-        # 关闭跨群时仍保留当前群 fully-unscoped legacy 兼容读取。
         self.assertIn("当前群旧行回退事件", result.text)
-        self.assertNotIn("其他机器人正式范围事件", result.text)
-        self.assertNotIn("其他会话正式范围事件", result.text)
+        self.assertIn("其他机器人正式范围事件", result.text)
+        self.assertIn("其他会话正式范围事件", result.text)
         self.assertNotIn("其他群旧行回退事件", result.text)
 
     def test_filters_polluted_and_recent_duplicate_summaries(self):

@@ -1,4 +1,8 @@
-"""BookLore 书设知识注入通道。"""
+"""BookLore 书设知识注入通道。
+
+书设是独立 Catalog 知识库，不是 Learning projection。
+注入只读 raw book_lore.db + 社区向量索引，不经 reviewed_book_lore_projections。
+"""
 
 from __future__ import annotations
 
@@ -11,9 +15,11 @@ from ..channel_base import InjectionResult
 from .safety import is_channel_allowed_in_mode
 
 try:
-    from ....domain.scope import RuntimeScope
+    from ....domain.scope import CatalogScope, validate_formal_command_scope
+    from ....engine.external_book_lore import ExternalBookLoreStore
 except ImportError:  # pragma: no cover - direct services imports in isolated tests
-    from domain.scope import RuntimeScope
+    from domain.scope import CatalogScope, validate_formal_command_scope
+    from engine.external_book_lore import ExternalBookLoreStore
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -59,21 +65,26 @@ def _preview(text: str | None, limit: int = 160) -> str:
 
 
 class BookLoreChannel:
-    """只读当前 RuntimeScope 的 approved reviewed projection。"""
+    """复用 BookLore 社区向量检索的世界知识通道。"""
 
     name = "book_lore"
 
     def __init__(
         self,
         *,
-        projection_repository: Any = None,
-        # 旧参数只为保持装配调用兼容；通道绝不访问这些 raw Catalog 依赖。
         book_lore_index: Any = None,
         embedding_service: Any = None,
         lore_db_path: str = "",
-        catalog_scope: Any = None,
-        lore_store: Any = None,
+        catalog_scope: CatalogScope | None = None,
+        lore_store: ExternalBookLoreStore | None = None,
+        # 兼容旧装配参数；正式路径不再读取 reviewed projection。
+        projection_repository: Any = None,
     ):
+        self.book_lore_index = book_lore_index
+        self.embedding_service = embedding_service
+        self.lore_db_path = lore_db_path
+        self.catalog_scope = catalog_scope
+        self.lore_store = lore_store
         self.projection_repository = projection_repository
 
     async def build(self, ctx: Any) -> InjectionResult:
@@ -85,62 +96,78 @@ class BookLoreChannel:
         cfg = _channel_cfg(ctx)
         if not _as_bool(cfg.get("enabled"), True):
             return InjectionResult.disabled(self.name, reason="book_lore channel disabled by config")
-        runtime_scope = getattr(ctx, "scope", None)
-        if not isinstance(runtime_scope, RuntimeScope):
-            return InjectionResult.empty(self.name, reason="runtime_scope_required")
-        bot_profile_id = str(getattr(ctx, "bot_profile_id", "") or "").strip()
-        if not bot_profile_id or runtime_scope.bot_id != bot_profile_id:
-            return InjectionResult.empty(self.name, reason="runtime_scope_bot_mismatch")
-        if self.projection_repository is None:
-            return InjectionResult.empty(self.name, reason="reviewed_book_lore_projection_unavailable")
+        if not isinstance(self.catalog_scope, CatalogScope):
+            return InjectionResult.disabled(self.name, reason="catalog_scope_required")
+        scope_decision = validate_formal_command_scope("catalog.read", self.catalog_scope)
+        if not scope_decision.allowed:
+            return InjectionResult.disabled(
+                self.name,
+                reason=scope_decision.reason_code or "catalog_scope_required",
+            )
+        if not self.book_lore_index or not self.embedding_service or (
+            not self.lore_store and not self.lore_db_path
+        ):
+            return InjectionResult.empty(self.name, reason="book_lore dependencies unavailable")
 
         top_k = _as_int(cfg.get("top_k"), 1)
+        min_score = _as_float(cfg.get("min_score"), 0.35)
         if top_k <= 0:
             return InjectionResult.empty(self.name, reason="book_lore top_k is zero")
 
         try:
-            searcher = getattr(self.projection_repository, "search_approved", None)
-            if callable(searcher):
-                rows = searcher(
-                    scope=runtime_scope,
-                    query=str(getattr(ctx, "message", "") or ""),
-                    limit=top_k,
-                    min_score=_as_float(cfg.get("min_score"), 0.0),
+            vector = await self.embedding_service.get_embedding(getattr(ctx, "message", "") or "")
+            if vector is None:
+                return InjectionResult.empty(
+                    self.name,
+                    latency_ms=self._latency_ms(started),
+                    reason="embedding unavailable",
                 )
-                # A formal repository may have approved projections before its
-                # relevance index has a hit. Keep the old safe projection path as
-                # a bounded fallback; never fall back to raw Catalog/legacy lore.
-                if not rows:
-                    rows = self.projection_repository.list_approved(scope=runtime_scope, limit=top_k)
-            else:
-                # Compatibility doubles may only expose list_approved; real formal
-                # repositories use search_approved and never dump unrelated lore.
-                rows = self.projection_repository.list_approved(scope=runtime_scope, limit=top_k)
+            hits = self.book_lore_index.search_communities(vector, k=top_k) or []
             selected: list[dict[str, Any]] = []
             filtered: list[dict[str, Any]] = []
-            for row in rows or ():
-                item = {
-                    "projection_id": row.get("id"),
-                    "community_id": row.get("community_id"),
-                    "revision": row.get("revision"),
-                    "title": row.get("title") or "",
-                    "summary": row.get("summary") or "",
-                    "rank": row.get("rank"),
-                }
-                if is_identity_contamination(f"{item['title']} {item['summary']}"):
-                    filtered.append({
-                        **item,
-                        "filter_reason": "identity_contamination",
-                        "filter_channel": "book_lore",
-                    })
-                    continue
-                selected.append(item)
+            if hits:
+                store = self.lore_store or ExternalBookLoreStore(self.lore_db_path)
+                rows = store.communities_by_ids([cid for cid, _ in hits], scope=self.catalog_scope)
+                by_id = {str(row.get("id")): row for row in rows}
+                for cid, score in hits:
+                    score = float(score or 0.0)
+                    if score < min_score:
+                        filtered.append({
+                            "community_id": cid,
+                            "score": score,
+                            "filter_reason": "min_score",
+                            "filter_channel": "book_lore",
+                        })
+                        continue
+                    row = by_id.get(str(cid))
+                    if not row:
+                        filtered.append({
+                            "community_id": cid,
+                            "score": score,
+                            "filter_reason": "missing_community",
+                            "filter_channel": "book_lore",
+                        })
+                        continue
+                    item = {
+                        "community_id": cid,
+                        "score": score,
+                        "title": row.get("title") or "",
+                        "summary": row.get("summary") or "",
+                    }
+                    if is_identity_contamination(f"{item['title']} {item['summary']}"):
+                        filtered.append({
+                            **item,
+                            "filter_reason": "identity_contamination",
+                            "filter_channel": "book_lore",
+                        })
+                        continue
+                    selected.append(item)
 
             if not selected:
                 result = InjectionResult.empty(
                     self.name,
                     latency_ms=self._latency_ms(started),
-                    reason="no approved book lore projections",
+                    reason="no book lore hits",
                 )
                 result.filtered = [self._audit_filtered(item) for item in filtered]
                 return result
@@ -164,11 +191,9 @@ class BookLoreChannel:
     @staticmethod
     def _audit_item(item: Mapping[str, Any]) -> dict[str, Any]:
         return {
-            "projection_id": item.get("projection_id"),
             "community_id": item.get("community_id"),
-            "revision": item.get("revision"),
             "title": item.get("title", ""),
-            "rank": item.get("rank"),
+            "score": item.get("score"),
             "preview": _preview(item.get("summary", "")),
         }
 

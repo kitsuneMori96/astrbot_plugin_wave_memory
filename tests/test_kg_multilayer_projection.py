@@ -137,7 +137,7 @@ def test_multilayer_projection_uses_all_formal_layers_and_filters_hnsw_cross_sco
     try:
         payload = build_graph_projection(
             conn=conn, scope=_scope(), layers=SUPPORTED_LAYERS, memory_index=_Index(),
-            fewshot_repository=_FewShot(), book_lore_repository=_BookLore(),
+            fewshot_repository=_FewShot(),
             memory_limit=20, similarity_k=3, similarity_threshold=.5,
         )
     finally:
@@ -147,7 +147,9 @@ def test_multilayer_projection_uses_all_formal_layers_and_filters_hnsw_cross_sco
     assert "entity:秘密" not in serialized
     assert "memory:99" not in serialized
     assert "hnsw:1:2" in serialized
-    assert {"fact", "memory_tag", "hnsw_neighbor", "belief", "jargon", "concern", "mood", "timeline_event", "affinity", "relationship_event", "few_shot", "book_lore", "community_member"} <= {edge["kind"] for edge in payload["edges"]}
+    # book_lore 层不再从 reviewed projection 产出边；仅有 Catalog 直读警告。
+    assert {"fact", "memory_tag", "hnsw_neighbor", "belief", "jargon", "concern", "mood", "timeline_event", "affinity", "relationship_event", "few_shot", "community_member"} <= {edge["kind"] for edge in payload["edges"]}
+    assert "book_lore" not in {edge["kind"] for edge in payload["edges"]}
     assert payload["scope"]["payload"]["bot_id"] == "bot-a"
     assert payload["read_only"] is True
 

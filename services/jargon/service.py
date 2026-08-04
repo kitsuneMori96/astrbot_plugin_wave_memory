@@ -10,8 +10,10 @@ from typing import Any, Dict, List, Optional
 from astrbot.api import logger
 try:
     from ...domain.scope import RuntimeScope
+    from ...engine.database import normalize_jargon_word
 except ImportError:
     from domain.scope import RuntimeScope
+    from engine.database import normalize_jargon_word
 
 from .holyman_reference import HolymanReference
 from .inference import JargonInferenceEngine, JargonInjector
@@ -50,11 +52,17 @@ class JargonService:
             weight_concentration=float(self._config.get("weight_concentration", .3)),
             candidate_router=self.classify_candidate,
         )
-        self._inference = JargonInferenceEngine(llm_client, max_context=self._max_context) if llm_client else None
+        blocklist_checker = getattr(db, "is_jargon_blocked", None)
+        self._inference = JargonInferenceEngine(
+            llm_client,
+            max_context=self._max_context,
+            blocklist_checker=blocklist_checker,
+        ) if llm_client else None
         self._injector = JargonInjector(
             db,
             max_inject=int(self._config.get("max_inject", 3)),
             holyman_reference=self._holyman,
+            blocklist_checker=blocklist_checker,
         )
         self._last_mine: Dict[tuple[str, str, str], float] = {}
         self._msg_count: Dict[tuple[str, str, str], int] = {}
@@ -65,6 +73,16 @@ class JargonService:
 
     def _repository_available(self) -> bool:
         return self._repo is not None
+
+    def _is_globally_blocked(self, word: str) -> bool:
+        checker = getattr(self._db, "is_jargon_blocked", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker(word))
+        except Exception as exc:
+            logger.warning("[Jargon] blocklist check failed closed for %r: %s", word, exc)
+            return True
 
     def _resolve_source_memory_id(self, scope: RuntimeScope, source_contexts: List[Dict[str, Any]], word: str) -> int | None:
         """用同一 RuntimeScope 内已落库消息解析候选锚点，绝不按旧 group_id 回退。"""
@@ -127,19 +145,24 @@ class JargonService:
         if not self._enabled or scope is None or key is None or not self._repository_available():
             return []
         self._msg_count[key], self._last_mine[key] = 0, time.time()
-        candidates = self._filter.get_candidates(scope, min_freq=self._min_frequency, top_k=self._top_k)
+        raw_candidates = self._filter.get_candidates(scope, min_freq=self._min_frequency, top_k=self._top_k)
         group_id = scope.session.conversation_id if scope.session else ""
-        candidates = [
-            candidate for candidate in candidates
-            if self.classify_candidate(
-                candidate.get("word", ""),
+        candidates: list[dict[str, Any]] = []
+        for raw_candidate in raw_candidates:
+            classification = self.classify_candidate(
+                raw_candidate.get("word", ""),
                 group_id,
-                (candidate.get("source_contexts") or [{}])[0],
-                candidate.get("contexts") or [],
-            ).get("enter_llm")
-        ]
+                (raw_candidate.get("source_contexts") or [{}])[0],
+                raw_candidate.get("contexts") or [],
+            )
+            if not classification.get("enter_llm"):
+                continue
+            candidate = dict(raw_candidate)
+            candidate["word"] = classification["word"]
+            candidates.append(candidate)
         if self._llm_validate and self._llm and candidates:
             candidates = await self._llm_validate_candidates(candidates)
+        candidates = [candidate for candidate in candidates if not self._is_globally_blocked(candidate.get("word", ""))]
         if not candidates:
             return []
         results: List[Dict[str, Any]] = []
@@ -150,7 +173,9 @@ class JargonService:
             except Exception:
                 trace_status = "invalid"
         for candidate in candidates:
-            word, contexts, now = str(candidate["word"]), candidate.get("contexts") or [], int(time.time())
+            word, contexts, now = normalize_jargon_word(candidate["word"]), candidate.get("contexts") or [], int(time.time())
+            if self._is_globally_blocked(word):
+                continue
             source_contexts = candidate.get("source_contexts") or []
             source_memory_id = self._resolve_source_memory_id(scope, source_contexts, word)
             existing = next((row for row in self._repo.list_scoped_jargon(scope, limit=100) if row.get("word") == word), None)
@@ -181,6 +206,8 @@ class JargonService:
                     tag_chain_status = "unavailable"
             if status == "confirmed" and (trace_status != "verified" or tag_chain_status != "complete"):
                 status = "pending"
+            if self._is_globally_blocked(word):
+                continue
             self._repo.upsert_scoped_jargon(
                 scope, word=word, meaning=meaning, status=status, is_jargon=is_jargon,
                 frequency=frequency, confidence=confidence, contexts=contexts,
@@ -192,8 +219,15 @@ class JargonService:
                 results.append({"word": word, "meaning": meaning, "confidence": confidence})
         return results
 
-    def review(self, runtime_scope: RuntimeScope, jargon_id: int, action: str, query_trace_id: str | None = None) -> dict[str, Any]:
-        """通过领域服务执行 scoped 候选审核；approve 必须已有同 Scope anchor。"""
+    def review(
+        self,
+        runtime_scope: RuntimeScope,
+        jargon_id: int,
+        action: str,
+        query_trace_id: str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """通过领域服务执行 scoped 候选审核；reject 同时写入全局拉黑。"""
         scope = self._group_scope(runtime_scope)
         if scope is None or not self._repository_available():
             raise ValueError("jargon_review_command_unavailable")
@@ -214,8 +248,17 @@ class JargonService:
             if not provenance.get("source_tags") or not provenance.get("evidence"):
                 raise ValueError("jargon_evidence_required")
         status = "confirmed" if action == "approve" else "rejected"
+        rejection_reason = str(reason or "user_global_reject").strip() or "user_global_reject"
+        if action == "reject":
+            add_block = getattr(self._db, "add_jargon_blocklist", None)
+            if not callable(add_block):
+                raise ValueError("jargon_blocklist_command_unavailable")
+            add_block(current["word"], reason=rejection_reason, source="user_global_reject")
         provenance = dict(current.get("provenance") or {})
         provenance.update({"reviewed_by": "webui", "review_action": action})
+        if action == "reject":
+            provenance["reject_reason"] = rejection_reason
+            provenance["blocklist_source"] = "user_global_reject"
         self._repo.upsert_scoped_jargon(
             scope,
             word=current["word"],
@@ -312,9 +355,11 @@ class JargonService:
         contexts: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """统一候选分类；只有本群未知黑话允许进入统计、LLM 和正式写入。"""
-        word = (word or "").strip()
+        word = normalize_jargon_word(word)
         source_ctx, contexts = source_ctx or {}, contexts or []
         base = {"word": word, "candidate_type": "local_jargon_candidate", "enter_llm": True, "reject_reason": None, "source": "wave_memory", "scope": "local", "meaning": "", "confidence": 0.0, "reference_only": False}
+        if self._is_globally_blocked(word):
+            return {**base, "enter_llm": False, "reject_reason": "global_blocklist"}
         if self._is_known_person_alias(word, group_id, source_ctx):
             return {**base, "candidate_type": "person_alias", "enter_llm": False, "reject_reason": "person_alias_diverted"}
         if self._is_technical_noise_candidate(word):

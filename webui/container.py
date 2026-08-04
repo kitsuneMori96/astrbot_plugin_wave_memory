@@ -57,16 +57,6 @@ class ServiceContainer:
         self.soul_repository: Any = None
         self.relationship_calibration: Any = None
         self.fewshot_repository: Any = None
-        self.book_lore_repository: Any = None
-
-        # ─── 学习中心服务（由 WebUI/API 按需解析，避免循环依赖） ───
-        self.learning_repositories: Any = None
-        self.learning_source_registry: Any = None
-        self.learning_job_runner: Any = None
-        self.learning_review_service: Any = None
-        self.learning_promotion_orchestrator: Any = None
-        self.learning_dedicated_review_bridge: Any = None
-        self.learning_api_idempotency: dict[tuple[str, str, str], Any] = {}
 
         # ─── 认证 ───
         self.password: str = ""
@@ -104,7 +94,6 @@ class ServiceContainer:
         request_scope_provider: Any = None,
         soul_repository: Any = None,
         fewshot_repository: Any = None,
-        book_lore_repository: Any = None,
     ) -> None:
         """注入所有服务引用。"""
         self.db = db
@@ -137,25 +126,6 @@ class ServiceContainer:
         self.request_scope_provider = request_scope_provider
         self.soul_repository = soul_repository or getattr(db, "soul_repository", None)
         self.fewshot_repository = fewshot_repository or getattr(db, "fewshot_repository", None)
-        self.book_lore_repository = book_lore_repository or getattr(db, "book_lore_repository", None)
-
-    def configure_learning_services(
-        self,
-        *,
-        repositories: Any,
-        source_registry: Any = None,
-        job_runner: Any = None,
-        review_service: Any = None,
-        promotion_orchestrator: Any = None,
-        dedicated_review_bridge: Any = None,
-    ) -> None:
-        """注入主插件已经创建的学习服务，禁止 WebUI 重新创建空 registry。"""
-        self.learning_repositories = repositories
-        self.learning_source_registry = source_registry
-        self.learning_job_runner = job_runner
-        self.learning_review_service = review_service
-        self.learning_promotion_orchestrator = promotion_orchestrator
-        self.learning_dedicated_review_bridge = dedicated_review_bridge
 
     @classmethod
     def reset(cls) -> None:

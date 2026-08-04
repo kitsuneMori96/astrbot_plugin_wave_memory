@@ -71,8 +71,9 @@ const COMPONENT_LABELS: Record<string, string> = {
   frequency: '出现频率',
   recency: '近期程度',
   consistency: '一致性',
-  source: '来源可信度',
-  confidence: '综合置信度',
+  source: '来源独立性',
+  span: '时间跨度',
+  confidence: '综合支持强度',
 }
 
 const EVIDENCE_TYPE_LABELS: Record<string, string> = {
@@ -131,11 +132,20 @@ function recordText(record: Record<string, unknown>, keys: string[], fallback = 
 
 function ConfidenceComponents({ item }: { item: BeliefItem }) {
   const components = Object.entries(item.confidence_components ?? {})
-  if (!components.length) return <p className="text-sm text-muted-foreground">服务端未返回置信分量。</p>
-  return <div className="grid gap-3 sm:grid-cols-2">{components.map(([key, raw]) => {
+  if (!components.length) return <p className="text-xs text-muted-foreground">服务端未返回置信分量。</p>
+  return <div className="flex flex-wrap gap-2">{components.map(([key, raw]) => {
     const value = Math.max(0, Math.min(1, Number(raw) || 0))
-    return <div key={key} className="rounded-lg border bg-muted/20 p-3"><div className="flex items-center justify-between gap-3 text-sm"><span>{COMPONENT_LABELS[key] ?? '评估分量'}</span><span className="font-medium tabular-nums">{Math.round(value * 100)}%</span></div><div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${value * 100}%` }} /></div></div>
+    return <Badge key={key} variant="outline" className="gap-1 font-normal text-xs">{COMPONENT_LABELS[key] ?? key}: <span className="font-semibold">{Math.round(value * 100)}%</span></Badge>
   })}</div>
+}
+
+function ConfidenceEvidenceSummary({ item }: { item: BeliefItem }) {
+  const summary = item.confidence_evidence
+  if (!summary) return null
+  const count = (key: string) => Math.max(0, Math.trunc(Number(summary[key]) || 0))
+  const spanSeconds = Math.max(0, Number(summary.span_seconds) || 0)
+  const spanText = spanSeconds >= 86_400 ? `${Math.round(spanSeconds / 86_400)} 天` : spanSeconds >= 3_600 ? `${Math.round(spanSeconds / 3_600)} 小时` : '同一时间段'
+  return <div className="flex flex-wrap gap-2 text-xs text-muted-foreground"><Badge variant="secondary">支持经历 {count('support_windows')} 段</Badge><Badge variant="outline">反证经历 {count('challenge_windows')} 段</Badge><Badge variant="outline">支持消息 {count('support_messages')} 条</Badge><Badge variant="outline">独立来源 {count('distinct_sources')} 个</Badge><Badge variant="outline">跨度 {spanText}</Badge></div>
 }
 
 function EvidenceCards({ item }: { item: BeliefItem }) {
@@ -146,7 +156,7 @@ function EvidenceCards({ item }: { item: BeliefItem }) {
 function BeliefDetails({ item, mutating, onTransition }: { item: BeliefItem; mutating: boolean; onTransition: (action: 'approve' | 'archive') => void }) {
   return <div className="flex flex-col gap-6">
     <section className="flex flex-col gap-2"><div className="flex flex-wrap gap-2"><Badge className={typeClass(item.type)}>{TYPE_LABELS[item.type]}</Badge><Badge className={statusClass(item.status)}>{STATUS_LABELS[item.status]}</Badge></div><p className="text-base leading-7 text-foreground">{item.content}</p>{item.anchor_sentence ? <blockquote className="rounded-r-lg border-l-2 border-primary bg-primary/5 px-4 py-3 text-muted-foreground">“{item.anchor_sentence}”</blockquote> : null}</section>
-    <section className="flex flex-col gap-3"><div className="flex items-center justify-between gap-3"><h3 className="font-medium">状态分量</h3><Badge variant="outline">综合 {confidenceText(item.confidence)}</Badge></div><ConfidenceComponents item={item} /></section>
+    <section className="flex flex-col gap-3"><div className="flex items-center justify-between gap-3"><h3 className="font-medium">证据支持分量</h3><Badge variant="outline">综合 {confidenceText(item.confidence)}</Badge></div><ConfidenceComponents item={item} /><ConfidenceEvidenceSummary item={item} /></section>
     <section className="flex flex-col gap-3"><div className="flex items-center justify-between gap-3"><h3 className="font-medium">证据卡</h3><span className="text-sm text-muted-foreground">{item.evidence.length} 条</span></div><EvidenceCards item={item} /></section>
     {item.quarantine_reason ? <Alert variant="destructive"><AlertTitle>当前处于隔离状态</AlertTitle><AlertDescription>{item.quarantine_reason}</AlertDescription></Alert> : null}
     <div className="flex flex-wrap gap-2 border-t pt-4"><Button disabled={mutating || !item.actions.approve.available} onClick={() => onTransition('approve')}><CheckIcon data-icon="inline-start" />通过并激活</Button><Button variant="outline" disabled={mutating || !item.actions.archive.available} onClick={() => onTransition('archive')}><ArchiveIcon data-icon="inline-start" />归档</Button>{!item.actions.approve.available ? <span className="self-center text-sm text-muted-foreground">无法通过：{item.actions.approve.reason_code ?? '当前状态不允许'}</span> : null}</div>
@@ -188,15 +198,19 @@ function BeliefEvidenceDialog({ item, scope, onOpenChange }: { item: BeliefItem 
   }, [item, load])
 
   const messages = payload?.messages ?? []
-  return <Dialog open={Boolean(item)} onOpenChange={onOpenChange}><DialogContent className="flex max-h-[86vh] flex-col sm:max-w-4xl"><DialogHeader><DialogTitle className="flex flex-wrap items-center gap-2"><span>信念形成多阶证据链</span>{item ? <Badge variant="outline">#{item.id}</Badge> : null}</DialogTitle><DialogDescription>只在当前 Bot 与 canonical 会话中还原证据；关系变化和自省插曲没有 scoped 引用时保持禁用。</DialogDescription></DialogHeader>
+  const supportAnchors = payload?.support_anchors ?? []
+  const challengeAnchors = payload?.challenge_anchors ?? []
+  return <Dialog open={Boolean(item)} onOpenChange={onOpenChange}><DialogContent className="flex max-h-[86vh] flex-col sm:max-w-4xl max-w-[95vw] overflow-hidden"><DialogHeader><DialogTitle className="flex flex-wrap items-center gap-2"><span>信念形成多阶证据链</span>{item ? <Badge variant="outline">#{item.id}</Badge> : null}</DialogTitle><DialogDescription>只在当前 Bot 与 canonical 会话中还原证据；关系变化和自省插曲没有 scoped 引用时保持禁用。</DialogDescription></DialogHeader>
+    <div className="flex-1 overflow-y-auto pr-1">
     {loading ? <div className="flex min-h-64 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2Icon className="animate-spin" />正在还原同作用域证据链</div> : null}
     {!loading && error ? <Alert variant="destructive"><AlertTitle>证据读取失败</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
     {!loading && payload ? <Tabs value={tab} onValueChange={(value) => setTab(value as typeof tab)} className="flex min-h-0 flex-1 flex-col"><div className="flex flex-wrap items-end justify-between gap-3 border-b pb-3"><div className="flex items-end gap-2"><Field className="w-20 gap-1"><FieldLabel htmlFor="belief-evidence-before">前文</FieldLabel><Input id="belief-evidence-before" type="number" min={0} max={50} value={before} onChange={(event) => setBefore(Math.max(0, Math.min(50, Number(event.target.value) || 0)))} /></Field><Field className="w-20 gap-1"><FieldLabel htmlFor="belief-evidence-after">后文</FieldLabel><Input id="belief-evidence-after" type="number" min={0} max={50} value={after} onChange={(event) => setAfter(Math.max(0, Math.min(50, Number(event.target.value) || 0)))} /></Field><Button type="button" size="sm" onClick={() => void load()}>刷新</Button></div><TabsList><TabsTrigger value="relationship_event" disabled={!payload.relationship_events.length}>关系变化</TabsTrigger><TabsTrigger value="episode" disabled={!payload.episodes.length}>自省独白</TabsTrigger><TabsTrigger value="memory" disabled={!messages.length}>聊天气泡</TabsTrigger></TabsList></div>
       <TabsContent value="relationship_event" className="min-h-0 flex-1 pt-4"><ScrollArea className="max-h-[55vh]"><div className="flex flex-col gap-3 pr-3">{payload.relationship_events.map((event, index) => <article key={recordText(event, ['id'], String(index))} className="rounded-lg border bg-card p-4"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{recordText(event, ['dimension', 'event_type'], '关系变化')}</span><Badge variant="outline">{recordText(event, ['delta'], '—')}</Badge></div><p className="mt-2 text-sm text-muted-foreground">{recordText(event, ['reason', 'summary'])}</p></article>)}</div></ScrollArea></TabsContent>
       <TabsContent value="episode" className="min-h-0 flex-1 pt-4"><ScrollArea className="max-h-[55vh]"><div className="flex flex-col gap-3 pr-3">{payload.episodes.map((episode, index) => <article key={recordText(episode, ['id'], String(index))} className="rounded-lg border bg-card p-4"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{recordText(episode, ['episode_type'], '自省插曲')}</span><span className="text-xs text-muted-foreground">{formatTime(Number(episode.created_at) || null)}</span></div><dl className="mt-3 grid gap-3 text-sm"><div><dt className="text-muted-foreground">外部触发</dt><dd>{recordText(episode, ['trigger'])}</dd></div><div><dt className="text-muted-foreground">内心独白</dt><dd>{recordText(episode, ['bot_inner_thought'])}</dd></div><div><dt className="text-muted-foreground">回复与后果</dt><dd>{recordText(episode, ['bot_reply', 'outcome'])}</dd></div></dl></article>)}</div></ScrollArea></TabsContent>
-      <TabsContent value="memory" className="min-h-0 flex-1 pt-4"><ScrollArea className="max-h-[55vh]"><div className="flex flex-col gap-4 pr-3">{messages.map((message) => <article key={`${message.role}:${message.id}`} data-evidence-role={message.role} className={message.role === 'anchor' ? 'rounded-lg border border-primary/30 bg-primary/5 p-3' : 'rounded-lg border bg-card p-3'}><div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground"><span>{message.sender_name || message.sender_id || '发送者未记录'}</span><span>{formatTime(message.timestamp)}</span></div><p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6">{message.content}</p>{message.role === 'anchor' ? <Badge className="mt-2" variant="secondary">信念来源锚点</Badge> : null}</article>)}</div></ScrollArea></TabsContent>
+      <TabsContent value="memory" className="min-h-0 flex-1 pt-4"><ScrollArea className="max-h-[55vh]"><div className="flex flex-col gap-4 pr-3">{supportAnchors.length || challengeAnchors.length ? <section className="grid gap-3 md:grid-cols-2"><div className="rounded-lg border border-primary/20 bg-primary/5 p-3"><div className="flex items-center justify-between gap-2"><h4 className="text-sm font-medium">支持经历锚点</h4><Badge variant="secondary">{supportAnchors.length} 条</Badge></div><div className="mt-3 flex flex-col gap-2">{supportAnchors.map((message) => <article key={`support:${message.id}`} className="rounded-md border bg-card p-3"><div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground"><span>{message.sender_name || message.sender_id || '发送者未记录'}</span><span>{formatTime(message.timestamp)}</span></div><p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6">{message.content}</p></article>) || <p className="text-sm text-muted-foreground">暂无可还原的支持锚点。</p>}</div></div><div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3"><div className="flex items-center justify-between gap-2"><h4 className="text-sm font-medium">反证经历锚点</h4><Badge variant="outline">{challengeAnchors.length} 条</Badge></div><div className="mt-3 flex flex-col gap-2">{challengeAnchors.map((message) => <article key={`challenge:${message.id}`} className="rounded-md border bg-card p-3"><div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground"><span>{message.sender_name || message.sender_id || '发送者未记录'}</span><span>{formatTime(message.timestamp)}</span></div><p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6">{message.content}</p></article>) || <p className="text-sm text-muted-foreground">暂无已记录的反证锚点。</p>}</div></div></section> : null}{messages.map((message) => <article key={`${message.role}:${message.id}`} data-evidence-role={message.role} className={message.role === 'anchor' ? 'rounded-lg border border-primary/30 bg-primary/5 p-3' : 'rounded-lg border bg-card p-3'}><div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground"><span>{message.sender_name || message.sender_id || '发送者未记录'}</span><span>{formatTime(message.timestamp)}</span></div><p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6">{message.content}</p>{message.role === 'anchor' ? <Badge className="mt-2" variant="secondary">信念来源锚点</Badge> : null}</article>)}</div></ScrollArea></TabsContent>
     </Tabs> : null}
     {!loading && payload && !messages.length && !payload.relationship_events.length && !payload.episodes.length ? <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">该信念没有可安全还原的 scoped 证据；请先确认完整 Scope 上下文。</div> : null}
+    </div>
   </DialogContent></Dialog>
 }
 

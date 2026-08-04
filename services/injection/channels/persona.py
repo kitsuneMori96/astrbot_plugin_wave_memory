@@ -148,6 +148,16 @@ class PersonaChannel:
                     "source": "PersonaComposer.experience_block",
                     "source_ids": list(debug.get("experience_ids", []) or []),
                 })
+            # Speaker statistics come from scope-keyed tables only and need no LLM,
+            # so they survive summary/provider outages.
+            speaker = str(payload.get("speaker_block") or "").strip()
+            if speaker:
+                candidates.append({
+                    "block": "speaker_profile",
+                    "text": speaker,
+                    "source": "PersonaComposer.speaker_block",
+                    "source_ids": list(debug.get("speaker_sources", []) or []),
+                })
 
         user_persona = self._build_user_persona(ctx)
         if user_persona:

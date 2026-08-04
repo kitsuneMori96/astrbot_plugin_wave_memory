@@ -16,16 +16,12 @@ try:  # 兼容插件包导入和仓库测试直接导入
     from ..engine.database import WaveMemoryDB
     from ..engine.vector_index import VectorIndex
     from ..engine.book_lore_index import BookLoreIndex
-    from ..engine.db.learning_repository import LearningRepositories
-    from .learning.candidate_service import LearningCandidateService
 except ImportError:  # pragma: no cover - 由仓库测试/旧调用路径使用
     from domain.evidence import EvidenceBinding, EvidenceRef
     from domain.scope import CatalogScope, RuntimeScope, validate_formal_command_scope
     from engine.database import WaveMemoryDB
     from engine.vector_index import VectorIndex
     from engine.book_lore_index import BookLoreIndex
-    from engine.db.learning_repository import LearningRepositories
-    from services.learning.candidate_service import LearningCandidateService
 
 from astrbot.api import logger
 from .llm_fallback import LLMFallbackClient
@@ -97,18 +93,7 @@ class SelfReflectService:
         self._recent_replies: dict[str, deque] = defaultdict(lambda: deque(maxlen=10))
         self._cooldown_map: dict[tuple[str, str, str], float] = {}
         self._reflect_count = 0
-
-        learning_repositories = repositories or getattr(db, "learning", None)
-        if learning_repositories is None:
-            connection = getattr(db, "conn", None)
-            if connection is not None:
-                try:
-                    learning_repositories = LearningRepositories.from_connection(connection)
-                except Exception as exc:
-                    logger.warning(f"[SelfReflect] Learning repository unavailable: {exc}")
         self.candidate_service = candidate_service
-        if self.candidate_service is None and learning_repositories is not None:
-            self.candidate_service = LearningCandidateService(learning_repositories)
 
     @staticmethod
     def _normalize_bot_id(value: str | None, *, allow_empty: bool = False) -> str:
@@ -281,7 +266,7 @@ class SelfReflectService:
         message_id = str(message_id or "").strip()
         bot_reply = str(bot_reply or "").strip()
         correction = str(correction or "").strip()
-        if not message_id or not bot_reply or not correction or self.candidate_service is None:
+        if not message_id or not bot_reply or not correction:
             return False
 
         knowledge, lore_hits = await self._search_book_lore(stable_bot_id, bot_reply, correction)
@@ -351,34 +336,35 @@ class SelfReflectService:
             },
             ensure_ascii=False, sort_keys=True,
         ).encode("utf-8")
-        source_fingerprint = "self-reflect:" + hashlib.sha256(fingerprint_data).hexdigest()
-        source_id = None
-        repositories = getattr(self.candidate_service, "repositories", None)
-        source_repository = getattr(repositories, "sources", None)
-        if source_repository is not None:
-            try:
-                source_id = source_repository.create(
-                    bot_id=stable_bot_id,
-                    source_type="self_reflect",
-                    name="correction_feedback",
-                    config={"bot_id": stable_bot_id, "scope": scope_payload},
-                )
-            except Exception as exc:
-                logger.debug(f"[SelfReflect] Could not register source: {exc}")
-        self.candidate_service.create(
-            bot_id=stable_bot_id,
-            candidate_type=CORRECTION_LEARNING_CANDIDATE,
-            content=text,
-            evidence=evidence,
-            source_fingerprint=source_fingerprint,
-            source_id=source_id,
-            reason="SelfReflect 检测到用户纠正，待审核后晋升",
-            metadata={
-                "source": "self_reflect",
-                "bot_id": stable_bot_id,
-                "session_id": runtime_scope.session.id,
-            },
-        )
+        if self.candidate_service is not None:
+            source_fingerprint = "self-reflect:" + hashlib.sha256(fingerprint_data).hexdigest()
+            source_id = None
+            repositories = getattr(self.candidate_service, "repositories", None)
+            source_repository = getattr(repositories, "sources", None)
+            if source_repository is not None:
+                try:
+                    source_id = source_repository.create(
+                        bot_id=stable_bot_id,
+                        source_type="self_reflect",
+                        name="correction_feedback",
+                        config={"bot_id": stable_bot_id, "scope": scope_payload},
+                    )
+                except Exception as exc:
+                    logger.debug(f"[SelfReflect] Could not register source: {exc}")
+            self.candidate_service.create(
+                bot_id=stable_bot_id,
+                candidate_type=CORRECTION_LEARNING_CANDIDATE,
+                content=text,
+                evidence=evidence,
+                source_fingerprint=source_fingerprint,
+                source_id=source_id,
+                reason="SelfReflect 检测到用户纠正，待审核后晋升",
+                metadata={
+                    "source": "self_reflect",
+                    "bot_id": stable_bot_id,
+                    "session_id": runtime_scope.session.id,
+                },
+            )
         return True
 
     def cleanup_cooldown(self):

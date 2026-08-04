@@ -107,6 +107,23 @@ def _group_scope(*, bot_id="bot-a", group_id="group-1"):
     )
 
 
+def _private_scope(*, bot_id="bot-a", user_id="user-1"):
+    from astrbot_plugin_wave_memory.domain.scope import RuntimeScope, SessionRef
+
+    conversation_id = f"user:{user_id}"
+    return RuntimeScope(
+        bot_id=bot_id,
+        visibility="private",
+        session=SessionRef(
+            id=f"qq:private:{conversation_id}",
+            platform_id="qq",
+            kind="private",
+            conversation_id=conversation_id,
+        ),
+        subject_principal_id=f"qq:user:{user_id}",
+    )
+
+
 class MessageWriterDedupTest(unittest.TestCase):
     def _writer(self, db=None, *, window_seconds=300):
         from astrbot_plugin_wave_memory.services.message_writer import MemoryDedupPolicy, MessageWriter
@@ -349,6 +366,31 @@ class MessageWriterDedupTest(unittest.TestCase):
         self.assertEqual(writer.stats["embedding_retries"], 1)
         self.assertEqual(writer.stats["embedding_recovered_after_retry"], 1)
         self.assertEqual(writer.stats["embedding_terminal_timeouts"], 0)
+
+    def test_private_scope_uses_canonical_conversation_and_visibility_dedup_key(self):
+        db = FakeDB()
+        writer = self._writer(db)
+        asyncio.run(writer._process_batch([
+            {
+                "scope": _private_scope(),
+                "group_id": "user:user-1",
+                "sender_id": "user-1",
+                "content": "私聊消息应进入基础写入链路",
+                "timestamp": 3400.0,
+                "source": "chat",
+            },
+            {
+                "scope": _private_scope(bot_id="bot-b"),
+                "group_id": "user:user-1",
+                "sender_id": "user-1",
+                "content": "私聊消息应进入基础写入链路",
+                "timestamp": 3401.0,
+                "source": "chat",
+            },
+        ]))
+        assert len(db.added) == 2
+        assert {item["scope"].visibility for item in db.added} == {"private"}
+        assert {item["group_id"] for item in db.added} == {"user:user-1"}
 
     def test_scope_payload_rejects_mismatched_or_non_group_legacy_projection(self):
         from astrbot_plugin_wave_memory.services.message_writer import MessageScopeError

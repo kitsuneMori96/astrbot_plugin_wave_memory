@@ -87,21 +87,17 @@ def _config_section(container: Any, name: str) -> Mapping[str, Any]:
 
 
 def _book_lore_path(container: Any) -> Path | None:
-    for owner in (container, getattr(container, "learning_source_registry", None)):
-        if owner is None:
-            continue
-        for name in ("book_lore_db_path", "lore_db_path"):
-            value = getattr(owner, name, None)
-            if value is not None and str(value).strip():
-                return Path(str(value)).expanduser().resolve()
+    for name in ("book_lore_db_path", "lore_db_path"):
+        value = getattr(container, name, None)
+        if value is not None and str(value).strip():
+            return Path(str(value)).expanduser().resolve()
 
     config = getattr(container, "plugin_config", None)
     if isinstance(config, Mapping):
         values: list[Any] = [config.get("book_lore_db_path"), config.get("lore_db_path")]
-        for section_name in ("BookLore_Settings", "Study_Settings", "Learning_Settings"):
-            section = config.get(section_name)
-            if isinstance(section, Mapping):
-                values.extend((section.get("book_lore_db_path"), section.get("lore_db_path")))
+        section = config.get("BookLore_Settings")
+        if isinstance(section, Mapping):
+            values.extend((section.get("book_lore_db_path"), section.get("lore_db_path")))
         for value in values:
             if value is not None and str(value).strip():
                 return Path(str(value)).expanduser().resolve()
@@ -117,26 +113,9 @@ def _book_lore_path(container: Any) -> Path | None:
 
 
 def _catalog_scope(container: Any) -> CatalogScope:
-    study = _config_section(container, "Study_Settings")
-    learning = _config_section(container, "Learning_Settings")
-    catalog_id = str(
-        request.args.get("catalog_id")
-        or study.get("source_library_id")
-        or learning.get("catalog_id")
-        or "book-lore"
-    ).strip()
-    corpus_id = str(
-        request.args.get("corpus_id")
-        or study.get("source_corpus_id")
-        or learning.get("corpus_id")
-        or "default"
-    ).strip()
-    version = str(
-        request.args.get("version")
-        or study.get("source_version")
-        or learning.get("catalog_version")
-        or "current"
-    ).strip()
+    catalog_id = str(request.args.get("catalog_id") or "book-lore").strip()
+    corpus_id = str(request.args.get("corpus_id") or "default").strip()
+    version = str(request.args.get("version") or "current").strip()
     return CatalogScope(catalog_id=catalog_id, corpus_id=corpus_id, version=version)
 
 
@@ -185,59 +164,6 @@ async def get_book_lore_summary():
         })
     except (ExternalBookLoreError, TypeError, ValueError) as exc:
         return _book_lore_error(exc)
-
-
-def _book_lore_projection_repository():
-    return getattr(get_container(), "book_lore_repository", None)
-
-
-def _serialize_book_lore_projection(item: Mapping[str, Any]) -> dict[str, Any]:
-    target_scope = item.get("target_scope")
-    return {
-        "id": int(item["id"]),
-        "community_id": str(item.get("community_id") or ""),
-        "title": str(item.get("title") or ""),
-        "summary": str(item.get("summary") or ""),
-        "content": str(item.get("content") or ""),
-        "rank": float(item.get("rank") or 0.0),
-        "status": str(item.get("status") or ""),
-        "revision": int(item.get("revision") or 1),
-        "source_scope": _serialize_domain(item.get("source_scope")),
-        "target_scope": _serialize_domain(target_scope),
-        "candidate": _serialize_domain(item.get("candidate") or {}),
-        "evidence": _serialize_domain(item.get("evidence_refs") or ()),
-        "derivation": _serialize_domain(item.get("derivation")),
-        "source_candidate_id": item.get("source_candidate_id"),
-        "created_at": item.get("created_at"),
-        "updated_at": item.get("updated_at"),
-        "approved_at": item.get("approved_at"),
-    }
-
-
-@knowledge_bp.route("/knowledge/book-lore/projections", methods=["GET"])
-@require_auth
-async def list_reviewed_book_lore_projections():
-    try:
-        limit, offset = _page_args(max_limit=500)
-        scope = _requested_runtime_scope()
-        if scope is None:
-            return jsonify(error_payload("scope_required", "bot_id and canonical session_id are required")), 400
-        if _connection() is None:
-            return jsonify(error_payload("service_unavailable", "BookLore projection store is unavailable", retryable=True)), 503
-        repository = _book_lore_projection_repository()
-        if repository is None:
-            return jsonify(error_payload("service_unavailable", "Reviewed BookLore repository is unavailable", retryable=True)), 503
-        search = str(request.args.get("search") or "").strip()
-        rows = repository.list_approved(scope=scope, limit=limit, offset=offset, search=search)
-        total = repository.count_approved(scope=scope, search=search)
-        payload = page_response([_serialize_book_lore_projection(item) for item in rows], total=total, limit=limit, offset=offset)
-        payload["scope"] = scope.to_dict()
-        payload["source"] = "reviewed_book_lore_projections"
-        return jsonify(payload)
-    except (TypeError, ValueError):
-        return jsonify(error_payload("invalid_request", "Invalid reviewed BookLore query")), 400
-    except Exception:
-        return jsonify(error_payload("service_unavailable", "BookLore projection store is unavailable", retryable=True)), 503
 
 
 @knowledge_bp.route("/knowledge/book-lore/<resource>", methods=["GET"])
@@ -554,6 +480,66 @@ async def get_few_shot(item_id: int):
     if item is None or item.get("scope") != scope or item.get("status") != "approved" or not _healthy_few_shot(item.get("content")):
         return jsonify(not_found_payload()), 404
     return jsonify(_serialize_few_shot(item))
+
+
+@knowledge_bp.route("/knowledge/experiences", methods=["GET"])
+@require_auth
+async def list_experiences():
+    """只读检索历史经历片段 (experience_episodes)。"""
+    try:
+        limit, offset = _page_args(max_limit=200)
+        conn = _connection()
+        if conn is None:
+            return jsonify(error_payload("service_unavailable", "Experience store is unavailable", retryable=True)), 503
+        if not _table_exists(conn, "experience_episodes"):
+            return jsonify(page_response([], total=0, limit=limit, offset=offset))
+
+        columns = _columns(conn, "experience_episodes")
+        where = ["1=1"]
+        params: list[Any] = []
+
+        bot_id = str(request.args.get("bot_id") or "").strip()
+        if bot_id and "bot_id" in columns:
+            where.append("bot_id=?")
+            params.append(bot_id)
+
+        search = str(request.args.get("search") or "").strip()
+        if search:
+            searchable = [
+                c for c in (
+                    "trigger_text", "bot_inner_thought", "bot_action",
+                    "bot_reply", "user_reaction", "outcome", "episode_type",
+                ) if c in columns
+            ]
+            if searchable:
+                where.append("(" + " OR ".join(f'"{c}" LIKE ?' for c in searchable) + ")")
+                params.extend([f"%{search}%"] * len(searchable))
+
+        episode_type = str(request.args.get("episode_type") or "").strip()
+        if episode_type and "episode_type" in columns:
+            where.append("episode_type=?")
+            params.append(episode_type)
+
+        min_weight = request.args.get("min_emotional_weight")
+        if min_weight is not None and "emotional_weight" in columns:
+            try:
+                where.append("emotional_weight >= ?")
+                params.append(float(min_weight))
+            except ValueError:
+                pass
+
+        where_sql = " WHERE " + " AND ".join(where)
+        total = int(conn.execute("SELECT COUNT(*) FROM experience_episodes" + where_sql, params).fetchone()[0])
+        order = "created_at DESC, id DESC" if "created_at" in columns else "id DESC"
+        items = _row_dicts(conn.execute(
+            f"SELECT * FROM experience_episodes{where_sql} ORDER BY {order} LIMIT ? OFFSET ?",
+            (*params, limit, offset),
+        ))
+        return jsonify(page_response(items, total=total, limit=limit, offset=offset))
+    except (TypeError, ValueError):
+        return jsonify(error_payload("invalid_pagination", "Invalid pagination parameters")), 400
+    except Exception as exc:
+        return jsonify(error_payload("service_unavailable", str(exc), retryable=True)), 503
 
 
 __all__ = ["knowledge_bp"]

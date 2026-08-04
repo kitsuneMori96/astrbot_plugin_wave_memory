@@ -79,8 +79,20 @@ def _canonical_contexts(value: Sequence[Any] | None) -> str:
 
 
 def normalize_tag_name(value: Any) -> str:
-    """Normalize a Tag name for the semantic Catalog without changing display text."""
-    return unicodedata.normalize("NFKC", str(value or "")).strip()
+    """Normalize a Tag name for semantic Catalog uniqueness on the write path.
+
+    Stronger than bare NFKC: strips zero-width chars, collapses whitespace, casefolds
+    Latin text, and removes trailing particles so near-duplicate phrases collide.
+    Display names remain the original caller-provided text at insert time.
+    """
+    try:
+        from ...services.tag_admission import normalize_admission_name
+    except ImportError:  # pragma: no cover - focused package imports
+        try:
+            from services.tag_admission import normalize_admission_name
+        except ImportError:
+            return unicodedata.normalize("NFKC", str(value or "")).strip()
+    return normalize_admission_name(value)
 
 
 def _positive_ints(values: Sequence[Any]) -> list[int]:
@@ -647,6 +659,15 @@ class ScopedKnowledgeRepo:
         # baseline when the materialized projection is not backfilled yet. Cross
         # group recall is explicit and still admits only complete group tag scopes.
         try:
+            # Push the candidate tag filter into SQL; a full scoped-link scan made
+            # cold recall cost seconds on large corpora.
+            effective = effective_tag_rows(
+                self.cm,
+                scope=None if allow_cross_group_recall else scope,
+                tag_ids=ids,
+            )
+        except TypeError:
+            # Older/compat projection helpers without tag pushdown.
             effective = effective_tag_rows(self.cm, scope=None if allow_cross_group_recall else scope)
         except Exception:
             return []
@@ -907,6 +928,137 @@ class ScopedKnowledgeRepo:
             }
             for row in rows
         ]
+
+    def record_scoped_belief_observation(
+        self,
+        scope: RuntimeScope,
+        *,
+        belief_id: int,
+        window_key: str,
+        polarity: str,
+        memory_ids: Sequence[int],
+        participants: Sequence[str] | None = None,
+        source_tags: Sequence[Any] | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        window_started_at: float | None = None,
+        window_ended_at: float | None = None,
+        observed_at: float | None = None,
+    ) -> int:
+        """记录一段可去重的 scoped Belief 经历观察。
+
+        同一个 belief、consolidation window 和 polarity 的重试会覆写同一行，
+        因此不会因任务重试或 LLM 重放重复增加支持度。
+        """
+        scope = _require_group_scope(scope)
+        if isinstance(belief_id, bool):
+            raise ValueError("belief_id must be a positive integer")
+        try:
+            belief_id = int(belief_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("belief_id must be a positive integer") from exc
+        if belief_id <= 0:
+            raise ValueError("belief_id must be a positive integer")
+        window_key = _require_exact_string(window_key, "window_key")
+        polarity = _require_exact_string(polarity, "polarity").lower()
+        if polarity not in {"support", "challenge"}:
+            raise ValueError("polarity must be support or challenge")
+        normalized_ids = list(dict.fromkeys(_positive_ints(memory_ids)))
+        if not normalized_ids:
+            raise ValueError("memory_ids must contain at least one positive integer")
+        for memory_id in normalized_ids:
+            self._require_scoped_memory(scope, memory_id)
+        belief_row = self.cm.execute_read(
+            "SELECT id FROM scoped_beliefs WHERE id=? AND bot_id=? AND session_id=? AND visibility=?",
+            (belief_id, *_scope_params(scope)),
+        ).fetchone()
+        if belief_row is None:
+            raise ScopedKnowledgeScopeError("belief_scope_mismatch", "belief does not belong to the RuntimeScope")
+        normalized_participants = [
+            str(value or "").strip()
+            for value in (participants or [])
+            if str(value or "").strip()
+        ]
+        normalized_participants = list(dict.fromkeys(normalized_participants))
+        now = float(observed_at if observed_at is not None else time.time())
+        try:
+            started = float(window_started_at) if window_started_at is not None else now
+            ended = float(window_ended_at) if window_ended_at is not None else now
+        except (TypeError, ValueError) as exc:
+            raise ValueError("window timestamps must be numeric when provided") from exc
+        if ended < started:
+            started, ended = ended, started
+        self.cm.execute_write(
+            """INSERT INTO scoped_belief_observations (
+                    bot_id, session_id, visibility, belief_id, window_key, polarity,
+                    memory_ids, participants, source_tags, metadata, window_started_at,
+                    window_ended_at, observed_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(bot_id, session_id, visibility, belief_id, window_key, polarity)
+                DO UPDATE SET memory_ids=excluded.memory_ids, participants=excluded.participants,
+                    source_tags=excluded.source_tags, metadata=excluded.metadata,
+                    window_started_at=excluded.window_started_at, window_ended_at=excluded.window_ended_at,
+                    observed_at=excluded.observed_at, updated_at=excluded.updated_at""",
+            (
+                *_scope_params(scope), belief_id, window_key, polarity,
+                _canonical_contexts(normalized_ids), _canonical_contexts(normalized_participants),
+                _canonical_contexts(source_tags), _canonical_json(metadata, "metadata"),
+                started, ended, now, now, now,
+            ),
+        )
+        self.cm.commit()
+        return self._select_id(
+            "scoped_belief_observations",
+            "bot_id=? AND session_id=? AND visibility=? AND belief_id=? AND window_key=? AND polarity=?",
+            (*_scope_params(scope), belief_id, window_key, polarity),
+        )
+
+    def list_scoped_belief_observations(
+        self, scope: RuntimeScope, *, belief_id: int | None = None, limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """列出某 Scope 下可审计的 Belief 支持/反证经历。"""
+        scope = _require_group_scope(scope)
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        conditions = ["bot_id=?", "session_id=?", "visibility=?"]
+        params: list[Any] = list(_scope_params(scope))
+        if belief_id is not None:
+            if isinstance(belief_id, bool):
+                raise ValueError("belief_id must be a positive integer")
+            try:
+                belief_id = int(belief_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("belief_id must be a positive integer") from exc
+            if belief_id <= 0:
+                raise ValueError("belief_id must be a positive integer")
+            conditions.append("belief_id=?")
+            params.append(belief_id)
+        rows = self.cm.execute_read(
+            f"""SELECT id, belief_id, window_key, polarity, memory_ids, participants,
+                       source_tags, metadata, window_started_at, window_ended_at,
+                       observed_at, created_at, updated_at
+                  FROM scoped_belief_observations WHERE {' AND '.join(conditions)}
+                 ORDER BY observed_at ASC, id ASC LIMIT ?""",
+            [*params, limit],
+        ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                memory_ids = json.loads(row[4] or "[]")
+                participants = json.loads(row[5] or "[]")
+                source_tags = json.loads(row[6] or "[]")
+                metadata = json.loads(row[7] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            result.append({
+                "id": row[0], "belief_id": row[1], "window_key": row[2], "polarity": row[3],
+                "memory_ids": memory_ids if isinstance(memory_ids, list) else [],
+                "participants": participants if isinstance(participants, list) else [],
+                "source_tags": source_tags if isinstance(source_tags, list) else [],
+                "metadata": metadata if isinstance(metadata, dict) else {},
+                "window_started_at": row[8], "window_ended_at": row[9],
+                "observed_at": row[10], "created_at": row[11], "updated_at": row[12],
+            })
+        return result
 
     def get_scoped_consolidation_cursor(self, scope: RuntimeScope, *, cursor_name: str) -> str | None:
         scope = _require_group_scope(scope)

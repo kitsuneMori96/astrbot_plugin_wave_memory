@@ -486,23 +486,33 @@ class TagWorker:
         return normalized
 
     async def _save_tags(self, item: TagWorkItem, tags: list) -> int:
-        """Write formal tags to scoped projections or legacy tags to legacy links."""
+        """Write formal tags to scoped projections or legacy tags to legacy links.
+
+        Scoped work never expands the legacy ``tags`` pool.  Both lanes run the
+        shared admission filter so stop-words and low-confidence phrases cannot
+        become long-lived vectors.
+        """
+        try:
+            from .tag_admission import admit_tag_batch, quality_reject_reason
+        except ImportError:  # pragma: no cover
+            from services.tag_admission import admit_tag_batch, quality_reject_reason
+
+        admitted, _decisions = admit_tag_batch(tags if isinstance(tags, list) else [])
         saved_count = 0
-        for position, tag_info in enumerate(tags, 1):
-            if not isinstance(tag_info, dict):
+        for position, tag_info in enumerate(admitted, 1):
+            name = str(tag_info.get("name") or "").strip()
+            if not name:
                 continue
-            name = tag_info.get("name", "")
-            if not isinstance(name, str) or not name.strip():
-                continue
-            name = name.strip()
             tag_type = tag_info.get("type", "keyword")
             confidence = tag_info.get("confidence", 0.8)
             if not isinstance(tag_type, str):
                 tag_type = "keyword"
 
             if item.scope is None:
-                # The legacy lane deliberately persists semantic evidence in the
-                # original tags/memory_tags tables rather than inventing Scope.
+                # Legacy lane only: exact-name upsert into historical tags/memory_tags.
+                # Quality admission already ran; still refuse non-lexical leftovers.
+                if quality_reject_reason(name, tag_type, float(confidence)) is not None:
+                    continue
                 vector = tag_info.get("embedding")
                 try:
                     import numpy as np
@@ -523,14 +533,18 @@ class TagWorker:
                 saved_count += 1
                 continue
 
-            # scoped_tags only preserve current Scope links; semantic vectors use
-            # the Catalog index and never the legacy tag-id label space.
+            # Formal Scope path: Catalog + scoped_tags only. Never touch legacy tags.
             tag_id = self.db.upsert_scoped_tag(
                 item.scope,
                 name=name,
                 tag_type=tag_type,
                 confidence=confidence,
-                metadata={"producer": "tag_worker", "memory_id": item.memory_id},
+                metadata={
+                    "producer": "tag_worker",
+                    "memory_id": item.memory_id,
+                    "admission": tag_info.get("admission"),
+                    "admission_reason": tag_info.get("admission_reason"),
+                },
             )
             catalog_id = getattr(self.db, "get_scoped_tag_catalog_id", lambda *_: None)(item.scope, tag_id)
             vector = tag_info.get("embedding")

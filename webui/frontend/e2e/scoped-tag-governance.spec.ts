@@ -39,7 +39,7 @@ test('scoped Tag 工作台先预检再批准，并在窄屏保持可用', async 
   await page.goto('#/tags')
   await page.getByLabel('Bot').selectOption('bot-alpha')
   await page.getByLabel('群 / canonical session').selectOption('qq:group:g1')
-  await expect(page.getByText('当前 Scope 的 Tag')).toBeVisible()
+  await expect(page.getByText('当前 Scope 的 Tag', { exact: true })).toBeVisible()
   const tagCheckboxes = page.locator('input[type="checkbox"]')
   await tagCheckboxes.nth(0).check()
   await tagCheckboxes.nth(1).check()

@@ -110,7 +110,7 @@ class FewShotService:
         seven_days_ago = int(now) - 7 * 86400
         rows = self._db.conn.execute(
             """SELECT id, content FROM memories
-               WHERE source IN ('bot_reply', 'bzz_experience', 'bzz_evolution')
+               WHERE source IN ('bot_reply', 'bzz_experience')
                AND timestamp > ? AND LENGTH(content) >= 20
                ORDER BY RANDOM() LIMIT 50""",
             (seven_days_ago,),

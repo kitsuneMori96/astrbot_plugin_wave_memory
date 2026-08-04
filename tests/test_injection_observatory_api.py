@@ -70,9 +70,14 @@ class InjectionObservatoryApiTest(unittest.TestCase):
 
     def test_trace_list_limits_large_result_sets(self):
         from services.injection.channel_base import InjectionResult
+        from services.injection.trace_store import InjectionTraceStore
         from webui.blueprints.injection_observatory import build_trace_list_payload
 
-        trace_store, _ = self._stores()
+        mem_conn = sqlite3.connect(":memory:")
+        self.addCleanup(mem_conn.close)
+        trace_store = InjectionTraceStore(mem_conn)
+        trace_store.ensure_schema()
+
         for i in range(550):
             trace_store.record(
                 {"trace_id": f"trace-many-{i}", "timestamp": i, "mode": "full", "message": str(i), "status": "ok"},

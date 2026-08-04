@@ -85,7 +85,10 @@ class PairSimilarityService:
         self._last_refresh = time.time()
         logger.info("[WaveMemory] PairSimilarity projection empty; waiting for durable rebuild job.")
 
-    compute_projection = staticmethod(compute_pair_similarity_projection)
+    @staticmethod
+    def compute_projection(rows, **kwargs):
+        """Delegate to the pure sparse projection builder (accepts Top-K kwargs)."""
+        return compute_pair_similarity_projection(rows, **kwargs)
 
     def clear_cache(self) -> None:
         """Invalidate the read cache after a committed Tag projection change."""
@@ -93,9 +96,14 @@ class PairSimilarityService:
         self._last_refresh = 0
 
     def install_projection(self, cache: dict[tuple[int, int], float]) -> None:
-        """Install a verified durable-job result into the bounded read cache."""
+        """Install a verified durable-job result into the bounded read cache.
+
+        Sparse Top-K projections already keep the edge set small; if an older
+        oversized payload arrives, keep the highest-similarity edges first.
+        """
         if len(cache) > self._max_cache_size:
-            cache = dict(list(cache.items())[: self._max_cache_size])
+            ordered = sorted(cache.items(), key=lambda item: item[1], reverse=True)
+            cache = dict(ordered[: self._max_cache_size])
         self._cache = dict(cache)
         self._last_refresh = time.time()
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import time
 from collections import defaultdict
 from itertools import groupby
@@ -17,6 +18,21 @@ except ImportError:  # pragma: no cover - focused repository tests without AstrB
 from .database import WaveMemoryDB
 from .db.scoped_tag_projection import effective_tag_rows
 from .semantic_gain import bell_gain, SemanticGainConfig
+
+
+# Canonical rebuild-frequency policy for the derived cooccurrence projection.
+# A full rebuild materialises a second forward/backward graph before publishing,
+# so frequent rebuilds are the dominant memory-churn source.  These defaults are
+# the single source of truth: main.py and any compatibility caller share them so
+# an independently constructed scheduler cannot fall back to the old 5%/300s rate.
+DEFAULT_REBUILD_THRESHOLD_PCT = 0.20
+DEFAULT_REBUILD_COOLDOWN_SEC = 1800.0
+
+# Bound on retained directed neighbours per source tag.  The builder previously
+# accumulated the dense per-memory tag cross-product and only pruned afterwards,
+# so peak memory grew with the widest tag co-occurrence rather than the retained
+# graph.  Keeping the strongest edges preserves routing behaviour under a bound.
+DEFAULT_MAX_NEIGHBORS_PER_TAG = 64
 
 
 def ordinal_potential(position: int, max_position: int) -> float:
@@ -34,11 +50,24 @@ class DirectedCooccurrence:
     与旧 CooccurrenceMatrix 接口兼容。
     """
 
-    def __init__(self, db: WaveMemoryDB, pair_sim_service=None, residual_map: dict = None, semantic_gain_config: SemanticGainConfig = None):
+    def __init__(
+        self,
+        db: WaveMemoryDB,
+        pair_sim_service=None,
+        residual_map: dict = None,
+        semantic_gain_config: SemanticGainConfig = None,
+        max_neighbors_per_tag: int = DEFAULT_MAX_NEIGHBORS_PER_TAG,
+    ):
         self.db = db
         self.pair_sim_service = pair_sim_service
         self.residual_map = residual_map or {}
         self.semantic_gain_config = semantic_gain_config or SemanticGainConfig()
+        try:
+            bound = int(max_neighbors_per_tag)
+        except (TypeError, ValueError):
+            bound = DEFAULT_MAX_NEIGHBORS_PER_TAG
+        # 0 or negative would mean "unbounded"; keep a positive resident bound.
+        self.max_neighbors_per_tag = bound if bound > 0 else DEFAULT_MAX_NEIGHBORS_PER_TAG
         # {source_id: {target_id: directed_weight}}
         self.forward: dict[int, dict[int, float]] = defaultdict(lambda: defaultdict(float))
         # 反向索引
@@ -128,16 +157,33 @@ class DirectedCooccurrence:
                 for src in new_backward[tgt]:
                     new_backward[tgt][src] /= max_w
 
-        # 剪枝
+        # 剪枝 + Top-K 邻居上限：先丢弱边，再对超宽节点只保留最强邻居。
+        # 上限只作用于常驻图，不改变数据库中的 Tag 事实。
+        bound = self.max_neighbors_per_tag
         for src in list(new_forward.keys()):
-            new_forward[src] = {tgt: w for tgt, w in new_forward[src].items() if w >= 0.01}
-            if not new_forward[src]:
+            neighbors = {tgt: w for tgt, w in new_forward[src].items() if w >= 0.01}
+            if len(neighbors) > bound:
+                neighbors = dict(
+                    sorted(neighbors.items(), key=lambda item: (-item[1], item[0]))[:bound]
+                )
+            if neighbors:
+                new_forward[src] = neighbors
+            else:
                 del new_forward[src]
 
-        for tgt in list(new_backward.keys()):
-            new_backward[tgt] = {src: w for src, w in new_backward[tgt].items() if w >= 0.01}
-            if not new_backward[tgt]:
-                del new_backward[tgt]
+        # backward 必须与裁剪后的 forward 保持一致，否则反向锚定会读到已被
+        # 丢弃的边，并让常驻内存重新按未裁剪的宽度增长。
+        rebuilt_backward: dict[int, dict[int, float]] = {}
+        for src, neighbors in new_forward.items():
+            for tgt, weight in neighbors.items():
+                rebuilt_backward.setdefault(tgt, {})[src] = weight
+        for tgt in list(rebuilt_backward.keys()):
+            inbound = rebuilt_backward[tgt]
+            if len(inbound) > bound:
+                rebuilt_backward[tgt] = dict(
+                    sorted(inbound.items(), key=lambda item: (-item[1], item[0]))[:bound]
+                )
+        new_backward = rebuilt_backward
 
         # 原子切换
         self.forward = new_forward
@@ -312,8 +358,8 @@ class CooccurrenceScheduler:
     def __init__(
         self,
         cooccurrence: DirectedCooccurrence,
-        threshold_pct: float = 0.05,
-        cooldown_sec: float = 300,
+        threshold_pct: float = DEFAULT_REBUILD_THRESHOLD_PCT,
+        cooldown_sec: float = DEFAULT_REBUILD_COOLDOWN_SEC,
         on_rebuild_complete=None,
         rebuild_lock: asyncio.Lock | None = None,
     ):
@@ -477,6 +523,13 @@ class CooccurrenceScheduler:
                     pair_sim_service=self.cooccurrence.pair_sim_service,
                     residual_map=self.cooccurrence.residual_map,
                     semantic_gain_config=self.cooccurrence.semantic_gain_config,
+                    # The replacement must keep the live resident bound; otherwise a
+                    # rebuild would silently republish an unbounded neighbour graph.
+                    max_neighbors_per_tag=getattr(
+                        self.cooccurrence,
+                        "max_neighbors_per_tag",
+                        DEFAULT_MAX_NEIGHBORS_PER_TAG,
+                    ),
                 )
                 await asyncio.to_thread(new_matrix.rebuild)
                 # Publish only a fully rebuilt matrix; readers never observe its
@@ -502,6 +555,7 @@ class CooccurrenceScheduler:
                     self._accumulated_changes,
                     reason_names,
                 )
+                gc.collect()
 
             if self.on_rebuild_complete:
                 try:

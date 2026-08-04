@@ -41,32 +41,6 @@ export interface BookLorePage extends PageResponse<BookLoreItem> {
   read_only: true
 }
 
-export interface ReviewedBookLoreProjection {
-  id: number
-  community_id: string
-  title: string
-  summary: string
-  content: string
-  rank: number
-  status: 'approved'
-  revision: number
-  source_scope: CatalogScopeDto
-  target_scope: {
-    bot_id: string
-    visibility: 'group'
-    session: { id: string; platform_id: string; kind: 'group'; conversation_id: string }
-  }
-  evidence: EvidenceRef[]
-  created_at?: number | null
-  updated_at?: number | null
-  approved_at?: number | null
-}
-
-export interface ReviewedBookLorePage extends PageResponse<ReviewedBookLoreProjection> {
-  scope: ReviewedBookLoreProjection['target_scope']
-  source: 'reviewed_book_lore_projections'
-}
-
 export interface BookLoreSummary {
   scope: CatalogScopeDto
   counts: Record<BookLoreResource, number>
@@ -131,10 +105,6 @@ export function getBookLoreSummary(query: Pick<KnowledgeListQuery, 'catalog_id' 
 
 export function getBookLoreItems(resource: BookLoreResource, query: KnowledgeListQuery = {}): Promise<BookLorePage> {
   return fetchJson<BookLorePage>(`/api/knowledge/book-lore/${resource}${queryString(query)}`)
-}
-
-export function getReviewedBookLore(query: KnowledgeListQuery): Promise<ReviewedBookLorePage> {
-  return fetchJson<ReviewedBookLorePage>(`/api/knowledge/book-lore/projections${queryString(query)}`)
 }
 
 export function getScopedFacts(query: KnowledgeListQuery): Promise<ScopedFactsPage> {

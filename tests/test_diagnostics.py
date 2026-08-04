@@ -208,6 +208,7 @@ def test_diagnostics_collects_readonly_evidence_and_distinct_health(tmp_path):
         "memory_index_shadow",
         "tag_index_shadow",
         "book_lore_source",
+        "process_memory",
     }
     assert by_name["legacy_scope_debt"]["health"] in HEALTH_VALUES
     assert "legacy_null_scope" in by_name["legacy_scope_debt"]["evidence"]

@@ -9,8 +9,10 @@ from typing import Any, Dict, List
 from astrbot.api import logger
 try:
     from ...domain.scope import RuntimeScope
+    from ...engine.database import normalize_jargon_word
 except ImportError:
     from domain.scope import RuntimeScope
+    from engine.database import normalize_jargon_word
 try:
     from ..identity_safety import is_identity_contamination
 except ImportError:
@@ -23,10 +25,23 @@ _COMPARE_INFERENCES = """对于词条「{word}」，上下文推断为「{meanin
 
 
 class JargonInferenceEngine:
-    def __init__(self, llm_client: Any, max_context: int = 15):
+    def __init__(self, llm_client: Any, max_context: int = 15, blocklist_checker: Any = None):
         self._llm, self._max_context = llm_client, max_context
+        self._blocklist_checker = blocklist_checker
+
+    def _is_blocked(self, word: str) -> bool:
+        if not callable(self._blocklist_checker):
+            return False
+        try:
+            return bool(self._blocklist_checker(normalize_jargon_word(word)))
+        except Exception as exc:
+            logger.warning("[Jargon] inference blocklist check failed closed for %r: %s", word, exc)
+            return True
 
     async def infer(self, word: str, contexts: List[str]) -> Dict[str, Any]:
+        word = normalize_jargon_word(word)
+        if self._is_blocked(word):
+            return {"is_jargon": None, "meaning": "", "confidence": 0.0, "enter_llm": False, "reject_reason": "global_blocklist"}
         meaning_a = await self._step_with_context(word, contexts)
         if not meaning_a:
             return {"is_jargon": None, "meaning": "", "confidence": 0.0}
@@ -58,12 +73,22 @@ class JargonInferenceEngine:
 
 class JargonInjector:
     """读取当前 Scope confirmed 词条，并解释命中的广域 curated 词条。"""
-    def __init__(self, db: Any, max_inject: int = 3, holyman_reference: Any = None):
+    def __init__(self, db: Any, max_inject: int = 3, holyman_reference: Any = None, blocklist_checker: Any = None):
         self._repo, self._max_inject = getattr(db, "scoped_knowledge", None), max_inject
         self._holyman = holyman_reference
+        self._blocklist_checker = blocklist_checker if blocklist_checker is not None else getattr(db, "is_jargon_blocked", None)
         self._cache: Dict[tuple[str, str, str], List[Dict[str, Any]]] = {}
         self._cache_ts: Dict[tuple[str, str, str], float] = {}
         self._last_injection_items: List[Dict[str, Any]] = []
+
+    def _is_blocked(self, word: str) -> bool:
+        if not callable(self._blocklist_checker):
+            return False
+        try:
+            return bool(self._blocklist_checker(normalize_jargon_word(word)))
+        except Exception as exc:
+            logger.warning("[Jargon] injector blocklist check failed closed for %r: %s", word, exc)
+            return True
 
     def get_injection(self, text: str, runtime_scope: RuntimeScope | None, max_items: int | None = None) -> str:
         self._last_injection_items = []
@@ -75,6 +100,7 @@ class JargonInjector:
             item for item in jargons
             if str(item.get("word") or "").strip()
             and str(item.get("meaning") or "").strip()
+            and not self._is_blocked(str(item["word"]))
             and self._word_explicitly_mentioned(text_lower, str(item["word"]))
         ]
         selected.sort(key=lambda item: (-len(str(item["word"])), -float(item.get("frequency", 0) or 0)))
@@ -86,10 +112,16 @@ class JargonInjector:
         if callable(matcher):
             try:
                 for match in matcher(text, max_items=local_limit):
-                    if not isinstance(match, dict) or is_identity_contamination(str(match.get("explanation") or "")):
+                    matched_word = normalize_jargon_word(match.get("term") if isinstance(match, dict) else "")
+                    if (
+                        not isinstance(match, dict)
+                        or not matched_word
+                        or self._is_blocked(matched_word)
+                        or is_identity_contamination(str(match.get("explanation") or ""))
+                    ):
                         continue
                     global_items.append({
-                        "word": str(match.get("term") or "").strip(),
+                        "word": matched_word,
                         "meaning": str(match.get("explanation") or "").strip(),
                         "source": "holyman_skills",
                         "source_layer": "curated",
@@ -100,9 +132,11 @@ class JargonInjector:
                     })
             except Exception as exc:
                 logger.debug("[Jargon] Holyman reference match failed: %s", exc)
-        selected_words = {str(item.get("word") or "").casefold() for item in selected}
-        global_items = [item for item in global_items if str(item.get("word") or "").casefold() not in selected_words]
+        selected_words = {normalize_jargon_word(item.get("word")) for item in selected}
+        global_items = [item for item in global_items if normalize_jargon_word(item.get("word")) not in selected_words]
         combined = [*selected, *global_items][:local_limit]
+        # 60 秒 scoped cache 之后、真正渲染之前再次查询全局拉黑，避免拒绝刚发生时继续注入。
+        combined = [item for item in combined if not self._is_blocked(str(item.get("word") or ""))]
         if not combined:
             return ""
         self._last_injection_items = [self._trace_item(item) for item in combined]

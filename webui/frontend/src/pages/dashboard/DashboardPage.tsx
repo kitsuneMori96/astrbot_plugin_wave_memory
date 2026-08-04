@@ -142,7 +142,7 @@ function NeedsAttentionCards({ system }: { system?: SystemPayload }) {
     ...(pendingFewShot > 0 ? [{
       title: '风格特征范例待审核',
       description: `风格候选库目前积压了 ${pendingFewShot} 条待审核的 Few-Shot 范例。`,
-      route: '/learning?tab=fewshot',
+      route: '/knowledge/style-examples',
       badge: '风格待审',
       statusClass: 'border-l-4 border-l-amber-500/80 shadow-[0_0_15px_rgba(245,158,11,0.03)]',
     }] : []),

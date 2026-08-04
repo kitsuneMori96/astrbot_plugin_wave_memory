@@ -35,6 +35,15 @@ def _scope() -> RuntimeScope:
     )
 
 
+def _private_scope() -> RuntimeScope:
+    return RuntimeScope(
+        bot_id="bot-alpha",
+        visibility="private",
+        session=SessionRef("qq:private:user:user-1", "qq", "private", "user:user-1"),
+        subject_principal_id="qq:user:user-1",
+    )
+
+
 @pytest.mark.asyncio
 async def test_production_gateway_commits_memory_tags_operation_and_outbox_atomically(tmp_path):
     path = str(tmp_path / "production-write.sqlite3")
@@ -103,6 +112,48 @@ async def test_production_gateway_commits_memory_tags_operation_and_outbox_atomi
         assert '"id":"qq:group:group-1"' in tag_event_payload
         assert '"visibility":"group"' in tag_event_payload
         assert db.conn.execute("SELECT COUNT(*) FROM quality_decisions").fetchone()[0] == 1
+    finally:
+        await gateway.shutdown()
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_private_gateway_write_and_backfill_are_exactly_scoped_without_tags(tmp_path):
+    path = str(tmp_path / "private-write.sqlite3")
+    db = WaveMemoryDB(path, dimension=4)
+    gateway = ProductionWriteGateway(path)
+    try:
+        scope = _private_scope()
+        memory_id = await gateway.append_memory(
+            scope=scope,
+            group_id="user:user-1",
+            content="private canonical memory",
+            vector=None,
+            sender_id="qq:user:user-1",
+            sender_name="tester",
+            timestamp=100.0,
+            importance=0.8,
+            source="chat",
+            provenance={"event_id": "private-event"},
+            origin_metadata={},
+            quarantine=False,
+            idempotency_hint="private-event",
+        )
+        assert db.conn.execute(
+            "SELECT bot_id, session_id, visibility, group_id FROM memories WHERE id=?",
+            (memory_id,),
+        ).fetchone() == ("bot-alpha", "qq:private:user:user-1", "private", "user:user-1")
+        assert await gateway.backfill_memory_vector(
+            scope=scope,
+            memory_id=memory_id,
+            vector=np.asarray([1, 2, 3, 4], dtype=np.float32),
+            idempotency_hint="private-backfill",
+        ) is True
+        with pytest.raises(ValueError):
+            await gateway.apply_tag_extraction(
+                scope=scope, memory_id=memory_id, tags=[{"name": "must-not-write"}], status="done"
+            )
+        assert db.conn.execute("SELECT COUNT(*) FROM scoped_tags").fetchone()[0] == 0
     finally:
         await gateway.shutdown()
         db.close()

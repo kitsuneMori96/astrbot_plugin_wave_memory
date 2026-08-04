@@ -61,6 +61,13 @@ class QueryEngineScopeTest(unittest.TestCase):
             ),
         )
 
+    def _private_scope(self):
+        from domain.scope import RuntimeScope, SessionRef
+
+        return RuntimeScope(
+            "yushu", "private", SessionRef("qq:private:u", "qq", "private", "u")
+        )
+
     def _engine(self):
         from engine.query_engine import QueryEngine
 
@@ -79,6 +86,46 @@ class QueryEngineScopeTest(unittest.TestCase):
         self.assertEqual(asyncio.run(engine.shotgun_query("关键词", scope=private)), [])
         self.assertEqual(self.embedding.calls, 0)
         self.assertEqual(self.db.scopes, [])
+
+    def test_private_query_uses_raw_vector_and_forces_policy_lanes_off(self):
+        from engine.query_engine import QueryEngine
+
+        class PrivateDb(_ScopedDb):
+            def __init__(self):
+                super().__init__()
+                self.flags = []
+
+            def get_memories_by_ids(self, ids, *, scope, allow_cross_group_recall=False, shared_grant_memory_ids=None):
+                self.scopes.append(scope)
+                self.flags.append((allow_cross_group_recall, shared_grant_memory_ids))
+                return [{
+                    "id": 1, "group_id": "u", "bot_id": "yushu",
+                    "session_id": "qq:private:u", "visibility": "private",
+                    "content": "私聊记忆", "timestamp": 1, "importance": 1.0,
+                }]
+
+        class NoTagIndex:
+            count = 100
+
+            def search(self, vector, k):
+                raise AssertionError("private query must not search tag catalog")
+
+        db = PrivateDb()
+        engine = QueryEngine(
+            db, _Index(), _Embedding(),
+            {
+                "min_similarity": 0.0,
+                "cross_group_enabled": True,
+                "shared_memory_grants_enabled": True,
+            },
+            tag_catalog_index=NoTagIndex(),
+        )
+        scope = self._private_scope()
+        result = asyncio.run(engine.query("关键词", scope=scope))
+
+        self.assertEqual([memory["id"] for memory in result], [1])
+        self.assertEqual(db.flags, [(False, None)])
+        self.assertEqual(db.scopes, [scope])
 
     def test_hnsw_candidates_are_post_filtered_by_exact_runtime_scope(self):
         engine = self._engine()

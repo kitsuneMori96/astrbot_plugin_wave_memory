@@ -75,9 +75,18 @@ class _ScopedBeliefDB:
 
     def list_scoped_beliefs(self, scope, *, status=None, limit=50):
         self.calls.append({"scope": scope, "status": status, "limit": limit})
+        evidence_v1 = {
+            "confidence_policy_version": "evidence-v1",
+            "tag_chain_status": "complete",
+            "source_tags": [{"memory_id": 1, "tag_id": 1}],
+            "evidence": {"memory_ids": [1, 2], "support_memory_ids": [1, 2], "challenge_memory_ids": []},
+            "confidence_components": {"confidence": 0.8},
+            "confidence_evidence": {"support_windows": 2},
+            "activation_eligible": True,
+        }
         return [
-            {"id": 1, "content": "我会先核实事实再设定边界", "belief_type": "self_identity", "strength": 0.8, "status": "active"},
-            {"id": 2, "content": "u1 在边界问题上值得认真回应", "belief_type": "person_judgment", "strength": 0.6, "status": "active"},
+            {"id": 1, "content": "我会先核实事实再设定边界", "belief_type": "self_identity", "strength": 0.8, "status": "active", "provenance": evidence_v1},
+            {"id": 2, "content": "u1 在边界问题上值得认真回应", "belief_type": "person_judgment", "strength": 0.6, "status": "active", "provenance": evidence_v1},
             {"id": 3, "content": "legacy pending 不得注入", "belief_type": "world_view", "strength": 1.0, "status": "pending_legacy"},
         ]
 
@@ -94,10 +103,21 @@ class PersonaBeliefReworkTest(unittest.TestCase):
 
     def test_persona_composer_builds_layered_safe_context(self):
         from services.persona_composer import PersonaComposer
-        from engine.db.migrations.book_experience import ensure_book_experience_schema
 
         conn = self._connect()
-        ensure_book_experience_schema(conn)
+        conn.execute("""CREATE TABLE IF NOT EXISTS book_experience_episodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bot_id TEXT NOT NULL,
+            group_id TEXT NOT NULL,
+            user_id TEXT,
+            content TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            source_candidate_id INTEGER,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )""")
+        conn.commit()
         now = time.time()
         conn.executemany(
             """INSERT INTO book_experience_episodes

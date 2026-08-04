@@ -68,10 +68,7 @@ def _call_names(node: ast.AST) -> list[str]:
 
 def test_wave_memory_db_exposes_formal_repositories_and_schema_is_idempotent(tmp_path, monkeypatch):
     database = _import_database(monkeypatch)
-    from engine.db.scoped_learning_projection_repo import (
-        ReviewedBookLoreProjectionRepository,
-        ScopedFewShotRepository,
-    )
+    from engine.db.scoped_learning_projection_repo import ScopedFewShotRepository
     from engine.db.scoped_soul_repo import ScopedSoulRepository
 
     path = tmp_path / "production.db"
@@ -85,7 +82,7 @@ def test_wave_memory_db_exposes_formal_repositories_and_schema_is_idempotent(tmp
     try:
         assert isinstance(first.soul_repository, ScopedSoulRepository)
         assert isinstance(first.fewshot_repository, ScopedFewShotRepository)
-        assert isinstance(first.book_lore_repository, ReviewedBookLoreProjectionRepository)
+        assert not hasattr(first, "book_lore_repository")
     finally:
         first.close()
 
@@ -101,8 +98,8 @@ def test_wave_memory_db_exposes_formal_repositories_and_schema_is_idempotent(tmp
             "scoped_soul_mood",
             "scoped_soul_concerns",
             "scoped_few_shot_examples",
-            "reviewed_book_lore_projections",
         } <= tables
+        assert "reviewed_book_lore_projections" not in tables
         assert second.conn.execute(
             "SELECT value FROM legacy_projection_marker"
         ).fetchone()[0] == "keep-me"
@@ -125,7 +122,6 @@ def test_coordinator_writer_and_fewshot_service_share_formal_repository_with_sco
         writer = CoordinatorScopedProjectionWriter(
             gateway.coordinator,
             fewshot_repository=db.fewshot_repository,
-            book_lore_repository=db.book_lore_repository,
         )
         service = FewShotService(
             db=db,
@@ -179,11 +175,9 @@ def test_service_container_explicitly_holds_formal_repositories():
 
     soul = object()
     fewshot = object()
-    book_lore = object()
     db = SimpleNamespace(
         soul_repository=soul,
         fewshot_repository=fewshot,
-        book_lore_repository=book_lore,
     )
     ServiceContainer.reset()
     try:
@@ -198,7 +192,7 @@ def test_service_container_explicitly_holds_formal_repositories():
         )
         assert container.soul_repository is soul
         assert container.fewshot_repository is fewshot
-        assert container.book_lore_repository is book_lore
+        assert not hasattr(container, "book_lore_repository") or container.book_lore_repository is None
     finally:
         ServiceContainer.reset()
 
@@ -207,33 +201,27 @@ def test_main_production_wiring_passes_formal_repositories_writer_and_runtime_sc
     tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
     constructor = _method(tree, "__init__")
     initializer = _method(tree, "_initialize_once")
-    learning = _method(tree, "_configure_learning_center_services")
     injection = _method(tree, "_setup_injection_shadow_pipeline")
     context_config = _method(tree, "_build_shadow_context_config")
     on_message = _method(tree, "on_message")
 
     constructor_source = ast.unparse(constructor)
     initializer_source = ast.unparse(initializer)
-    learning_source = ast.unparse(learning)
     injection_source = ast.unparse(injection)
     context_config_source = ast.unparse(context_config)
     on_message_source = ast.unparse(on_message)
 
     assert "CoordinatorScopedProjectionWriter(self.write_gateway.coordinator" in constructor_source
     assert "fewshot_repository=self.db.fewshot_repository" in constructor_source
-    assert "book_lore_repository=self.db.book_lore_repository" in constructor_source
+    assert "book_lore_repository" not in constructor_source
     assert "repository=self.db.fewshot_repository" in initializer_source
     assert "writer=self.scoped_projection_writer" in initializer_source
     for service_name in ("ConcernTracker", "MoodTrajectory", "SubjectiveTime"):
         assert service_name in _call_names(initializer)
     assert "repository=soul_repository" in initializer_source
     assert "coordinator=soul_coordinator" in initializer_source
-    assert "RelationshipEventService" in _call_names(learning)
-    assert "repository=self.db.soul_repository" in learning_source
-    assert "coordinator=self.write_gateway.coordinator" in learning_source
-    assert "'book_lore': self.scoped_projection_writer" in learning_source
-    assert "'few_shot'" in learning_source and "self.scoped_projection_writer" in learning_source
     assert {"FewShotChannel", "BookLoreChannel"} <= set(_call_names(injection))
+    assert "book_lore_index=self.book_lore_index" in injection_source
     assert "from .webui.container import get_container" in injection_source
     assert "_parse_bool_config_value(cross_group_cfg.get('cross_group_enabled'), True)" in constructor_source
     assert constructor_source.count("'cross_group_enabled': self.cross_group_enabled") == 1

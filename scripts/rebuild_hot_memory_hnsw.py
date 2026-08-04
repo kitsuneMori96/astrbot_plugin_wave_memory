@@ -72,7 +72,7 @@ def rebuild(
     index_dir: Path,
     dimension: int,
     max_vectors: int,
-    retention: int = 2,
+    retention: int = 1,
 ) -> dict[str, Any]:
     _ensure_path()
     from engine.vector_index import VectorIndex
@@ -164,6 +164,12 @@ def main() -> int:
     parser.add_argument("--index-dir", type=Path, required=True)
     parser.add_argument("--dimension", type=int, default=1024)
     parser.add_argument("--max-vectors", type=int, default=100000)
+    parser.add_argument(
+        "--generation-retention",
+        type=int,
+        default=1,
+        help="HNSW generations to keep after publishing (default 1, matching runtime).",
+    )
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--confirmation", type=str, default="")
@@ -223,6 +229,7 @@ def main() -> int:
             index_dir=index_dir,
             dimension=args.dimension,
             max_vectors=args.max_vectors,
+            retention=max(1, int(args.generation_retention)),
         )
         verify_result = verify(conn, index_dir=index_dir, dimension=args.dimension)
     finally:

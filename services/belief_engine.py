@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from astrbot.api import logger
 
@@ -19,6 +19,7 @@ try:
 except ImportError:  # pragma: no cover - direct service imports in focused tests
     from domain.scope import RuntimeScope
     from engine.database import WaveMemoryDB
+from .belief_confidence import POLICY_VERSION, calculate_confidence, is_activation_eligible
 from .llm_fallback import LLMFallbackClient
 from .identity_safety import is_identity_contamination
 
@@ -63,38 +64,46 @@ class BeliefLifecycleService:
         return {"id": int(belief_id), "status": target_status}
 
 
-EXTRACT_PROMPT = """分析以下记忆摘要，提取 0-2 条**高质量**稳定判断（宁缺毋滥，没有就返回 []）。
+EXTRACT_PROMPT = """分析以下群聊经历窗口，提取 0-2 条**高质量**稳定判断（宁缺毋滥，没有就返回 []）。
 
 稳定判断 = 反复出现的模式、对某人/某事的一致性看法、或对自己的认知。
 不是事实陈述（"今天下雨"不是），是主观判断（"这个人说话不可信"是）。
 
 【严格排除以下情况，命中则不要提取】
-1. 跑团/角色扮演/小说情节：TRPG、COC、DND、模组、剧透、"角色""设定""模组""队友当储备粮"等。
-   这些是**虚构游戏内行为**，绝不能当成对真人的判断。
-   例：群友在玩跑团说"搜刮尸体"，这是游戏行为，不是"此人是逐利狂"。
-2. 实体边界错误：主语必须是**清晰的真实人物/群体名**，不能把定语黏进昵称
-   （如"在雪山救了白狐的感恩芒果"应是"感恩芒果"），不能拿群名/区名/书名当人。
-3. 琐碎偏好：口味、零食、表情等无意义细节（如"喜欢炒饭配玉米"）一律不提取。
-4. 来自小说/书籍内化的世界观（书名、虚构地名人名），不是真实社交判断。
+1. 跑团/角色扮演/小说情节：TRPG、COC、DND、模组、剧透、"角色""设定""模组"等虚构内容。
+2. 实体边界错误：主语必须是清晰的真实人物/群体名，不能把定语黏进昵称，也不能把群名/书名当人。
+3. 琐碎偏好：口味、零食、表情等无意义细节一律不提取。
+4. 来自小说/书籍内化的世界观，不是真实社交判断。
 
 【只提取】对真实群友的稳定社交判断、bot 真实的自我认知、反复验证的真实世界观。
+每条结论必须用下面的 message ID 引用实际消息证据；不得引用未提供的 ID。
 
 记忆摘要：
 {summary}
+
+可引用的经历消息：
+{evidence_messages}
 
 已有信念（避免重复或与之矛盾的也列出来）：
 {existing_beliefs}
 
 输出格式（JSON 数组，没有合格的就返回 []）：
-[{{"content": "一句话判断（主语是真实人物/自己）", "type": "person_judgment|world_view|self_identity|preference", "challenges": []}}]
+[{{
+  "content": "一句话判断（主语是真实人物/自己）",
+  "type": "person_judgment|world_view|self_identity|preference",
+  "evidence_memory_ids": [12, 15],
+  "challenge_memory_ids": [],
+  "match_id": null,
+  "relation": "new|reinforce|challenge",
+  "challenges": [],
+  "anchor_sentence": "来自实际消息的短句"
+}}]
 
-type 说明：
-- person_judgment: 对某个真实群友的判断（如"斯扎拉克对跑团细节要求严格"）
-- world_view: 对真实世界/事物的看法
-- self_identity: 对自己的认知（如"我不喜欢被当成工具"）
-- preference: bot 自己的重要偏好（非琐碎口味）
-
-challenges: 如果这条新判断与已有信念矛盾，列出矛盾信念的 ID。
+- evidence_memory_ids：支持该判断的实际 message ID，至少一个。
+- challenge_memory_ids：反证某条已有信念的实际 message ID；没有则 []。
+- match_id：若该结论对应已有信念，填写其 ID；无则 null。
+- relation：new 表示新候选；reinforce 表示支持 match_id；challenge 表示反证 match_id。
+- challenges：本条候选反证的其他已有信念 ID；仅填实际矛盾项。
 
 只返回 JSON，不要其他文字。"""
 
@@ -122,52 +131,61 @@ class BeliefEngine:
         query_trace_id: str | None = None,
         trace_store: object | None = None,
     ) -> list[dict]:
-        """从同一 RuntimeScope 的 consolidation 摘要中提取 scoped pending 信念。
+        """从同 Scope 的 consolidation 窗口提取可审计的 pending 信念候选。
 
-        ``scope`` 是必填的正式运行边界。source ids 必须全部是该 scope 下已解析、
-        非隔离的 memories v2 记录；任何缺失或跨 Scope id 都会 fail closed。
+        每条 LLM 候选都必须点名本窗口中真实、已解析且未隔离的消息 ID。
+        分数来自持久化经历观察，而不是固定初始值、摘要长度或 LLM 自报置信度。
+        ``query_trace_id`` 保留为兼容参数，但后台 consolidation 的合法性不依赖
+        一个不存在的前台 query trace。
         """
         if not isinstance(scope, RuntimeScope) or scope.visibility != "group" or scope.session is None:
             logger.warning("[BeliefEngine] Scoped extraction rejected: RuntimeScope required")
             return []
-        if not summary or len(summary) < 20 or is_identity_contamination(summary):
+        if not summary or len(summary) < 20 or is_identity_contamination(summary) or self.llm is None:
             return []
-        if (not isinstance(source_memory_ids, list)
-                or not source_memory_ids
-                or any(isinstance(memory_id, bool) or not isinstance(memory_id, int) for memory_id in source_memory_ids)):
+        if (
+            not isinstance(source_memory_ids, list)
+            or not source_memory_ids
+            or any(isinstance(memory_id, bool) or not isinstance(memory_id, int) or memory_id <= 0 for memory_id in source_memory_ids)
+        ):
             logger.warning("[BeliefEngine] Scoped extraction rejected: verified source ids required")
             return []
         requested_ids = list(dict.fromkeys(source_memory_ids))
-        trace_status = "pending"
-        if query_trace_id and trace_store is not None:
-            try:
-                trace_status = "verified" if trace_store.get_for_scope(str(query_trace_id), scope) else "invalid"
-            except Exception:
-                trace_status = "invalid"
-        tag_chain_status = "missing"
-        source_tags: list[dict] = []
-        tag_getter = getattr(getattr(self.db, "scoped_knowledge", None), "list_scoped_memory_tags", None)
-        if callable(tag_getter):
-            try:
-                source_tags = list(tag_getter(scope, requested_ids) or [])
-                tag_chain_status = "complete" if source_tags else "empty"
-            except Exception:
-                tag_chain_status = "unavailable"
         scoped_memories = self.db.get_memories_by_ids(requested_ids, scope=scope)
-        if len(scoped_memories) != len(requested_ids):
+        memory_by_id = {
+            int(memory.get("id")): memory
+            for memory in scoped_memories
+            if isinstance(memory, dict) and isinstance(memory.get("id"), int)
+        }
+        if set(memory_by_id) != set(requested_ids):
             logger.warning("[BeliefEngine] Scoped extraction rejected: source ids are absent or cross-scope")
             return []
 
-        existing = self.db.list_scoped_beliefs(scope, limit=30)
+        existing = self.db.list_scoped_beliefs(scope, limit=100)
+        existing_by_id = {
+            int(belief["id"]): belief
+            for belief in existing
+            if isinstance(belief, dict) and isinstance(belief.get("id"), int)
+        }
         existing_text = "\n".join(
-            f"[ID:{belief['id']}] {belief['content']} (type={belief['belief_type']}, strength={belief['strength']:.0%})"
+            f"[ID:{belief['id']}] {belief['content']} (type={belief['belief_type']}, support={float(belief.get('strength') or 0.0):.0%})"
             for belief in existing
         ) or "（暂无）"
-        prompt = EXTRACT_PROMPT.format(summary=summary[:1000], existing_beliefs=existing_text)
+        evidence_messages = "\n".join(
+            f"[memory_id:{memory_id}] {str(memory_by_id[memory_id].get('sender_name') or memory_by_id[memory_id].get('sender_id') or 'unknown')}: "
+            f"{str(memory_by_id[memory_id].get('content') or '')[:180]}"
+            for memory_id in requested_ids
+        )
+        prompt = EXTRACT_PROMPT.format(
+            summary=summary[:1500],
+            evidence_messages=evidence_messages[:9000],
+            existing_beliefs=existing_text[:6000],
+        )
+        window_key = self._window_key(scope, requested_ids)
 
         try:
             response = await self.llm.text_chat(prompt=prompt)
-            text = response.completion_text.strip()
+            text = str(getattr(response, "completion_text", "") or "").strip()
             if text.startswith("```"):
                 text = text.split("```")[1]
                 if text.startswith("json"):
@@ -176,61 +194,280 @@ class BeliefEngine:
             if not isinstance(beliefs_data, list):
                 return []
 
-            new_beliefs = []
+            created: list[dict] = []
             for item in beliefs_data[:2]:
                 if not isinstance(item, dict):
                     continue
-                content = item.get("content", "").strip()
-                belief_type = item.get("type", "world_view")
-                if (not content or len(content) < 5 or is_identity_contamination(content)):
+                content = str(item.get("content") or "").strip()
+                belief_type = str(item.get("type") or "world_view").strip()
+                evidence_ids = self._valid_evidence_ids(item.get("evidence_memory_ids"), requested_ids)
+                challenge_ids = self._valid_evidence_ids(item.get("challenge_memory_ids"), requested_ids)
+                if not content or len(content) < 5 or is_identity_contamination(content) or not evidence_ids:
                     continue
                 if belief_type not in ("person_judgment", "world_view", "self_identity", "preference"):
                     belief_type = "world_view"
 
-                similar = self._find_similar(content, existing)
-                if similar:
-                    # There is no legacy reinforce/source write in the formal path.  Re-upsert
-                    # the same scoped key with a modest strength increase and verified evidence.
-                    self.db.upsert_scoped_belief(
-                        scope,
-                        belief_key=similar["belief_key"],
-                        content=similar["content"],
-                        belief_type=similar["belief_type"],
-                        strength=min(float(similar["strength"]) + 0.1, 1.0),
-                        status=similar["status"],
-                        source_memory_id=requested_ids[0] if requested_ids else None,
-                        provenance={"producer": "consolidation", "source_memory_ids": requested_ids[:10], "source_tags": source_tags, "evidence": {"memory_ids": requested_ids[:10]}, "scope": scope.session.id if scope.session else scope.bot_id, "query_trace_id": str(query_trace_id or ""), "trace_status": trace_status, "tag_chain_status": tag_chain_status},
+                anchor_sentence = self._safe_anchor_sentence(item.get("anchor_sentence"), evidence_ids, memory_by_id)
+                relation = str(item.get("relation") or "new").strip().lower()
+                explicit_match = self._matching_existing_belief(item.get("match_id"), existing_by_id)
+                target = explicit_match if relation in {"reinforce", "challenge"} else None
+                if target is None and relation == "challenge":
+                    target = next(
+                        (
+                            candidate
+                            for raw_target_id in (item.get("challenges") or [])
+                            for candidate in [self._matching_existing_belief(raw_target_id, existing_by_id)]
+                            if candidate is not None
+                        ),
+                        None,
                     )
-                    continue
+                if target is None and relation != "challenge":
+                    target = self._find_similar(content, existing)
+                    relation = "reinforce" if target is not None else "new"
 
-                belief_key = hashlib.sha256(content.casefold().encode("utf-8")).hexdigest()[:32]
-                belief_id = self.db.upsert_scoped_belief(
-                    scope,
-                    belief_key=belief_key,
-                    content=content,
-                    belief_type=belief_type,
-                    strength=0.4,
-                    status="pending",
-                    source_memory_id=requested_ids[0] if requested_ids else None,
-                    provenance={"producer": "consolidation", "source_memory_ids": requested_ids[:10], "source_tags": source_tags, "evidence": {"memory_ids": requested_ids[:10]}, "scope": scope.session.id if scope.session else scope.bot_id, "query_trace_id": str(query_trace_id or ""), "trace_status": trace_status, "tag_chain_status": tag_chain_status},
-                )
-                new_beliefs.append({"id": belief_id, "content": content, "type": belief_type})
-                existing.append({
-                    "id": belief_id,
-                    "belief_key": belief_key,
-                    "content": content,
-                    "belief_type": belief_type,
-                    "strength": 0.4,
-                    "status": "pending",
-                })
-                logger.info(f"[BeliefEngine] New scoped belief: {content[:50]}... (type={belief_type})")
-            return new_beliefs
+                changed_targets: set[int] = set()
+                if target is not None and relation == "challenge":
+                    refreshed = self._record_and_refresh(
+                        scope,
+                        target,
+                        polarity="challenge",
+                        window_key=window_key,
+                        memory_ids=challenge_ids or evidence_ids,
+                        memory_by_id=memory_by_id,
+                        anchor_sentence=anchor_sentence,
+                        query_trace_id=query_trace_id,
+                    )
+                    self._replace_existing(existing, existing_by_id, refreshed)
+                    changed_targets.add(int(target["id"]))
+                else:
+                    is_new = target is None
+                    if is_new:
+                        belief_key = hashlib.sha256(content.casefold().encode("utf-8")).hexdigest()[:32]
+                        belief_id = self.db.upsert_scoped_belief(
+                            scope,
+                            belief_key=belief_key,
+                            content=content,
+                            belief_type=belief_type,
+                            strength=0.0,
+                            status="pending",
+                            source_memory_id=evidence_ids[0],
+                            provenance={
+                                "producer": "consolidation",
+                                "confidence_policy_version": POLICY_VERSION,
+                                "window_memory_ids": requested_ids,
+                                "anchor_sentence": anchor_sentence,
+                            },
+                        )
+                        target = {
+                            "id": belief_id,
+                            "belief_key": belief_key,
+                            "content": content,
+                            "belief_type": belief_type,
+                            "strength": 0.0,
+                            "status": "pending",
+                            "source_memory_id": evidence_ids[0],
+                            "provenance": {},
+                        }
+                        existing.append(target)
+                        existing_by_id[belief_id] = target
+                    refreshed = self._record_and_refresh(
+                        scope,
+                        target,
+                        polarity="support",
+                        window_key=window_key,
+                        memory_ids=evidence_ids,
+                        memory_by_id=memory_by_id,
+                        anchor_sentence=anchor_sentence,
+                        query_trace_id=query_trace_id,
+                    )
+                    self._replace_existing(existing, existing_by_id, refreshed)
+                    changed_targets.add(int(refreshed["id"]))
+                    if is_new:
+                        created.append({
+                            "id": refreshed["id"], "content": refreshed["content"],
+                            "type": refreshed["belief_type"], "confidence": refreshed["strength"],
+                            "confidence_components": refreshed.get("provenance", {}).get("confidence_components"),
+                        })
+                        logger.info("[BeliefEngine] New scoped belief observation: %s... (type=%s)", content[:50], belief_type)
+
+                for raw_target_id in item.get("challenges") or []:
+                    challenged = self._matching_existing_belief(raw_target_id, existing_by_id)
+                    if challenged is None or int(challenged["id"]) in changed_targets:
+                        continue
+                    refreshed = self._record_and_refresh(
+                        scope,
+                        challenged,
+                        polarity="challenge",
+                        window_key=window_key,
+                        memory_ids=challenge_ids or evidence_ids,
+                        memory_by_id=memory_by_id,
+                        anchor_sentence=anchor_sentence,
+                        query_trace_id=query_trace_id,
+                    )
+                    self._replace_existing(existing, existing_by_id, refreshed)
+                    changed_targets.add(int(challenged["id"]))
+            return created
         except json.JSONDecodeError:
             logger.debug("[BeliefEngine] Failed to parse LLM output as JSON")
             return []
         except Exception as exc:
-            logger.debug(f"[BeliefEngine] Scoped extract failed: {exc}")
+            logger.debug("[BeliefEngine] Scoped extract failed: %s", exc)
             return []
+
+    @staticmethod
+    def _window_key(scope: RuntimeScope, memory_ids: list[int]) -> str:
+        assert scope.session is not None
+        return f"consolidation:{scope.session.id}:{memory_ids[0]}:{memory_ids[-1]}"
+
+    @staticmethod
+    def _valid_evidence_ids(raw_ids: Any, allowed_ids: list[int]) -> list[int]:
+        if isinstance(raw_ids, (str, bytes)) or not isinstance(raw_ids, list):
+            return []
+        allowed = set(allowed_ids)
+        result: list[int] = []
+        for raw_id in raw_ids:
+            if isinstance(raw_id, bool):
+                continue
+            try:
+                memory_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if memory_id in allowed and memory_id not in result:
+                result.append(memory_id)
+        return result
+
+    @staticmethod
+    def _matching_existing_belief(raw_id: Any, beliefs_by_id: dict[int, dict]) -> dict | None:
+        if isinstance(raw_id, bool):
+            return None
+        try:
+            belief_id = int(raw_id)
+        except (TypeError, ValueError):
+            return None
+        return beliefs_by_id.get(belief_id)
+
+    @staticmethod
+    def _safe_anchor_sentence(raw_anchor: Any, evidence_ids: list[int], memory_by_id: dict[int, dict]) -> str:
+        source_text = "\n".join(str(memory_by_id[memory_id].get("content") or "") for memory_id in evidence_ids)
+        anchor = str(raw_anchor or "").strip()
+        if anchor and len(anchor) <= 240 and anchor in source_text:
+            return anchor
+        return str(memory_by_id[evidence_ids[0]].get("content") or "").strip()[:240]
+
+    @staticmethod
+    def _replace_existing(existing: list[dict], beliefs_by_id: dict[int, dict], refreshed: dict) -> None:
+        belief_id = int(refreshed["id"])
+        beliefs_by_id[belief_id] = refreshed
+        for index, row in enumerate(existing):
+            if int(row.get("id", -1)) == belief_id:
+                existing[index] = refreshed
+                break
+        else:
+            existing.append(refreshed)
+
+    def _record_and_refresh(
+        self,
+        scope: RuntimeScope,
+        belief: dict,
+        *,
+        polarity: str,
+        window_key: str,
+        memory_ids: list[int],
+        memory_by_id: dict[int, dict],
+        anchor_sentence: str,
+        query_trace_id: str | None,
+    ) -> dict:
+        participants = [
+            str(memory_by_id[memory_id].get("sender_id") or memory_by_id[memory_id].get("sender_name") or "").strip()
+            for memory_id in memory_ids
+        ]
+        timestamps = [
+            float(memory_by_id[memory_id].get("timestamp") or 0.0)
+            for memory_id in memory_ids
+        ]
+        repo = getattr(self.db, "scoped_knowledge", None)
+        tag_getter = getattr(repo, "list_scoped_memory_tags", None)
+        observation_tags: list[dict] = []
+        if callable(tag_getter):
+            try:
+                observation_tags = list(tag_getter(scope, memory_ids) or [])
+            except Exception:
+                observation_tags = []
+        self.db.record_scoped_belief_observation(
+            scope,
+            belief_id=int(belief["id"]),
+            window_key=window_key,
+            polarity=polarity,
+            memory_ids=memory_ids,
+            participants=participants,
+            source_tags=observation_tags,
+            metadata={"producer": "consolidation", "anchor_sentence": anchor_sentence},
+            window_started_at=min(timestamps) if timestamps else time.time(),
+            window_ended_at=max(timestamps) if timestamps else time.time(),
+        )
+        observations = self.db.list_scoped_belief_observations(scope, belief_id=int(belief["id"]), limit=500)
+        evaluation = calculate_confidence(observations)
+        evidence_ids: list[int] = []
+        support_ids: list[int] = []
+        challenge_ids: list[int] = []
+        for observation in observations:
+            target = support_ids if observation.get("polarity") == "support" else challenge_ids
+            for raw_id in observation.get("memory_ids") or []:
+                try:
+                    memory_id = int(raw_id)
+                except (TypeError, ValueError):
+                    continue
+                if memory_id > 0 and memory_id not in evidence_ids:
+                    evidence_ids.append(memory_id)
+                if memory_id > 0 and memory_id not in target:
+                    target.append(memory_id)
+        all_tags: list[dict] = []
+        if callable(tag_getter) and evidence_ids:
+            try:
+                all_tags = list(tag_getter(scope, evidence_ids) or [])
+            except Exception:
+                all_tags = []
+        tagged_ids = {int(tag.get("memory_id")) for tag in all_tags if isinstance(tag, dict) and tag.get("memory_id") is not None}
+        tag_chain_status = "complete" if evidence_ids and set(evidence_ids) <= tagged_ids else "empty"
+        provenance = dict(belief.get("provenance") or {})
+        provenance.update({
+            "producer": "consolidation",
+            "confidence_policy_version": POLICY_VERSION,
+            "confidence_components": evaluation["components"],
+            "confidence_evidence": evaluation["summary"],
+            "activation_eligible": bool(evaluation["activation_eligible"] and tag_chain_status == "complete"),
+            "source_memory_ids": support_ids,
+            "source_tags": all_tags,
+            "evidence": {
+                "memory_ids": evidence_ids,
+                "support_memory_ids": support_ids,
+                "challenge_memory_ids": challenge_ids,
+                "observation_ids": [observation.get("id") for observation in observations],
+                "window_keys": [observation.get("window_key") for observation in observations],
+            },
+            "tag_chain_status": tag_chain_status,
+            "anchor_sentence": anchor_sentence or provenance.get("anchor_sentence") or "",
+            "query_trace_id": str(query_trace_id or ""),
+            "trace_status": "not_required",
+            "scope": scope.session.id if scope.session else scope.bot_id,
+        })
+        source_memory_id = support_ids[0] if support_ids else belief.get("source_memory_id")
+        self.db.upsert_scoped_belief(
+            scope,
+            belief_key=belief["belief_key"],
+            content=belief["content"],
+            belief_type=belief["belief_type"],
+            strength=float(evaluation["components"]["confidence"]),
+            status=belief.get("status") or "pending",
+            source_memory_id=source_memory_id,
+            provenance=provenance,
+        )
+        return {
+            **belief,
+            "strength": float(evaluation["components"]["confidence"]),
+            "source_memory_id": source_memory_id,
+            "provenance": provenance,
+        }
 
     def get_injection(
         self,
@@ -284,9 +521,9 @@ class BeliefEngine:
             seen_ids.add(belief_id)
             unique_beliefs.append(belief)
 
-        # 按 strength 阈值过滤：挡掉被动摇到很低的低质信念（已批准 active 默认 0.4 仍通过）。
-        _MIN_INJECT_STRENGTH = 0.35
-        unique_beliefs = [belief for belief in unique_beliefs if (belief.get("strength") or 0) >= _MIN_INJECT_STRENGTH]
+        # 人工批准不能绕过 evidence-v1 资格：新反证或证据链缺失时保留可审计
+        # active 行，但立即停止进入 prompt。
+        unique_beliefs = [belief for belief in unique_beliefs if self._evidence_ready(belief)]
 
         if not unique_beliefs:
             return ""
@@ -301,9 +538,7 @@ class BeliefEngine:
     @staticmethod
     def _evidence_ready(belief: dict) -> bool:
         provenance = belief.get("provenance") if isinstance(belief.get("provenance"), dict) else {}
-        if provenance.get("producer") == "consolidation":
-            return bool(provenance.get("source_tags")) and bool(provenance.get("evidence")) and provenance.get("trace_status") == "verified"
-        return provenance.get("tag_chain_status") in (None, "complete")
+        return is_activation_eligible(provenance)
 
     def _is_duplicate(self, content: str, existing: list[dict]) -> bool:
         """简单文本相似度去重。"""

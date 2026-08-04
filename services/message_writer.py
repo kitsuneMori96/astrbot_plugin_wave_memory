@@ -22,10 +22,20 @@ try:
     from ..domain.quality import QualityDecision, QualityProposal
     from ..domain.scope import RuntimeScope
     from .quality_gate import QualityGate, decode_quality_evidence
+    from .storage_capacity_policy import (
+        StorageCapacityPolicy,
+        count_active_memories,
+        decide_storage_admission,
+    )
 except ImportError:  # 兼容独立测试/外部调用 services
     from domain.quality import QualityDecision, QualityProposal
     from domain.scope import RuntimeScope
     from services.quality_gate import QualityGate, decode_quality_evidence
+    from services.storage_capacity_policy import (
+        StorageCapacityPolicy,
+        count_active_memories,
+        decide_storage_admission,
+    )
 
 
 # noise 判定：这些消息不入向量索引
@@ -65,7 +75,7 @@ class MemoryDedupPolicy:
             candidate = dict(item)
             candidate["content"] = normalized
             candidate["_dedup_normalized_content"] = normalized
-            scope = self._require_group_scope(candidate)
+            scope = self._require_memory_scope(candidate)
             if self.find_recent_duplicate(db, candidate, normalized):
                 duplicate_count += 1
                 continue
@@ -81,19 +91,19 @@ class MemoryDedupPolicy:
         return list(unique_by_key.values()), duplicate_count
 
     @staticmethod
-    def _require_group_scope(item: Mapping[str, Any]) -> RuntimeScope:
+    def _require_memory_scope(item: Mapping[str, Any]) -> RuntimeScope:
         scope = item.get("scope")
         if not isinstance(scope, RuntimeScope):
             raise MessageScopeError("scope_required", "MessageWriter requires a RuntimeScope")
-        if scope.visibility != "group" or scope.session is None:
+        if scope.visibility not in {"group", "private"} or scope.session is None:
             raise MessageScopeError(
                 "legacy_writer_scope_visibility_unsupported",
-                "MessageWriter only persists real group RuntimeScope values",
+                "MessageWriter only persists group/private RuntimeScope values",
             )
         return scope
 
     def find_recent_duplicate(self, db: Any, item: dict, normalized_content: str) -> Any:
-        scope = self._require_group_scope(item)
+        scope = self._require_memory_scope(item)
         assert scope.session is not None
         try:
             timestamp = float(item.get("timestamp") or time.time())
@@ -189,6 +199,7 @@ class MessageWriter:
         embedding_retry_attempts: int = 2,
         embedding_retry_backoff_seconds: float = 0.5,
         on_vector_backfill_requested: Any | None = None,
+        storage_capacity_policy: StorageCapacityPolicy | None = None,
     ):
         self.db = db
         self.memory_index = memory_index
@@ -202,6 +213,7 @@ class MessageWriter:
         self.write_gateway = write_gateway
         self.embedding_timeout = max(float(embedding_timeout), 0.1)
         self.on_vector_backfill_requested = on_vector_backfill_requested
+        self.storage_capacity_policy = storage_capacity_policy or StorageCapacityPolicy()
         try:
             self.embedding_retry_attempts = min(max(int(embedding_retry_attempts), 1), 5)
         except (TypeError, ValueError):
@@ -232,6 +244,8 @@ class MessageWriter:
             "embedding_retries": 0,
             "embedding_recovered_after_retry": 0,
             "embedding_terminal_timeouts": 0,
+            "cold_chat_writes": 0,
+            "capacity_over_writes": 0,
             "last_success_at": None,
         }
 
@@ -252,7 +266,7 @@ class MessageWriter:
 
     @staticmethod
     def _normalize_scope_payload(message_data: dict[str, Any]) -> dict[str, Any]:
-        """Require an event-resolved group Scope and project its compatibility key."""
+        """Require an event-resolved group/private Scope and project its compatibility key."""
         if not isinstance(message_data, dict):
             raise MessageScopeError("invalid_message_payload", "message payload must be a dict")
         item = dict(message_data)
@@ -261,10 +275,10 @@ class MessageWriter:
             raise MessageScopeError("scope_required", "MessageWriter requires an event-resolved RuntimeScope")
         if not isinstance(scope, RuntimeScope):
             raise MessageScopeError("invalid_runtime_scope", "scope must be RuntimeScope")
-        if scope.visibility != "group" or scope.session is None:
+        if scope.visibility not in {"group", "private"} or scope.session is None:
             raise MessageScopeError(
                 "legacy_writer_scope_visibility_unsupported",
-                "MessageWriter only projects real group RuntimeScope values",
+                "MessageWriter only projects group/private RuntimeScope values",
             )
         canonical_group_id = scope.session.conversation_id
         declared_group_id = str(item.get("group_id") or "").strip()
@@ -540,19 +554,45 @@ class MessageWriter:
         else:
             vectors = []
 
-        # 写入有向量的消息
+        # Soft canonical capacity: over-cap ordinary chat may keep text only.
+        # One COUNT per batch keeps the extra query off the hot per-message path.
+        try:
+            active_count = count_active_memories(self.db.conn)
+        except Exception:
+            active_count = 0
+
+        # 写入有向量的消息（超额 chat 可降为冷落库）
         for item, vec in zip(need_embed, vectors):
             try:
+                decision = decide_storage_admission(
+                    source=str(item.get("source") or "chat"),
+                    active_count=active_count,
+                    policy=self.storage_capacity_policy,
+                    has_vector=vec is not None,
+                )
+                write_vector = vec if decision.keep_vector else None
+                if decision.over_capacity:
+                    self._stats["capacity_over_writes"] = (
+                        self._stats.get("capacity_over_writes", 0) + 1
+                    )
+                if decision.demoted_to_cold:
+                    self._stats["cold_chat_writes"] = self._stats.get("cold_chat_writes", 0) + 1
+                    provenance_extra = item.setdefault("metadata", {})
+                    if isinstance(provenance_extra, dict):
+                        provenance_extra["storage_admission"] = decision.reason
                 memory_id = await self._persist_memory(
                     item,
-                    vector=vec,
+                    vector=write_vector,
                     importance=MemoryDedupPolicy._importance(item),
                     source=item["source"],
                 )
+                del memory_id  # id is assigned by the coordinator; stats only need counts
 
                 # The committed memory.created event drives HNSW projection.
                 self._write_count += 1
                 self._stats[item["source"]] = self._stats.get(item["source"], 0) + 1
+                # Approximate subsequent inserts in this batch without re-counting.
+                active_count += 1
 
             except Exception as e:
                 logger.debug(f"[WaveMemory] Single write failed: {e}")

@@ -132,6 +132,41 @@ def test_effective_tag_fallback_admits_tagged_memory_without_materialized_projec
         connection.close()
 
 
+def test_private_active_vector_is_hot_without_tags_and_private_legacy_is_not_group_legacy():
+    connection = _connection()
+    try:
+        _insert_memory(
+            connection,
+            1,
+            group_id="user:user-1",
+            session_id="qq:private:user:user-1",
+            visibility="private",
+            timestamp=NOW - 365 * 86_400,
+            importance=2.0,
+        )
+        _insert_memory(
+            connection,
+            2,
+            group_id="private:user:user-2",
+            bot_id="",
+            session_id="",
+            visibility="",
+        )
+        connection.execute(
+            "UPDATE memories SET bot_id='', session_id='', visibility='' WHERE id=2"
+        )
+        connection.commit()
+        candidates = select_hot_memory_candidates(
+            connection, MemoryIndexPolicy(max_vectors=10), DIMENSION, now=NOW
+        )
+        assert [candidate.memory_id for candidate in candidates] == [1]
+        assert candidates[0].visibility == "private"
+        assert candidates[0].tag_count == 0
+        assert candidates[0].scope_key == ("bot-a", "qq:private:user:user-1", "private", "user:user-1")
+    finally:
+        connection.close()
+
+
 def test_scope_noise_and_inactive_rows_are_excluded():
     connection = _connection()
     try:
@@ -157,7 +192,9 @@ def test_scope_noise_and_inactive_rows_are_excluded():
         connection.close()
 
 
-def test_durable_sources_and_types_outlive_expired_core_chat():
+def test_durable_sources_and_types_outrank_expired_core_chat():
+    """chat_hot_days is a score half-life now: stale chat stays eligible but
+    ranks strictly below durable knowledge instead of being hard-excluded."""
     connection = _connection()
     try:
         expired = NOW - 31 * 86_400
@@ -172,10 +209,32 @@ def test_durable_sources_and_types_outlive_expired_core_chat():
 
         candidates = select_hot_memory_candidates(connection, MemoryIndexPolicy(chat_hot_days=30), DIMENSION, now=NOW)
 
-        assert [candidate.memory_id for candidate in candidates] == [2, 3]
-        assert all(candidate.durable for candidate in candidates)
+        by_id = {candidate.memory_id: candidate for candidate in candidates}
+        assert set(by_id) == {1, 2, 3}
+        assert by_id[2].durable and by_id[3].durable
+        assert not by_id[1].durable
+        # Decayed non-durable chat must rank strictly below both durable rows.
+        assert by_id[1].score < min(by_id[2].score, by_id[3].score)
+        # 31 days at a 30-day half-life leaves less than 55% of the base score.
+        fresh = _score_like(by_id[1], now=NOW, timestamp=NOW)
+        assert by_id[1].score < fresh * 0.55
     finally:
         connection.close()
+
+
+def _score_like(candidate, *, now, timestamp):
+    from services.memory_index_policy import _score
+
+    return _score(
+        durable=candidate.durable,
+        importance=1.0,
+        tag_relevance=candidate.tag_relevance,
+        tag_count=candidate.tag_count,
+        access_count=0.0,
+        timestamp=timestamp,
+        now=now,
+        stale_decay_days=0,
+    )
 
 
 def test_default_policy_admits_one_scope_until_global_capacity():

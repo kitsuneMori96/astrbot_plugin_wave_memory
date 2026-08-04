@@ -135,3 +135,16 @@ export function cancelMaintenanceJob(jobId: string): Promise<{
 }> {
   return fetchJson(`/api/maintenance/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' })
 }
+
+export interface OutboxStatus {
+  status: string
+  outbox_items: number
+  outbox_deliveries: number
+  scope_recovery_items: number
+  job_requests: number
+  write_gateway_wired: boolean
+}
+
+export function getOutboxStatus(): Promise<OutboxStatus> {
+  return fetchJson<OutboxStatus>('/api/maintenance/outbox')
+}

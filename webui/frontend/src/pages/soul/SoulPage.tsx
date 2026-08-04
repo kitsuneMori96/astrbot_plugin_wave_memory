@@ -13,6 +13,7 @@ import {
 } from '@/api/people'
 import { getSoulState, type RelationshipHistoryItem, type SoulScopeSelection, type SoulStatePayload } from '@/api/soul'
 import { RelationshipCalibrationPanel } from '@/components/relationship/RelationshipCalibrationPanel'
+import { TimeAnchorsExplorer } from '@/components/soul/TimeAnchorsExplorer'
 import { EvidenceList, ObjectDeepLink, PaginationControls, QueryState, ScopeSelect } from '@/components/shared'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -283,8 +284,9 @@ export function SoulPage() {
   const scope = useMemo<SoulScopeSelection | null>(() => botId && sessionId ? { bot_id: botId, session_id: sessionId, visibility: 'group' } : null, [botId, sessionId])
   const relationshipItem = useMemo<RelationshipItem | null>(() => {
     const relationship = payload?.relationship
-    const ref = relationship?.people_ref
-    if (!relationship || !ref || !relationship.values || relationship.revision === null) return null
+    if (!relationship) return null
+    const ref = relationship.people_ref
+    if (!ref || !relationship.values || relationship.revision === null) return null
     const locator = String(ref.locator ?? subjectId)
     const selected = relationshipOptions.find((item) => item.subject_principal_id === locator)
     if (!selected) return null
@@ -412,7 +414,7 @@ export function SoulPage() {
             </Card>
 
             <Card>
-              <CardHeader className="border-b bg-muted/10 py-4"><div className="flex items-center gap-2"><Clock3Icon className="size-4 text-primary" /><CardTitle className="text-sm">Timeline · 时间线</CardTitle></div><CardDescription>正式 SoulScope 共享窗口事件锚点 · 已应用时间范围</CardDescription></CardHeader>
+              <CardHeader className="border-b bg-muted/10 py-4"><div className="flex items-center justify-between gap-2"><div className="flex items-center gap-2"><Clock3Icon className="size-4 text-primary" /><CardTitle className="text-sm">Timeline · 时间线</CardTitle></div><TimeAnchorsExplorer botId={botId} /></div><CardDescription>正式 SoulScope 共享窗口事件锚点 · 已应用时间范围</CardDescription></CardHeader>
               <CardContent className="pt-5">{formalUnavailable || payload.timeline.page.total_status === 'unavailable' ? <SectionUnavailable reason={payload.timeline.page.reason_code ?? payload.source.reason_code} /> : payload.timeline.items.length ? <div className="ml-2 flex flex-col gap-5 border-l-2 border-muted pl-5">{payload.timeline.items.map((item) => <div key={item.id} className="relative"><span className="absolute -left-[27px] top-1 size-3 rounded-full border-2 border-background bg-primary" /><div className="rounded-lg border bg-muted/10 p-3"><p className="text-sm font-semibold">{item.event_summary || item.summary || '未命名事件'}</p><p className="mt-1 text-[10px] text-muted-foreground">{item.event_type || 'unknown'} · {formatTime(item.timestamp)} · revision {item.revision ?? '未记录'}</p><div className="mt-3"><EvidenceList evidence={item.evidence} /></div></div></div>)}</div> : <p className="p-6 text-center text-sm text-muted-foreground">当前 Scope 没有时间线记录。</p>}</CardContent>
             </Card>
             <SoulContextCard context={payload.soul_context} />

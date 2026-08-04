@@ -172,17 +172,18 @@ def _canonical_scope(row: dict[str, Any]) -> tuple[str, str, str, str] | None:
     session_id = _text(row.get("session_id"))
     visibility = _text(row.get("visibility"))
     group_id = _text(row.get("group_id"))
-    if not bot_id or not session_id or not group_id or visibility != "group":
+    if not bot_id or not session_id or not group_id or visibility not in {"group", "private"}:
         return None
     parts = session_id.split(":", 2)
-    if len(parts) != 3 or not parts[0] or parts[1] != "group" or parts[2] != group_id:
+    if len(parts) != 3 or not parts[0] or parts[1] != visibility or parts[2] != group_id:
         return None
     return bot_id, session_id, visibility, group_id
 
 
 def _is_legacy_group_row(row: dict[str, Any]) -> bool:
     """Recognize only fully unscoped legacy rows; partial modern scope fails closed."""
-    if not _text(row.get("group_id")):
+    group_id = _text(row.get("group_id"))
+    if not group_id or group_id.casefold().startswith("private:"):
         return False
     return not any(_text(row.get(name)) for name in ("bot_id", "session_id", "visibility"))
 
@@ -308,18 +309,29 @@ def _read_memory_rows(
 
 
 def _score(*, durable: bool, importance: float, tag_relevance: float,
-           tag_count: int, access_count: float, timestamp: float, now: float) -> float:
-    """Stable relevance score; a durable bonus preserves long-lived knowledge."""
+           tag_count: int, access_count: float, timestamp: float, now: float,
+           stale_decay_days: int = 0) -> float:
+    """Stable relevance score; a durable bonus preserves long-lived knowledge.
+
+    ``stale_decay_days`` replaces the former hard chat-age gate: instead of
+    excluding every group chat older than ``chat_hot_days``, age now decays the
+    non-durable score exponentially (half-life = ``stale_decay_days``).  A stale
+    but heavily accessed/tagged memory can therefore still win a hot slot, while
+    forgettable old chatter loses to anything recent — under the same global
+    capacity bound, this is ranking, not deletion.
+    """
     age_days = max(0.0, (now - timestamp) / 86_400.0)
     recency = max(0.0, 1.0 - min(age_days, 365.0) / 365.0)
-    return (
-        (100.0 if durable else 0.0)
-        + max(0.0, importance) * 10.0
+    base = (
+        max(0.0, importance) * 10.0
         + max(0.0, tag_relevance) * 4.0
         + min(max(0, tag_count), 32) * 1.5
         + math.log1p(max(0.0, access_count)) * 2.0
         + recency
     )
+    if not durable and stale_decay_days > 0:
+        base *= 0.5 ** (age_days / float(stale_decay_days))
+    return (100.0 if durable else 0.0) + base
 
 
 def _eligible_candidates(
@@ -371,9 +383,11 @@ def _eligible_candidates(
             if memory_type in _INACTIVE_MEMORY_TYPES:
                 continue
             tags = scoped_tags.get((*scope[:3], candidate_id), [])
+            bot_id, session_id, visibility, group_id = scope
+            # Private messages enter the hot tier from their canonical vector and
+            # raw importance/recency; tags are deliberately not required.
             recall_visibility = "scoped"
             enforce_scope_quota = True
-            bot_id, session_id, visibility, group_id = scope
         elif _is_legacy_group_row(row):
             if memory_type in _LEGACY_EXCLUDED_MEMORY_TYPES:
                 continue
@@ -386,18 +400,20 @@ def _eligible_candidates(
             # A partially populated modern scope must never be downgraded to a
             # legacy lane merely because one field is malformed or missing.
             continue
-        if not tags:
+        if not tags and not (scope is not None and visibility == "private"):
             continue
 
         tag_relevance = sum(max(0.0, _number(tag.get("relevance"), 1.0)) for tag in tags)
         durable = source in _DURABLE_SOURCES or memory_type in _DURABLE_MEMORY_TYPES
         timestamp = _number(row.get("timestamp"))
-        if (
-            recall_visibility == "scoped"
-            and not durable
-            and now - timestamp > max(0, int(policy.chat_hot_days)) * 86_400
-        ):
-            continue
+        # ``chat_hot_days`` is now a score half-life for group chat, not a hard
+        # cutoff: stale-but-valuable memories compete on score instead of being
+        # unconditionally excluded before ranking.
+        stale_decay_days = (
+            max(0, int(policy.chat_hot_days))
+            if recall_visibility == "scoped" and visibility == "group"
+            else 0
+        )
         candidates.append(HotMemoryCandidate(
             memory_id=candidate_id,
             vector=vector,
@@ -409,6 +425,7 @@ def _eligible_candidates(
                 access_count=_number(row.get("access_count")),
                 timestamp=timestamp,
                 now=now,
+                stale_decay_days=stale_decay_days,
             ),
             bot_id=bot_id,
             session_id=session_id,

@@ -105,6 +105,7 @@ class DiagnosticsService:
             self._probe_index_shadow("memory_index_shadow", self.memory_index, checked_at),
             self._probe_index_shadow("tag_index_shadow", self.tag_index, checked_at),
             self._probe_book_lore(checked_at),
+            self._probe_process_memory(checked_at),
         ))
         return {
             "health": _overall_health(checks),
@@ -830,6 +831,88 @@ class DiagnosticsService:
                 source,
                 checked_at,
                 {"scope": "catalog", **_error_evidence(exc)},
+            )
+
+    def _probe_process_memory(self, checked_at: str) -> dict[str, Any]:
+        """Separate resident process memory from reclaimable page cache.
+
+        A container total mixes both, so an operator cannot tell a real resident
+        regression from SQLite page cache that the kernel can drop under pressure.
+        """
+        source = "proc:memory"
+
+        def _read_int(path: str) -> int | None:
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    return int(handle.read().strip())
+            except (OSError, ValueError):
+                return None
+
+        def _proc_status_kb(field: str) -> int | None:
+            try:
+                with open("/proc/self/status", encoding="utf-8") as handle:
+                    for line in handle:
+                        if line.startswith(f"{field}:"):
+                            return int(line.split()[1])
+            except (OSError, IndexError, ValueError):
+                return None
+            return None
+
+        def _cgroup_stat() -> dict[str, int]:
+            values: dict[str, int] = {}
+            try:
+                with open("/sys/fs/cgroup/memory.stat", encoding="utf-8") as handle:
+                    for line in handle:
+                        parts = line.split()
+                        if len(parts) == 2:
+                            try:
+                                values[parts[0]] = int(parts[1])
+                            except ValueError:
+                                continue
+            except OSError:
+                return {}
+            return values
+
+        def _mb(value: int | None) -> float | None:
+            return None if value is None else round(value / 1024 / 1024, 1)
+
+        try:
+            stat = _cgroup_stat()
+            anon = stat.get("anon")
+            file_cache = stat.get("file")
+            container_total = _read_int("/sys/fs/cgroup/memory.current")
+            rss_kb = _proc_status_kb("VmRSS")
+            hwm_kb = _proc_status_kb("VmHWM")
+            evidence: dict[str, Any] = {
+                "scope": "process",
+                "resident_anon_mb": _mb(anon),
+                "page_cache_mb": _mb(file_cache),
+                "container_total_mb": _mb(container_total),
+                "process_rss_mb": None if rss_kb is None else round(rss_kb / 1024, 1),
+                "process_peak_rss_mb": None if hwm_kb is None else round(hwm_kb / 1024, 1),
+                "note": (
+                    "container_total_mb 含可回收的 page cache；判断常驻回归请看 "
+                    "resident_anon_mb / process_rss_mb。"
+                ),
+            }
+            available = any(
+                evidence[key] is not None
+                for key in ("resident_anon_mb", "process_rss_mb", "container_total_mb")
+            )
+            return _result(
+                "process_memory",
+                "healthy" if available else "not_configured",
+                source,
+                checked_at,
+                evidence if available else {"scope": "process", "reason": "proc_metrics_unavailable"},
+            )
+        except Exception as exc:
+            return _result(
+                "process_memory",
+                "probe_error",
+                source,
+                checked_at,
+                {"scope": "process", **_error_evidence(exc)},
             )
 
 

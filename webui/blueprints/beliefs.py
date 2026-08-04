@@ -14,10 +14,12 @@ from ..middleware.auth import require_auth
 try:
     from ...domain.scope import RuntimeScope, ScopeCodec, ScopeValidationError, SessionRef
     from ...engine.db.scoped_knowledge_repo import ScopedKnowledgeScopeError
+    from ...services.belief_confidence import is_activation_eligible
     from ...services.belief_lifecycle import BeliefLifecycleService
 except ImportError:  # pragma: no cover - plugin root may be imported directly
     from domain.scope import RuntimeScope, ScopeCodec, ScopeValidationError, SessionRef
     from engine.db.scoped_knowledge_repo import ScopedKnowledgeScopeError
+    from services.belief_confidence import is_activation_eligible
     from services.belief_lifecycle import BeliefLifecycleService
 
 beliefs_bp = Blueprint("beliefs", __name__, url_prefix="/api/beliefs")
@@ -233,7 +235,24 @@ def _context_count(value, default: int = 15) -> int:
 
 
 def _scoped_belief_evidence(container, scope: RuntimeScope, item: dict, *, before: int, after: int) -> dict:
-    """只在同一 RuntimeScope 内还原正式信念的来源消息与上下文。"""
+    """只在同一 RuntimeScope 内还原 Belief 的支持/反证经历与主锚点上下文。"""
+    evidence_polarity: dict[int, str] = {}
+    for evidence in item.get("evidence") or []:
+        if not isinstance(evidence, dict):
+            continue
+        try:
+            memory_id = int(evidence.get("id"))
+        except (TypeError, ValueError):
+            continue
+        if memory_id > 0:
+            evidence_polarity[memory_id] = str(evidence.get("polarity") or "support")
+    try:
+        source_memory_id = int(item.get("source_memory_id")) if item.get("source_memory_id") is not None else None
+    except (TypeError, ValueError):
+        source_memory_id = None
+    if source_memory_id is not None:
+        evidence_polarity.setdefault(source_memory_id, "support")
+    anchor_id = source_memory_id or next((memory_id for memory_id, polarity in evidence_polarity.items() if polarity == "support"), None) or next(iter(evidence_polarity), None)
     base_payload = {
         "ok": True,
         "belief": {
@@ -246,13 +265,15 @@ def _scoped_belief_evidence(container, scope: RuntimeScope, item: dict, *, befor
         "anchor": None,
         "messages": [],
         "memories": [],
+        "support_anchors": [],
+        "challenge_anchors": [],
         "relationship_events": [],
         "episodes": [],
         "used_fallback": True,
         "reason_code": "belief_anchor_unavailable",
     }
     conn = getattr(getattr(container, "db", None), "conn", None)
-    if conn is None or scope.session is None or item.get("source_memory_id") is None:
+    if conn is None or scope.session is None or anchor_id is None:
         return base_payload
 
     try:
@@ -271,7 +292,7 @@ def _scoped_belief_evidence(container, scope: RuntimeScope, item: dict, *, befor
         scope_params = (scope.bot_id, scope.session.id, scope.visibility)
         anchor = conn.execute(
             f"SELECT {select_columns} FROM memories WHERE id=? AND {scope_where} LIMIT 1",
-            (int(item["source_memory_id"]), *scope_params),
+            (anchor_id, *scope_params),
         ).fetchone()
         if not anchor:
             return base_payload
@@ -287,11 +308,18 @@ def _scoped_belief_evidence(container, scope: RuntimeScope, item: dict, *, befor
             "ORDER BY timestamp ASC LIMIT ?",
             (*scope_params, anchor_ts, after),
         ).fetchall()
+        evidence_rows = []
+        if evidence_polarity:
+            marks = ",".join("?" for _ in evidence_polarity)
+            evidence_rows = conn.execute(
+                f"SELECT {select_columns} FROM memories WHERE id IN ({marks}) AND {scope_where} ORDER BY timestamp ASC",
+                (*evidence_polarity.keys(), *scope_params),
+            ).fetchall()
     except Exception:
         return base_payload
 
-    def row_to_message(row, role: str) -> dict:
-        return {
+    def row_to_message(row, role: str, polarity: str | None = None) -> dict:
+        payload = {
             "id": row[0],
             "group_id": row[1],
             "sender_id": row[2],
@@ -300,24 +328,56 @@ def _scoped_belief_evidence(container, scope: RuntimeScope, item: dict, *, befor
             "timestamp": row[5],
             "role": role,
         }
+        if polarity:
+            payload["polarity"] = polarity
+        return payload
 
-    anchor_message = row_to_message(anchor, "anchor")
+    anchor_message = row_to_message(anchor, "anchor", evidence_polarity.get(int(anchor[0]), "support"))
     messages = [
         *[row_to_message(row, "before") for row in reversed(before_rows)],
         anchor_message,
         *[row_to_message(row, "after") for row in after_rows],
     ]
+    support_anchors = []
+    challenge_anchors = []
+    for row in evidence_rows:
+        polarity = evidence_polarity.get(int(row[0]), "support")
+        target = support_anchors if polarity == "support" else challenge_anchors
+        target.append(row_to_message(row, "anchor", polarity))
     return {
         **base_payload,
         "anchor": anchor_message,
         "messages": messages,
         "memories": messages,
+        "support_anchors": support_anchors,
+        "challenge_anchors": challenge_anchors,
         "used_fallback": False,
         "reason_code": None,
     }
 
 
-def _formal_belief(row: dict, scope: RuntimeScope, *, evidence_available: bool = False) -> dict:
+def _belief_observations(repo, scope: RuntimeScope, belief_id: int | None = None) -> list[dict]:
+    getter = getattr(repo, "list_scoped_belief_observations", None)
+    if not callable(getter):
+        return []
+    try:
+        return list(getter(scope, belief_id=belief_id, limit=1000) or [])
+    except (TypeError, ValueError):
+        try:
+            return list(getter(scope, limit=1000) or [])
+        except Exception:
+            return []
+    except Exception:
+        return []
+
+
+def _formal_belief(
+    row: dict,
+    scope: RuntimeScope,
+    *,
+    evidence_available: bool = False,
+    observations: list[dict] | None = None,
+) -> dict:
     item = dict(row)
     provenance = item.get("provenance") if isinstance(item.get("provenance"), dict) else {}
     source_memory_id = item.get("source_memory_id")
@@ -325,6 +385,7 @@ def _formal_belief(row: dict, scope: RuntimeScope, *, evidence_available: bool =
     item["confidence"] = item.get("strength")
     item["confidence_components"] = provenance.get("confidence_components")
     item["confidence_policy_version"] = provenance.get("confidence_policy_version")
+    item["confidence_evidence"] = provenance.get("confidence_evidence")
     item["anchor_sentence"] = provenance.get("anchor_sentence")
     item["evidence_health"] = "available" if evidence_available else "unavailable"
     item["quarantine_reason"] = provenance.get("quarantine_reason")
@@ -333,17 +394,47 @@ def _formal_belief(row: dict, scope: RuntimeScope, *, evidence_available: bool =
     item["visibility"] = scope.visibility
     item["level"] = _belief_level(item.get("strength"))
     item["revision"] = _item_revision(item)
-    item["evidence"] = ([{
-        "type": "memory",
-        "id": str(source_memory_id),
-        "source_scope": scope.session.id if scope.session else scope.bot_id,
-        "availability": "available",
-        "summary": item.get("anchor_sentence") or "Belief 的同 Scope 来源锚点",
-        "object_ref": None,
-    }] if evidence_available else [])
+    evidence: list[dict] = []
+    seen_memory_ids: set[int] = set()
+    for observation in observations or []:
+        polarity = str(observation.get("polarity") or "support")
+        summary = "支持经历" if polarity == "support" else "反证经历"
+        for raw_memory_id in observation.get("memory_ids") or []:
+            try:
+                memory_id = int(raw_memory_id)
+            except (TypeError, ValueError):
+                continue
+            if memory_id <= 0 or memory_id in seen_memory_ids:
+                continue
+            seen_memory_ids.add(memory_id)
+            evidence.append({
+                "type": "memory",
+                "id": str(memory_id),
+                "source_scope": scope.session.id if scope.session else scope.bot_id,
+                "availability": "available" if evidence_available else "unavailable",
+                "summary": f"{summary} · {observation.get('window_key') or '未记录窗口'}",
+                "polarity": polarity,
+                "object_ref": None,
+            })
+    if evidence_available and source_memory_id is not None and not evidence:
+        evidence.append({
+            "type": "memory",
+            "id": str(source_memory_id),
+            "source_scope": scope.session.id if scope.session else scope.bot_id,
+            "availability": "available",
+            "summary": item.get("anchor_sentence") or "Belief 的同 Scope 来源锚点",
+            "polarity": "support",
+            "object_ref": None,
+        })
+    item["evidence"] = evidence
+    item["observation_count"] = len(observations or [])
     item["object_ref"] = _item_object_ref(item, scope)
+    can_activate = item.get("status") == "pending" and evidence_available and is_activation_eligible(provenance)
+    approve_reason = None if can_activate else (
+        "belief_anchor_unavailable" if not evidence_available else "belief_evidence_incomplete"
+    )
     item["actions"] = {
-        "approve": {"available": item.get("status") == "pending" and evidence_available, "reason_code": None if evidence_available else "belief_anchor_unavailable"},
+        "approve": {"available": can_activate, "reason_code": approve_reason},
         "archive": {"available": item.get("status") != "archived", "reason_code": None if item.get("status") != "archived" else "invalid_belief_transition"},
         "restore": {"available": False, "reason_code": "belief_restore_command_unavailable"},
         "delete": {"available": False, "reason_code": "physical_delete_disabled"},
@@ -382,6 +473,7 @@ def _resolve_belief_detail(scope: RuntimeScope, *, locator: int | None = None):
         row,
         scope,
         evidence_available=_memory_evidence_available(container, scope, row.get("source_memory_id")),
+        observations=_belief_observations(_scoped_repo(container), scope, int(row.get("id") or 0)),
     )
     return item, None
 
@@ -477,7 +569,9 @@ async def list_beliefs():
     try:
         scope = _group_scope_from_query()
         limit, offset = _pagination_from_query()
-        rows = _scoped_repo(get_container()).list_scoped_beliefs(
+        container = get_container()
+        repo = _scoped_repo(container)
+        rows = repo.list_scoped_beliefs(
             scope, status=request.args.get("status"), limit=10000,
         )
         belief_type = _normalize_belief_type(request.args.get("type"))
@@ -486,12 +580,18 @@ async def list_beliefs():
             rows = [row for row in rows if _normalize_belief_type(row.get("belief_type")) == belief_type]
         if search:
             rows = [row for row in rows if search in str(row.get("content") or "")]
-        container = get_container()
+        observations_by_belief: dict[int, list[dict]] = {}
+        for observation in _belief_observations(repo, scope):
+            try:
+                observations_by_belief.setdefault(int(observation.get("belief_id")), []).append(observation)
+            except (TypeError, ValueError):
+                continue
         items = [
             _formal_belief(
                 row,
                 scope,
                 evidence_available=_memory_evidence_available(container, scope, row.get("source_memory_id")),
+                observations=observations_by_belief.get(int(row.get("id") or 0), []),
             )
             for row in rows[offset:offset + limit]
         ]
@@ -686,8 +786,6 @@ async def approve_belief(belief_id: int):
         _require_object_ref(body, kind="belief", locator=belief_id, scope=scope, item=current)
         if not _memory_evidence_available(container, scope, current.get("source_memory_id")):
             return _scope_error("belief_anchor_unavailable", 422)
-        if not _query_trace_valid(container, scope, body):
-            return _scope_error("query_trace_required", 422)
         result = BeliefLifecycleService(repo, getattr(container, "injection_trace_store", None)).transition(scope, belief_id, "approve", query_trace_id=body.get("query_trace_id"))
         return jsonify(mutation_response(
             operation_kind="belief.approve", status="succeeded", revision=None,
@@ -752,8 +850,6 @@ async def batch_transition_scoped_beliefs():
                     raise ScopedKnowledgeScopeError("invalid_belief_transition")
                 if not _memory_evidence_available(container, scope, current.get("source_memory_id")):
                     raise ScopedKnowledgeScopeError("belief_anchor_unavailable")
-                if not _query_trace_valid(container, scope, body):
-                    raise ScopedKnowledgeScopeError("query_trace_required")
             elif current.get("status") == "archived":
                 raise ScopedKnowledgeScopeError("invalid_belief_transition")
             validated.append(current)

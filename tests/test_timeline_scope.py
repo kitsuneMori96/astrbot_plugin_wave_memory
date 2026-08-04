@@ -44,6 +44,14 @@ class TimelineScopeTest(unittest.TestCase):
             "INSERT INTO memories VALUES (8, '跨群 legacy resolved', ?, 'u', '用户参与了咖啡话题', 'g2', '', '', '', '', 0)",
             (time.time(),),
         )
+        self.db.conn.execute(
+            "INSERT INTO memories VALUES (9, '私聊事件', ?, 'u', '用户参与了咖啡话题', 'u', 'yushu', 'qq:private:u', 'private', 'resolved', 0)",
+            (time.time(),),
+        )
+        self.db.conn.execute(
+            "INSERT INTO memories VALUES (10, '私聊 legacy 事件', ?, 'u', '用户参与了咖啡话题', 'private:u', '', '', '', '', 0)",
+            (time.time(),),
+        )
         self.db.conn.commit()
 
     @staticmethod
@@ -76,6 +84,8 @@ class TimelineScopeTest(unittest.TestCase):
         self.assertIn("legacy 事件", result.text)
         self.assertNotIn("跨会话", result.text)
         self.assertNotIn("跨群 legacy resolved", result.text)
+        self.assertNotIn("私聊事件", result.text)
+        self.assertNotIn("私聊 legacy 事件", result.text)
         self.assertNotIn("隔离", result.text)
 
     def test_cross_group_default_includes_other_bots_and_groups_but_not_unsafe_rows(self):

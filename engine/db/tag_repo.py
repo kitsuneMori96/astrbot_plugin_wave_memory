@@ -196,42 +196,6 @@ class TagRepo:
                 result[r[0]] = np.frombuffer(r[1], dtype=np.float32)
         return result
 
-    def get_legacy_tag_vectors_by_ids(self, ids: list[int]) -> dict[int, np.ndarray]:
-        """Return vectors in the legacy ``tags.id`` label space only."""
-        return self.get_tag_vectors_by_ids(ids)
-
-    def list_legacy_memory_tags(self, memory_ids: list[int]) -> dict[int, list[dict]]:
-        """Read existing legacy tag evidence without creating or rewriting links."""
-        if not memory_ids:
-            return {}
-        columns = {
-            str(row[1]) for row in self.cm.execute_read("PRAGMA table_info(memory_tags)").fetchall()
-        }
-        if not {"memory_id", "tag_id"} <= columns:
-            return {}
-        try:
-            ids = sorted({int(value) for value in memory_ids})
-        except (TypeError, ValueError):
-            return {}
-        if not ids:
-            return {}
-        relevance = "COALESCE(relevance, 1.0)" if "relevance" in columns else "1.0"
-        result: dict[int, list[dict]] = {}
-        for offset in range(0, len(ids), 900):
-            chunk = ids[offset : offset + 900]
-            placeholders = ",".join("?" * len(chunk))
-            rows = self.cm.execute_read(
-                f"SELECT memory_id, tag_id, {relevance} AS relevance "
-                f"FROM memory_tags WHERE memory_id IN ({placeholders})",
-                chunk,
-            ).fetchall()
-            for memory_id, tag_id, tag_relevance in rows:
-                result.setdefault(int(memory_id), []).append({
-                    "tag_id": int(tag_id),
-                    "relevance": float(tag_relevance if tag_relevance is not None else 1.0),
-                })
-        return result
-
     def add_tag_relation(
         self,
         source_tag_id: int,

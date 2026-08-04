@@ -7,6 +7,11 @@ try:
 except ImportError:  # pragma: no cover
     from ..domain.scope import RuntimeScope
 
+try:
+    from .belief_confidence import is_activation_eligible
+except ImportError:  # pragma: no cover
+    from services.belief_confidence import is_activation_eligible
+
 
 class BeliefLifecycleService:
     def __init__(self, repository, trace_store=None):
@@ -24,14 +29,12 @@ class BeliefLifecycleService:
             raise LookupError("scoped_object_not_found")
         if action == "approve":
             provenance = current.get("provenance") if isinstance(current.get("provenance"), dict) else {}
-            if not query_trace_id or self.trace_store is None or not self.trace_store.get_for_scope(str(query_trace_id), scope):
-                raise ValueError("belief_query_trace_required")
-            if not provenance.get("source_tags") or not provenance.get("evidence"):
-                raise ValueError("belief_evidence_required")
             if current.get("status") != "pending":
                 raise ValueError("invalid_belief_transition")
             if not current.get("source_memory_id"):
                 raise ValueError("belief_anchor_required")
+            if not is_activation_eligible(provenance):
+                raise ValueError("belief_evidence_incomplete")
             target_status = "active"
         else:
             if current.get("status") == "archived":

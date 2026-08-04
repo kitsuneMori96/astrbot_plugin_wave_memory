@@ -10,6 +10,11 @@ from typing import Optional
 
 from astrbot.api import logger
 
+try:
+    from .llm_fallback import build_provider_chain, call_first_available_provider
+except ImportError:  # pragma: no cover - direct service imports in focused tests
+    from services.llm_fallback import build_provider_chain, call_first_available_provider
+
 
 # ─── 结构化 Tag 提取 Prompt ───
 
@@ -92,9 +97,11 @@ class TagExtractor:
     5. 已有 Tag 复用：注入高频 Tag 词表，LLM 优先复用
     """
 
-    def __init__(self, context, provider_id: str, max_tags: int = 10, batch_size: int = 5, blacklist: str = "", db=None, embedding_service=None, tag_index=None):
+    def __init__(self, context, provider_id: str, max_tags: int = 10, batch_size: int = 5, blacklist: str = "", db=None, embedding_service=None, tag_index=None, provider_fallback_ids=None):
         self.context = context
         self.provider_id = provider_id
+        # 标签提取失败会静默退化成关键词兜底，回退链让单渠道故障不至于长期降级。
+        self.provider_ids = build_provider_chain(provider_id, provider_fallback_ids)
         self.max_tags = max_tags
         self.batch_size = batch_size
         self.db = db
@@ -311,15 +318,10 @@ class TagExtractor:
         if not message or len(message.strip()) < 6:
             return []
 
-        if not self.provider_id:
+        if not self.provider_ids:
             return self._fallback_extract(message)
 
         try:
-            provider = self.context.get_provider_by_id(self.provider_id)
-            if not provider:
-                logger.warning(f"[WaveMemory] Tag LLM provider '{self.provider_id}' not found, using fallback")
-                return self._fallback_extract(message)
-
             reference_section = self._build_reference_section(scope)
 
             # Tag RAG：如果 embedding 可用，追加当前 Scope 的语义相关 tag
@@ -333,7 +335,10 @@ class TagExtractor:
                 reference_section=reference_section,
             )
 
-            response = await provider.text_chat(
+            response = await call_first_available_provider(
+                self.context,
+                self.provider_ids,
+                log_prefix="[TagExtract]",
                 prompt=prompt,
                 system_prompt="你是一个记忆标注系统，只输出 JSON 数组，不输出其他内容。",
             )
@@ -364,7 +369,7 @@ class TagExtractor:
         if not messages:
             return []
 
-        if not self.provider_id:
+        if not self.provider_ids:
             return [self._fallback_extract(m.get("content", "")) for m in messages]
 
         # 构建一个 JSON 文档作为批处理输入，避免靠自然语言编号对齐
@@ -386,10 +391,6 @@ class TagExtractor:
         batch_json = json.dumps(batch_doc, ensure_ascii=False, separators=(",", ":"))
 
         try:
-            provider = self.context.get_provider_by_id(self.provider_id)
-            if not provider:
-                return [self._fallback_extract(m.get("content", "")) for m in messages]
-
             reference_section = self._build_reference_section(scope)
 
             # Tag RAG：用批量消息的拼接文本搜索当前 Scope 的语义相关 tag
@@ -402,7 +403,10 @@ class TagExtractor:
                 batch_json=batch_json,
                 reference_section=reference_section,
             )
-            response = await provider.text_chat(
+            response = await call_first_available_provider(
+                self.context,
+                self.provider_ids,
+                log_prefix="[TagExtract]",
                 prompt=prompt,
                 system_prompt="你是一个记忆标注系统，只输出严格 JSON 对象，不输出 markdown 或解释。",
             )

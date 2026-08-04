@@ -189,6 +189,100 @@ class JargonScopedApiTest(unittest.TestCase):
         self.assertEqual(validated, [("opaque-7", 7)])
         self.assertEqual(review_calls, [(scope.bot_id, 7, "reject")])
 
+    def test_single_and_batch_review_use_same_domain_service(self):
+        scope, envelope = self._scope_envelope()
+        calls = []
+        validated = []
+
+        class _Service:
+            def review(self, runtime_scope, jargon_id, action, query_trace_id=None, reason=None):
+                calls.append((runtime_scope.bot_id, jargon_id, action, reason))
+                return {"id": jargon_id, "status": "rejected", "scope": runtime_scope}
+
+        original_require = self.module._require_object_ref
+        self.module._require_object_ref = lambda body, **kwargs: validated.append((body["object_ref"]["ref"], kwargs["locator"]))
+        self.module.get_container = lambda: types.SimpleNamespace(
+            db=types.SimpleNamespace(scoped_knowledge=self.repo),
+            jargon_service=_Service(),
+        )
+        try:
+            self.module.request = types.SimpleNamespace(get_json=lambda **_kwargs: _async_value({
+                "scope": envelope,
+                "object_ref": {"ref": "opaque-7"},
+                "revision": 2000,
+                "reason": "用户拒绝",
+            }))
+            single = asyncio.run(self.module.review_scoped_jargon.__wrapped__(7, "reject"))
+            self.module.request = types.SimpleNamespace(get_json=lambda **_kwargs: _async_value({
+                "scope": envelope,
+                "action": "reject",
+                "reason": "用户拒绝",
+                "items": [{"id": 7, "object_ref": {"ref": "opaque-7"}, "revision": 2000}],
+            }))
+            batch = asyncio.run(self.module.batch_review_scoped_jargon.__wrapped__())
+        finally:
+            self.module._require_object_ref = original_require
+
+        self.assertTrue(single["ok"])
+        self.assertTrue(batch["ok"])
+        self.assertEqual(calls, [
+            (scope.bot_id, 7, "reject", "用户拒绝"),
+            (scope.bot_id, 7, "reject", "用户拒绝"),
+        ])
+        self.assertEqual(validated, [("opaque-7", 7), ("opaque-7", 7)])
+
+    def test_single_review_fails_closed_on_scope_or_object_ref(self):
+        _, envelope = self._scope_envelope()
+        calls = []
+
+        class _Service:
+            def review(self, *_args, **_kwargs):
+                calls.append(True)
+                return {"id": 7, "status": "rejected"}
+
+        self.module.get_container = lambda: types.SimpleNamespace(
+            db=types.SimpleNamespace(scoped_knowledge=self.repo),
+            jargon_service=_Service(),
+        )
+        self.module.request = types.SimpleNamespace(get_json=lambda **_kwargs: _async_value({}))
+        missing_scope = asyncio.run(self.module.review_scoped_jargon.__wrapped__(7, "reject"))
+        self.assertEqual(missing_scope[1], 400)
+
+        original_require = self.module._require_object_ref
+        self.module._require_object_ref = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            self.module.ScopedKnowledgeScopeError("object_ref_stale")
+        )
+        self.module.request = types.SimpleNamespace(get_json=lambda **_kwargs: _async_value({
+            "scope": envelope,
+            "object_ref": {"ref": "wrong-scope"},
+            "revision": 2000,
+        }))
+        try:
+            stale = asyncio.run(self.module.review_scoped_jargon.__wrapped__(7, "reject"))
+        finally:
+            self.module._require_object_ref = original_require
+        self.assertEqual(stale[1], 422)
+        self.assertEqual(calls, [])
+
+    def test_global_blocklist_audit_and_remove_use_db_facade(self):
+        calls = []
+
+        class _DB:
+            def list_jargon_blocklist(self):
+                calls.append(("list",))
+                return [{"id": 3, "word": "abc", "reason": "拒绝", "source": "user_global_reject", "created_at": 1.0}]
+            def remove_jargon_blocklist(self, *, blocklist_id, source):
+                calls.append(("remove", blocklist_id, source))
+                return 1
+
+        self.module.get_container = lambda: types.SimpleNamespace(db=_DB())
+        listed = asyncio.run(self.module.holyman_blocklist.__wrapped__())
+        removed = asyncio.run(self.module.remove_global_jargon_blocklist.__wrapped__(3))
+
+        self.assertEqual(listed["items"][0]["word"], "abc")
+        self.assertTrue(removed["ok"])
+        self.assertEqual(calls, [("list",), ("remove", 3, "user_global_reject")])
+
     def test_create_requires_codec_envelope_and_passes_runtime_scope(self):
         _, envelope = self._scope_envelope()
         self.module.request = types.SimpleNamespace(

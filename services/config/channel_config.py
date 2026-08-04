@@ -10,6 +10,11 @@ import hashlib
 import json
 from typing import Any, Mapping
 
+try:
+    from ...domain.scope import RuntimeScope
+except ImportError:  # pragma: no cover - top-level services imports
+    from domain.scope import RuntimeScope
+
 from .effective_config import (
     EffectiveConfigResult,
     patches_for_scope,
@@ -202,7 +207,9 @@ def build_default_channel_config(
         "memory": ChannelConfig("memory", _enabled_for("memory", mode, inject_cfg), priority=100, top_k=inject_top_k, token_budget=600, timeout_ms=2000, min_score=min_similarity, modes=_modes_for("memory", mode)),
         "timeline": ChannelConfig("timeline", _enabled_for("timeline", mode, inject_cfg), priority=80, max_items=timeline_max, token_budget=220, timeout_ms=400, modes=_modes_for("timeline", mode)),
         "facts": ChannelConfig("facts", _enabled_for("facts", mode, inject_cfg), priority=75, max_items=facts_max, token_budget=260, timeout_ms=120, modes=_modes_for("facts", mode)),
-        "persona": ChannelConfig("persona", _enabled_for("persona", mode, inject_cfg), priority=70, max_items=1, token_budget=350, timeout_ms=500, modes=_modes_for("persona", mode)),
+        # max_items=2 lets the scope-keyed speaker statistics block ride along with
+        # the bot's own persona block; at 1 only self_persona could ever be injected.
+        "persona": ChannelConfig("persona", _enabled_for("persona", mode, inject_cfg), priority=70, max_items=2, token_budget=460, timeout_ms=500, modes=_modes_for("persona", mode)),
         "belief": ChannelConfig("belief", _enabled_for("belief", mode, inject_cfg), priority=65, max_items=5, token_budget=220, timeout_ms=300, modes=_modes_for("belief", mode)),
         "jargon": ChannelConfig("jargon", _enabled_for("jargon", mode, inject_cfg), priority=60, max_items=3, token_budget=180, timeout_ms=160, modes=_modes_for("jargon", mode)),
         "fewshot": ChannelConfig("fewshot", _enabled_for("fewshot", mode, inject_cfg), priority=50, max_items=3, token_budget=260, timeout_ms=300, modes=_modes_for("fewshot", mode)),
@@ -458,6 +465,32 @@ def _config_set_from_payload(payload: Mapping[str, Any]) -> ChannelConfigSet:
     return replace(validated, channels=channels, mode=candidate.mode)
 
 
+def _is_private_scope(scope: Any) -> bool:
+    return bool(
+        isinstance(scope, RuntimeScope)
+        and scope.visibility == "private"
+        and scope.session is not None
+        and scope.session.kind == "private"
+    )
+
+
+def _restrict_private_channels(config: ChannelConfigSet) -> ChannelConfigSet:
+    """Apply the non-overridable private-session channel safety envelope."""
+    allowed = {"safety", "memory", "fts5"}
+    channels = {
+        name: cfg if name in allowed else replace(cfg, enabled=False, modes=("full",))
+        for name, cfg in config.channels.items()
+    }
+    return replace(
+        config,
+        channels=channels,
+        trace_enabled=False,
+        query_stages={name: False for name in _QUERY_STAGE_NAMES},
+        memory_recall={**config.memory_recall, "enable_shotgun": False},
+        timeline_days=0,
+    )
+
+
 def resolve_effective_channel_config(
     plugin_config: Mapping[str, Any] | None,
     *,
@@ -499,6 +532,17 @@ def resolve_effective_channel_config(
     reconstructed = _config_set_from_payload(effective.values)
     if reconstructed.to_dict() != candidate.to_dict():
         raise ValueError("effective resolver output does not match validated channel candidate")
+    if _is_private_scope(scope):
+        candidate = _restrict_private_channels(candidate)
+        # Keep the effective-config API truthful after applying the
+        # non-overridable private envelope; provenance remains useful for the
+        # underlying layer values while the returned values are safe-to-use.
+        canonical = json.dumps(candidate.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        effective = replace(
+            effective,
+            values=candidate.to_dict(),
+            revision=f"effective-private-{hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:20]}",
+        )
     return candidate, effective
 
 

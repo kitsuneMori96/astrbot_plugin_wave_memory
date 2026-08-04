@@ -53,6 +53,14 @@ export interface JargonResponse extends PageResponse<JargonItem> {
   }
 }
 
+export interface JargonBlocklistItem {
+  id: number
+  word: string
+  reason: string
+  source: string
+  created_at: number | null
+}
+
 export interface JargonEvidenceMessage {
   id: number
   group_id: string | null
@@ -114,6 +122,16 @@ export function listJargons(filters: JargonFilters): Promise<JargonResponse> {
   return fetchJson<JargonResponse>(`/api/jargon?${params.toString()}`)
 }
 
+export function listJargonBlocklist(): Promise<{ items: JargonBlocklistItem[]; total: number }> {
+  return fetchJson<{ items: JargonBlocklistItem[]; total: number }>('/api/jargon/blocklist')
+}
+
+export function removeJargonBlocklistItem(id: number) {
+  return fetchJson<{ ok: boolean; operation: { status: string }; item: { id: number; removed: boolean } }>(`/api/jargon/blocklist/${id}`, {
+    method: 'DELETE',
+  })
+}
+
 export function getJargonEvidence(item: JargonItem, scope: JargonScopeSelection, before = 15, after = 15): Promise<JargonEvidencePayload> {
   if (!item.object_ref?.ref) throw new Error('该黑话没有服务端签发的 ObjectRef，不能安全读取证据')
   const params = new URLSearchParams({
@@ -159,14 +177,14 @@ export function archiveJargon(item: JargonItem, scope: JargonScopeSelection) {
 }
 
 export function batchReviewJargons(items: JargonItem[], action: 'approve' | 'reject', scope: JargonScopeSelection) {
-  if (!items.length || items.some((item) => !item.object_ref)) throw new Error('批量审核要求每条黑话都有服务端签发的 ObjectRef')
-  return fetchJson<{ ok: boolean; operation: { status: string }; reviewed_count: number; items: Array<{ id: number; status: string }> }>('/api/jargon/commands/batch-review', {
+  const payload = {
+    scope: scopeEnvelope(scope),
+    action,
+    items: items.map((item) => ({ id: item.id, object_ref: item.object_ref, revision: item.revision })),
+  }
+  return fetchJson<{ ok: boolean; operation: { status: string }; transitioned_count?: number }>(`/api/jargon/commands/batch-review`, {
     method: 'POST',
-    body: JSON.stringify({
-      scope: scopeEnvelope(scope),
-      action,
-      items: items.map((item) => ({ id: item.id, object_ref: item.object_ref, revision: item.revision })),
-    }),
+    body: JSON.stringify(payload),
   })
 }
 

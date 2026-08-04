@@ -94,24 +94,18 @@ def _canonical_index_kind(value: Any) -> str:
 
 
 def _book_lore_path(container: Any, database_path: str | None) -> str | None:
-    for owner, names in (
-        (container, ("book_lore_db_path", "lore_db_path")),
-        (getattr(container, "learning_source_registry", None), ("book_lore_db_path", "lore_db_path")),
-    ):
-        for name in names:
-            value = _path_value(getattr(owner, name, None)) if owner is not None else None
-            if value:
-                return value
+    for name in ("book_lore_db_path", "lore_db_path"):
+        value = _path_value(getattr(container, name, None)) if container is not None else None
+        if value:
+            return value
 
     config = getattr(container, "plugin_config", None)
     if isinstance(config, Mapping):
         direct = _path_value(config.get("book_lore_db_path") or config.get("lore_db_path"))
         if direct:
             return direct
-        for section_name in ("BookLore_Settings", "Study_Settings", "Learning_Settings"):
-            section = config.get(section_name)
-            if not isinstance(section, Mapping):
-                continue
+        section = config.get("BookLore_Settings")
+        if isinstance(section, Mapping):
             nested = _path_value(section.get("book_lore_db_path") or section.get("lore_db_path"))
             if nested:
                 return nested

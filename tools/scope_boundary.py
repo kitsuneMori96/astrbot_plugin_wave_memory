@@ -32,6 +32,32 @@ def extract_group_runtime_scope(context: Any) -> RuntimeScope | None:
     return scope
 
 
+def extract_memory_runtime_scope(context: Any) -> RuntimeScope | None:
+    """返回 WaveMemory 基础工具允许的 group/private RuntimeScope。"""
+    scope = extract_event_runtime_scope(context)
+    if scope is None or scope.visibility not in {"group", "private"} or scope.session is None:
+        return None
+    if scope.session.kind != scope.visibility or not scope.bot_id or not scope.session.id:
+        return None
+    if not scope.session.conversation_id:
+        return None
+    return scope
+
+
+def require_memory_runtime_scope(context: Any, command_type: str) -> tuple[RuntimeScope | None, str | None]:
+    """提取基础记忆工具的 group/private Scope；不降级到 legacy group_id。"""
+    scope = extract_memory_runtime_scope(context)
+    if scope is None:
+        return None, "memory_scope_required"
+    # The formal matrix is the source of truth: it now grants private access
+    # only to approved base-memory commands and keeps every derived group domain
+    # fail-closed.
+    decision = validate_formal_command_scope(command_type, scope)
+    if not decision.allowed:
+        return None, decision.reason_code or "scope_rejected"
+    return scope, None
+
+
 def require_group_runtime_scope(context: Any, command_type: str) -> tuple[RuntimeScope | None, str | None]:
     """提取并校验 formal command 的群聊 RuntimeScope。"""
     scope = extract_group_runtime_scope(context)
@@ -62,6 +88,7 @@ def scope_error_message(action: str, reason_code: str) -> str:
     """统一、用户可读且含稳定 reason code 的 fail-closed 返回值。"""
     labels = {
         "scope_required": "当前事件没有已解析的群聊作用域",
+        "memory_scope_required": "当前事件没有已解析的记忆作用域",
         "scope_mismatch": "目标不属于当前作用域",
         "legacy_scope_unresolved": "旧数据没有可验证的 canonical 作用域",
         "scope_migration_required": "该工具依赖的 legacy 数据尚未完成 Scope 迁移",
@@ -74,6 +101,8 @@ def scope_error_message(action: str, reason_code: str) -> str:
 __all__ = [
     "extract_event_runtime_scope",
     "extract_group_runtime_scope",
+    "extract_memory_runtime_scope",
+    "require_memory_runtime_scope",
     "require_catalog_scope",
     "require_group_runtime_scope",
     "scope_envelope",

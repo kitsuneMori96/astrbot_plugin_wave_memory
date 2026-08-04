@@ -239,7 +239,10 @@ def rebuild_approved_scope_recovery_indexes(
         settings = _settings(memory_index_settings)
         policy = memory_index_policy_from_settings(settings)
         tag_max_vectors = _bounded_int(settings, "tag_index_max_vectors", 40_000, 1)
-        retention = _bounded_int(settings, "generation_retention", 2, 2)
+        # Recovery artifacts must follow the same retention policy as the runtime
+        # indexes.  Forcing a minimum of two generations here silently reintroduced
+        # a second resident/disk copy after every approved recovery run.
+        retention = _bounded_int(settings, "generation_retention", 1, 1)
         watermark = _watermark(connection)
         memory_manifest, memory_ids = _memory_artifact(
             connection,

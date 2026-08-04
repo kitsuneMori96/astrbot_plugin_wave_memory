@@ -54,7 +54,7 @@ let _kgFullEdges = null;
 let _kgLayerCounts = {};
 let _kgWarnings = [];
 let layoutMode = 'semantic';
-let labelDensity = 'focus';
+let labelDensity = 'core';
 let cameraPreset = 'overview';
 let actionRingNode = null;
 let pickableNodeObjects = [];
@@ -262,7 +262,14 @@ function addNodeRecord(rawNode, index=0, options={}) {
     const type = normalizeNodeType(rawNode);
     const degree = rawNode.value || rawNode.degree || rawNode.weight || 1;
     const isSeed = rawNode.isSource || rawNode.isSeed || type === 'source';
-    const label = rawNode.name || rawNode.label || id;
+    // 标签优化：memory 节点用 sender_name + 摘要，去掉裸 QQ 号噪声
+    let label = rawNode.name || rawNode.label || id;
+    if (type === 'memory' && rawNode.sender_name) {
+        const cleanContent = (rawNode.content || rawNode.name || '').replace(/@[^\s(]*\(\d+\)\s*/g, '').trim();
+        label = cleanContent ? `${rawNode.sender_name}: ${cleanContent.slice(0, 20)}` : rawNode.sender_name;
+    } else if (label.length > 24) {
+        label = label.slice(0, 22) + '…';
+    }
     const color = isSeed ? TYPE_COLORS.source : colorForType(type);
     const radius = isSeed ? 1.9 : Math.max(0.55, Math.min(1.65, Math.log2((degree || 1) + 1) * 0.22 + 0.62));
     const position = rawNode._position || computeNodePosition(rawNode, index, options);
@@ -649,11 +656,12 @@ function animate() {
         labelGroup.children.forEach(sprite => sprite.lookAt(camera.position));
     }
 
-    // 粒子沿 Curve 路径流淌机制
+    // 粒子沿 Curve 路径流淌机制 + 脉冲波衰减效果
     flowParticles.forEach(p => {
         p.progress += p.speed;
         if (p.progress > 1) {
             p.progress = 0; // 重复流动
+            p.phaseOffset = Math.random() * 0.5; // 每次重置随机错开节奏
         }
         if (p.curve && p.mesh) {
             // 获取样条线当前进度的空间物理位置
@@ -661,11 +669,26 @@ function animate() {
             // 补偿图组自转导致的物理世界位移
             p.mesh.position.copy(point).applyMatrix4(graphGroup.matrixWorld);
             
+            // 脉冲波衰减：起始大、到达目标时缩小
+            const pulseScale = 1.4 - p.progress * 0.8; // 1.4 → 0.6
+            const pulseOpacity = 0.9 - p.progress * 0.6; // 0.9 → 0.3
+            
             // 节点选定或悬停时，关联连线粒子呼吸闪烁
             const isHoveredLine = hoveredNode && (p.sourceId === hoveredNode || p.targetId === hoveredNode);
-            p.mesh.scale.setScalar(isHoveredLine ? 1.6 : 1);
+            p.mesh.scale.setScalar(isHoveredLine ? 2.0 : pulseScale);
+            if (p.mesh.material) p.mesh.material.opacity = isHoveredLine ? 1.0 : pulseOpacity;
         }
     });
+
+    // 节点微弱呼吸动画：±4% 正弦脉动，相位按位置错开
+    if (graphGroup) {
+        graphState.nodes.forEach(record => {
+            if (!record.object || !record.visible) return;
+            if (record.id === hoveredNode || record.id === selectedNode) return; // hover/select 已有独立 scale
+            const breathe = 1 + Math.sin(t * 1.2 + record.position.x * 0.1 + record.position.z * 0.07) * 0.04;
+            record.object.scale.setScalar(record.radius * breathe);
+        });
+    }
 
     if (controls) controls.update();
     if (composer) composer.render();
@@ -695,6 +718,7 @@ function renderGraph(nodes, edges, options={}) {
     updateStats();
     applyVisibility();
     flyToGraph();
+    initLegend(); // 渲染完毕后刷新动态图例（只显示实际出现的类型）
 }
 
 function createFlowParticles() {
@@ -775,7 +799,7 @@ function applySemanticLayout(options={}) {
         return r.raw.community !== undefined ? `community-${r.raw.community}` : (r.type || r.raw.layer || 'entity');
     })));
     const centers = new Map();
-    const islandRadius = Math.max(25, Math.min(84, 18 + records.length * 0.18));
+    const islandRadius = Math.max(40, Math.min(120, 30 + records.length * 0.25));
     islandKeys.forEach((key, idx) => {
         const angle = (idx / Math.max(1, islandKeys.length)) * Math.PI * 2;
         centers.set(key, new THREE.Vector3(Math.cos(angle) * islandRadius, ((idx % 3) - 1) * 9, Math.sin(angle) * islandRadius));
@@ -822,31 +846,55 @@ function applySemanticLayout(options={}) {
 
 function relaxNodePositions(iterations=3) {
     const records = Array.from(graphState.nodes.values());
-    for (let iter = 0; iter < iterations; iter++) {
+    const nodeCount = records.length;
+    const maxIter = nodeCount <= 400 ? 20 : 8;
+    const effectiveIter = Math.max(iterations, maxIter);
+    const repulsionRadius = 12;
+    const repulsionStrength = 0.35;
+    const springIdeal = 10;
+    const springStrength = 0.04;
+    const gravityStrength = 0.01;
+    const damping = 0.92;
+
+    for (let iter = 0; iter < effectiveIter; iter++) {
+        // 库仑斥力
         for (let i = 0; i < records.length; i++) {
             for (let j = i + 1; j < records.length; j++) {
                 const a = records[i];
                 const b = records[j];
                 const delta = a.position.clone().sub(b.position);
                 const dist = Math.max(0.01, delta.length());
-                if (dist > 6.0) continue;
-                // 经典库仑物理斥力公式
-                const push = delta.normalize().multiplyScalar((6.0 - dist) * 0.22);
+                if (dist > repulsionRadius) continue;
+                const push = delta.normalize().multiplyScalar((repulsionRadius - dist) * repulsionStrength);
                 a.position.add(push);
                 b.position.sub(push);
             }
         }
+        // 胡克弹簧吸引
         graphState.edges.forEach(edge => {
             const a = getNodeRecord(edge.source);
             const b = getNodeRecord(edge.target);
             if (!a || !b) return;
             const delta = b.position.clone().sub(a.position);
             const dist = delta.length();
-            if (dist < 15 || dist > 70) return;
-            // 弹簧胡克定律拉回
-            const pull = delta.normalize().multiplyScalar(Math.min(2.0, (dist - 15) * 0.02));
+            if (dist < springIdeal * 0.5 || dist > 70) return;
+            const pull = delta.normalize().multiplyScalar(Math.min(3.0, (dist - springIdeal) * springStrength));
             a.position.add(pull);
             b.position.sub(pull);
+        });
+        // 重力：向各自 island center 微弱吸引，防止飘散
+        records.forEach(record => {
+            if (record.raw.isSource || record.type === 'source') return;
+            const center = new THREE.Vector3(0, 0, 0);
+            const toCenter = center.clone().sub(record.position);
+            const dist = toCenter.length();
+            if (dist > 5) {
+                record.position.add(toCenter.normalize().multiplyScalar(dist * gravityStrength));
+            }
+        });
+        // 阻尼防震荡
+        records.forEach(record => {
+            record.position.multiplyScalar(damping + (1 - damping) * 0.98);
         });
     }
 }
@@ -932,7 +980,7 @@ function createAllReadableLabels() {
     graphState.nodes.forEach(record => { record.labelObject = null; });
     const records = Array.from(graphState.nodes.values()).sort((a, b) => (b.degree || 0) - (a.degree || 0));
     let selectedRecords = records;
-    if (labelDensity === 'core') selectedRecords = records.slice(0, Math.min(80, records.length));
+    if (labelDensity === 'core') selectedRecords = records.slice(0, Math.min(40, records.length));
     else if (labelDensity === 'focus') {
         const focusSet = new Set();
         if (selectedNode) {
@@ -947,7 +995,7 @@ function createAllReadableLabels() {
     }
     selectedRecords.forEach(record => {
         const sprite = createTextSprite(record.label, record.color, record.radius);
-        sprite.position.copy(record.position).add(new THREE.Vector3(record.radius * 1.7, record.radius * 0.7, 0));
+        sprite.position.copy(record.position).add(new THREE.Vector3(record.radius * 2.2, record.radius * 1.1, 0));
         sprite.userData.nodeId = record.id;
         labelGroup.add(sprite);
         record.labelObject = sprite;
@@ -1011,7 +1059,7 @@ function createTextSprite(text, color, radius) {
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
     const fontSize = 34;
-    const label = String(text || '').slice(0, 18);
+    const label = String(text || '').slice(0, 24);
     ctx.font = `600 ${fontSize}px system-ui, -apple-system, sans-serif`;
     const width = Math.ceil(ctx.measureText(label).width + 38);
     canvas.width = Math.max(128, width);
@@ -1030,7 +1078,7 @@ function createTextSprite(text, color, radius) {
     texture.needsUpdate = true;
     const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false });
     const sprite = new THREE.Sprite(material);
-    const scale = Math.max(4.0, radius * 3.2);
+    const scale = Math.min(3.6, Math.max(2.0, radius * 1.8));
     sprite.scale.set((canvas.width / canvas.height) * scale, scale, 1);
     return sprite;
 }
@@ -1191,11 +1239,16 @@ function appendGraphData(newNodes, newEdges) {
 function initLegend() {
     const legend = document.getElementById('legend');
     if (!legend) return;
-    const types = ['bot','person','topic','event','entity','keyword','memory','belief','concern','jargon','mood','timeline','relationship_event','few_shot','trait','book_lore','community'];
+    // 动态图例：只显示当前图谱实际出现的节点类型
+    const activeTypes = new Set();
+    graphState.nodes.forEach(record => { if (record.type) activeTypes.add(record.type); });
+    const types = activeTypes.size > 0
+        ? Array.from(activeTypes).sort((a, b) => (TYPE_LABELS[a] || a).localeCompare(TYPE_LABELS[b] || b))
+        : ['entity','topic','person','memory','event','fact','keyword'];
     legend.innerHTML = types.map(t => `
         <button class="legend-pill flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10px] cursor-pointer border border-transparent"
-                data-type="${t}" style="background:${TYPE_COLORS[t]}15; color:${TYPE_COLORS[t]}; --pill-glow:${TYPE_COLORS[t]}40">
-            <span class="w-2.5 h-2.5 rounded-full" style="background: radial-gradient(circle at 30% 30%, ${TYPE_COLORS[t]}, ${TYPE_COLORS[t]}80)"></span>
+                data-type="${t}" style="background:${TYPE_COLORS[t] || '#94a3b8'}15; color:${TYPE_COLORS[t] || '#94a3b8'}; --pill-glow:${(TYPE_COLORS[t] || '#94a3b8')}40">
+            <span class="w-2.5 h-2.5 rounded-full" style="background: radial-gradient(circle at 30% 30%, ${TYPE_COLORS[t] || '#94a3b8'}, ${(TYPE_COLORS[t] || '#94a3b8')}80)"></span>
             ${TYPE_LABELS[t] || t}
         </button>
     `).join('');

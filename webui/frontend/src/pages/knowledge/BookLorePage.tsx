@@ -1,26 +1,22 @@
-import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { EyeIcon, RefreshCwIcon, SearchIcon } from 'lucide-react'
 
 import {
   getBookLoreItems,
   getBookLoreSummary,
-  getReviewedBookLore,
   type BookLoreItem,
   type BookLorePage,
   type BookLoreResource,
   type BookLoreSummary,
-  type ReviewedBookLorePage,
-  type ReviewedBookLoreProjection,
 } from '@/api/knowledge'
-import { getScopeOptions, scopeOptionsFor } from '@/api/options'
-import { EvidenceList, PaginationControls, QueryState, ResponsiveDetail, ResponsiveTable, ScopeSelect } from '@/components/shared'
+import { PaginationControls, QueryState, ResponsiveDetail, ResponsiveTable } from '@/components/shared'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { useCanonicalScopeDefault, usePaginationSearchParams } from '@/hooks/use-pagination-search-params'
+import { usePaginationSearchParams } from '@/hooks/use-pagination-search-params'
 
 const RESOURCES: Array<{ value: BookLoreResource; label: string; help: string }> = [
   { value: 'entities', label: '实体', help: '人物、地点与设定对象' },
@@ -44,12 +40,6 @@ function itemTitle(item: BookLoreItem): string {
 
 function itemSummary(item: BookLoreItem): string {
   return displayText(item.summary ?? item.description ?? item.content ?? item.original, '无摘要')
-}
-
-function serverRank(value: unknown): string {
-  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
-  if (typeof value === 'string' && value.trim()) return value
-  return '未记录'
 }
 
 function governance(item: BookLoreItem) {
@@ -99,10 +89,6 @@ function ItemDetail({ item, resource }: { item: BookLoreItem; resource: BookLore
   )
 }
 
-function ReviewedProjectionDetail({ item }: { item: ReviewedBookLoreProjection }) {
-  return <div className="flex flex-col gap-4"><div className="flex flex-wrap gap-2"><Badge>approved</Badge><Badge variant="outline">revision {item.revision}</Badge><Badge variant="secondary">服务端 rank {serverRank(item.rank)}</Badge></div><div><h3 className="mb-1 text-sm font-medium text-muted-foreground">正式投影内容</h3><p className="whitespace-pre-wrap rounded-md border p-3 leading-relaxed">{item.content}</p></div><dl className="grid gap-3 sm:grid-cols-2"><div><dt className="text-sm text-muted-foreground">Community</dt><dd className="font-mono">{item.community_id}</dd></div><div><dt className="text-sm text-muted-foreground">来源 Catalog</dt><dd className="font-mono">{item.source_scope.catalog_id} · {item.source_scope.corpus_id} · {item.source_scope.version}</dd></div><div className="sm:col-span-2"><dt className="text-sm text-muted-foreground">目标 RuntimeScope</dt><dd className="break-all font-mono">{item.target_scope.bot_id} · {item.target_scope.session.id}</dd></div></dl><div><h3 className="mb-2 text-sm font-medium">审核证据</h3><EvidenceList evidence={item.evidence} emptyDescription="正式投影未返回可展示的证据引用。" /></div></div>
-}
-
 function SummaryTile({ label, value, help }: { label: string; value: number | undefined; help: string }) {
   return <div className="min-w-[4.75rem] rounded-lg border bg-muted/20 px-2.5 py-1.5 text-center"><div className="text-[11px] text-muted-foreground">{label}</div><div className="text-base font-semibold leading-5">{value ?? '—'}</div><div className="sr-only">{help}</div></div>
 }
@@ -112,9 +98,6 @@ export function BookLorePage() {
   const requestedTab = pagination.searchParams.get('tab') as BookLoreResource | null
   const resource = RESOURCES.some((item) => item.value === requestedTab) ? requestedTab! : 'entities'
   const search = pagination.searchParams.get('search') ?? ''
-  const botId = pagination.searchParams.get('bot_id') ?? ''
-  const sessionId = pagination.searchParams.get('session_id') ?? ''
-  useCanonicalScopeDefault({ botId, sessionId, setFilters: pagination.setFilters })
   const [searchDraft, setSearchDraft] = useState(search)
   const [summary, setSummary] = useState<BookLoreSummary | null>(null)
   const [payload, setPayload] = useState<BookLorePage | null>(null)
@@ -122,26 +105,8 @@ export function BookLorePage() {
   const [error, setError] = useState<unknown>()
   const [loading, setLoading] = useState(true)
   const [reload, setReload] = useState(0)
-  const [projectionPayload, setProjectionPayload] = useState<ReviewedBookLorePage | null>(null)
-  const [projectionError, setProjectionError] = useState<unknown>()
-  const [projectionLoading, setProjectionLoading] = useState(false)
-  const [projectionOffset, setProjectionOffset] = useState(0)
-  const loadBots = useCallback(async () => scopeOptionsFor(await getScopeOptions(), ['bot']), [])
-  const loadSessions = useCallback(async () => scopeOptionsFor(await getScopeOptions(), ['session']).filter((option) => option.description?.startsWith(`${botId} ·`)), [botId])
 
   useEffect(() => { setSearchDraft(search) }, [search])
-
-  useEffect(() => {
-    if (!botId || !sessionId) { setProjectionPayload(null); setProjectionLoading(false); setProjectionError(undefined); return }
-    let active = true
-    setProjectionLoading(true)
-    setProjectionError(undefined)
-    getReviewedBookLore({ bot_id: botId, session_id: sessionId, visibility: 'group', search: search || undefined, limit: 25, offset: projectionOffset })
-      .then((value) => { if (active) setProjectionPayload(value) })
-      .catch((reason: unknown) => { if (active) { setProjectionPayload(null); setProjectionError(reason) } })
-      .finally(() => { if (active) setProjectionLoading(false) })
-    return () => { active = false }
-  }, [botId, projectionOffset, reload, search, sessionId])
 
   useEffect(() => {
     let active = true
@@ -170,7 +135,6 @@ export function BookLorePage() {
 
   const submitSearch = (event: FormEvent) => {
     event.preventDefault()
-    setProjectionOffset(0)
     pagination.setFilters({ search: searchDraft.trim() || null })
   }
   const status = !summary && summaryError ? 'error' : loading ? 'loading' : error ? 'error' : !payload?.items.length ? 'empty' : 'success'
@@ -180,7 +144,7 @@ export function BookLorePage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <header className="max-w-2xl">
           <h1 className="text-xl font-bold tracking-tight">BookLore 世界观知识库</h1>
-          <p className="text-xs text-muted-foreground">只读浏览实体、社区、关系与笔记；正式 Reviewed 投影和原始 Catalog 始终保持边界。</p>
+          <p className="text-xs text-muted-foreground">只读浏览实体、社区、关系与笔记。书设是独立 Catalog，直接查询，不经学习投影。</p>
         </header>
         <div className="flex flex-wrap gap-2 text-xs">
           {RESOURCES.map((item) => <SummaryTile key={item.value} label={item.label} value={summary?.counts[item.value]} help={item.help} />)}
@@ -193,7 +157,7 @@ export function BookLorePage() {
             <form className="flex min-w-[17rem] flex-1 flex-wrap items-center gap-2" onSubmit={submitSearch}>
               <div className="relative min-w-48 max-w-md flex-1"><SearchIcon className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input aria-label="搜索 BookLore" className="h-8 pl-8" value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)} placeholder="搜索标题、摘要或内容" /></div>
               <Button type="submit" size="sm" className="h-8" disabled={loading}>搜索</Button>
-              <Button type="button" size="sm" className="h-8" variant="ghost" onClick={() => { setSearchDraft(''); setProjectionOffset(0); pagination.setFilters({ search: null }) }}>清除</Button>
+              <Button type="button" size="sm" className="h-8" variant="ghost" onClick={() => { setSearchDraft(''); pagination.setFilters({ search: null }) }}>清除</Button>
               <Button type="button" size="sm" className="h-8" variant="outline" disabled={loading} onClick={() => setReload((value) => value + 1)}><RefreshCwIcon aria-hidden="true" /><span className="sr-only">重新读取</span></Button>
             </form>
             <Badge variant="outline">Catalog · 只读</Badge>
@@ -216,26 +180,9 @@ export function BookLorePage() {
         </CardContent>
       </Card>
 
-      <details className="rounded-lg border border-primary/20 bg-primary/5">
-        <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5 text-sm marker:hidden">
-          <span className="font-medium">Reviewed BookLore</span>
-          <span className="text-xs text-muted-foreground">RuntimeScope · {botId || '未选择 Bot'} · {sessionId || '未选择群会话'}</span>
-          <Badge className="ml-auto" variant="secondary">{projectionPayload?.page.total ?? '—'} 条正式投影</Badge>
-        </summary>
-        <div className="border-t border-primary/15 px-4 py-4">
-          <p className="mb-3 text-xs text-muted-foreground">仅展示 approved 且明确投影到所选 canonical RuntimeScope 的正式知识；不会从原始 Catalog 或其他群补数据。</p>
-          <div className="grid gap-3 md:grid-cols-2">
-            <ScopeSelect value={botId || undefined} loadOptions={loadBots} label="Bot" placeholder="选择真实 Bot" required onValueChange={(value) => { setProjectionOffset(0); pagination.setFilters({ bot_id: value, session_id: null }) }} />
-            <ScopeSelect value={sessionId || undefined} loadOptions={loadSessions} label="群 / 会话" placeholder="选择 canonical 群会话" disabled={!botId} required onValueChange={(value) => { setProjectionOffset(0); pagination.setFilters({ session_id: value }) }} />
-          </div>
-          <div className="mt-4"><QueryState status={!botId || !sessionId ? 'unknown' : projectionLoading ? 'loading' : projectionError ? 'error' : projectionPayload?.items.length ? 'success' : 'empty'} error={projectionError} title="Reviewed BookLore 读取失败" description={!botId || !sessionId ? '请选择服务端证实的 Bot 与 canonical 群会话。' : '当前 RuntimeScope 尚无 approved reviewed projection。'} onRetry={() => setReload((value) => value + 1)}><ResponsiveTable label="Reviewed BookLore 正式投影清单" table={<Table><TableHeader><TableRow className="bg-background/50"><TableHead>标题</TableHead><TableHead>摘要</TableHead><TableHead className="w-24">Rank</TableHead><TableHead className="w-20">证据</TableHead><TableHead className="w-14"><span className="sr-only">详情</span></TableHead></TableRow></TableHeader><TableBody>{projectionPayload?.items.map((item) => <TableRow key={item.id}><TableCell className="font-medium">{item.title}</TableCell><TableCell className="max-w-xl"><p className="line-clamp-2 text-muted-foreground">{item.summary}</p></TableCell><TableCell className="font-mono text-xs">{serverRank(item.rank)}</TableCell><TableCell>{item.evidence.length} 条</TableCell><TableCell className="text-right"><ResponsiveDetail title={item.title} description="审核证据、来源 Catalog 与目标 RuntimeScope" className="sm:max-w-3xl" trigger={<Button type="button" variant="ghost" size="icon-sm" aria-label={`查看 ${item.title} 正式投影`}><EyeIcon aria-hidden="true" /></Button>}><ReviewedProjectionDetail item={item} /></ResponsiveDetail></TableCell></TableRow>)}</TableBody></Table>} cards={projectionPayload?.items.map((item) => <article key={item.id} className="flex flex-col gap-3 rounded-lg border bg-card p-4"><div className="flex flex-wrap items-start justify-between gap-2"><div><p className="font-medium">{item.title}</p><p className="mt-1 whitespace-pre-wrap break-words text-sm text-muted-foreground">{item.summary}</p></div><Badge variant="secondary">Rank {serverRank(item.rank)}</Badge></div><div className="flex items-center justify-between gap-3 text-sm"><span className="text-muted-foreground">审核证据 {item.evidence.length} 条</span><ResponsiveDetail title={item.title} description="审核证据、来源 Catalog 与目标 RuntimeScope" className="sm:max-w-3xl" trigger={<Button type="button" variant="outline" size="sm">查看详情</Button>}><ReviewedProjectionDetail item={item} /></ResponsiveDetail></div></article>)} /></QueryState></div>
-          {projectionPayload ? <div className="mt-3 flex items-center justify-between text-sm text-muted-foreground"><span>共 {projectionPayload.page.total ?? '未提供'} 条</span><div className="flex gap-2"><Button size="sm" variant="outline" disabled={projectionLoading || projectionOffset === 0} onClick={() => setProjectionOffset(Math.max(0, projectionOffset - 25))}>上一页</Button><Button size="sm" variant="outline" disabled={projectionLoading || projectionOffset + 25 >= (projectionPayload.page.total ?? 0)} onClick={() => setProjectionOffset(projectionOffset + 25)}>下一页</Button></div></div> : null}
-        </div>
-      </details>
-
       <details className="rounded-lg border border-dashed text-sm">
         <summary className="cursor-pointer list-none px-4 py-2.5 font-medium marker:hidden">数据边界与治理说明</summary>
-        <p className="border-t px-4 py-3 text-xs leading-relaxed text-muted-foreground">BookLore Catalog 是独立只读知识源；Reviewed 是经过审核并投影到 canonical RuntimeScope 的正式子集。隔离项不会被当作可用知识，“解析状态未知”也不等同于解析成功。</p>
+        <p className="border-t px-4 py-3 text-xs leading-relaxed text-muted-foreground">BookLore Catalog 是独立只读知识源，直接供查询与注入使用。隔离项不会被当作可用知识，“解析状态未知”也不等同于解析成功。</p>
       </details>
     </div>
   )

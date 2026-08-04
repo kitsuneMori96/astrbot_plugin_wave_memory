@@ -138,6 +138,27 @@ CREATE TABLE IF NOT EXISTS scoped_beliefs (
     UNIQUE (bot_id, session_id, visibility, belief_key)
 );
 
+CREATE TABLE IF NOT EXISTS scoped_belief_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    visibility TEXT NOT NULL CHECK (visibility = 'group'),
+    belief_id INTEGER NOT NULL,
+    window_key TEXT NOT NULL,
+    polarity TEXT NOT NULL CHECK (polarity IN ('support', 'challenge')),
+    memory_ids TEXT NOT NULL DEFAULT '[]',
+    participants TEXT NOT NULL DEFAULT '[]',
+    source_tags TEXT NOT NULL DEFAULT '[]',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    window_started_at REAL,
+    window_ended_at REAL,
+    observed_at REAL NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    UNIQUE (bot_id, session_id, visibility, belief_id, window_key, polarity),
+    FOREIGN KEY (belief_id) REFERENCES scoped_beliefs(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS scoped_consolidation_cursors (
     bot_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
@@ -158,10 +179,16 @@ CREATE INDEX IF NOT EXISTS idx_scoped_tags_scope_name
     ON scoped_tags (bot_id, session_id, visibility, name);
 CREATE INDEX IF NOT EXISTS idx_scoped_memory_tags_scope_memory
     ON scoped_memory_tags (bot_id, session_id, visibility, memory_id);
+CREATE INDEX IF NOT EXISTS idx_scoped_memory_tags_scope_tag
+    ON scoped_memory_tags (bot_id, session_id, visibility, tag_id, memory_id);
+CREATE INDEX IF NOT EXISTS idx_scoped_memory_tags_tag
+    ON scoped_memory_tags (tag_id, memory_id);
 CREATE INDEX IF NOT EXISTS idx_scoped_tag_relations_scope_source
     ON scoped_tag_relations (bot_id, session_id, visibility, source_tag_id);
 CREATE INDEX IF NOT EXISTS idx_scoped_beliefs_scope_status
     ON scoped_beliefs (bot_id, session_id, visibility, status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_scoped_belief_observations_scope_belief
+    ON scoped_belief_observations (bot_id, session_id, visibility, belief_id, observed_at);
 """
 
 

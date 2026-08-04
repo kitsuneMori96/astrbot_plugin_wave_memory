@@ -495,26 +495,53 @@ async def reject_concern(concern_id: int):
 @soul_bp.route("/time-anchors", methods=["GET"])
 @require_auth
 async def time_anchors():
-    """时间锚点列表（情感权重高的关键事件）。"""
+    """时间锚点列表（情感权重高的关键事件），支持搜索、时间范围筛选与分页。"""
     c = get_container()
     if not _table_exists(c.db.conn, "time_anchors"):
-        return jsonify({"items": [], "legacy": True, "readonly": True, "source": "legacy_audit"})
+        return jsonify({"items": [], "total": 0, "legacy": True, "readonly": True, "source": "legacy_audit"})
     bot_id = request.args.get("bot_id")
+    search = str(request.args.get("search") or "").strip()
+    from_ts = request.args.get("from_ts")
+    to_ts = request.args.get("to_ts")
     limit = max(1, min(500, _safe_int(request.args.get("limit", 50), 50)))
-    sql = "SELECT id, event_summary, timestamp, emotional_weight, bot_id FROM time_anchors WHERE 1=1"
+    offset = max(0, _safe_int(request.args.get("offset", 0), 0))
+
+    where = ["1=1"]
     params = []
     if bot_id:
-        sql += " AND bot_id = ?"
+        where.append("bot_id = ?")
         params.append(bot_id)
-    sql += " ORDER BY timestamp DESC LIMIT ?"
-    params.append(limit)
+    if search:
+        where.append("event_summary LIKE ?")
+        params.append(f"%{search}%")
+    if from_ts:
+        where.append("timestamp >= ?")
+        params.append(float(from_ts))
+    if to_ts:
+        where.append("timestamp <= ?")
+        params.append(float(to_ts))
+
+    where_sql = " WHERE " + " AND ".join(where)
+    total_sql = f"SELECT COUNT(*) FROM time_anchors{where_sql}"
+    total = c.db.conn.execute(total_sql, params).fetchone()[0]
+
+    sql = f"SELECT id, event_summary, timestamp, emotional_weight, bot_id FROM time_anchors{where_sql} ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
     rows = c.db.conn.execute(sql, params).fetchall()
     items = [
         {"id": r[0], "event_summary": r[1], "timestamp": r[2],
          "emotional_weight": r[3], "bot_id": r[4]}
         for r in rows
     ]
-    return jsonify({"items": items, "legacy": True, "readonly": True, "source": "legacy_audit"})
+    return jsonify({
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "legacy": True,
+        "readonly": True,
+        "source": "legacy_audit"
+    })
 
 
 @soul_bp.route("/time-anchors", methods=["POST"])

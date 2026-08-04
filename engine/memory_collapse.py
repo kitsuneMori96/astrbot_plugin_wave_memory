@@ -74,6 +74,32 @@ def is_fanout_duplicate(memory: Mapping[str, Any]) -> bool:
     return kind in {"fanout_duplicate", "group_bound_core_chat_fanout"}
 
 
+def _collapse_aliases(memory: Mapping[str, Any]) -> set[str]:
+    """Return every safe equivalence key known for a recall candidate.
+
+    Text+sender intentionally remains the primary compatibility key so historical
+    clones with different origin hashes still collapse.  A shared explicit origin
+    is an additional proof of identity and must also collapse even when a legacy
+    fanout row carries a different sender projection.
+    """
+    primary = collapse_key(memory)
+    aliases = {primary}
+    if primary.startswith("family:"):
+        return aliases
+
+    provenance = _as_mapping(memory.get("provenance"))
+    origin = str(
+        memory.get("origin_fingerprint")
+        or memory.get("origin_key")
+        or provenance.get("origin_fingerprint")
+        or memory.get("source_memory_id")
+        or ""
+    ).strip()
+    if origin:
+        aliases.add(f"origin:{origin}")
+    return aliases
+
+
 def collapse_memories(
     memories: list[Mapping[str, Any]] | list[dict[str, Any]],
     *,
@@ -108,11 +134,11 @@ def collapse_memories(
     deduped: list[dict[str, Any]] = []
     seen: set[str] = set()
     for memory in ordered:
-        key = collapse_key(memory)
-        if key in seen:
+        aliases = _collapse_aliases(memory)
+        if aliases & seen:
             memory["_collapsed_as_fanout_duplicate"] = True
             continue
-        seen.add(key)
+        seen.update(aliases)
         deduped.append(memory)
     return deduped
 

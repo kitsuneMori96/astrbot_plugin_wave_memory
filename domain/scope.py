@@ -403,8 +403,8 @@ class ScopePolicyRegistry:
 # group_id、Bot 显示名或 legacy 字段猜测 Scope。
 COMMAND_SCOPE_MATRIX: Mapping[str, ScopeRequirement] = MappingProxyType({
     # 已持久化为 v2 的群会话资源。
-    "memory.message.write": ScopeRequirement(("runtime",), ("group",)),
-    "memory.message.read": ScopeRequirement(("runtime",), ("group",)),
+    "memory.message.write": ScopeRequirement(("runtime",), ("group", "private")),
+    "memory.message.read": ScopeRequirement(("runtime",), ("group", "private")),
     "tag.extract": ScopeRequirement(("runtime",), ("group",)),
     "jargon.mine": ScopeRequirement(("runtime",), ("group",)),
     "jargon.inject": ScopeRequirement(("runtime",), ("group",)),
@@ -428,15 +428,6 @@ COMMAND_SCOPE_MATRIX: Mapping[str, ScopeRequirement] = MappingProxyType({
     "relationship.record": ScopeRequirement(("runtime",), ("group",), subject_required=True),
     "self_reflect.candidate": ScopeRequirement(("runtime",), ("group",)),
     "livingmemory.compat.write": ScopeRequirement(("runtime",), ("group",), subject_required=True),
-
-    # 现有 Learning bridge 仍只允许真实 group Scope 投影给 legacy 领域服务。
-    "learning.fact.promote": ScopeRequirement(("runtime",), ("group",), subject_required=True),
-    "learning.worldview_internalization.promote": ScopeRequirement(("runtime",), ("group",)),
-    "learning.book_experience.promote": ScopeRequirement(("runtime",), ("group",)),
-    "learning.few_shot_style.promote": ScopeRequirement(("runtime",), ("group",)),
-    "learning.relationship.promote": ScopeRequirement(("runtime",), ("group",)),
-    "learning.book_lore.promote": ScopeRequirement(("runtime",), ("group",)),
-    "learning.memory.promote": ScopeRequirement(("runtime",), ("group",)),
 
     # Catalog 与 Bot 私有认知不伪装成群会话；实际领域服务会在后续阶段接入。
     "catalog.raw.import": ScopeRequirement(("catalog",)),

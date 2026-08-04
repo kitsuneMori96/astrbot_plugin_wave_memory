@@ -46,6 +46,7 @@ export const test = base.extend<FrontendFixtures>({
       '/api/learning-center/experiences': { items: [], total: 0 },
       '/api/beliefs': { ...emptyPage, scope: { kind: 'RuntimeScope', payload: null }, capabilities: { lifecycle: unavailable, batch_lifecycle: unavailable, evidence: unavailable, create: unavailable, edit: unavailable, physical_delete: unavailable, select_all_matching: unavailable } },
       '/api/jargon': { ...emptyPage, scope: { kind: 'RuntimeScope', payload: null }, capabilities: { review: unavailable, batch_review: unavailable, edit: unavailable, archive: unavailable, evidence: unavailable, create: unavailable, delete: unavailable, toggle_global: unavailable, select_all_matching: unavailable } },
+      '/api/jargon/blocklist': { items: [], total: 0 },
       '/api/people': emptyPage,
       '/api/knowledge/facts': { ...emptyPage, scope: { bot_id: '', session_id: '', visibility: 'group' } },
       '/api/knowledge/few-shot': emptyPage,

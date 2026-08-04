@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from ..channel_base import InjectionResult
+from ..query_gate import should_skip_retrieval
 from .safety import SafetyChannel, is_channel_allowed_in_mode
 
 # Align with MessageWriter.classify_source: ordinary group chat is "chat".
@@ -18,7 +19,6 @@ _DEFAULT_SOURCE_FILTER = [
     "experience",
     "lore",
     "bzz_experience",
-    "bzz_evolution",
     "book_lore",
 ]
 
@@ -158,6 +158,13 @@ class MemoryRecallChannel:
         top_k = _as_int(channel_cfg.get("top_k"), 5)
         if top_k <= 0:
             return InjectionResult.empty(self.name, reason="top_k is zero")
+        # Short functional utterances have no retrieval target; recalling for them
+        # only spends budget and increases misattribution risk.
+        skip, skip_reason = should_skip_retrieval(ctx)
+        if skip:
+            return InjectionResult.empty(
+                self.name, latency_ms=self._latency_ms(started), reason=skip_reason
+            )
 
         try:
             memories = await self._query(ctx, top_k=top_k, recall_cfg=recall_cfg)
@@ -173,7 +180,7 @@ class MemoryRecallChannel:
             if not memories:
                 return InjectionResult.empty(self.name, latency_ms=self._latency_ms(started), reason="no safe memories")
 
-            text = self.query_engine.format_injection(memories, current_group_id=getattr(ctx, "group_id", "") or "")
+            text = self._format(ctx, memories)
             if not text:
                 return InjectionResult.empty(self.name, latency_ms=self._latency_ms(started), reason="formatted memory text is empty")
             return InjectionResult.hit(
@@ -187,6 +194,34 @@ class MemoryRecallChannel:
             result = InjectionResult.error_result(self.name, exc)
             result.latency_ms = self._latency_ms(started)
             return result
+
+    def _format(self, ctx: Any, memories: list[dict[str, Any]]) -> str:
+        """Render recalled memories with ownership attribution when supported.
+
+        Attribution needs the current speaker and the bot identities.  Query
+        engines that predate the extra parameters (and test doubles) keep working
+        through the plain call below.
+        """
+        group_id = getattr(ctx, "group_id", "") or ""
+        bot_ids = {
+            str(value).strip()
+            for value in (
+                getattr(ctx, "bot_id", "") or "",
+                getattr(ctx, "bot_profile_id", "") or "",
+            )
+            if str(value or "").strip()
+        }
+        try:
+            return self.query_engine.format_injection(
+                memories,
+                current_group_id=group_id,
+                speaker_id=str(getattr(ctx, "sender_id", "") or ""),
+                bot_ids=bot_ids,
+            )
+        except TypeError:
+            return self.query_engine.format_injection(
+                memories, current_group_id=group_id
+            )
 
     async def _query(self, ctx: Any, *, top_k: int, recall_cfg: Mapping[str, Any]) -> list[dict[str, Any]]:
         enable_shotgun = _as_bool(recall_cfg.get("enable_shotgun"), False)

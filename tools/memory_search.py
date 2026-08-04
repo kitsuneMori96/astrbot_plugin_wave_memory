@@ -13,21 +13,21 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 try:
     from .scope_boundary import (
-        extract_group_runtime_scope,
-        require_group_runtime_scope,
+        extract_memory_runtime_scope,
+        require_memory_runtime_scope,
         scope_error_message,
     )
 except ImportError:  # 兼容插件顶级加载
     from tools.scope_boundary import (
-        extract_group_runtime_scope,
-        require_group_runtime_scope,
+        extract_memory_runtime_scope,
+        require_memory_runtime_scope,
         scope_error_message,
     )
 
 
-def _extract_group_scope(context: ContextWrapper[AstrAgentContext]):
-    """兼容旧私有导入；实际边界统一由 scope_boundary 实现。"""
-    return extract_group_runtime_scope(context)
+def _extract_memory_scope(context: ContextWrapper[AstrAgentContext]):
+    """返回基础 WaveMemory 工具允许的 group/private Scope。"""
+    return extract_memory_runtime_scope(context)
 
 
 @dataclass
@@ -35,7 +35,7 @@ class WaveMemorySearchTool(FunctionTool[AstrAgentContext]):
     """让模型主动搜索记忆的工具。"""
 
     name: str = "wave_memory_search"
-    description: str = "搜索历史记忆和对话记录。当需要回忆之前聊过的内容、查找群友说过的话、或确认历史事实时使用。"
+    description: str = "搜索当前对话范围内的历史记忆和对话记录。当需要回忆之前聊过的内容或确认历史事实时使用。"
     parameters: dict = field(default_factory=lambda: {
         "type": "object",
         "properties": {
@@ -74,7 +74,7 @@ class WaveMemorySearchTool(FunctionTool[AstrAgentContext]):
             except Exception:
                 return "记忆数据库连接异常"
 
-        scope, error_code = require_group_runtime_scope(context, "memory.message.read")
+        scope, error_code = require_memory_runtime_scope(context, "memory.message.read")
         if error_code:
             return scope_error_message("记忆搜索", error_code)
         assert scope is not None
@@ -130,7 +130,7 @@ class WaveMemoryRememberTool(FunctionTool[AstrAgentContext]):
         if not self.writer:
             return "记忆系统未初始化"
 
-        scope, error_code = require_group_runtime_scope(context, "memory.message.write")
+        scope, error_code = require_memory_runtime_scope(context, "memory.message.write")
         if error_code:
             return scope_error_message("记忆写入", error_code)
         assert scope is not None

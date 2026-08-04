@@ -176,7 +176,7 @@ class FactsToolScopeTest(unittest.TestCase):
 
 
 class ToolScopeBoundaryTest(unittest.TestCase):
-    def test_legacy_read_tools_are_fail_closed_even_when_called_directly(self):
+    def test_read_tools_fail_closed_even_when_called_directly(self):
         from tools.extra_tools import WaveMemoryAffinityTool, WaveMemoryTagGraphTool
         from tools.person_search import WaveMemoryPersonSearchTool
 
@@ -184,8 +184,11 @@ class ToolScopeBoundaryTest(unittest.TestCase):
         tag_graph = asyncio.run(WaveMemoryTagGraphTool().call(None, tag_name="跨群标签"))
         person = asyncio.run(WaveMemoryPersonSearchTool().call(None, person="跨群用户"))
 
-        for result in (affinity, tag_graph, person):
+        # Legacy social projections stay migration-gated. Person search remains a
+        # group-only feature, and validates that boundary before it opens a DB.
+        for result in (affinity, tag_graph):
             self.assertIn("scope_migration_required", result)
+        self.assertIn("scope_required", person)
 
     def test_book_lore_tool_requires_explicit_catalog_scope(self):
         from tools.book_lore_search import BookLoreGraphTool, BookLoreSearchTool

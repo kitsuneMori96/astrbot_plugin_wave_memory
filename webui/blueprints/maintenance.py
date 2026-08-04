@@ -264,4 +264,35 @@ async def cancel_job(run_id: str):
     return jsonify(response), 200 if status == "cancelled" else 202
 
 
+@maintenance_bp.route("/outbox", methods=["GET"])
+@require_auth
+async def outbox_status():
+    """获取 Outbox 事务写队列的运行状态与积压统计。"""
+    c = get_container()
+    db = getattr(c, "db", None)
+    conn = getattr(db, "conn", None) if db else None
+    if conn is None:
+        return jsonify(error_payload("service_unavailable", "Database is unavailable", retryable=True)), 503
+
+    def _table_count(t: str) -> int:
+        try:
+            return int(conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0])
+        except Exception:
+            return 0
+
+    outbox_count = _table_count("domain_outbox")
+    deliveries_count = _table_count("outbox_deliveries")
+    recovery_items = _table_count("scope_recovery_items")
+    job_requests = _table_count("job_requests")
+
+    return jsonify({
+        "status": "healthy",
+        "outbox_items": outbox_count,
+        "outbox_deliveries": deliveries_count,
+        "scope_recovery_items": recovery_items,
+        "job_requests": job_requests,
+        "write_gateway_wired": getattr(c, "write_gateway", None) is not None,
+    })
+
+
 __all__ = ["maintenance_bp"]

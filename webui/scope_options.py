@@ -263,7 +263,7 @@ class RuntimeScopeOptionsSource:
                         capabilities={table: count},
                         group_name=self._group_name(bot_id, session.conversation_id),
                     )
-        for table, scope_column in (("scoped_few_shot_examples", "runtime_scope_json"), ("reviewed_book_lore_projections", "target_runtime_scope_json")):
+        for table, scope_column in (("scoped_few_shot_examples", "runtime_scope_json"),):
             if scope_column not in _table_columns(conn, table):
                 continue
             grouped: dict[tuple[str, str], int] = {}

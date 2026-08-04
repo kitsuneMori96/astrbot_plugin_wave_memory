@@ -23,6 +23,7 @@ export interface BeliefItem {
   confidence: number | null
   confidence_components: Record<string, number> | null
   confidence_policy_version: string | null
+  confidence_evidence?: Record<string, number | null>
   anchor_sentence: string | null
   evidence_health: 'available' | 'unavailable' | 'quarantined' | 'unknown'
   quarantine_reason: string | null
@@ -80,6 +81,8 @@ export interface BeliefEvidencePayload {
   anchor: BeliefEvidenceMessage | null
   messages: BeliefEvidenceMessage[]
   memories: BeliefEvidenceMessage[]
+  support_anchors: Array<BeliefEvidenceMessage & { polarity?: 'support' | 'challenge' }>
+  challenge_anchors: Array<BeliefEvidenceMessage & { polarity?: 'support' | 'challenge' }>
   relationship_events: Array<Record<string, unknown>>
   episodes: Array<Record<string, unknown>>
   used_fallback: boolean

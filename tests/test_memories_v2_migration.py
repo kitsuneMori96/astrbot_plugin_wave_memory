@@ -301,36 +301,3 @@ def test_cross_group_hot_recall_is_opt_in_and_rejects_non_group_partial_unresolv
     assert next(row for row in expanded if row["id"] == legacy)["_tag_lane"] == "legacy"
 
 
-def test_legacy_tag_cold_candidates_stay_group_scoped_and_allow_explicit_global_reads(manager):
-    repo = _repo_with_legacy_memories(manager)
-    vector = np.asarray([0.1, 0.2], dtype=np.float32).tobytes()
-    manager.execute_write(
-        "INSERT INTO memories(group_id, content, vector, timestamp) VALUES (?, ?, ?, ?)",
-        ("group-1", "legacy group one", vector, 1000.0),
-    )
-    manager.execute_write(
-        "INSERT INTO memories(group_id, content, vector, timestamp) VALUES (?, ?, ?, ?)",
-        ("group-2", "legacy group two", vector, 1001.0),
-    )
-    manager.execute_write("CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT, vector BLOB)")
-    manager.execute_write("INSERT INTO tags VALUES (1, 'legacy topic', ?)", (vector,))
-    manager.execute_write("INSERT INTO memory_tags(memory_id, tag_id, relevance) VALUES (1, 1, 0.8)")
-    manager.execute_write("INSERT INTO memory_tags(memory_id, tag_id, relevance) VALUES (2, 1, 1.0)")
-    manager.commit()
-    ensure_memories_v2_schema(manager)
-
-    scope = _group_scope(group_id="group-1")
-    scoped = repo.list_legacy_cold_memory_candidates(scope, [1], limit=10)
-    cross_group = repo.list_legacy_cold_memory_candidates(
-        scope,
-        [1],
-        limit=10,
-        allow_cross_group_recall=True,
-    )
-    global_denied = repo.list_legacy_cold_memory_candidates(None, [1], limit=10)
-    global_allowed = repo.list_legacy_cold_memory_candidates(None, [1], limit=10, allow_unscoped=True)
-
-    assert [row["content"] for row in scoped] == ["legacy group one"]
-    assert {row["content"] for row in cross_group} == {"legacy group one", "legacy group two"}
-    assert global_denied == []
-    assert {row["content"] for row in global_allowed} == {"legacy group one", "legacy group two"}

@@ -23,6 +23,11 @@ except ImportError:  # pragma: no cover - direct service imports in focused test
     from engine.database import WaveMemoryDB
     from engine.fact_classifier import classify_fact
 from .identity_safety import is_identity_contamination
+from .llm_fallback import (
+    build_provider_chain,
+    call_first_available_provider,
+    is_unrecoverable_error,
+)
 
 
 CONSOLIDATION_PROMPT = """从以下群聊消息中提取结构化知识。
@@ -69,10 +74,13 @@ class ConsolidationService:
         skip_topics: list = None,
         belief_engine=None,
         bot_identifiers: set = None,
+        provider_fallback_ids=None,
     ):
         self.db = db
         self.context = context
         self.provider_id = provider_id
+        # 整合是每 4 小时一轮的后台任务，单渠道故障不应让摘要彻底停产。
+        self.provider_ids = build_provider_chain(provider_id, provider_fallback_ids)
         self.interval = interval_hours * 3600
         self.batch_size = batch_size
         self.topic_backfill = topic_backfill
@@ -81,6 +89,13 @@ class ConsolidationService:
         self._bot_identifiers: set = bot_identifiers or set()
         self._task: Optional[asyncio.Task] = None
         self._running = False
+        # Health evidence: existence of this object proves nothing about output.
+        self._last_run_ts: float = 0.0
+        self._last_success_ts: float = 0.0
+        self._last_error: str = ""
+        self._last_error_unrecoverable: bool = False
+        self._last_run_failures: int = 0
+        self._last_run_scopes: int = 0
 
     def start(self, supervisor=None):
         self._running = True
@@ -111,18 +126,23 @@ class ConsolidationService:
 
     async def consolidate_once(self) -> dict:
         """Enumerate only complete resolved v2 group scopes and process each cursor."""
-        if not self.provider_id or not self.context:
+        if not self.provider_ids or not self.context:
             logger.debug("[WaveMemory] Consolidation skipped: no LLM provider")
             return {"status": "skipped"}
 
         scopes = await asyncio.to_thread(self._list_memory_scopes)
         total_messages = total_relations = 0
+        failures: list[str] = []
+        unrecoverable = False
         for scope in scopes:
             try:
                 result = await self._consolidate_scope(scope)
                 total_messages += result.get("messages", 0)
                 total_relations += result.get("relations", 0)
             except Exception as exc:
+                failures.append(str(exc))
+                if is_unrecoverable_error(exc):
+                    unrecoverable = True
                 logger.warning(
                     "[WaveMemory] Consolidation failed for scope %s/%s: %s",
                     scope.bot_id,
@@ -130,14 +150,73 @@ class ConsolidationService:
                     exc,
                 )
 
+        self._last_run_ts = time.time()
+        self._last_run_failures = len(failures)
+        self._last_run_scopes = len(scopes)
         if total_messages:
+            self._last_success_ts = self._last_run_ts
+            self._last_error = ""
+            self._last_error_unrecoverable = False
             logger.info(
                 "[WaveMemory] Scoped consolidation done: %s messages, %s relations, %s scopes",
                 total_messages,
                 total_relations,
                 len(scopes),
             )
+        elif failures:
+            # Every scope failed.  Keep the reason so the health panel can report a
+            # stalled summary pipeline instead of "ok" just because the object exists.
+            self._last_error = failures[-1]
+            self._last_error_unrecoverable = unrecoverable
+            logger.warning(
+                "[WaveMemory] Consolidation produced no summary across %s scopes; last error: %s",
+                len(scopes),
+                failures[-1],
+            )
         return {"messages": total_messages, "relations": total_relations, "groups": len(scopes)}
+
+    def health_snapshot(self, *, stale_after_hours: float | None = None) -> dict:
+        """Report whether consolidation actually produced summaries recently.
+
+        The previous health check only asserted that the service object existed, so
+        a 20-day summary outage caused by provider 503/402 still displayed as "ok".
+        """
+        stale_window = (
+            self.interval * 3 if stale_after_hours is None else max(0.0, stale_after_hours) * 3600
+        )
+        now = time.time()
+        snapshot = {
+            "provider_ids": list(self.provider_ids),
+            "last_run_ts": self._last_run_ts,
+            "last_success_ts": self._last_success_ts,
+            "last_error": self._last_error,
+            "last_error_unrecoverable": self._last_error_unrecoverable,
+            "failed_scopes": self._last_run_failures,
+            "total_scopes": self._last_run_scopes,
+        }
+        if not self.provider_ids:
+            snapshot.update(status="off", detail="未配置 LLM provider")
+            return snapshot
+        if self._last_run_ts <= 0:
+            snapshot.update(status="pending", detail="尚未执行首轮整合")
+            return snapshot
+        if self._last_success_ts <= 0:
+            hint = "余额/鉴权不可自愈" if self._last_error_unrecoverable else "上游不可用"
+            snapshot.update(
+                status="degraded",
+                detail=f"整合从未成功产出摘要（{hint}）：{self._last_error[:160]}",
+            )
+            return snapshot
+        idle = now - self._last_success_ts
+        if stale_window > 0 and idle > stale_window:
+            hours = idle / 3600
+            snapshot.update(
+                status="degraded",
+                detail=f"已 {hours:.1f} 小时未产出新摘要；最后错误：{self._last_error[:160]}",
+            )
+            return snapshot
+        snapshot.update(status="ok", detail="")
+        return snapshot
 
     def _list_memory_scopes(self) -> list[RuntimeScope]:
         """Build RuntimeScope values from complete v2 tuples; malformed rows fail closed."""
@@ -189,10 +268,10 @@ class ConsolidationService:
             conversation_lines.append(f"[{sender_name or sender_id or 'unknown'}({sender_id}) {time_text}] {content[:200]}")
             message_ids.append(memory_id)
 
-        provider = self.context.get_provider_by_id(self.provider_id)
-        if not provider:
-            return {"messages": 0, "relations": 0}
-        response = await provider.text_chat(
+        response = await call_first_available_provider(
+            self.context,
+            self.provider_ids,
+            log_prefix="[Consolidation]",
             prompt=CONSOLIDATION_PROMPT.replace("{conversation}", "\n".join(conversation_lines)),
             system_prompt="你是记忆整合系统，只输出 JSON。",
         )
@@ -230,7 +309,7 @@ class ConsolidationService:
             try:
                 full_text = f"{summary}\n事实: {json.dumps(facts, ensure_ascii=False)}" if facts else summary
                 beliefs = await self.belief_engine.extract_from_summary(
-                    full_text, scope, source_memory_ids=message_ids[:5],
+                    full_text, scope, source_memory_ids=message_ids,
                 )
                 logger.info("[Consolidation] Scoped belief extraction: %s new beliefs", len(beliefs or []))
             except Exception as exc:

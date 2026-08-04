@@ -102,17 +102,17 @@ class MemoryIndexProjection:
     @staticmethod
     def _canonical_scope_key(row: tuple[Any, ...]) -> tuple[str, str, str, str] | None:
         bot_id, session_id, visibility, group_id = (str(value or "").strip() for value in row)
-        if not bot_id or not session_id or not group_id or visibility != "group":
+        if not bot_id or not session_id or not group_id or visibility not in {"group", "private"}:
             return None
         parts = session_id.split(":", 2)
-        if len(parts) != 3 or not parts[0] or parts[1] != "group" or parts[2] != group_id:
+        if len(parts) != 3 or not parts[0] or parts[1] != visibility or parts[2] != group_id:
             return None
         return bot_id, session_id, visibility, group_id
 
     @staticmethod
     def _legacy_group_member(row: tuple[Any, ...]) -> bool:
         bot_id, session_id, visibility, group_id = (str(value or "").strip() for value in row)
-        return bool(group_id) and not any((bot_id, session_id, visibility))
+        return bool(group_id) and not group_id.casefold().startswith("private:") and not any((bot_id, session_id, visibility))
 
     def _decrement_member(self, memory_id: int) -> None:
         memory_id = int(memory_id)

@@ -1,7 +1,10 @@
 import asyncio
+import sqlite3
 import sys
+import tempfile
 import types
 import unittest
+from pathlib import Path
 
 
 if "astrbot.api" not in sys.modules:
@@ -39,6 +42,27 @@ class _Repo:
 class _Db:
     def __init__(self):
         self.scoped_knowledge = _Repo()
+        self.blocked = {}
+
+    @staticmethod
+    def normalize(word):
+        import unicodedata
+        return unicodedata.normalize("NFKC", str(word or "")).casefold().strip()
+
+    def is_jargon_blocked(self, word):
+        return self.normalize(word) in self.blocked
+
+    def add_jargon_blocklist(self, word, *, reason, source):
+        normalized = self.normalize(word)
+        self.blocked[normalized] = {"word": normalized, "reason": reason, "source": source}
+        return self.blocked[normalized]
+
+    def list_jargon_blocklist(self):
+        return list(self.blocked.values())
+
+    def remove_jargon_blocklist(self, word=None, *, blocklist_id=None, source="user_global_reject"):
+        normalized = self.normalize(word)
+        return 1 if self.blocked.pop(normalized, None) else 0
 
 
 class JargonScopeTest(unittest.TestCase):
@@ -111,6 +135,131 @@ class JargonScopeTest(unittest.TestCase):
         self.assertIn("交猫猫税", row["source_context"])
         self.assertIn("bot_id=?", db.conn.last_sql)
         self.assertIn("qq:group:g1", db.conn.last_params)
+
+    def test_reject_is_global_and_blocks_other_scope_before_llm_or_persist(self):
+        from services.jargon.service import JargonService
+
+        db = _Db()
+        first, second = self._scope("yushu", "g1"), self._scope("bzz", "g2")
+        service = JargonService(db, enabled=True, config={"min_messages": 1, "min_frequency": 1})
+        db.scoped_knowledge.upsert_scoped_jargon(first, word="猫猫税", meaning="", status="pending", is_jargon=None, frequency=1, confidence=0.0, contexts=[])
+        item = db.scoped_knowledge.list_scoped_jargon(first, limit=10)[0]
+        result = service.review(first, item["id"], "reject", reason="用户明确拒绝")
+        self.assertEqual(result["status"], "rejected")
+        self.assertTrue(db.is_jargon_blocked("  CAT猫猫税 ".replace("CAT", "")))
+
+        llm_calls = []
+        service_b = JargonService(db, llm_client=types.SimpleNamespace(text_chat=lambda **_: llm_calls.append(1)), enabled=True, config={"min_messages": 1, "min_frequency": 1})
+        upserts_before = len(db.scoped_knowledge.calls)
+        service_b._filter.get_candidates = lambda *_args, **_kwargs: [{"word": "猫猫税", "frequency": 3, "contexts": ["上下文"]}]
+        asyncio.run(service_b.mine(second))
+        self.assertEqual(llm_calls, [])
+        self.assertEqual(len(db.scoped_knowledge.calls), upserts_before)
+
+    def test_local_and_holyman_matches_are_filtered_before_final_render(self):
+        from services.jargon.inference import JargonInjector
+
+        db = _Db()
+        scope = self._scope()
+        db.scoped_knowledge.upsert_scoped_jargon(scope, word="猫猫税", meaning="本地释义", status="confirmed", is_jargon=True, frequency=1)
+        holyman = types.SimpleNamespace(match_text=lambda *_args, **_kwargs: [{"term": "猫猫税", "explanation": "Holyman释义", "confidence": 0.9}])
+        injector = JargonInjector(db, holyman_reference=holyman)
+        self.assertIn("本地释义", injector.get_injection("猫猫税", scope))
+        db.blocked["猫猫税"] = {"word": "猫猫税", "reason": "拒绝", "source": "user_global_reject"}
+        self.assertEqual(injector.get_injection("猫猫税", scope), "")
+
+    def test_inference_checker_fails_closed_before_llm(self):
+        from services.jargon.inference import JargonInferenceEngine
+
+        calls = []
+
+        class _LLM:
+            async def text_chat(self, **_kwargs):
+                calls.append(True)
+                return types.SimpleNamespace(completion_text='{"meaning":"不应调用"}')
+
+        engine = JargonInferenceEngine(_LLM(), blocklist_checker=lambda _word: (_ for _ in ()).throw(RuntimeError("db unavailable")))
+        result = asyncio.run(engine.infer("猫猫税", ["上下文"]))
+        self.assertEqual(result["reject_reason"], "global_blocklist")
+        self.assertFalse(result["enter_llm"])
+        self.assertEqual(calls, [])
+
+    def test_holyman_sync_uses_source_scoped_blocklist_replace(self):
+        from services.jargon import sync as sync_module
+
+        calls = []
+
+        class _FakeDB:
+            def __init__(self, _path):
+                pass
+            def upsert_jargon_knowledge_snapshot(self, *_args, **_kwargs):
+                pass
+            def replace_jargon_knowledge_table(self, table, *_args, **_kwargs):
+                calls.append(("generic", table))
+            def replace_jargon_blocklist_source(self, rows, *, source):
+                calls.append(("blocklist", source, [row["word"] for row in rows]))
+            def close(self):
+                pass
+
+        original_db = sync_module.WaveMemoryDB
+        with tempfile.TemporaryDirectory() as tmp:
+            assets_dir = Path(tmp) / "holyman"
+            assets_dir.mkdir()
+            (assets_dir.parent / "wave_memory.db").write_bytes(b"not-empty")
+            service = sync_module.HolymanSyncService(assets_dir=assets_dir)
+            sync_module.WaveMemoryDB = _FakeDB
+            try:
+                service._sync_runtime_snapshot({
+                    "manifest": {},
+                    "phrases": {},
+                    "quality_report": {},
+                    "examples": [],
+                    "concepts": [],
+                    "candidates": [],
+                    "blocked": {"猫猫税": "默认屏蔽"},
+                })
+            finally:
+                sync_module.WaveMemoryDB = original_db
+        self.assertIn(("blocklist", "holyman_skills", ["猫猫税"]), calls)
+        self.assertNotIn(("generic", "jargon_blocklist"), calls)
+
+    def test_blocklist_normalizes_and_holyman_sync_preserves_manual_priority(self):
+        from engine.database import WaveMemoryDB
+
+        class _Facade(WaveMemoryDB):
+            @property
+            def conn(self):
+                return self._test_conn
+
+        db = object.__new__(_Facade)
+        db._test_conn = sqlite3.connect(":memory:")
+        try:
+            db._setup_jargon_knowledge_tables()
+            manual = db.add_jargon_blocklist("  ＡＢＣ  ", reason="人工拒绝", source="user_global_reject")
+            db.replace_jargon_blocklist_source(
+                [{"word": "abc", "reason": "Holyman 默认屏蔽"}],
+                source="holyman_skills",
+            )
+            self.assertEqual(db.list_jargon_blocklist()[0]["source"], "user_global_reject")
+            sources = {row[0] for row in db.conn.execute("SELECT source FROM jargon_blocklist WHERE word='abc'").fetchall()}
+            self.assertEqual(sources, {"user_global_reject", "holyman_skills"})
+
+            db.replace_jargon_blocklist_source(
+                [{"word": "ＡＢＣ", "reason": "同步更新"}],
+                source="holyman_skills",
+            )
+            self.assertEqual(db.list_jargon_blocklist()[0]["reason"], "人工拒绝")
+            self.assertEqual(db.remove_jargon_blocklist(blocklist_id=manual["id"]), 1)
+            restored = db.list_jargon_blocklist()
+            self.assertEqual(restored, [{
+                "id": restored[0]["id"],
+                "word": "abc",
+                "reason": "同步更新",
+                "source": "holyman_skills",
+                "created_at": restored[0]["created_at"],
+            }])
+        finally:
+            db._test_conn.close()
 
     def test_edit_requeues_and_archive_removes_from_default_list(self):
         from services.jargon.service import JargonService

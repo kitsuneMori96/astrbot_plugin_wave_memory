@@ -4,7 +4,7 @@ import { useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
 import { fetchJson } from '@/api/client'
-import { archiveJargon, batchReviewJargons, checkHolymanUpdate, getCatalogAudit, getJargonEvidence, listJargons, previewHolymanSync, reviewJargon, updateJargonMeaning, type CatalogAssetRecord, type CatalogAuditPayload, type HolymanSyncPreviewPayload, type HolymanUpdateCheckPayload, type JargonEvidencePayload, type JargonItem, type JargonResponse, type JargonScopeSelection } from '@/api/jargon'
+import { archiveJargon, batchReviewJargons, checkHolymanUpdate, getCatalogAudit, getJargonEvidence, listJargonBlocklist, listJargons, previewHolymanSync, removeJargonBlocklistItem, reviewJargon, updateJargonMeaning, type CatalogAssetRecord, type CatalogAuditPayload, type HolymanSyncPreviewPayload, type HolymanUpdateCheckPayload, type JargonBlocklistItem, type JargonEvidencePayload, type JargonItem, type JargonResponse, type JargonScopeSelection } from '@/api/jargon'
 import { getScopeOptions, scopeOptionsFor } from '@/api/options'
 import { EvidenceList, ObjectDeepLink, PaginationControls, QueryState, ResponsiveDetail, ResponsiveTable, ScopeSelect, type ObjectRefState } from '@/components/shared'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -61,6 +61,14 @@ function confidenceText(value: number | null) {
   return `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%`
 }
 
+function normalizeJargonItem(item: JargonItem): JargonItem {
+  return { ...item, anchors: Array.isArray(item.anchors) ? item.anchors : [] }
+}
+
+function normalizeJargonResponse(payload: JargonResponse): JargonResponse {
+  return { ...payload, items: Array.isArray(payload.items) ? payload.items.map(normalizeJargonItem) : [] }
+}
+
 function formatTime(seconds: unknown): string {
   const value = Number(seconds)
   return Number.isFinite(value) && value > 0 ? new Date(value * 1000).toLocaleString('zh-CN') : '时间未记录'
@@ -93,8 +101,8 @@ function JargonDetails({ item, reviewAvailable, busy, onReview }: { item: Jargon
   return <div className="flex flex-col gap-6">
     <section className="flex flex-col gap-3"><div className="flex flex-wrap items-center gap-2"><Badge className={statusClass(item.status)}>{STATUS_LABELS[item.status]}</Badge><Badge variant="outline">出现 {item.frequency} 次</Badge><Badge variant="outline">置信度 {confidenceText(item.confidence)}</Badge></div><div><h3 className="text-xl font-semibold">{item.word}</h3><p className="mt-2 text-base leading-7 text-muted-foreground">{item.meaning || '尚未形成可展示的释义。'}</p></div></section>
     <section className="flex flex-col gap-3"><div className="flex items-center justify-between"><h3 className="font-medium">证据卡</h3><span className="text-sm text-muted-foreground">{item.anchors.length} 条</span></div><EvidenceCards item={item} /></section>
-    <Alert><ShieldCheckIcon /><AlertTitle>审核边界</AlertTitle><AlertDescription>只有待审核且拥有可解析证据的领域候选可以通过；页面不提供自由创建、物理删除或绕过审核写入。</AlertDescription></Alert>
-    <div className="flex flex-wrap gap-2 border-t pt-4"><Button disabled={busy || !reviewAvailable || item.status !== 'pending' || item.anchors.length === 0} onClick={() => onReview('approve')}><CheckIcon data-icon="inline-start" />通过审核</Button><Button variant="outline" disabled={busy || !reviewAvailable || item.status !== 'pending'} onClick={() => onReview('reject')}><XIcon data-icon="inline-start" />拒绝候选</Button></div>
+    <Alert><ShieldCheckIcon /><AlertTitle>审核边界</AlertTitle><AlertDescription>通过要求同作用域可解析证据；拒绝会把规范化词形写入所有群共享的全局拉黑列表，阻止后续 LLM、持久化与注入。</AlertDescription></Alert>
+    <div className="flex flex-wrap gap-2 border-t pt-4"><Button disabled={busy || !reviewAvailable || item.status !== 'pending' || item.anchors.length === 0} onClick={() => onReview('approve')}><CheckIcon data-icon="inline-start" />通过审核</Button><Button variant="outline" disabled={busy || !reviewAvailable || item.status !== 'pending'} onClick={() => onReview('reject')}><XIcon data-icon="inline-start" />拒绝并全局拉黑</Button></div>
     <details className="rounded-lg border bg-muted/20 p-3"><summary className="cursor-pointer font-medium">技术字段与完整证据引用</summary><div className="mt-4 flex flex-col gap-4"><dl className="grid gap-3 text-sm sm:grid-cols-2"><div><dt className="text-muted-foreground">修订版本</dt><dd className="font-mono">{item.revision}</dd></div><div><dt className="text-muted-foreground">审核状态</dt><dd className="break-all font-mono">{item.review_status}</dd></div><div><dt className="text-muted-foreground">来源</dt><dd className="break-all font-mono">{item.source}</dd></div><div><dt className="text-muted-foreground">规则版本</dt><dd className="break-all font-mono">{item.rule_version ?? '未记录'}</dd></div><div className="sm:col-span-2"><dt className="text-muted-foreground">作用域</dt><dd className="break-all font-mono">{item.bot_id} · {item.session_id} · {item.visibility}</dd></div></dl><EvidenceList evidence={item.anchors} emptyDescription="该条目没有可解析 anchor，无法安全晋升。" />{item.object_ref ? <ObjectDeepLink to="/jargon" objectRef={item.object_ref}>复制可复现对象深链</ObjectDeepLink> : null}<details className="rounded-md border bg-background p-3"><summary className="cursor-pointer text-sm">查看晋升记录 JSON</summary><pre className="mt-3 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(item.promotion ?? {}, null, 2)}</pre></details></div></details>
   </div>
 }
@@ -248,7 +256,7 @@ function CatalogBrowser({ catalog }: { catalog: CatalogAuditPayload | null }) {
       <TabsContent value="concepts" className="pt-3"><CatalogTable items={concepts} titleKeys={['title', 'key', 'word']} summaryKeys={['summary', 'content', 'meaning']} emptyText="没有符合筛选条件的文化概念。" /></TabsContent>
       <TabsContent value="examples" className="pt-3"><CatalogTable items={examples} titleKeys={['title', 'word']} summaryKeys={['text', 'content', 'summary']} emptyText="没有符合筛选条件的声音样本与知识。" /></TabsContent>
       <TabsContent value="corpus" className="pt-3"><CatalogTable items={corpus} titleKeys={['title', 'source', 'line']} summaryKeys={['preview', 'text', 'content']} emptyText="没有符合筛选条件的原始语料。" /></TabsContent>
-      <TabsContent value="candidates" className="pt-3"><Alert className="mb-3"><ShieldCheckIcon /><AlertTitle>资产候选审计</AlertTitle><AlertDescription className="flex flex-wrap items-center gap-2"><span>候选清单已恢复；正式全局资产审核命令尚未开放。</span><Button type="button" size="sm" disabled title="catalog_mutation_disabled">批量通过</Button><Button type="button" size="sm" variant="outline" disabled title="catalog_mutation_disabled">批量拒绝</Button></AlertDescription></Alert><CatalogTable items={candidates} titleKeys={['word', 'title']} summaryKeys={['meaning', 'reason', 'summary']} emptyText="资产包中没有符合筛选条件的候选。" /></TabsContent>
+      <TabsContent value="candidates" className="pt-3"><Alert className="mb-3"><ShieldCheckIcon /><AlertTitle>资产候选审计</AlertTitle><AlertDescription className="flex flex-wrap items-center gap-2"><span>候选清单已恢复；正式全局资产审核命令尚未开放。</span><Button type="button" size="sm" disabled title="catalog_mutation_disabled">批量通过</Button><Button type="button" size="sm" variant="outline" disabled title="catalog_mutation_disabled">批量拒绝并全局拉黑</Button></AlertDescription></Alert><CatalogTable items={candidates} titleKeys={['word', 'title']} summaryKeys={['meaning', 'reason', 'summary']} emptyText="资产包中没有符合筛选条件的候选。" /></TabsContent>
       <TabsContent value="blocked" className="pt-3"><div className="mb-3 flex gap-2"><Input disabled placeholder="添加屏蔽词（正式命令未开放）" /><Button type="button" disabled title="catalog_mutation_disabled">添加屏蔽</Button></div><CatalogTable items={filter(blocked)} titleKeys={['word']} summaryKeys={['reason']} emptyText="没有符合筛选条件的屏蔽项。" /></TabsContent>
     </Tabs>
 
@@ -283,9 +291,13 @@ export function JargonPage() {
   const [editItem, setEditItem] = useState<JargonItem | null>(null)
   const [editMeaning, setEditMeaning] = useState('')
   const [archiveItem, setArchiveItem] = useState<JargonItem | null>(null)
+  const [blocklist, setBlocklist] = useState<JargonBlocklistItem[]>([])
+  const [blocklistStatus, setBlocklistStatus] = useState<'loading' | 'success' | 'error'>('loading')
+  const [removingBlocklistId, setRemovingBlocklistId] = useState<number | null>(null)
   const [filterDraft, setFilterDraft] = useState({ search, status: statusFilter })
   const [activeTab, setActiveTab] = useState<'local' | 'catalog'>('local')
   const listRequest = useRef(0)
+  const blocklistRequest = useRef(0)
   const catalogRequest = useRef(0)
 
   useEffect(() => setFilterDraft({ search, status: statusFilter }), [search, statusFilter])
@@ -304,7 +316,7 @@ export function JargonPage() {
     setQueryStatus('loading')
     setError(undefined)
     try {
-      const next = await listJargons({ ...scope, limit: pagination.limit, offset: pagination.offset, status: statusFilter || undefined, search: search || undefined })
+      const next = normalizeJargonResponse(await listJargons({ ...scope, limit: pagination.limit, offset: pagination.offset, status: statusFilter || undefined, search: search || undefined }))
       if (request !== listRequest.current) return
       setPayload(next)
       setSelectedIds([])
@@ -314,6 +326,21 @@ export function JargonPage() {
       setPayload(null); setError(reason); setQueryStatus('error')
     }
   }, [botId, pagination.limit, pagination.offset, scope, search, sessionId, statusFilter])
+
+  const loadBlocklist = useCallback(async () => {
+    const request = ++blocklistRequest.current
+    setBlocklistStatus('loading')
+    try {
+      const next = await listJargonBlocklist()
+      if (request !== blocklistRequest.current) return
+      setBlocklist(Array.isArray(next.items) ? next.items : [])
+      setBlocklistStatus('success')
+    } catch {
+      if (request !== blocklistRequest.current) return
+      setBlocklist([])
+      setBlocklistStatus('error')
+    }
+  }, [])
 
   const loadCatalog = useCallback(async () => {
     const request = ++catalogRequest.current
@@ -328,7 +355,7 @@ export function JargonPage() {
     }
   }, [])
 
-  useEffect(() => { if (activeTab === 'local') void load() }, [activeTab, load])
+  useEffect(() => { if (activeTab === 'local') { void load(); void loadBlocklist() } }, [activeTab, load, loadBlocklist])
   useEffect(() => { if (activeTab === 'catalog') void loadCatalog() }, [activeTab, loadCatalog])
   useEffect(() => {
     if (!objectRef) { setDeepLinkedItem(null); setDeepLinkStatus(null); return }
@@ -340,7 +367,7 @@ export function JargonPage() {
     setDeepLinkStatus('loading')
     fetchJson<{ item: JargonItem }>(endpoint).then((result) => {
       if (cancelled) return
-      setDeepLinkedItem(result.item)
+      setDeepLinkedItem(normalizeJargonItem(result.item))
       setDeepLinkStatus('ready')
     }).catch((reason) => {
       if (cancelled) return
@@ -355,8 +382,8 @@ export function JargonPage() {
     try {
       const result = await reviewJargon(item, action, scope)
       if (!result.ok || result.operation.status !== 'succeeded') throw new Error('服务端未确认审核命令成功')
-      toast.success(action === 'approve' ? '候选已通过证据审核' : '候选已拒绝')
-      await load()
+      toast.success(action === 'approve' ? '候选已通过证据审核' : '候选已拒绝并全局拉黑')
+      await Promise.all([load(), loadBlocklist()])
     } catch (reason) { toast.error(reason instanceof Error ? reason.message : '审核失败') }
     finally { setMutating(null) }
   }
@@ -368,10 +395,43 @@ export function JargonPage() {
     try {
       const result = await batchReviewJargons(selected, action, scope)
       if (!result.ok || result.operation.status !== 'succeeded') throw new Error('服务端未确认批量审核成功')
-      toast.success(`已${action === 'approve' ? '确认' : '拒绝'} ${result.reviewed_count} 条黑话`)
-      await load()
+      toast.success(action === 'approve' ? '已批量通过选择的黑话' : '已批量拒绝并全局拉黑')
+      await Promise.all([load(), loadBlocklist()])
     } catch (reason) {
       toast.error(reason instanceof Error ? reason.message : '批量审核失败')
+    } finally {
+      setBatchMutating(false)
+    }
+  }
+
+  async function removeFromGlobalBlocklist(item: JargonBlocklistItem) {
+    setRemovingBlocklistId(item.id)
+    try {
+      const result = await removeJargonBlocklistItem(item.id)
+      if (!result.ok || result.operation.status !== 'succeeded') throw new Error('服务端未确认解除全局拉黑')
+      toast.success(`已解除“${item.word}”的手动全局拉黑`)
+      await loadBlocklist()
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : '解除全局拉黑失败')
+    } finally {
+      setRemovingBlocklistId(null)
+    }
+  }
+
+  async function archiveSelected() {
+    const selected = (payload?.items ?? []).filter((item) => selectedIds.includes(item.id))
+    if (!selected.length) return
+    setBatchMutating(true)
+    try {
+      const results = await Promise.all(selected.map((item) => archiveJargon(item, scope)))
+      if (results.some((result) => !result.ok || result.operation.status !== 'succeeded')) {
+        throw new Error('服务端未确认所有黑话归档成功')
+      }
+      toast.success(`已归档 ${selected.length} 条黑话记录，保留证据与审计信息`)
+      setSelectedIds([])
+      await load()
+    } catch (reason) {
+      toast.error(reason instanceof Error ? reason.message : '批量归档失败')
     } finally {
       setBatchMutating(false)
     }
@@ -436,7 +496,6 @@ export function JargonPage() {
   const anchorCount = payload ? pageItems.reduce((sum, item) => sum + item.anchors.length, 0) : '—'
   const totalText = payload?.page.total_status === 'exact' && payload.page.total !== null ? payload.page.total : '—'
   const reviewAvailable = payload?.capabilities.review?.available === true
-  const batchReviewAvailable = payload?.capabilities.batch_review?.available === true
   const editAvailable = payload?.capabilities.edit?.available === true
   const archiveAvailable = payload?.capabilities.archive?.available === true
 
@@ -455,17 +514,26 @@ export function JargonPage() {
 <CardDescription>主表只显示中文业务字段；来源、规则、对象引用和 JSON 收纳在详情中。</CardDescription>
 </CardHeader>
 <CardContent className="flex flex-col gap-4">
-{selectedItems.length ? <div className="flex flex-wrap items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 p-3"><Badge variant="secondary">已选 {selectedItems.length} 条</Badge><Button type="button" size="sm" disabled={batchMutating || !batchReviewAvailable || selectedItems.some((item) => item.anchors.length === 0 || !item.object_ref)} onClick={() => void reviewSelected('approve')}><CheckIcon data-icon="inline-start" />批量确认</Button><Button type="button" size="sm" variant="outline" disabled={batchMutating || !batchReviewAvailable || selectedItems.some((item) => !item.object_ref)} onClick={() => void reviewSelected('reject')}><XIcon data-icon="inline-start" />批量拒绝</Button><Button type="button" size="sm" variant="ghost" className="ml-auto" onClick={() => setSelectedIds([])}>取消选择</Button>{!payload?.capabilities.select_all_matching?.available ? <span className="w-full text-xs text-muted-foreground">跨页全部匹配暂不可用：{payload?.capabilities.select_all_matching?.reason_code ?? '需要服务端重新签发全量 ObjectRef'}</span> : null}</div> : null}
+{selectedItems.length ? <div className="flex flex-wrap items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 p-3"><Badge variant="secondary">已选 {selectedItems.length} 条</Badge><Button type="button" size="sm" disabled={batchMutating || selectedItems.some((item) => item.anchors.length === 0 || !item.object_ref)} onClick={() => void reviewSelected('approve')}><CheckIcon data-icon="inline-start" />批量通过</Button><Button type="button" size="sm" variant="outline" disabled={batchMutating || selectedItems.some((item) => !item.object_ref)} onClick={() => void reviewSelected('reject')}><XIcon data-icon="inline-start" />批量拒绝并全局拉黑</Button><Button type="button" size="sm" variant="outline" disabled={batchMutating || !archiveAvailable || selectedItems.some((item) => !item.object_ref)} onClick={() => void archiveSelected()}><ArchiveIcon data-icon="inline-start" />批量归档</Button><Button type="button" size="sm" variant="ghost" className="ml-auto" onClick={() => setSelectedIds([])}>取消选择</Button></div> : null}
 <QueryState status={queryStatus} error={error} onRetry={() => void load()} title={!botId || !sessionId ? '请选择真实 Bot 与会话' : undefined} description={!botId || !sessionId ? '作用域未选择时不会查询，也不会补入默认 Bot。' : undefined}>
 <ResponsiveTable label="群聊黑话清单" table={<Table>
 <TableHeader><TableRow><TableHead className="w-10"><input aria-label="选择当前页全部黑话" type="checkbox" checked={allPageSelected} onChange={(event) => setSelectedIds(event.target.checked ? pageItems.map((item) => item.id) : [])} /></TableHead><TableHead>词条</TableHead><TableHead>释义</TableHead><TableHead className="w-20">频次</TableHead><TableHead className="w-24">来源</TableHead><TableHead className="w-24">状态</TableHead><TableHead className="w-20">证据</TableHead><TableHead className="w-64 text-right">操作</TableHead></TableRow></TableHeader>
-<TableBody>{pageItems.map((item) => <TableRow key={item.id} className={selectedIds.includes(item.id) ? 'bg-primary/5' : undefined}><TableCell><input aria-label={`选择黑话 ${item.word}`} type="checkbox" checked={selectedIds.includes(item.id)} onChange={(event) => toggleSelected(item.id, event.target.checked)} /></TableCell><TableCell className="font-semibold">{item.word}</TableCell><TableCell className="max-w-xl"><p className="line-clamp-2 text-sm text-muted-foreground">{item.meaning || '尚未形成可展示的释义'}</p></TableCell><TableCell className="tabular-nums">{item.frequency}</TableCell><TableCell><Badge variant="secondary" className="font-mono text-[10px]">{item.source || 'wave_memory'}</Badge></TableCell><TableCell><Badge className={statusClass(item.status)}>{STATUS_LABELS[item.status]}</Badge></TableCell><TableCell>{item.anchors.length ? `${item.anchors.length} 条` : '无锚点'}</TableCell><TableCell className="text-right"><div className="flex justify-end gap-1"><Button type="button" variant="outline" size="sm" disabled={!item.object_ref} title={item.object_ref ? '还原同作用域聊天证据' : '缺少服务端签发的 ObjectRef'} onClick={() => setEvidenceItem(item)}><MessageSquareQuoteIcon data-icon="inline-start" />证据</Button>{item.status === 'pending' ? <><Button type="button" size="icon-sm" aria-label={`确认黑话 ${item.word}`} disabled={mutating === item.id || !reviewAvailable || item.anchors.length === 0} title="确认黑话" onClick={() => void review(item, 'approve')}><CheckIcon /></Button><Button type="button" variant="outline" size="icon-sm" aria-label={`拒绝黑话 ${item.word}`} disabled={mutating === item.id || !reviewAvailable} title="拒绝候选" onClick={() => void review(item, 'reject')}><XIcon /></Button></> : null}<Button type="button" variant="ghost" size="icon-sm" aria-label={`编辑黑话 ${item.word}`} disabled={!editAvailable || !item.object_ref} title={editAvailable ? '编辑释义；保存后回到待审核' : payload?.capabilities.edit?.reason_code ?? '编辑不可用'} onClick={() => openMeaningEditor(item)}><Edit2Icon /></Button><ResponsiveDetail title={item.word} description="黑话释义、证据引用与审核操作" className="sm:max-w-4xl" trigger={<Button type="button" variant="ghost" size="icon-sm" aria-label={`查看黑话 ${item.word} 详情`} title="查看详情"><EyeIcon /></Button>}><JargonDetails item={item} reviewAvailable={reviewAvailable} busy={mutating === item.id} onReview={(action) => void review(item, action)} /></ResponsiveDetail><Button type="button" variant="ghost" size="icon-sm" aria-label={`归档黑话 ${item.word}`} disabled={!archiveAvailable || !item.object_ref} title={archiveAvailable ? '归档并移出正式注入集合' : payload?.capabilities.archive?.reason_code ?? '归档不可用'} onClick={() => setArchiveItem(item)}><ArchiveIcon /></Button></div></TableCell></TableRow>)}</TableBody>
+<TableBody>{pageItems.map((item) => <TableRow key={item.id} className={selectedIds.includes(item.id) ? 'bg-primary/5' : undefined}><TableCell><input aria-label={`选择黑话 ${item.word}`} type="checkbox" checked={selectedIds.includes(item.id)} onChange={(event) => toggleSelected(item.id, event.target.checked)} /></TableCell><TableCell className="font-semibold">{item.word}</TableCell><TableCell className="max-w-xl"><p className="line-clamp-2 text-sm text-muted-foreground">{item.meaning || '尚未形成可展示的释义'}</p></TableCell><TableCell className="tabular-nums">{item.frequency}</TableCell><TableCell><Badge variant="secondary" className="font-mono text-[10px]">{item.source || 'wave_memory'}</Badge></TableCell><TableCell><Badge className={statusClass(item.status)}>{STATUS_LABELS[item.status]}</Badge></TableCell><TableCell>{item.anchors.length ? `${item.anchors.length} 条` : '无锚点'}</TableCell><TableCell className="text-right"><div className="flex justify-end gap-1"><Button type="button" variant="outline" size="sm" disabled={!item.object_ref} title={item.object_ref ? '还原同作用域聊天证据' : '缺少服务端签发的 ObjectRef'} onClick={() => setEvidenceItem(item)}><MessageSquareQuoteIcon data-icon="inline-start" />证据</Button>{item.status === 'pending' ? <><Button type="button" size="icon-sm" aria-label={`确认黑话 ${item.word}`} disabled={mutating === item.id || !reviewAvailable || item.anchors.length === 0} title="确认黑话" onClick={() => void review(item, 'approve')}><CheckIcon /></Button><Button type="button" variant="outline" size="icon-sm" aria-label={`拒绝并全局拉黑黑话 ${item.word}`} disabled={mutating === item.id || !reviewAvailable} title="拒绝并全局拉黑" onClick={() => void review(item, 'reject')}><XIcon /></Button></> : null}<Button type="button" variant="ghost" size="icon-sm" aria-label={`编辑黑话 ${item.word}`} disabled={!editAvailable || !item.object_ref} title={editAvailable ? '编辑释义；保存后回到待审核' : payload?.capabilities.edit?.reason_code ?? '编辑不可用'} onClick={() => openMeaningEditor(item)}><Edit2Icon /></Button><ResponsiveDetail title={item.word} description="黑话释义、证据引用与审核操作" className="sm:max-w-4xl" trigger={<Button type="button" variant="ghost" size="icon-sm" aria-label={`查看黑话 ${item.word} 详情`} title="查看详情"><EyeIcon /></Button>}><JargonDetails item={item} reviewAvailable={reviewAvailable} busy={mutating === item.id} onReview={(action) => void review(item, action)} /></ResponsiveDetail><Button type="button" variant="ghost" size="icon-sm" aria-label={`归档黑话 ${item.word}`} disabled={!archiveAvailable || !item.object_ref} title={archiveAvailable ? '归档并移出正式注入集合' : payload?.capabilities.archive?.reason_code ?? '归档不可用'} onClick={() => setArchiveItem(item)}><ArchiveIcon /></Button></div></TableCell></TableRow>)}</TableBody>
 </Table>} cards={pageItems.map((item) => <article key={item.id} className={`flex flex-col gap-3 rounded-lg border bg-card p-4 ${selectedIds.includes(item.id) ? 'border-primary/50 bg-primary/5' : ''}`}><div className="flex items-start justify-between gap-2"><label className="flex min-w-0 items-start gap-2"><input aria-label={`选择黑话 ${item.word}`} type="checkbox" checked={selectedIds.includes(item.id)} onChange={(event) => toggleSelected(item.id, event.target.checked)} /><span><span className="block font-semibold">{item.word}</span><span className="mt-1 block whitespace-pre-wrap break-words text-sm text-muted-foreground">{item.meaning || '尚未形成可展示的释义'}</span></span></label><Badge className={statusClass(item.status)}>{STATUS_LABELS[item.status]}</Badge></div><div className="flex flex-wrap gap-2 text-xs text-muted-foreground"><span>频次 {item.frequency}</span><span>来源 {item.source || 'wave_memory'}</span><span>证据 {item.anchors.length} 条</span></div><div className="flex flex-wrap justify-end gap-2"><Button type="button" variant="outline" size="sm" disabled={!item.object_ref} onClick={() => setEvidenceItem(item)}><MessageSquareQuoteIcon data-icon="inline-start" />证据</Button><Button type="button" variant="outline" size="sm" disabled={!editAvailable || !item.object_ref} onClick={() => openMeaningEditor(item)}><Edit2Icon data-icon="inline-start" />编辑</Button><ResponsiveDetail title={item.word} description="黑话释义、证据引用与审核操作" className="sm:max-w-4xl" trigger={<Button type="button" variant="outline" size="sm">详情</Button>}><JargonDetails item={item} reviewAvailable={reviewAvailable} busy={mutating === item.id} onReview={(action) => void review(item, action)} /></ResponsiveDetail></div></article>)} />
 </QueryState>{payload && !payload.capabilities.review?.available ? <Alert>
 <AlertTitle>审核能力当前不可用</AlertTitle>
 <AlertDescription>服务端拒绝原因：{payload.capabilities.review?.reason_code ?? '未提供'}</AlertDescription>
 </Alert> : null}{payload ? <PaginationControls page={payload.page} onOffsetChange={pagination.setOffset} onLimitChange={pagination.setLimit} /> : null}</CardContent>
 </Card>
+
+        <Card>
+          <CardHeader><CardTitle className="text-base">全局黑话拉黑列表</CardTitle><CardDescription>所有群共享，展示规范化词形、来源、原因与时间；只有用户审核产生的手动项可在此解除。</CardDescription></CardHeader>
+          <CardContent>
+            <QueryState status={blocklistStatus} title="全局拉黑列表暂不可用" description="拉黑检查仍在服务端 fail-closed；此处仅为审计与解除入口。" onRetry={() => void loadBlocklist()}>
+              {blocklist.length ? <ResponsiveTable label="全局黑话拉黑列表" table={<Table><TableHeader><TableRow><TableHead>规范化词形</TableHead><TableHead>原因</TableHead><TableHead>来源</TableHead><TableHead>记录时间</TableHead><TableHead className="w-24 text-right">操作</TableHead></TableRow></TableHeader><TableBody>{blocklist.map((item) => <TableRow key={item.id}><TableCell className="font-semibold">{item.word}</TableCell><TableCell className="text-sm text-muted-foreground">{item.reason}</TableCell><TableCell><Badge variant="outline" className="font-mono text-[10px]">{item.source}</Badge></TableCell><TableCell className="text-sm text-muted-foreground">{item.created_at ? formatTime(item.created_at) : '未记录'}</TableCell><TableCell className="text-right"><Button type="button" size="sm" variant="outline" disabled={item.source !== 'user_global_reject' || removingBlocklistId === item.id} title={item.source === 'user_global_reject' ? '解除手动全局拉黑' : 'Holyman 同步项不可手动删除'} onClick={() => void removeFromGlobalBlocklist(item)}>{removingBlocklistId === item.id ? <Loader2Icon data-icon="inline-start" className="animate-spin" /> : <XIcon data-icon="inline-start" />}解除</Button></TableCell></TableRow>)}</TableBody></Table>} cards={blocklist.map((item) => <article key={item.id} className="flex flex-col gap-3 rounded-lg border bg-card p-4"><div className="flex items-start justify-between gap-3"><div><p className="font-semibold">{item.word}</p><p className="mt-1 text-sm text-muted-foreground">{item.reason}</p></div><Badge variant="outline" className="font-mono text-[10px]">{item.source}</Badge></div><div className="flex items-center justify-between gap-2 text-xs text-muted-foreground"><span>{item.created_at ? formatTime(item.created_at) : '未记录时间'}</span><Button type="button" size="sm" variant="outline" disabled={item.source !== 'user_global_reject' || removingBlocklistId === item.id} onClick={() => void removeFromGlobalBlocklist(item)}>解除全局拉黑</Button></div></article>)} /> : <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">当前没有全局拉黑词形。</div>}
+            </QueryState>
+          </CardContent>
+        </Card>
       </TabsContent>
 
       <TabsContent value="catalog"><Card><CardHeader><div className="flex items-start justify-between gap-3"><div><CardTitle className="flex items-center gap-2 text-base"><DatabaseIcon className="size-4" />广域资产浏览</CardTitle><CardDescription className="mt-1">只读审计 Holyman 分层参考资产，不赋予本地审核语义，也不提供同步写入。</CardDescription></div><Badge variant={catalog?.asset_status === 'ready' ? 'secondary' : 'outline'}>{catalog?.asset_status === 'ready' ? '资产就绪' : '状态待核验'}</Badge></div></CardHeader><CardContent><QueryState status={catalogStatus} title="广域资产暂不可用" description="未使用演示数据或旧缓存替代。" onRetry={() => void loadCatalog()}>{catalog ? <CatalogBrowser catalog={catalog} /> : null}</QueryState></CardContent></Card></TabsContent>

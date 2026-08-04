@@ -1,5 +1,32 @@
 # Changelog
 
+## v4.7.0 (2026-07-26)
+
+### 瘦身重构：剥离"自主学习"与"学习中心"空壳管道
+
+- **彻底物理移除 StudyService 与 Learning Center**：删除 `services/learning/` 目录、`StudyService`（自主学习 / 世界观内化）和 `book_experience`（书中经历提取），约清理 8,000+ 行冗余代码。
+- **清理学习中心 WebUI 与配置策略**：注销 `/learning-center` API 蓝图，移除前端"学习过程"页面，从 `_conf_schema.json` 中移除 `Learning_Settings` 与 `Study_Settings` 配置节。
+- **核心能力解耦与保留**：保留 `SelfReflectService` 纯纠正检测逻辑（断开向已删除候选表的写入），保留 `ScopedFewShotRepository`（正式 FewShot 风格注入通道不受影响）。
+- **测试套件修补**：修补引用点与 Schema 断言，移除 15 个过时学习中心测试文件，全量测试套件 100% 通过转绿。
+
+### 新增前端数据视角
+
+- **经历片段页面**（`/knowledge/experiences`）：只读浏览 Bot 对话中积累的历史经历片段，支持情感权重筛选与关键词搜索。
+- **全量时间锚点探索器**：在 Soul 页面新增可搜索、可分页的全量 Time Anchors 弹窗，不再被底部卡片限制。
+- **Outbox 写入管道健康卡片**：维护任务页顶部展示 Domain Outbox / 投递 / 恢复队列实时积压指标。
+- **Tag 治理建议 API**：后端 `/api/tags/governance/suggestions` 已完整对接（前端 `ScopedTagGovernancePanel` 早已具备完整操作面板）。
+
+### 3D 神经云图渲染依赖本地化与视觉增强
+
+- **CDN 本地化**：three.js r128、gsap 3.12.5、tailwind 3.4.16、alpine 3.14.9 等 12 个渲染依赖全部下载到 `webui/static/vendor/`，explore.html 与 index.html 零外部域名引用。修复了 cdn.tailwindcss.com 已不可达导致的管理面板样式丢失。
+- **渲染依赖自检与降级提示**：新增 `verifyRenderDependencies()` 逐项探测 THREE/OrbitControls/EffectComposer/UnrealBloomPass/gsap，缺失时全屏显示具体文件名并通过 postMessage 通知 React 父窗口。
+- **动态图例**：右下角图例改为只显示当前图谱实际出现的节点类型（原硬编码 17 种 → 实际 ~6 种）。
+- **节点标签降噪**：后端 memory 节点 label 去除 `@昵称(QQ号)` 格式噪声，前端兜底正则清洗 + 截取限制 24 字符。
+- **力导向布局增强**：斥力半径 6→12、弹簧理想长度 15→10、新增重力项与阻尼防震荡，迭代 20 次（≤400 节点），节点自然聚簇。
+- **呼吸动画**：节点 ±4% 正弦脉动，相位按空间坐标错开。
+- **脉冲波衰减**：粒子从源到目标 scale 1.4→0.6、opacity 0.9→0.3，每次重置随机错开节奏。
+- **标签密度控制**：默认 `core` 模式只显示最重要的 40 个节点标签，sprite scale 加硬上限 3.6 防止巨字遮挡。
+
 ## v4.6.3 (2026-07-21)
 
 ### 检索开放 Scope 与跨群同文治理

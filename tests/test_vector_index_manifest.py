@@ -143,6 +143,28 @@ def test_save_prunes_only_generations_beyond_default_retention(tmp_path):
     assert read_index_manifest(index_path) == committed
 
 
+def test_single_generation_retention_keeps_only_the_verified_generation(tmp_path):
+    """retention=1 is the runtime default; it must leave no rollback copy behind."""
+    index_path = tmp_path / "memory.hnsw"
+    index = vector_index_module.VectorIndex(
+        dimension=4,
+        index_path=str(index_path),
+        kind="memory",
+        generation_retention=1,
+    )
+
+    for count in (1, 2, 3):
+        index.index.current_count = count
+        committed = index.save()
+
+    assert committed is not None
+    assert committed.generation == 3
+    assert not generation_path(index_path, 1).exists()
+    assert not generation_path(index_path, 2).exists()
+    assert generation_path(index_path, 3).is_file()
+    assert read_index_manifest(index_path) == committed
+
+
 def test_generation_retention_is_configurable(tmp_path):
     index_path = tmp_path / "memory.hnsw"
     index = vector_index_module.VectorIndex(

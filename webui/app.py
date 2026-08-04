@@ -66,6 +66,18 @@ def create_app(
         app.register_blueprint(bp)
         logger.debug(f"[WaveMemory WebUI] registered blueprint: {bp.name}")
 
+    @app.route("/")
+    async def serve_index():
+        from quart import send_from_directory
+        return await send_from_directory(static_dir / "app", "index.html")
+
+    @app.route("/assets/<path:filename>")
+    @app.route("/static/app/assets/<path:filename>")
+    async def serve_app_assets(filename):
+        from quart import send_from_directory
+        assets_dir = static_dir / "app" / "assets"
+        return await send_from_directory(assets_dir, filename)
+
     # Stage 3 diagnostics is independently registered so older blueprint registries
     # can load it without gaining any database/provider fallback behavior.
     from .blueprints.diagnostics import diagnostics_bp

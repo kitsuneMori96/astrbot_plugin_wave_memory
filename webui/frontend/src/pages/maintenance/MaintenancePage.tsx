@@ -28,6 +28,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { usePaginationSearchParams } from '@/hooks/use-pagination-search-params'
 import { MaintainPage } from '@/pages/maintain/MaintainPage'
+import { OutboxMonitorCard } from '@/components/maintenance/OutboxMonitorCard'
 
 const activeStatuses = new Set(['pending', 'queued', 'running'])
 
@@ -283,6 +284,7 @@ export function MaintenancePage() {
   }
 
   return <div data-slot="maintenance-page" className="flex flex-col gap-6">
+    <OutboxMonitorCard />
     <Card>
       <CardHeader><CardTitle>标签与维护中心</CardTitle><CardDescription>恢复标签提取、质量审计和建议审核工作台；后台任务历史保持可刷新恢复，queued/202 仅表示已受理。</CardDescription></CardHeader>
       <CardContent className="flex flex-wrap gap-2"><Button asChild variant="outline"><Link to="/diagnostics/indexes"><SearchCheckIcon />只读索引诊断</Link></Button>{activeTab === 'jobs' ? <Button variant="outline" onClick={() => void loadJobs()}><RefreshCwIcon />刷新任务历史</Button> : null}</CardContent>

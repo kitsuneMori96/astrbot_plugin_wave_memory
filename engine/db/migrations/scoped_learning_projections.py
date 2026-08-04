@@ -1,7 +1,7 @@
-"""Scoped FewShot 与 reviewed BookLore projection 的幂等增量迁移。
+"""Scoped FewShot projection 的幂等增量迁移。
 
-该迁移只在 WaveMemory 主库创建正式 projection 表；不会创建、复制或修改
-ExternalBookLore 的 raw Catalog 表。
+书设 reviewed_book_lore_projections 概念已废弃：书设只读 raw Catalog。
+该迁移只维护 FewShot 表，并清理遗留的 book lore projection 表。
 """
 
 from __future__ import annotations
@@ -65,32 +65,6 @@ CREATE TABLE IF NOT EXISTS scoped_few_shot_feedback_events (
 )
 """
 
-_CREATE_REVIEWED_BOOK_LORE = """
-CREATE TABLE IF NOT EXISTS reviewed_book_lore_projections (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_catalog_scope_key TEXT NOT NULL,
-    source_catalog_scope_json TEXT NOT NULL,
-    target_runtime_scope_key TEXT NOT NULL,
-    target_runtime_scope_json TEXT NOT NULL,
-    community_id TEXT NOT NULL,
-    title TEXT NOT NULL,
-    summary TEXT NOT NULL,
-    content TEXT NOT NULL,
-    rank REAL NOT NULL DEFAULT 0,
-    candidate_json TEXT NOT NULL,
-    evidence_refs_json TEXT NOT NULL,
-    evidence_bindings_json TEXT NOT NULL,
-    evidence_derivation_json TEXT NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('pending', 'approved', 'rejected', 'revoked')),
-    revision INTEGER NOT NULL DEFAULT 1 CHECK(revision >= 1),
-    source_candidate_id INTEGER,
-    idempotency_key TEXT NOT NULL,
-    created_at REAL NOT NULL,
-    updated_at REAL NOT NULL,
-    approved_at REAL
-)
-"""
-
 _CREATE_INDEXES = (
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_scoped_few_shot_identity "
     "ON scoped_few_shot_examples(runtime_scope_key, idempotency_key)",
@@ -100,12 +74,13 @@ _CREATE_INDEXES = (
     "ON scoped_few_shot_usage_events(runtime_scope_key, query_trace_id, example_id)",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_scoped_few_shot_feedback_trace_example "
     "ON scoped_few_shot_feedback_events(runtime_scope_key, query_trace_id, example_id)",
-    "CREATE UNIQUE INDEX IF NOT EXISTS uq_reviewed_book_lore_identity "
-    "ON reviewed_book_lore_projections(target_runtime_scope_key, idempotency_key)",
-    "CREATE INDEX IF NOT EXISTS idx_reviewed_book_lore_read "
-    "ON reviewed_book_lore_projections(target_runtime_scope_key, status, rank DESC, updated_at DESC)",
-    "CREATE INDEX IF NOT EXISTS idx_reviewed_book_lore_source "
-    "ON reviewed_book_lore_projections(source_catalog_scope_key, community_id)",
+)
+
+_DROP_REVIEWED_BOOK_LORE = (
+    "DROP INDEX IF EXISTS uq_reviewed_book_lore_identity",
+    "DROP INDEX IF EXISTS idx_reviewed_book_lore_read",
+    "DROP INDEX IF EXISTS idx_reviewed_book_lore_source",
+    "DROP TABLE IF EXISTS reviewed_book_lore_projections",
 )
 
 
@@ -153,14 +128,15 @@ def _upgrade_scoped_fewshot(connection) -> None:
 
 
 def ensure_scoped_learning_projection_schema(connection) -> None:
-    """创建 scoped projection 表和索引；可加入调用方已经开启的正式事务。"""
+    """创建 scoped FewShot 表和索引，并清理废弃的 book lore projection 表。"""
     def apply(tx) -> None:
         tx.execute(_CREATE_SCOPED_FEWSHOT)
         _upgrade_scoped_fewshot(tx)
         tx.execute(_CREATE_SCOPED_FEWSHOT_USAGE)
         tx.execute(_CREATE_SCOPED_FEWSHOT_FEEDBACK)
-        tx.execute(_CREATE_REVIEWED_BOOK_LORE)
         for statement in _CREATE_INDEXES:
+            tx.execute(statement)
+        for statement in _DROP_REVIEWED_BOOK_LORE:
             tx.execute(statement)
 
     if bool(getattr(connection, "in_transaction", False)):

@@ -165,14 +165,14 @@ class HolymanSyncService:
                     }
                     for item in assets.get("candidates", [])
                 ])
-                db.replace_jargon_knowledge_table("jargon_blocklist", [
+                db.replace_jargon_blocklist_source([
                     {
                         "word": word,
                         "reason": reason,
                         "source": "holyman_skills",
                     }
                     for word, reason in (assets.get("blocked") or {}).items()
-                ])
+                ], source="holyman_skills")
             finally:
                 db.close()
         except Exception as e:

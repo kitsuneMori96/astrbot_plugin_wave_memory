@@ -128,27 +128,6 @@ async def get_agent_feedback():
     if not conn:
         return jsonify({"error": "agent_feedback_store_unavailable", "feedback_records": [], "config_suggestions": [], "review_candidates": [], "history": {}, "summary": {}})
     payload = build_agent_feedback_payload(conn)
-    # 兼容期显式指定 Bot 时，将候选列表投影到学习中心新 service；配置建议
-    # 仍保持在原配置域，绝不混入 learning_promotions。
-    bot_id = str(request.args.get("bot_id") or "").strip() if request is not None else ""
-    if bot_id:
-        try:
-            from engine.db.learning_repository import LearningRepositories
-            container = get_container()
-            repositories = getattr(container, "learning_repositories", None) or LearningRepositories.from_connection(conn)
-            container.learning_repositories = repositories
-            candidates, _ = repositories.candidates.list(bot_id=bot_id, limit=100)
-            pending = [item for item in candidates if item.get("review_status") == "pending"]
-            history = [item for item in candidates if item.get("review_status") != "pending"]
-            payload["review_candidates"] = pending
-            payload["history"]["review_candidates"] = history
-            payload["summary"]["pending_candidates"] = len(pending)
-            payload["summary"]["history_items"] = len(payload["history"].get("config_suggestions", [])) + len(history)
-        except Exception:
-            # 作用域错误不回退到无 Bot 的旧全局列表，避免跨 Bot 泄漏。
-            payload["review_candidates"] = []
-            payload["history"]["review_candidates"] = []
-            payload["summary"]["pending_candidates"] = 0
     return jsonify(payload)
 
 
