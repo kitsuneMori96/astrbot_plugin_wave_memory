@@ -367,6 +367,12 @@
         "hint": "格式：逗号分隔的群号。此名单中的群消息绝不记录。",
         "type": "string",
         "default": ""
+      },
+      "debounce_seconds": {
+        "description": "消息防抖合并等待秒数",
+        "hint": "用户连续说话时的合并窗口。设 0 关闭防抖（消息立即触发 LLM 回复）。低延迟场景推荐 0。",
+        "type": "float",
+        "default": 0
       }
     }
   },

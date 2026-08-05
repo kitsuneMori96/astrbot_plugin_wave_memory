@@ -228,10 +228,10 @@ WaveMemory 是 AstrBot 记忆插件：负责记录、整理、检索、注入、
 开发命令：
 
 ```bash
-cd webui/frontend && npm install
-cd webui/frontend && npm run dev
-cd webui/frontend && npm run typecheck
-cd webui/frontend && npm run build
+cd webui/frontend && pnpm install
+cd webui/frontend && pnpm run dev
+cd webui/frontend && pnpm run typecheck
+cd webui/frontend && pnpm run build
 ```
 
 发布约定：提交 `webui/static/app/index.html` 与 hashed JS/CSS 静态产物；后端 `/` 优先服务 React 构建产物，产物缺失时自动 fallback 到旧版首页。
