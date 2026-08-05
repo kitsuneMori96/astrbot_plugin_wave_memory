@@ -115,8 +115,9 @@ class EPAModule:
 
         probs = proj_energy / total
 
-        # 计算熵
-        entropy = -float(np.sum(probs * np.log(probs + 1e-10))) / np.log(len(probs))
+        # 计算熵（k=1 时 len(probs)==1，log(1)=0 会除零）
+        denom = np.log(len(probs)) if len(probs) > 1 else 1.0
+        entropy = -float(np.sum(probs * np.log(probs + 1e-10))) / denom
         logic_depth = 1.0 - entropy
 
         # 最强轴

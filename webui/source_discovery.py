@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -532,7 +533,7 @@ class UniversalImporter:
                 samples=samples_json,
             )
 
-            response = await provider.text_chat(prompt=prompt)
+            response = await asyncio.wait_for(provider.text_chat(prompt=prompt), timeout=120)
             if not response or not response.completion_text:
                 return {"valid": True, "skipped": True}
 

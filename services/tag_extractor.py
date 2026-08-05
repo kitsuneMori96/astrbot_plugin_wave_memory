@@ -326,9 +326,12 @@ class TagExtractor:
                 reference_section=reference_section,
             )
 
-            response = await provider.text_chat(
-                prompt=prompt,
-                system_prompt="你是一个记忆标注系统，只输出 JSON 数组，不输出其他内容。",
+            response = await asyncio.wait_for(
+                provider.text_chat(
+                    prompt=prompt,
+                    system_prompt="你是一个记忆标注系统，只输出 JSON 数组，不输出其他内容。",
+                ),
+                timeout=120,
             )
 
             if not response or not response.completion_text:
@@ -395,9 +398,12 @@ class TagExtractor:
                 batch_json=batch_json,
                 reference_section=reference_section,
             )
-            response = await provider.text_chat(
-                prompt=prompt,
-                system_prompt="你是一个记忆标注系统，只输出严格 JSON 对象，不输出 markdown 或解释。",
+            response = await asyncio.wait_for(
+                provider.text_chat(
+                    prompt=prompt,
+                    system_prompt="你是一个记忆标注系统，只输出严格 JSON 对象，不输出 markdown 或解释。",
+                ),
+                timeout=120,
             )
 
             if not response or not response.completion_text:

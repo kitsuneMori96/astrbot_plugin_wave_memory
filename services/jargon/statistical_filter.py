@@ -59,6 +59,7 @@ class JargonStatisticalFilter:
         self._user_freq: Dict[str, Dict[str, Set[str]]] = defaultdict(lambda: defaultdict(set))
         # group_id -> {word: [context metadata]}
         self._contexts: Dict[str, Dict[str, List[Dict]]] = defaultdict(lambda: defaultdict(list))
+        self._feed_count: int = 0
 
     def feed(self, text: str, group_id: str, sender_id: str = "", timestamp: float = None) -> None:
         """喂入一条消息，更新词频统计。"""
@@ -68,6 +69,9 @@ class JargonStatisticalFilter:
             return
         words = self._tokenize(text)
         now = timestamp or time.time()
+        self._feed_count += 1
+        if self._feed_count % 500 == 0:
+            self._prune(now)
         for w in words:
             self._group_freq[group_id][w] += 1
             if w not in self._first_seen[group_id]:
@@ -82,6 +86,26 @@ class JargonStatisticalFilter:
                     "timestamp": now,
                     "sender_id": sender_id or "",
                 })
+
+    def _prune(self, now: float = None) -> None:
+        """淘汰超出窗口期的词，防止内存无界增长。"""
+        now = now or time.time()
+        window_ago = now - self._window_days * 86400
+        for gid in list(self._group_freq.keys()):
+            stale = [
+                w for w, ts in self._first_seen.get(gid, {}).items()
+                if ts < window_ago
+            ]
+            for w in stale:
+                self._group_freq[gid].pop(w, None)
+                self._first_seen[gid].pop(w, None)
+                self._user_freq[gid].pop(w, None)
+                self._contexts[gid].pop(w, None)
+            if not self._group_freq[gid]:
+                self._group_freq.pop(gid, None)
+                self._first_seen.pop(gid, None)
+                self._user_freq.pop(gid, None)
+                self._contexts.pop(gid, None)
 
     def get_candidates(self, group_id: str, min_freq: int = 5, top_k: int = 20) -> List[Dict]:
         """获取候选黑话词（window_days 天内频率 >= min_freq 的非常规词）。

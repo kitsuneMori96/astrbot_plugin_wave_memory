@@ -313,6 +313,11 @@ class CooccurrenceScheduler:
         self._accumulated_changes = 0
         self._last_rebuild_ts: float = 0
         self._is_rebuilding = False
+        self._main_loop = None
+        try:
+            self._main_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._main_loop = None
 
     def notify_tag_change(self, count: int = 1):
         """通知有 Tag 变更。"""
@@ -325,12 +330,22 @@ class CooccurrenceScheduler:
                 self._schedule_rebuild()
 
     def _schedule_rebuild(self):
-        """直接触发重建（不用 call_later 防抖）。"""
+        """触发重建。当前线程有事件循环则直接调度，否则投递到主循环（避免重建静默失效）。"""
         try:
-            loop = asyncio.get_event_loop()
-            asyncio.ensure_future(self._do_rebuild())
+            current_loop = asyncio.get_running_loop()
         except RuntimeError:
-            pass
+            current_loop = None
+        loop = current_loop or self._main_loop
+        if loop is None:
+            logger.warning("[WaveMemory] CooccurrenceScheduler: no event loop available, rebuild skipped")
+            return
+        try:
+            if current_loop is None and loop.is_running():
+                asyncio.run_coroutine_threadsafe(self._do_rebuild(), loop)
+            else:
+                asyncio.ensure_future(self._do_rebuild(), loop=loop)
+        except Exception as e:
+            logger.warning(f"[WaveMemory] CooccurrenceScheduler: schedule rebuild failed: {e}")
 
     async def _do_rebuild(self):
         """执行重建。"""

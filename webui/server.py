@@ -42,7 +42,7 @@ class _SecureConfig:
 class Server:
     """WebUI 服务器（守护线程 + Hypercorn）。"""
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 7890):
+    def __init__(self, host: str = "0.0.0.0", port: int = 9876):
         self.host = host
         self.port = port
         self._thread: Optional[threading.Thread] = None

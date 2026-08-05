@@ -113,23 +113,28 @@ class FewShotService:
         if not rows:
             return []
 
-        # LLM 评估风格代表性
-        candidates = []
-        for mem_id, content in rows:
-            try:
-                if not self._is_healthy_example(content):
-                    continue
-                result = await self._evaluate_style(content)
-                score = result.get("score", 0)
-                if score >= self._min_score:
-                    candidates.append({
-                        "content": content,
-                        "score": score,
-                        "traits": result.get("traits", []),
-                    })
-            except Exception:
-                continue
+        # LLM 评估风格代表性（有界并发，避免最多 80 次串行 LLM 长时间阻塞）
+        healthy = [r[1] for r in rows if self._is_healthy_example(r[1])]
+        sem = asyncio.Semaphore(4)
 
+        async def _safe_evaluate(content: str):
+            async with sem:
+                try:
+                    return content, await self._evaluate_style(content)
+                except Exception:
+                    return content, {}
+
+        eval_results = await asyncio.gather(*(_safe_evaluate(c) for c in healthy))
+
+        candidates = []
+        for content, result in eval_results:
+            score = result.get("score", 0)
+            if score >= self._min_score:
+                candidates.append({
+                    "content": content,
+                    "score": score,
+                    "traits": result.get("traits", []),
+                })
             if len(candidates) >= self._extract_top_k:
                 break
 

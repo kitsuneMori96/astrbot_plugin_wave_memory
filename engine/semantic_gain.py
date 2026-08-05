@@ -64,7 +64,7 @@ def histogram_scan(similarities: list[float], bins: int = 20) -> dict:
     bin_width = 1.0 / bins
     counts = [0] * bins
     for s in similarities:
-        idx = min(int(s / bin_width), bins - 1)
+        idx = max(0, min(int(s / bin_width), bins - 1))
         counts[idx] += 1
 
     histogram = [(i * bin_width + bin_width / 2, counts[i]) for i in range(bins)]

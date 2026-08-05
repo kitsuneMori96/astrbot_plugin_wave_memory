@@ -85,6 +85,7 @@ class ConsolidationService:
         self._task: Optional[asyncio.Task] = None
         self._running = False
         self._last_consolidated_ts: float = 0
+        self._group_watermarks: dict[str, float] = {}
 
     def start(self):
         self._running = True
@@ -94,6 +95,18 @@ class ConsolidationService:
         if row:
             try:
                 self._last_consolidated_ts = float(row[0])
+            except (ValueError, TypeError):
+                pass
+        wm_row = self.db.conn.execute(
+            "SELECT value FROM kv_store WHERE key = 'consolidation_group_watermarks'"
+        ).fetchone()
+        if wm_row:
+            try:
+                parsed = json.loads(wm_row[0])
+                if isinstance(parsed, dict):
+                    self._group_watermarks = {
+                        str(k): float(v) for k, v in parsed.items()
+                    }
             except (ValueError, TypeError):
                 pass
         self._task = asyncio.create_task(self._loop())
@@ -124,7 +137,9 @@ class ConsolidationService:
             return {"status": "skipped"}
 
         now = time.time()
-        since = self._last_consolidated_ts or (now - self.interval)
+        base_since = self._last_consolidated_ts or (now - self.interval)
+        # 组发现基于最旧水位：保证失败/未追平的分组不会被跳过
+        discovery_since = min([base_since] + list(self._group_watermarks.values()))
 
         # 按 group_id 分组
         def _fetch_groups():
@@ -132,7 +147,7 @@ class ConsolidationService:
                 """SELECT DISTINCT group_id FROM memories
                    WHERE timestamp > ? AND memory_type = 'message'
                      AND sender_id NOT IN ('bot_self', 'angel_memory_import', 'livingmemory_import', 'legacy_import')""",
-                (since,),
+                (discovery_since,),
             ).fetchall()
 
         groups = await asyncio.to_thread(_fetch_groups)
@@ -141,10 +156,15 @@ class ConsolidationService:
         total_relations = 0
 
         for (group_id,) in groups:
+            since_g = self._group_watermarks.get(group_id, base_since)
             try:
-                result = await self._consolidate_group(group_id, since, now)
+                result = await self._consolidate_group(group_id, since_g, now)
                 total_consolidated += result.get("messages", 0)
                 total_relations += result.get("relations", 0)
+                last_ts = result.get("last_message_ts")
+                if last_ts is not None:
+                    # 仅在实际消费成功后推进水位，失败/超限时不移，避免消息永久丢失
+                    self._group_watermarks[group_id] = last_ts
             except Exception as e:
                 logger.warning(f"[WaveMemory] Consolidation failed for group {group_id}: {e}")
 
@@ -154,6 +174,10 @@ class ConsolidationService:
             self.db.conn.execute(
                 "INSERT OR REPLACE INTO kv_store (key, value) VALUES ('last_consolidation_ts', ?)",
                 (str(now),),
+            )
+            self.db.conn.execute(
+                "INSERT OR REPLACE INTO kv_store (key, value) VALUES ('consolidation_group_watermarks', ?)",
+                (json.dumps(self._group_watermarks),),
             )
             self.db.conn.commit()
         await asyncio.to_thread(_save_ts)
@@ -176,7 +200,7 @@ class ConsolidationService:
             return self.db.conn.execute(
                 """SELECT id, sender_name, sender_id, content, timestamp
                    FROM memories
-                   WHERE group_id = ? AND timestamp BETWEEN ? AND ?
+                   WHERE group_id = ? AND timestamp > ? AND timestamp < ?
                      AND memory_type = 'message' AND content IS NOT NULL
                    ORDER BY timestamp ASC
                    LIMIT ?""",
@@ -185,8 +209,12 @@ class ConsolidationService:
 
         messages = await asyncio.to_thread(_fetch_messages)
 
+        if not messages:
+            return {"messages": 0, "relations": 0, "last_message_ts": since}
+
         if len(messages) < 5:
-            return {"messages": 0, "relations": 0}
+            # 不足整合阈值：跳过但推进水位，避免下次重复扫描
+            return {"messages": 0, "relations": 0, "last_message_ts": messages[-1][4]}
 
         # 格式化对话文本
         conversation_lines = []
@@ -206,9 +234,12 @@ class ConsolidationService:
 
         prompt = CONSOLIDATION_PROMPT.replace("{conversation}", conversation_text)
 
-        response = await provider.text_chat(
-            prompt=prompt,
-            system_prompt="你是记忆整合系统，只输出 JSON。",
+        response = await asyncio.wait_for(
+            provider.text_chat(
+                prompt=prompt,
+                system_prompt="你是记忆整合系统，只输出 JSON。",
+            ),
+            timeout=120,
         )
 
         if not response or not response.completion_text:
@@ -228,7 +259,7 @@ class ConsolidationService:
         # 跳过灌水
         if summary == "日常灌水" and not facts:
             await asyncio.to_thread(self._write_summary, msg_ids, summary)
-            return {"messages": len(msg_ids), "relations": 0}
+            return {"messages": len(msg_ids), "relations": 0, "last_message_ts": messages[-1][4]}
 
         # 写入 tag_relations（在线程中执行，不阻塞事件循环）
         relations_written = await asyncio.to_thread(self._write_relations, topics, facts, relations)
@@ -246,8 +277,8 @@ class ConsolidationService:
                     try:
                         self.db.insert_fact(a, rel, b, group_id=group_id, confidence=0.7)
                         written += 1
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"[Consolidation] insert social fact failed: {e}")
             return written
 
         social_written = await asyncio.to_thread(_write_social)
@@ -271,8 +302,8 @@ class ConsolidationService:
                         self.db.insert_fact(person, "被称为", called, group_id=group_id, confidence=0.8)
                         self._add_alias(person, called)
                         written += 1
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"[Consolidation] insert nickname failed: {e}")
             return written
 
         nicknames_written = await asyncio.to_thread(_write_nicknames)
@@ -300,7 +331,7 @@ class ConsolidationService:
         else:
             logger.info(f"[Consolidation] 跳过信念提取: belief_engine={bool(self.belief_engine)} summary={summary[:20]!r}")
 
-        return {"messages": len(msg_ids), "relations": relations_written, "facts": facts_written}
+        return {"messages": len(msg_ids), "relations": relations_written, "facts": facts_written, "last_message_ts": messages[-1][4]}
 
     def _parse_response(self, text: str) -> Optional[dict]:
         """解析 LLM 返回的 JSON。"""

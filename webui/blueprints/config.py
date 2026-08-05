@@ -110,7 +110,7 @@ async def get_config():
         "webui": {
             "enabled": cfg.get("WebUI_Settings", {}).get("webui_enabled", True),
             "host": cfg.get("WebUI_Settings", {}).get("webui_host", "0.0.0.0"),
-            "port": cfg.get("WebUI_Settings", {}).get("webui_port", 7890),
+            "port": cfg.get("WebUI_Settings", {}).get("webui_port", 9876),
         },
     })
 

@@ -163,6 +163,11 @@ class WaveMemoryPlugin(Star):
         social_cfg = self.config.get("Social_Settings", {})
         inject_cfg = self.config.get("Inject_Settings", {})
         filter_cfg = self.config.get("Message_Filter", {})
+        self.debounce_seconds = filter_cfg.get("debounce_seconds")
+        if self.debounce_seconds is None:
+            self.debounce_seconds = 4.0
+        else:
+            self.debounce_seconds = float(self.debounce_seconds)
         perf_cfg = self.config.get("Performance_Settings", {})
         lifecycle_cfg = self.config.get("Lifecycle_Settings", {})
         cross_group_cfg = self.config.get("Cross_Group_Settings", {})
@@ -273,7 +278,7 @@ class WaveMemoryPlugin(Star):
         # WebUI 配置
         self.webui_enabled = webui_cfg.get("webui_enabled", True)
         self.webui_host = webui_cfg.get("webui_host", "0.0.0.0")
-        self.webui_port = int(webui_cfg.get("webui_port", 7890))
+        self.webui_port = int(webui_cfg.get("webui_port", 9876))
         self.webui_password = webui_cfg.get("webui_password", "")
 
         # 消息过滤配置
@@ -565,10 +570,25 @@ class WaveMemoryPlugin(Star):
         )
 
     def _spawn(self, coro) -> asyncio.Task:
-        """创建后台任务并追踪。"""
+        """创建后台任务并追踪（完成/异常后自动清理引用，避免 _bg_tasks 无界增长）。"""
         task = asyncio.create_task(coro)
+
+        def _cleanup(t: asyncio.Task) -> None:
+            try:
+                self._bg_tasks.remove(t)
+            except ValueError:
+                pass
+
+        task.add_done_callback(_cleanup)
         self._bg_tasks.append(task)
         return task
+
+    async def _refresh_pair_similarity(self):
+        """后台刷新标签对相似度缓存（避免启动时同步阻塞）。"""
+        try:
+            await asyncio.to_thread(self.pair_sim_service.refresh_if_needed)
+        except Exception as e:
+            logger.warning(f"[WaveMemory] Pair similarity refresh failed: {e}")
 
     def _set_injection_channel_config(self, config) -> None:
         """WebUI 热应用通道配置时更新运行时注入编排器配置。"""
@@ -848,8 +868,8 @@ class WaveMemoryPlugin(Star):
                         cur_imp = float(row[0] if row[0] is not None else 1.0)
                         if cur_imp < 3.0:
                             self.db.update_memory(mid, importance=min(3.0, cur_imp + 0.02))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"[WaveMemory] importance boost failed: {e}")
 
             if result.injected:
                 parts_detail = []
@@ -942,8 +962,8 @@ class WaveMemoryPlugin(Star):
         if self.tag_index.count == 0 and self.db.get_tag_count() > 0:
             self._spawn(self._rebuild_tag_index())
 
-        # PairSimilarity：延迟到首次查询时再 refresh（避免 __init__ 阻塞 16s）
-        # self.pair_sim_service.refresh_if_needed() — 移除启动时同步调用
+        # PairSimilarity：后台异步刷新（避免 __init__ 阻塞）
+        self._spawn(self._refresh_pair_similarity())
 
         # 构建共现矩阵（仅在内存中为空时才 rebuild）
         if self.enable_spike and self.db.get_tag_count() > 10 and not self.cooccurrence.forward:
@@ -2577,9 +2597,9 @@ class WaveMemoryPlugin(Star):
                         # 达到最长 12s 强制截断
                         break
 
-                    remaining_debounce = 4.0 - elapsed_since_update
+                    remaining_debounce = self.debounce_seconds - elapsed_since_update
                     if remaining_debounce <= 0:
-                        # 4s 内没有新消息，防抖正常结束
+                        # debounce_seconds 内没有新消息，防抖正常结束
                         break
 
                     wait_time = min(remaining_debounce, 12.0 - elapsed_since_start)

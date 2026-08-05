@@ -42,7 +42,7 @@ class PairSimilarityService:
         # 2. 缓存未命中，去 DB 查
         try:
             row = self.db.conn.execute(
-                "SELECT similarity FROM tag_pair_similarity WHERE tag_id_a=? AND tag_id_b=?",
+                "SELECT similarity FROM tag_pair_similarity WHERE tag_a=? AND tag_b=?",
                 (key[0], key[1])
             ).fetchone()
             sim = row[0] if row else 0.0
@@ -126,7 +126,7 @@ class PairSimilarityService:
             try:
                 self.db.conn.execute("DELETE FROM tag_pair_similarity")
                 self.db.conn.executemany(
-                    "INSERT INTO tag_pair_similarity (tag_id_a, tag_id_b, similarity, updated_at) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO tag_pair_similarity (tag_a, tag_b, similarity, computed_at) VALUES (?, ?, ?, ?)",
                     batch_params,
                 )
                 self.db.conn.commit()

@@ -117,8 +117,12 @@ class SelfReflectService:
         if not is_correction:
             return False
 
-        # 冷却检查
+        # 冷却检查（顺带清理过期条目，防止 _cooldown_map 无界增长）
         topic_key = recent_reply["text"][:30]
+        if len(self._cooldown_map) > 500:
+            self._cooldown_map = {
+                k: v for k, v in self._cooldown_map.items() if now - v < self.cooldown
+            }
         if topic_key in self._cooldown_map and (now - self._cooldown_map[topic_key]) < self.cooldown:
             return False
 

@@ -52,13 +52,16 @@ class ConnectionManager:
 
     def __init__(self, db_path: str):
         self._write_lock = threading.RLock()
+        self._read_lock = threading.RLock()
+        self._thread_local = threading.local()
         self.db_path = db_path
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
         # 写连接
         self._write_conn = self._create_connection()
-        # 读连接（独立，不被写阻塞）
+        # 读连接：每个线程独立，避免多线程共享游标互相干扰
         self._read_conn = self._create_connection()
+        self._thread_local.read_conn = self._read_conn
 
         # 兼容旧代码 db.conn.execute()
         self.conn = _ConnProxy(self)
@@ -96,9 +99,17 @@ class ConnectionManager:
         with self._write_lock:
             self._write_conn.commit()
 
+    def _get_read_conn(self) -> sqlite3.Connection:
+        """获取当前线程的读连接（每线程独立，安全并发）。"""
+        conn = getattr(self._thread_local, "read_conn", None)
+        if conn is None:
+            conn = self._create_connection()
+            self._thread_local.read_conn = conn
+        return conn
+
     def execute_read(self, sql, params=None):
-        """读操作 — 无锁，走读连接。WAL 保证不被写阻塞。"""
-        return self._read_conn.execute(sql, params or ())
+        """读操作 — 走当前线程的读连接。WAL 保证不被写阻塞。"""
+        return self._get_read_conn().execute(sql, params or ())
 
     def execute(self, sql, params=None):
         """通用 execute — 自动判断读/写路由。兼容旧代码。"""
@@ -118,6 +129,23 @@ class ConnectionManager:
         except Exception:
             return True
 
+    def _close_read_conns(self):
+        """关闭主读连接与当前线程的读连接。"""
+        try:
+            self._read_conn.close()
+        except Exception:
+            pass
+        local = getattr(self._thread_local, "read_conn", None)
+        if local is not None and local is not self._read_conn:
+            try:
+                local.close()
+            except Exception:
+                pass
+        try:
+            self._thread_local.read_conn = None
+        except Exception:
+            pass
+
     def reopen(self):
         """重新打开所有连接。"""
         with self._write_lock:
@@ -125,12 +153,10 @@ class ConnectionManager:
                 self._write_conn.close()
             except Exception:
                 pass
-            try:
-                self._read_conn.close()
-            except Exception:
-                pass
+            self._close_read_conns()
             self._write_conn = self._create_connection()
             self._read_conn = self._create_connection()
+            self._thread_local.read_conn = self._read_conn
 
     def close(self):
         """关闭所有连接。"""
@@ -139,10 +165,7 @@ class ConnectionManager:
                 self._write_conn.close()
             except Exception:
                 pass
-            try:
-                self._read_conn.close()
-            except Exception:
-                pass
+            self._close_read_conns()
 
     def _sync_index_delete(self, ids):
         """删除记忆时同步清除向量索引标记。"""

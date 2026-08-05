@@ -57,7 +57,7 @@ class BookLoreSearchTool(FunctionTool[AstrAgentContext]):
     async def call(self, ctx: ContextWrapper[AstrAgentContext], **kwargs) -> str:
         query = kwargs.get("query", "").strip()
         type_filter = kwargs.get("type_filter", "")
-        limit = int(kwargs.get("limit", 5))
+        limit = max(1, min(int(kwargs.get("limit", 5)), 50))
 
         if not query:
             return "请提供搜索内容"

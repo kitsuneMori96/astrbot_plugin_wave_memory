@@ -259,7 +259,7 @@ class WaveMemoryFactsTool(FunctionTool[AstrAgentContext]):
 
     async def call(self, ctx: ContextWrapper[AstrAgentContext], **kwargs) -> str:
         query = kwargs.get("query", "")
-        limit = int(kwargs.get("limit", 10))
+        limit = max(1, min(int(kwargs.get("limit", 10)), 50))
 
         if not query:
             return "请提供搜索关键词"

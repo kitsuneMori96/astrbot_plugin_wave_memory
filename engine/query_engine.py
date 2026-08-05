@@ -279,6 +279,7 @@ class QueryEngine:
                 max_segments=int(self.config.get("shotgun_max_segments", 3)),
             )
             ctx_vecs = await self.embedding.get_embeddings(context_messages)
+            ctx_vecs = [v for v in (ctx_vecs or []) if v is not None]
             if ctx_vecs:
                 segment_vecs = segmenter.segment(ctx_vecs)
                 for seg_vec in segment_vecs:

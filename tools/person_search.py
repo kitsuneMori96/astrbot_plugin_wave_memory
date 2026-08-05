@@ -50,7 +50,7 @@ class WaveMemoryPersonSearchTool(FunctionTool[AstrAgentContext]):
     async def call(self, context: ContextWrapper[AstrAgentContext], **kwargs) -> str:
         person = kwargs.get("person", "").strip()
         query_type = kwargs.get("query_type", "recent")
-        limit = int(kwargs.get("limit", 8))
+        limit = max(1, min(int(kwargs.get("limit", 8)), 50))
 
         if not person:
             return "请提供要查找的人物名称或QQ号"

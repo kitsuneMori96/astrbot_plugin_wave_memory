@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import AsyncIterator
-
 from astrbot.api import logger
 
 
@@ -88,9 +88,12 @@ class TagAuditor:
 
         prompt = AUDIT_PROMPT.replace("{tags_json}", tags_json)
 
-        response = await provider.text_chat(
-            prompt=prompt,
-            system_prompt="你是知识图谱质量审计系统，只输出 JSON 数组。",
+        response = await asyncio.wait_for(
+            provider.text_chat(
+                prompt=prompt,
+                system_prompt="你是知识图谱质量审计系统，只输出 JSON 数组。",
+            ),
+            timeout=120,
         )
 
         if not response or not response.completion_text:

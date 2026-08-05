@@ -76,15 +76,7 @@ class EmbeddingService:
         try:
             # AstrBot embedding provider 的标准接口
             raw_result = await provider.get_embeddings(texts)
-
-            results = []
-            for vec in raw_result:
-                if vec is not None and len(vec) > 0:
-                    arr = np.array(vec, dtype=np.float32)
-                    results.append(arr)
-                else:
-                    results.append(None)
-            return results
+            return self._build_results(raw_result, len(texts))
 
         except RuntimeError as e:
             if "Event loop is closed" in str(e):
@@ -95,7 +87,7 @@ class EmbeddingService:
                 if provider:
                     try:
                         raw_result = await provider.get_embeddings(texts)
-                        return [np.array(v, dtype=np.float32) if v is not None and len(v) > 0 else None for v in raw_result]
+                        return self._build_results(raw_result, len(texts))
                     except Exception as e2:
                         logger.error(f"[WaveMemory] Embedding retry failed: {e2}")
             else:
@@ -105,3 +97,31 @@ class EmbeddingService:
         except Exception as e:
             logger.error(f"[WaveMemory] Embedding failed: {e}")
             return [None] * len(texts)
+
+    @staticmethod
+    def _build_results(raw_result, expected_count: int) -> list[Optional[np.ndarray]]:
+        """规范化 provider 返回：过滤空/非有限/维度不一致的向量，保证长度对齐。"""
+        results = []
+        expected_dim = None
+        for vec in raw_result:
+            if vec is not None and len(vec) > 0:
+                try:
+                    arr = np.array(vec, dtype=np.float32)
+                except Exception:
+                    arr = None
+                if arr is not None and arr.ndim == 1 and arr.shape[0] > 0 and np.all(np.isfinite(arr)):
+                    if expected_dim is None:
+                        expected_dim = arr.shape[0]
+                    if arr.shape[0] == expected_dim:
+                        results.append(arr)
+                        continue
+                    logger.warning(
+                        f"[WaveMemory] Dropping embedding with dim {arr.shape[0]} != {expected_dim}"
+                    )
+                results.append(None)
+            else:
+                results.append(None)
+        # 对齐输入长度（provider 可能缺行）
+        while len(results) < expected_count:
+            results.append(None)
+        return results[:expected_count]

@@ -136,11 +136,19 @@ class WaveMemoryDB:
     def delete_memories_by_source(self, source: str, older_than_seconds: float) -> int:
         """删除指定 source 中超过一定时间的记忆。返回删除数量。"""
         cutoff = time.time() - older_than_seconds
+        rows = self.conn.execute(
+            "SELECT id FROM memories WHERE source = ? AND timestamp < ?",
+            (source, cutoff),
+        ).fetchall()
+        ids = [r[0] for r in rows]
         cursor = self.conn.execute(
             "DELETE FROM memories WHERE source = ? AND timestamp < ?",
             (source, cutoff),
         )
         self.conn.commit()
+        if ids:
+            # 同步清理向量索引，避免 HNSW 幽灵条目
+            self._sync_index_delete(ids)
         return cursor.rowcount
 
     def mark_evicted(self, memory_id: int):

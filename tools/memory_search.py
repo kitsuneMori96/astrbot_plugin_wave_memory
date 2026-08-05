@@ -41,7 +41,7 @@ class WaveMemorySearchTool(FunctionTool[AstrAgentContext]):
 
     async def call(self, context: ContextWrapper[AstrAgentContext], **kwargs) -> str:
         query = kwargs.get("query", "")
-        top_k = kwargs.get("top_k", 5)
+        top_k = max(1, min(int(kwargs.get("top_k", 5)), 50))
 
         if not query:
             return "请提供搜索关键词"

@@ -599,16 +599,25 @@ QQ：{sender_id}
             meta["meta_updated"] = time.strftime("%Y-%m-%d %H:%M")
             meta_str = json.dumps(meta, ensure_ascii=False)
 
-            # 写入
+            # 写入（UPSERT：新用户走 INSERT，已有用户走 UPDATE，避免新用户好感度丢失）
             if result.get("affection_update") is not None:
                 self.db.conn.execute(
-                    "UPDATE user_profiles SET affection = ?, metadata = ? WHERE user_id = ? AND group_id = ? AND bot_id = ?",
-                    (result["affection_update"], meta_str, sender_id, group_id, db_bot_id)
+                    """INSERT INTO user_profiles (user_id, group_id, bot_id, affection, metadata, last_seen)
+                       VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(user_id, group_id, bot_id) DO UPDATE SET
+                         affection = excluded.affection,
+                         metadata = excluded.metadata,
+                         last_seen = excluded.last_seen""",
+                    (sender_id, group_id, db_bot_id, result["affection_update"], meta_str, time.time())
                 )
             else:
                 self.db.conn.execute(
-                    "UPDATE user_profiles SET metadata = ? WHERE user_id = ? AND group_id = ? AND bot_id = ?",
-                    (meta_str, sender_id, group_id, db_bot_id)
+                    """INSERT INTO user_profiles (user_id, group_id, bot_id, metadata, last_seen)
+                       VALUES (?, ?, ?, ?, ?)
+                       ON CONFLICT(user_id, group_id, bot_id) DO UPDATE SET
+                         metadata = excluded.metadata,
+                         last_seen = excluded.last_seen""",
+                    (sender_id, group_id, db_bot_id, meta_str, time.time())
                 )
             self.db.conn.commit()
 
@@ -639,6 +648,12 @@ QQ：{sender_id}
         if not hasattr(self, '_daily_affection_changes'):
             self._daily_affection_changes = {}
         today = time.strftime("%Y-%m-%d")
+        # 清理过期日期条目，防止长期运行无界增长
+        if len(self._daily_affection_changes) > 500:
+            self._daily_affection_changes = {
+                k: v for k, v in self._daily_affection_changes.items()
+                if k.endswith(today)
+            }
         key = f"{sender_id}:{bot_id}:{today}"
         daily_total = self._daily_affection_changes.get(key, 0)
 

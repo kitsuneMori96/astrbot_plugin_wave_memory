@@ -50,12 +50,16 @@ class TagWorker:
             try:
                 batch = self._fetch_untagged_batch()
                 if batch:
+                    self._reserve_batch(batch)
                     await self._process_batch(batch)
 
-                # 补生缺失向量，有修复则重建索引
+                # 补生缺失向量（直接入内存索引，不再整库追加重建）
                 fixed = await self._backfill_vectors()
                 if fixed:
-                    await self._rebuild_indexes()
+                    if self.memory_index:
+                        self.memory_index.save()
+                    if self.tag_index:
+                        self.tag_index.save()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -83,14 +87,26 @@ class TagWorker:
             WHERE COALESCE(tc.tag_cnt, 0) < 2
             AND m.id NOT IN (
                 SELECT memory_id FROM tag_extraction_status
-                WHERE status = 'skipped'
+                WHERE status IN ('skipped', 'done')
+                OR (status = 'pending' AND updated_at > ?)
                 OR (status = 'failed' AND updated_at > ?)
             )
             AND LENGTH(m.content) >= 10
             AND COALESCE(m.source, '') != 'noise'
             ORDER BY m.id DESC
             LIMIT ?
-        """, (cutoff, self.batch_size)).fetchall()
+        """, (cutoff, cutoff, self.batch_size)).fetchall()
+
+    def _reserve_batch(self, batch: list):
+        """认领本批记忆（pending），防止与 TagBackfillJob 双跑重复调用 LLM。"""
+        now = time.time()
+        for mem_id, _, _ in batch:
+            self.db.conn.execute(
+                """INSERT OR REPLACE INTO tag_extraction_status (memory_id, status, updated_at)
+                   VALUES (?, 'pending', ?)""",
+                (mem_id, now),
+            )
+        self.db.conn.commit()
 
     async def _process_batch(self, batch: list):
         """处理一批记忆。"""
@@ -144,8 +160,8 @@ class TagWorker:
             tag_vec = None
             try:
                 tag_vec = await self.embedding.get_embedding(name)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"[WaveMemory] TagWorker embed failed for '{name}': {e}")
 
             tag_id = self.db.add_tag_extended(
                 name=name,
@@ -159,8 +175,8 @@ class TagWorker:
                 try:
                     import numpy as np
                     self.tag_index.add([tag_id], tag_vec.reshape(1, -1))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"[WaveMemory] TagWorker tag_index.add failed for {tag_id}: {e}")
 
         if tag_ids:
             self.db.link_memory_tags(memory_id, tag_ids)
@@ -189,59 +205,41 @@ class TagWorker:
             rows = self.db.conn.execute(
                 f"SELECT id, content FROM memories WHERE id IN ({ph})", mem_ids
             ).fetchall()
-            texts = [r[1] for r in rows if r[1]]
-            if texts:
+            pairs = [(mid, content) for mid, content in rows if content]
+            if pairs:
+                texts = [content for _, content in pairs]
                 vecs = await self.embedding.get_embeddings(texts)
-                for (mid, _), vec in zip(rows, vecs):
-                    if vec is not None:
-                        self.db.update_memory_vector(mid, vec)
-                        fixed += 1
+                for (mid, _), vec in zip(pairs, vecs):
+                    if vec is None:
+                        continue
+                    self.db.update_memory_vector(mid, vec)
+                    if self.memory_index:
+                        try:
+                            self.memory_index.add([mid], vec.reshape(1, -1))
+                        except Exception as e:
+                            logger.debug(f"[WaveMemory] memory_index.add failed for {mid}: {e}")
+                    fixed += 1
             self.db.conn.commit()
 
         tag_rows = self.db.conn.execute(
             "SELECT id, name FROM tags WHERE vector IS NULL LIMIT ?", (batch_size,)
         ).fetchall()
-        if tag_rows:
-            names = [r[1] for r in tag_rows if r[1]]
-            if names:
-                vecs = await self.embedding.get_embeddings(names)
-                for (tid, name), vec in zip(tag_rows, vecs):
-                    if vec is not None:
-                        self.db.add_tag_extended(name=name, vector=vec)
-                        fixed += 1
+        pairs = [(tid, name) for tid, name in tag_rows if name]
+        if pairs:
+            names = [name for _, name in pairs]
+            vecs = await self.embedding.get_embeddings(names)
+            for (tid, name), vec in zip(pairs, vecs):
+                if vec is None:
+                    continue
+                new_id = self.db.add_tag(name=name, vector=vec)
+                if self.tag_index:
+                    try:
+                        self.tag_index.add([new_id], vec.reshape(1, -1))
+                    except Exception as e:
+                        logger.debug(f"[WaveMemory] tag_index.add failed for {name}: {e}")
+                fixed += 1
             self.db.conn.commit()
 
         if fixed:
             logger.info(f"[WaveMemory] TagWorker backfilled {fixed} vectors")
         return fixed
-
-    async def _rebuild_indexes(self):
-        """重建 memory 和 tag 向量索引。"""
-        import numpy as np
-
-        def _sync_mem():
-            all_vecs = self.db.get_all_memory_vectors()
-            if all_vecs and self.memory_index:
-                ids = [v[0] for v in all_vecs]
-                vectors = np.array([v[1] for v in all_vecs], dtype=np.float32)
-                self.memory_index.add(ids, vectors)
-                self.memory_index.save()
-                return len(ids)
-            return 0
-
-        def _sync_tag():
-            tag_data = self.db.get_all_tag_vectors()
-            if tag_data:
-                ids = [t[0] for t in tag_data]
-                vectors = np.array([t[2] for t in tag_data], dtype=np.float32)
-                self.tag_index.add(ids, vectors)
-                self.tag_index.save()
-                return len(ids)
-            return 0
-
-        count = await asyncio.to_thread(_sync_mem)
-        if count:
-            logger.info(f"[WaveMemory] TagWorker rebuilt memory index: {count} vectors")
-        count = await asyncio.to_thread(_sync_tag)
-        if count:
-            logger.info(f"[WaveMemory] TagWorker rebuilt tag index: {count} vectors")

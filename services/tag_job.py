@@ -68,6 +68,7 @@ class TagBackfillJob:
                     )
                     break
 
+                self._reserve_batch(batch)
                 batch_processed, batch_failed = await self._process_batch(batch)
                 processed += batch_processed
                 failed += batch_failed
@@ -88,7 +89,8 @@ class TagBackfillJob:
             self._running = False
 
     def _fetch_untagged_batch(self) -> list[tuple]:
-        """获取标签不足(< 2个)且未失败的记忆。"""
+        """获取标签不足(< 2个)且未失败/未被认领的记忆。"""
+        cutoff = time.time() - 3600  # 1h cooldown（stale pending/failed 允许重试）
         return self.db.conn.execute("""
             SELECT m.id, m.content, m.sender_name
             FROM memories m
@@ -99,12 +101,25 @@ class TagBackfillJob:
             WHERE COALESCE(tc.tag_cnt, 0) < 2
             AND m.id NOT IN (
                 SELECT memory_id FROM tag_extraction_status
-                WHERE status IN ('done', 'failed', 'skipped')
+                WHERE status IN ('done', 'skipped')
+                OR (status = 'pending' AND updated_at > ?)
+                OR (status = 'failed' AND updated_at > ?)
             )
             AND LENGTH(m.content) >= 10
             ORDER BY m.id ASC
             LIMIT ?
-        """, (self.batch_size,)).fetchall()
+        """, (cutoff, cutoff, self.batch_size)).fetchall()
+
+    def _reserve_batch(self, batch: list[tuple]):
+        """认领本批记忆（pending），防止与 TagWorker 双跑重复调用 LLM。"""
+        now = time.time()
+        for mem_id, _, _ in batch:
+            self.db.conn.execute(
+                """INSERT OR REPLACE INTO tag_extraction_status (memory_id, status, updated_at)
+                   VALUES (?, 'pending', ?)""",
+                (mem_id, now),
+            )
+        self.db.conn.commit()
 
     async def _process_batch(self, batch: list[tuple]) -> tuple[int, int]:
         """处理一批记忆，返回 (成功数, 失败数)。"""

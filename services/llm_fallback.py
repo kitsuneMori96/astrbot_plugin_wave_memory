@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 from typing import Any, Optional
 
 logger = logging.getLogger("wavememory")
+
+# LLM 调用超时（秒），防止 provider 挂死导致后台任务无限阻塞
+LLM_TIMEOUT_SECONDS = float(os.environ.get("WAVEMEMORY_LLM_TIMEOUT", "120"))
 
 
 class LLMResponse:
@@ -44,9 +49,12 @@ class LLMFallbackClient:
                 if system_prompt:
                     full_prompt = f"{system_prompt}\n\n{prompt}"
 
-                response = await provider.text_chat(
-                    prompt=full_prompt,
-                    contexts=contexts or [],
+                response = await asyncio.wait_for(
+                    provider.text_chat(
+                        prompt=full_prompt,
+                        contexts=contexts or [],
+                    ),
+                    timeout=LLM_TIMEOUT_SECONDS,
                 )
 
                 if response and response.completion_text:

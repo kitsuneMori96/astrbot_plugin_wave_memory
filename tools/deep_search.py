@@ -52,8 +52,8 @@ class WaveMemoryDeepSearchTool(FunctionTool[AstrAgentContext]):
 
     async def call(self, ctx: ContextWrapper, **kwargs) -> str:
         keywords = kwargs.get("keywords", "").strip()
-        window_size = int(kwargs.get("window_size", 3))
-        max_results = int(kwargs.get("max_results", 5))
+        window_size = max(1, min(int(kwargs.get("window_size", 3)), 20))
+        max_results = max(1, min(int(kwargs.get("max_results", 5)), 50))
 
         if not keywords:
             return "请提供搜索关键词。"
