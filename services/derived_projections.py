@@ -82,7 +82,6 @@ class MemoryIndexProjection:
         self.policy = policy or MemoryIndexPolicy()
         self._dirty = False
         self._lock = asyncio.Lock()
-        self._capacity_rebuild_required = False
         # Keep lane and quota metadata separate: legacy group rows have a stable
         # group compatibility key but deliberately no fabricated formal Scope.
         self._hot_memory_lanes: dict[int, str] = {}
@@ -90,14 +89,6 @@ class MemoryIndexProjection:
         self._scope_counts: dict[tuple[str, str, str, str], int] = {}
         self._membership_loaded = False
         self._membership_safe = True
-
-    @property
-    def capacity_rebuild_required(self) -> bool:
-        """Whether an incremental admission hit the fixed physical capacity."""
-        return self._capacity_rebuild_required
-
-    def clear_capacity_rebuild_required(self) -> None:
-        self._capacity_rebuild_required = False
 
     @staticmethod
     def _canonical_scope_key(row: tuple[Any, ...]) -> tuple[str, str, str, str] | None:
@@ -261,40 +252,18 @@ class MemoryIndexProjection:
                 self._dirty = True
                 return
             scope_key = candidate.scope_key
-            previous_scope = self._hot_memory_scopes.get(memory_id)
-            if not self._membership_safe:
-                # Do not guess when a persisted index could not be mapped back to
-                # its lane/quota state; wait for the durable selector to reconcile it.
-                self._capacity_rebuild_required = True
-                return
-            if (
-                self.policy.enforce_scope_hot_quota
-                and scope_key is not None
-                and previous_scope != scope_key
-                and (
-                    self.policy.per_scope_max_vectors <= 0
-                    or self._scope_counts.get(scope_key, 0) >= self.policy.per_scope_max_vectors
-                )
-            ):
-                self._capacity_rebuild_required = True
-                return
             if candidate.vector is None:
                 self._decrement_member(memory_id)
                 await asyncio.to_thread(self.index.mark_deleted, [memory_id])
                 self._dirty = True
                 return
-            try:
-                await asyncio.to_thread(
-                    self.index.add,
-                    [memory_id],
-                    candidate.vector.reshape(1, -1),
-                )
-            except IndexCapacityError:
-                # Preserve the hard memory ceiling.  A coalesced durable rebuild
-                # will select the highest-priority set; this candidate is cold in
-                # the meantime rather than forcing an unbounded resize.
-                self._capacity_rebuild_required = True
-                return
+            # v4.2.1 semantics: a full index resizes inline.  Capacity is not a
+            # fault condition, so admission never queues a durable rebuild.
+            await asyncio.to_thread(
+                self.index.add,
+                [memory_id],
+                candidate.vector.reshape(1, -1),
+            )
             self._set_member(
                 memory_id,
                 lane=str(getattr(candidate, "recall_visibility", "scoped")),

@@ -116,30 +116,19 @@ class VectorIndex:
     def add(self, ids: list[int], vectors: np.ndarray):
         """添加向量到索引。vectors shape: (n, dim)。
 
-        ``allow_resize=False`` is used by the memory hot tier.  It deliberately
-        refuses an over-capacity write instead of silently making the process
-        resident set grow; the caller can keep the record cold and request a
-        compacted durable rebuild.
+        v4.2.1 语义：容量不足直接 resize 并预留 10000 槽位。满载是稳态而非
+        故障，因此这里不做 O(n) 标签去重，也不再抛容量异常触发重建。
+        ``allow_resize=False`` 仅保留给只读校验/脚本场景。
         """
         if not ids:
             return
         with self._lock:
             current = self.index.get_current_count()
-            existing_ids: set[int] = set()
-            get_ids = getattr(self.index, "get_ids_list", None)
-            if callable(get_ids):
-                try:
-                    existing_ids = {int(value) for value in get_ids()}
-                except Exception:
-                    # Conservatively count every label as new when an older
-                    # hnswlib build cannot expose labels.
-                    existing_ids = set()
-            new_labels = {int(value) for value in ids if int(value) not in existing_ids}
-            needed = current + len(new_labels)
+            needed = current + len(ids)
             if needed > self.max_elements:
                 if not self.allow_resize:
                     raise IndexCapacityError(
-                        f"index capacity reached: current={current} incoming={len(new_labels)} "
+                        f"index capacity reached: current={current} incoming={len(ids)} "
                         f"max_elements={self.max_elements}"
                     )
                 self.index.resize_index(needed + 10000)

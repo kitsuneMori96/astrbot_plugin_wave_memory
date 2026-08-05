@@ -86,9 +86,20 @@ class _Index:
         self.saved.append(dict(kwargs))
 
 
-class _CapacityIndex(_Index):
+class _ResizingIndex(_Index):
+    """模拟 v4.2.1 语义：容量不足时 inline resize 并继续接纳。"""
+
+    def __init__(self, initial_capacity: int = 1):
+        super().__init__()
+        self.max_elements = initial_capacity
+        self.resized = []
+
     def add(self, ids, vectors):
-        raise IndexCapacityError("index capacity reached")
+        needed = len(self.added) + len(list(ids))
+        if needed > self.max_elements:
+            self.max_elements = needed + 10
+            self.resized.append(self.max_elements)
+        super().add(ids, vectors)
 
 
 @pytest.mark.asyncio
@@ -147,10 +158,10 @@ async def test_committed_memory_event_projects_vector_and_delete_tombstone(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_hot_capacity_keeps_tagged_memory_cold_and_requests_rebuild(tmp_path):
+async def test_hot_capacity_resizes_inline_instead_of_requesting_rebuild(tmp_path):
     path = tmp_path / "capacity.sqlite"
     _prepare_db(path)
-    index = _CapacityIndex()
+    index = _ResizingIndex(initial_capacity=0)
     projection = MemoryIndexProjection(str(path), index)
     gateway = ProductionWriteGateway(str(path), consumers={projection.consumer_name: projection})
     scope = _scope()
@@ -178,13 +189,15 @@ async def test_hot_capacity_keeps_tagged_memory_cold_and_requests_rebuild(tmp_pa
     )
     await gateway.drain_committed()
 
-    assert projection.capacity_rebuild_required is True
-    assert index.added == []
+    # v4.2.1 语义：满载即 resize，候选照常进入热层，不再产生重建请求。
+    assert [entry[0] for entry in index.added] == [[memory_id]]
+    assert index.resized, "capacity should have been resized inline"
+    assert not hasattr(projection, "capacity_rebuild_required")
     await gateway.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_incremental_projection_respects_per_scope_hot_quota(tmp_path):
+async def test_incremental_projection_admits_all_candidates_without_scope_quota_gate(tmp_path):
     path = tmp_path / "scope-quota.sqlite"
     _prepare_db(path)
     index = _Index()
@@ -224,8 +237,8 @@ async def test_incremental_projection_respects_per_scope_hot_quota(tmp_path):
         )
         await gateway.drain_committed()
 
-    assert [entry[0] for entry in index.added] == [[1]]
-    assert projection.capacity_rebuild_required is True
+    # per-scope 配额闸门已随容量重建链一起移除；准入只看向量是否存在。
+    assert [entry[0] for entry in index.added] == [[1], [2]]
     await gateway.shutdown()
 
 
@@ -267,7 +280,6 @@ async def test_incremental_projection_admits_same_scope_until_global_capacity(tm
         await gateway.drain_committed()
 
     assert [entry[0] for entry in index.added] == [[1], [2]]
-    assert projection.capacity_rebuild_required is False
     await gateway.shutdown()
 
 

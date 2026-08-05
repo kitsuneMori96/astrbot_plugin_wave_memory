@@ -10,7 +10,9 @@ def maintenance_repair_token(
     watermark: int,
     generation: int,
 ) -> str:
-    """Coalesce physical memory-capacity repairs within one HNSW generation."""
-    if kind == "memory_index" and reason == "hot_capacity":
-        return f"{kind}:{reason}:{generation}"
+    """Coalesce one repair per (kind, reason, watermark, generation) tuple.
+
+    容量满载已改为 inline resize（v4.2.1 语义），不再产生 hot_capacity /
+    chat_hot_window 重建请求，因此这里不需要按 generation 单独合并。
+    """
     return f"{kind}:{reason}:{watermark}:{generation}"

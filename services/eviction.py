@@ -30,7 +30,6 @@ class EvictionService:
         chat_stale_days: int = 30,
         eviction_interval_hours: float = 6.0,
         write_gateway=None,
-        on_hot_rebalance=None,
     ):
         self.db = db
         self.memory_index = memory_index
@@ -38,10 +37,9 @@ class EvictionService:
         self.chat_stale = chat_stale_days * 86400
         self.interval = eviction_interval_hours * 3600
         self.write_gateway = write_gateway
-        self.on_hot_rebalance = on_hot_rebalance
         self._task: Optional[asyncio.Task] = None
         self._running = False
-        self._stats = {"noise_deleted": 0, "chat_evicted": 0, "hot_rebalance_requested": 0}
+        self._stats = {"noise_deleted": 0, "chat_evicted": 0}
 
     def start(self, supervisor=None):
         self._running = True
@@ -158,18 +156,6 @@ class EvictionService:
                     f"[EvictionService] Deleted {noise_deleted} scoped noise memories "
                     f"(>{self.noise_ttl//86400}d)"
                 )
-
-        callback = self.on_hot_rebalance
-        if not callable(callback):
-            return
-        try:
-            result = callback()
-            if hasattr(result, "__await__"):
-                await result
-        except Exception as exc:
-            logger.warning("[EvictionService] hot-index rebalance request failed: %s", exc)
-            return
-        self._stats["hot_rebalance_requested"] += 1
 
     @property
     def stats(self) -> dict:

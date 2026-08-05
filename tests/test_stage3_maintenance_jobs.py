@@ -58,33 +58,37 @@ class _Jobs:
         )
 
 
-def test_memory_hot_capacity_tokens_coalesce_per_generation():
+def test_maintenance_tokens_use_uniform_watermark_generation_formula():
+    """容量重建链已移除，token 不再对 hot_capacity 做 generation 特例。"""
     first = maintenance_repair_token(
         "memory_index",
-        "hot_capacity",
+        "startup_drift",
         watermark=100,
         generation=7,
     )
-    next_event = maintenance_repair_token(
-        "memory_index",
-        "hot_capacity",
-        watermark=101,
-        generation=7,
-    )
+    assert first == "memory_index:startup_drift:100:7"
 
-    assert first == next_event == "memory_index:hot_capacity:7"
-    assert maintenance_repair_token(
-        "memory_index",
-        "hot_capacity",
-        watermark=101,
-        generation=8,
-    ) != first
+    # watermark 或 generation 任一变化都产生新 token（正常合并语义）。
     assert maintenance_repair_token(
         "memory_index",
         "startup_drift",
         watermark=101,
         generation=7,
-    ) == "memory_index:startup_drift:101:7"
+    ) != first
+    assert maintenance_repair_token(
+        "memory_index",
+        "startup_drift",
+        watermark=100,
+        generation=8,
+    ) != first
+
+    # 不同 kind/reason 之间互不冲突。
+    assert maintenance_repair_token(
+        "tag_index",
+        "startup_drift",
+        watermark=100,
+        generation=7,
+    ) == "tag_index:startup_drift:100:7"
 
 
 @pytest.mark.asyncio

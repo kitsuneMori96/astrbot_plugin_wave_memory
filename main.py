@@ -546,7 +546,7 @@ class WaveMemoryPlugin(Star):
             index_path=index_path,
             kind="memory",
             strict_manifest=False,
-            allow_resize=False,
+            allow_resize=True,
             generation_retention=self.index_generation_retention,
         )
 
@@ -556,7 +556,7 @@ class WaveMemoryPlugin(Star):
             index_path=tag_catalog_index_path,
             kind="tag_catalog",
             strict_manifest=False,
-            allow_resize=False,
+            allow_resize=True,
             generation_retention=self.index_generation_retention,
         )
         # Existing services/WebUI use ``tag_index`` for formal semantic Catalog
@@ -1625,7 +1625,6 @@ class WaveMemoryPlugin(Star):
                 chat_stale_days=self.memory_index_policy.chat_hot_days,
                 eviction_interval_hours=float(eviction_cfg.get("interval_hours", 6.0)),
                 write_gateway=self.write_gateway,
-                on_hot_rebalance=self._request_hot_index_rebalance,
             )
             self.eviction_service.start(self.task_supervisor)
         else:
@@ -2925,7 +2924,10 @@ class WaveMemoryPlugin(Star):
         logger.debug("[WaveMemory] persona cache warmup withheld: scope_migration_required")
 
     async def _on_memory_projection_refresh(self, event) -> None:
-        """Invalidate dependent reads and coalesce bounded-index maintenance requests.
+        """Invalidate dependent reads only.
+
+        Capacity is handled inline by index resize (v4.2.1 semantics); a full
+        index is a steady state, not a fault, so it no longer queues a rebuild.
 
         PairSimilarity is no longer rebuilt on every tag-change bucket.  That path
         previously materialised an O(n^2) upper triangle (~2M pairs for 2k tags)
@@ -2933,13 +2935,6 @@ class WaveMemoryPlugin(Star):
         invalidate the small read cache; a sparse rebuild runs at startup when the
         projection table is empty, or via an explicit maintenance request.
         """
-        if self.memory_index_projection.capacity_rebuild_required:
-            try:
-                await self._queue_maintenance_repair("memory_index", reason="hot_capacity")
-            except Exception:
-                logger.warning("[WaveMemory] bounded memory-index rebuild queue failed", exc_info=True)
-            else:
-                self.memory_index_projection.clear_capacity_rebuild_required()
         if event.event_type not in {
             "memory.tags_applied",
             "memory.tags_corrected",
@@ -2952,10 +2947,6 @@ class WaveMemoryPlugin(Star):
             return
         # Drop stale O(1) lookups only.  Do not schedule a full pair rebuild here.
         self.pair_sim_service.clear_cache()
-
-    async def _request_hot_index_rebalance(self) -> None:
-        """Queue a policy rebuild when the ordinary-chat hot window advances."""
-        await self._queue_maintenance_repair("memory_index", reason="chat_hot_window")
 
     @staticmethod
     def _vector_backfill_predicate(*, after_id: int = 0) -> tuple[str, tuple[object, ...]]:
@@ -3270,7 +3261,7 @@ class WaveMemoryPlugin(Star):
                     max_elements=self.memory_index_policy.max_vectors,
                     index_path=None,
                     kind="memory",
-                    allow_resize=False,
+                    allow_resize=True,
                 )
                 if rows:
                     fresh_index.add(
@@ -3285,14 +3276,13 @@ class WaveMemoryPlugin(Star):
             with self.memory_index._lock:
                 self.memory_index.index = fresh.index
                 self.memory_index.max_elements = fresh.max_elements
-                self.memory_index.allow_resize = False
+                self.memory_index.allow_resize = True
             manifest = await asyncio.to_thread(
                 self.memory_index.save,
                 db_watermark=int(watermark),
             )
             self.memory_index_projection._dirty = False
             self.memory_index_projection.set_hot_membership(candidates)
-            self.memory_index_projection.clear_capacity_rebuild_required()
         return {
             "kind": "memory_index",
             "count": len(rows),
@@ -3347,7 +3337,7 @@ class WaveMemoryPlugin(Star):
             max_elements=capacity,
             index_path=None,
             kind="tag_catalog",
-            allow_resize=False,
+            allow_resize=True,
         )
         if valid_rows:
             fresh.add(
@@ -3357,7 +3347,7 @@ class WaveMemoryPlugin(Star):
         with self.tag_catalog_index._lock:
             self.tag_catalog_index.index = fresh.index
             self.tag_catalog_index.max_elements = capacity
-            self.tag_catalog_index.allow_resize = False
+            self.tag_catalog_index.allow_resize = True
         manifest = await asyncio.to_thread(
             self.tag_catalog_index.save,
             db_watermark=int(watermark),
