@@ -2879,9 +2879,12 @@ class WaveMemoryPlugin(Star):
             "event_id": getattr(event, "message_id", None),
         })
 
-        # 解析并提取 [impression:...] 标记，写入用户画像
+        # 解析并提取 <<impression:...>> 标记，写入用户画像。
+        # 不使用 [impression:...]：meme_manager 会把非表情标签的 [xxx] 当作无效
+        # markup 在 on_llm_response 阶段删掉，那时 on_bot_sent 还没执行。
         import re as _re
-        _impression_match = _re.search(r'\[impression[:：](.+?)\]\s*$', bot_text, _re.DOTALL)
+        _IMPRESSION_RE = r'<<\s*impression\s*[:：](.+?)>>'
+        _impression_match = _re.search(_IMPRESSION_RE + r'\s*$', bot_text, _re.DOTALL)
         if _impression_match and sender_id and group_id:
             _impression_text = _impression_match.group(1).strip()[:120]
             if _impression_text and len(_impression_text) >= 4:
@@ -2905,7 +2908,12 @@ class WaveMemoryPlugin(Star):
                 from astrbot.core.message.components import Plain
                 for comp in result.chain:
                     if isinstance(comp, Plain) and comp.text:
-                        comp.text = _re.sub(r'\n?\[impression[:：].+?\]\s*$', '', comp.text, flags=_re.DOTALL)
+                        comp.text = _re.sub(
+                            r'\n?' + _IMPRESSION_RE + r'\s*$',
+                            '',
+                            comp.text,
+                            flags=_re.DOTALL,
+                        )
 
         # 自省 read-model 仅支持群聊，private 不记录派生回复状态。
         if runtime_scope.visibility == "group" and self.self_reflect:

@@ -139,8 +139,11 @@ class RelationshipChannel:
                 result = InjectionResult.empty(self.name, latency_ms=self._latency_ms(started), reason="identity_contamination")
                 result.filtered = [{"filter_reason": "identity_contamination", "filter_channel": self.name}]
                 return result
-            # impression 更新请求放在 identity 检查之后，避免触发误判
-            text += "\n(请在回复最末尾另起一行输出 [impression:你对这个人当前最新的一句话印象]，这行不会被用户看到。如果印象没有变化可以不输出。)"
+            # impression 更新请求放在 identity 检查之后，避免触发误判。
+            # 标记必须避开 [xxx] 形式：astrbot_plugin_meme_manager 会把非表情
+            # 标签的 [xxx] 当作无效 markup 在 on_llm_response 阶段直接删除，
+            # 那样 on_bot_sent 就永远读不到这段标记。
+            text += "\n(请在回复最末尾另起一行输出 <<impression:你对这个人当前最新的一句话印象>>，这行不会被用户看到。如果印象没有变化可以不输出。)"
             revision = relationship.get("revision") or _mapping(state).get("revision") or 0
             return InjectionResult.hit(
                 self.name,
