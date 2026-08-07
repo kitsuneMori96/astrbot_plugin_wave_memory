@@ -44,6 +44,10 @@ def _as_int(value: Any, default: int) -> int:
         return default
 
 
+def _as_str(value: Any, default: str) -> str:
+    return value if isinstance(value, str) else default
+
+
 def _preview(text: str | None, limit: int = 120) -> str:
     compact = str(text or "").replace("\n", " ").strip()
     return compact if len(compact) <= limit else compact[: limit - 1] + "…"
@@ -117,7 +121,11 @@ class MemoryRecallChannel:
             if not memories:
                 return InjectionResult.empty(self.name, latency_ms=self._latency_ms(started), reason="no safe memories")
 
-            text = self.query_engine.format_injection(memories, current_group_id=getattr(ctx, "group_id", "") or "")
+            text = self.query_engine.format_injection(
+                memories,
+                template=_as_str(recall_cfg.get("injection_format"), ""),
+                current_group_id=getattr(ctx, "group_id", "") or "",
+            )
             if not text:
                 return InjectionResult.empty(self.name, latency_ms=self._latency_ms(started), reason="formatted memory text is empty")
             return InjectionResult.hit(

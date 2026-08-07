@@ -48,7 +48,7 @@ class QueryEngine:
         self.geodesic = geodesic
 
         # 配置参数（对齐默认值）
-        self.min_similarity = float(config.get("min_similarity", "0.35"))
+        self.min_similarity = float(config.get("min_similarity", "0.45"))
         self.enable_spike = config.get("enable_spike_routing", True)
         self.enable_pyramid = config.get("enable_residual_pyramid", True)
         self.enable_epa = config.get("enable_epa", True)

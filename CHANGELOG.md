@@ -1,5 +1,27 @@
 # Changelog
 
+## v4.5.1 (2026-08-07)
+
+### 记忆衰减模型修复 + 死配置接线 + 参数合理化
+
+- **衰减模型功能修复（重要）**：
+  - `Memory_Decay_Settings` 此前因 `main.py` 读取了从未赋值的 `self.query_cfg`，整组 7 个参数实际上从未生效，始终使用代码默认值。已修复为直接读取 `self.config.get("Memory_Decay_Settings", {})`。
+  - 「90 天自动淘汰」此前永不触发：`apply_memory_decay` 只扫描 `memory_type='message'`，记忆在约 30 天归档后即被永久冻结，数据库无上限增长。现已同时处理 `archived` 记忆，归档后继续衰减，达淘汰阈值 + 年龄后真正删除。
+  - 半衰期档位边界由 `>` 改为 `>=`（`imp>=2.0`/`>=1.0`/`>=0.3`）。此前默认 importance=1.0 的普通消息落入 3 天短暂档，实际寿命比文档少 10 倍；修复后归入 30 天普通档，与文档一致。
+- **死配置接线**：
+  - `injection_format` 此前是死参数：schema 默认 `<memory ...>` 与代码默认 `[记忆]...` 不一致，且从未传入 `format_injection`。现已接线到主注入路径与 orchestrator memory 通道，schema 默认对齐代码。
+  - `relationship_single/daily/hostility_delta_cap` 三个 key 此前从未被读取（敌意上限代码硬编码 8.0 与 schema 5.0 冲突）。现已从 `Lifecycle_Settings` 接线到 `RelationshipEventService`，schema 敌意默认对齐 8.0。
+  - `tag_batch_size` 此前零读取，已接线到 `TagExtractor`。
+  - `MetaThinking_Bot1/2.proactive_interval_seconds / proactive_max_per_hour` 解析后从不消费，现注入到 MetaThinking 缺省。
+- **参数默认值变更（升级用户需检查配置）**：
+  - `Query_Settings.min_similarity`：0.35 → 0.45（减少边缘噪声注入）。
+  - `Lifecycle_Settings.mood_duration_hours`：4.0 → 2.0（对齐代码实际行为）。
+  - `Lifecycle_Settings.negative_emotion_threshold`：0.5 → 0.4（对齐代码实际行为）。
+  - `Message_Filter.debounce_seconds` 缺省回退由 4.0 → 0.0（对齐 schema 默认）。
+  - `Lifecycle_Settings.relationship_hostility_delta_cap`：5.0 → 8.0（对齐代码实际行为）。
+- **描述修正**：`mood_duration_hours` 单位由「天数」改为「小时数」；`dream` 由「深夜做梦」改为「定时记忆巩固」，删除「夜间执行」误导；`debounce_seconds` hint 改为记忆写入防抖语义。
+- **验证**：`apply_memory_decay` 行为断言通过（40 天普通记忆仍在 message 且 imp≈0.397、90 天归档、120 天噪声淘汰、核心记忆保持活跃）；全量 `python -m unittest discover -s tests` 通过（除基线既有的 jargon 中文编码断言失败外）。
+
 ## v4.5.0 (2026-07-06)
 
 ### 前端优化 + 黑盒管理前端

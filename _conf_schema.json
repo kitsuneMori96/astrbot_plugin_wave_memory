@@ -147,15 +147,15 @@
       },
       "min_similarity": {
         "description": "相似度关联召回门限",
-        "hint": "语义空间最低匹配分数（0.0 ~ 1.0）。低于此分数的无关琐碎记忆将绝不注入。建议保持在 0.35 黄金值附近。",
+        "hint": "语义空间最低匹配分数（0.0 ~ 1.0）。低于此分数的无关琐碎记忆将绝不注入。默认 0.45，数值越低注入越多噪声，过高则容易失忆。",
         "type": "float",
-        "default": 0.35
+        "default": 0.45
       },
       "injection_format": {
         "description": "记忆提示词注入模板 (Template)",
         "hint": "定义记忆在大模型 Context 里的承载标签。可用标签占位符：{content} (记忆内容), {sender} (对方昵称), {time} (发生时间)。建议保留这些标签，让机器人能自然使用“你之前说过...”的亲密口吻。",
         "type": "string",
-        "default": "<memory from='{sender}' time='{time}'>{content}</memory>"
+        "default": "[记忆] {sender}({time}): {content}"
       },
       "enable_spike_routing": {
         "description": "启用图谱共现脉冲传播 (Spike Routing)",
@@ -238,10 +238,10 @@
         "default": true
       },
       "mood_duration_hours": {
-        "description": "情绪状态自然半衰退天数",
-        "hint": "情绪突发后，在没有后续高强度互动刺激下，多少小时后平复并重置为平静温和状态（默认 4.0 小时）",
+        "description": "情绪状态自然衰退时长",
+        "hint": "情绪突发后，在没有后续高强度互动刺激下，多少小时后平复并重置为平静温和状态（默认 2.0 小时）",
         "type": "float",
-        "default": 4.0
+        "default": 2.0
       },
       "mood_msg_threshold": {
         "description": "情绪爆发活跃消息门限",
@@ -257,9 +257,9 @@
       },
       "negative_emotion_threshold": {
         "description": "CONCERNED 悲伤触发临界值",
-        "hint": "对话中负面、关切、悲伤情感占比超过此比例时，情绪自动偏向 CONCERNED（0.0 ~ 1.0）",
+        "hint": "对话中负面、关切、悲伤情感占比超过此比例时，情绪自动偏向 CONCERNED（0.0 ~ 1.0）。默认 0.4，比喜悦触发更敏感，属有意设计：机器人对负面情绪应更警觉。",
         "type": "float",
-        "default": 0.5
+        "default": 0.4
       },
       "relationship_single_delta_cap": {
         "description": "单次互动关系变化极大值",
@@ -275,19 +275,19 @@
       },
       "relationship_hostility_delta_cap": {
         "description": "单次辱骂敌意增加上限",
-        "hint": "单次检测到辱骂或恶意调戏时，敌意/敌对值正向拉升的最大限值（默认 5.0 分）。达到 3 次后自动进入保护性冷却。",
+        "hint": "单次检测到辱骂或恶意调戏时，敌意/敌对值正向拉升的最大限值（默认 8.0 分）。达到 3 次后自动进入保护性冷却。",
         "type": "float",
-        "default": 5.0
+        "default": 8.0
       },
       "enable_dream": {
-        "description": "启用深夜做梦引擎 (Dreaming)",
+        "description": "启用定时记忆巩固引擎 (Dreaming)",
         "hint": "后台自动执行：对零散记忆进行三层“时间线涟漪浪潮”重组，并在历史经历中搭建“共振桥梁”发现潜在相关联，形成长期的逻辑事实和心智。推荐开启。",
         "type": "bool",
         "default": true
       },
       "dream_interval_hours": {
-        "description": "做梦引擎触发自省间隔",
-        "hint": "每隔多少小时执行一次深夜记忆合并（推荐在夜间执行，默认 6.0 小时）",
+        "description": "记忆巩固引擎触发自省间隔",
+        "hint": "每隔多少小时后台执行一次记忆巩固（默认 6.0 小时）",
         "type": "float",
         "default": 6.0
       },
@@ -370,7 +370,7 @@
       },
       "debounce_seconds": {
         "description": "消息防抖合并等待秒数",
-        "hint": "用户连续说话时的合并窗口。设 0 关闭防抖（消息立即触发 LLM 回复）。低延迟场景推荐 0。",
+        "hint": "用户连续说话时，记忆写入的合并窗口。设 0 关闭防抖（每条消息立即写入记忆库）。低延迟场景推荐 0。",
         "type": "float",
         "default": 0
       }
@@ -535,18 +535,18 @@
   },
   "Memory_Decay_Settings": {
     "description": "记忆连续衰减配置",
-    "hint": "所有记忆按重要性分档以不同半衰期连续衰减。低于 archive_threshold 的记忆变为 archived（可解封），低于 evict_threshold 且超过 90 天的记忆自动淘汰。访问会重置衰减时钟。（升级用户需检查配置）",
+    "hint": "所有记忆按重要性分档以不同半衰期连续衰减。低于 archive_threshold 且超过约 30 天的记忆变为 archived（可解封）；已归档记忆仍持续衰减，低于 evict_threshold 且超过约 90 天的记忆自动淘汰。访问会重置衰减时钟。（升级用户需检查配置）",
     "type": "object",
     "items": {
       "half_life_core_days": {
         "description": "核心记忆半衰期（天）",
-        "hint": "重要性 > 2.0 的记忆以此速度衰减",
+        "hint": "重要性 >= 2.0 的记忆以此速度衰减",
         "type": "int",
         "default": 90
       },
       "half_life_normal_days": {
         "description": "普通记忆半衰期（天）",
-        "hint": "重要性 1.0~2.0 的记忆",
+        "hint": "重要性 >= 1.0 的记忆",
         "type": "int",
         "default": 30
       },

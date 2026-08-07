@@ -260,7 +260,7 @@ class MemoryRepo:
 
         rows = self.cm.execute_read(
             "SELECT id, importance, access_count, timestamp, last_decay_at, memory_type "
-            "FROM memories WHERE memory_type = 'message' AND last_decay_at < ?",
+            "FROM memories WHERE memory_type IN ('message', 'archived') AND last_decay_at < ?",
             (one_day_ago,),
         ).fetchall()
 
@@ -285,11 +285,11 @@ class MemoryRepo:
                 if days_since < 1:
                     continue
 
-                if imp > 2.0:
+                if imp >= 2.0:
                     base_hl = hl_core
-                elif imp > 1.0:
+                elif imp >= 1.0:
                     base_hl = hl_normal
-                elif imp > 0.3:
+                elif imp >= 0.3:
                     base_hl = hl_fleeting
                 else:
                     base_hl = hl_noise

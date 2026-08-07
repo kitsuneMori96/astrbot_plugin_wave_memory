@@ -304,7 +304,7 @@ AstrBot >= 4.14.0 · Python 3.10+ · WebUI 默认端口 9876
 |--------|--------|------|
 | enable_auto_inject | true | 自动注入记忆到 prompt；`compat_only` 下默认忽略旧 true |
 | inject_top_k | 5 | 注入记忆条数 |
-| min_similarity | 0.35 | 最低相似度 |
+| min_similarity | 0.45 | 最低相似度 |
 | enable_spike_routing | true | 脉冲传播（`memory_only`/`compat_only` 默认关闭） |
 | enable_residual_pyramid | true | 残差金字塔（`memory_only`/`compat_only` 默认关闭） |
 | enable_epa | true | EPA 嵌入投影分析（`memory_only`/`compat_only` 默认关闭） |
@@ -371,8 +371,8 @@ AstrBot >= 4.14.0 · Python 3.10+ · WebUI 默认端口 9876
 |--------|--------|------|
 | enable_persona_evolution | true | 对话对象画像注入 |
 | enable_mood | true | Bot 情绪 |
-| enable_dream | true | 做梦系统 |
-| dream_interval_hours | 6.0 | 做梦间隔 |
+| enable_dream | true | 定时记忆巩固（Dreaming） |
+| dream_interval_hours | 6.0 | 记忆巩固间隔 |
 | enable_consolidation | true | LLM 摘要整合 |
 | consolidation_interval_hours | 4.0 | 整合间隔 |
 
@@ -399,6 +399,22 @@ AstrBot >= 4.14.0 · Python 3.10+ · WebUI 默认端口 9876
 | enabled | true | 启用淘汰 |
 | noise_ttl_days | 7 | noise 保留天数 |
 | chat_stale_days | 30 | chat 闲置天数 |
+
+### 记忆衰减 (Memory_Decay_Settings)
+
+所有消息记忆按重要性分档以不同半衰期连续衰减；访问会重置衰减时钟并提升重要性。
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| half_life_core_days | 90 | 核心记忆（importance >= 2.0）半衰期 |
+| half_life_normal_days | 30 | 普通记忆（importance >= 1.0）半衰期 |
+| half_life_fleeting_days | 3 | 短暂记忆（importance 0.3~1.0）半衰期 |
+| half_life_noise_days | 1 | 噪声记忆（importance < 0.3）半衰期 |
+| archive_threshold | 0.15 | 低于此值且超过约 30 天 → archived（可解封） |
+| evict_threshold | 0.05 | 低于此值且超过约 90 天 → 自动淘汰（归档后仍持续衰减直至淘汰） |
+| review_boost_factor | 0.3 | 每次访问对有效半衰期的延长系数 |
+
+> ⚠️ v4.5.1 起：归档记忆会继续衰减，达到淘汰条件后真正删除；半衰期档位边界改为 `>=`（默认 importance=1.0 的普通消息落入 30 天档）。升级用户请检查配置。
 
 ---
 

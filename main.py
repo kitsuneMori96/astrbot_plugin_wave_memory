@@ -165,7 +165,7 @@ class WaveMemoryPlugin(Star):
         filter_cfg = self.config.get("Message_Filter", {})
         self.debounce_seconds = filter_cfg.get("debounce_seconds")
         if self.debounce_seconds is None:
-            self.debounce_seconds = 4.0
+            self.debounce_seconds = 0.0
         else:
             self.debounce_seconds = float(self.debounce_seconds)
         perf_cfg = self.config.get("Performance_Settings", {})
@@ -191,7 +191,7 @@ class WaveMemoryPlugin(Star):
             compat_cfg=compat_cfg,
         )
         self.inject_top_k = int(query_cfg.get("inject_top_k", 5))
-        self.min_similarity = float(query_cfg.get("min_similarity", "0.35"))
+        self.min_similarity = float(query_cfg.get("min_similarity", "0.45"))
         self.injection_format = query_cfg.get("injection_format", "[记忆] {sender}({time}): {content}")
         # v2.0: inject 控制参数
         self.skip_recent_minutes = int(inject_cfg.get("skip_recent_minutes") or query_cfg.get("skip_recent_minutes", 30))
@@ -307,6 +307,9 @@ class WaveMemoryPlugin(Star):
         self.mood_msg_threshold = int(lifecycle_cfg.get("mood_msg_threshold", 30))
         self.positive_emotion_threshold = float(lifecycle_cfg.get("positive_emotion_threshold", "0.6"))
         self.negative_emotion_threshold = float(lifecycle_cfg.get("negative_emotion_threshold", "0.4"))
+        self.relationship_single_delta_cap = float(lifecycle_cfg.get("relationship_single_delta_cap", 5.0))
+        self.relationship_daily_delta_cap = float(lifecycle_cfg.get("relationship_daily_delta_cap", 15.0))
+        self.relationship_hostility_delta_cap = float(lifecycle_cfg.get("relationship_hostility_delta_cap", 8.0))
         self.enable_dream = runtime_capability_enabled(self.runtime_mode, "dream", lifecycle_cfg.get("enable_dream", True))
         self.dream_interval_hours = float(lifecycle_cfg.get("dream_interval_hours", "6.0"))
         self.dream_recent_seeds = int(lifecycle_cfg.get("dream_recent_seeds", 3))
@@ -488,6 +491,7 @@ class WaveMemoryPlugin(Star):
                 context=context,
                 provider_id=self.tag_llm_provider_id,
                 max_tags=self.max_tags,
+                batch_size=int(tag_cfg.get("tag_batch_size", 5)),
                 blacklist=tag_cfg.get("tag_blacklist", ""),
                 db=self.db,
                 embedding_service=self.embedding_service,
@@ -705,6 +709,7 @@ class WaveMemoryPlugin(Star):
             "context_messages": recent_context,
             "exclude_sources": exclude_sources,
             "skip_recent_minutes": getattr(self, "skip_recent_minutes", 30),
+            "injection_format": getattr(self, "injection_format", ""),
         }
         config["timeline"] = {"days": 7}
         config["persona"] = {"realtime_ctx": realtime_ctx}
@@ -999,7 +1004,24 @@ class WaveMemoryPlugin(Star):
         if runtime_capability_enabled(self.runtime_mode, "persona_tools", True):
             llm_tools.append(WaveMemoryPersonSearchTool(db=self.db))
         if runtime_capability_enabled(self.runtime_mode, "affinity_tools", True):
-            llm_tools.append(WaveMemoryAffinityTool(db=self.db))
+            try:
+                from .services.relationship_events import RelationshipEventService
+                if not getattr(self, "_relationship_events", None):
+                    self._relationship_events = RelationshipEventService(
+                        conn=self.db.conn,
+                        single_delta_cap=self.relationship_single_delta_cap,
+                        daily_delta_cap=self.relationship_daily_delta_cap,
+                        hostility_delta_cap=self.relationship_hostility_delta_cap,
+                        target_profiles={p.db_id: {"name": p.name} for p in self._bot_registry.values() if p.db_id},
+                    )
+                llm_tools.append(WaveMemoryAffinityTool(
+                    db=self.db,
+                    relationship_events=self._relationship_events,
+                    bot_db_ids={p.qq_id: p.db_id for p in self._bot_registry.values() if p.db_id},
+                ))
+            except Exception as e:
+                logger.warning(f"[WaveMemory] 初始化关系事件服务失败: {e}")
+                llm_tools.append(WaveMemoryAffinityTool(db=self.db))
         if runtime_capability_enabled(self.runtime_mode, "book_lore_tools", True):
             llm_tools.append(BookLoreSearchTool(
                 book_lore_index=self.book_lore_index,
@@ -1196,6 +1218,15 @@ class WaveMemoryPlugin(Star):
                     if profile.meta_prompt:
                         bot_prompts[profile.qq_id] = profile.meta_prompt
                     interest_keywords.update(profile.all_keywords)
+
+                # 主 Bot 的主动发言参数缺省注入，使 MetaThinking_Bot1/2 配置真正生效
+                _primary = list(self._bot_registry.values())[0] if self._bot_registry else None
+                if _primary:
+                    meta_cfg = dict(meta_cfg)
+                    meta_cfg.setdefault("proactive_interval_seconds", _primary.proactive_interval_seconds)
+                    meta_cfg.setdefault("proactive_max_per_hour", _primary.proactive_max_per_hour)
+                    if _primary.proactive_enabled is not None:
+                        meta_cfg.setdefault("proactive_enabled", _primary.proactive_enabled)
 
                 self.meta_thinking = MetaThinking(
                     db=self.db,
@@ -1557,7 +1588,7 @@ class WaveMemoryPlugin(Star):
                         logger.debug(f"[WaveMemory] few_shot extract failed: {e}")
                 if getattr(self, "db", None):
                     try:
-                        decay_cfg = getattr(self, "query_cfg", {}).get("Memory_Decay_Settings", {})
+                        decay_cfg = self.config.get("Memory_Decay_Settings", {})
                         result = self.db.apply_memory_decay(decay_cfg)
                         if result and result.get("decayed", 0) + result.get("archived", 0) + result.get("evicted", 0) > 0:
                             logger.info(f"[WaveMemory] 记忆衰减: {result}")
@@ -2385,7 +2416,7 @@ class WaveMemoryPlugin(Star):
             # 组装注入文本
             injection_parts = []
             if memories:
-                injection_parts.append(self.query_engine.format_injection(memories))
+                injection_parts.append(self.query_engine.format_injection(memories, template=self.injection_format))
                 consumption["parts_count"] += 1
             if facts_text:
                 injection_parts.append(facts_text)
@@ -2546,7 +2577,7 @@ class WaveMemoryPlugin(Star):
         if self.group_blacklist and group_id in self.group_blacklist:
             return
 
-        # ─── 4s 消息合并防抖机制 (Debounce Coalescing) ───
+        # ─── 消息合并防抖机制 (Debounce Coalescing) ───
         # 不重写 event.message_obj.message：底层组件链由 AstrBot/适配器维护，
         # 插件越级替换会让后续引用/发送阶段把组件结构当作 Plain 文本嵌套序列化。
         sender_name_val = ""

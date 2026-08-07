@@ -126,7 +126,7 @@ def build_default_channel_config(
     query_cfg = query_cfg or {}
     inject_cfg = inject_cfg or {}
     inject_top_k = _int(query_cfg.get("inject_top_k"), 5)
-    min_similarity = _float(query_cfg.get("min_similarity"), 0.35)
+    min_similarity = _float(query_cfg.get("min_similarity"), 0.45)
     facts_max = _int(inject_cfg.get("facts_max"), 5)
     timeline_max = _int(inject_cfg.get("timeline_max"), 5)
     recent_dedup = _int(inject_cfg.get("skip_recent_minutes"), 30)
