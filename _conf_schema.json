@@ -419,6 +419,69 @@
       }
     }
   },
+  "MetaThinking_Settings": {
+    "description": "MetaThinking 内心判断层配置",
+    "hint": "MetaThinking 是发言前的一层 LLM 内心判断：决定是否回复/主动插话、语气、好感度。至少配置 default_model 或 provider_fallback_ids 之一，否则主动对话判断会因缺少 provider 而失败（日志报 No provider_ids configured）。",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用 MetaThinking",
+        "type": "bool",
+        "default": true,
+        "restart_required": true
+      },
+      "default_model": {
+        "description": "默认模型",
+        "hint": "用于 MetaThinking 判断/主动插话的模型 Provider ID（如 'deepseek/deepseek-v4-flash'）。留空时必须配置 provider_fallback_ids，否则主动对话判断失败。",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "restart_required": true
+      },
+      "provider_fallback_ids": {
+        "description": "备用 Provider ID（逗号分隔）",
+        "hint": "default_model 不可用时的备选链，逗号分隔多个 Provider ID，按顺序尝试。",
+        "type": "string",
+        "default": "",
+        "restart_required": true
+      },
+      "spam_threshold": {
+        "description": "刷屏检测阈值",
+        "type": "int",
+        "default": 6
+      },
+      "spam_window_seconds": {
+        "description": "刷屏检测窗口（秒）",
+        "type": "int",
+        "default": 60
+      },
+      "proactive_interval_seconds": {
+        "description": "主动对话最小间隔（秒）",
+        "type": "int",
+        "default": 600
+      },
+      "proactive_max_per_hour": {
+        "description": "每小时最多主动插话",
+        "type": "int",
+        "default": 3
+      },
+      "silent_hours_start": {
+        "description": "静默时段开始（小时）",
+        "type": "int",
+        "default": 0
+      },
+      "silent_hours_end": {
+        "description": "静默时段结束（小时）",
+        "type": "int",
+        "default": 6
+      },
+      "interest_sample_size": {
+        "description": "兴趣关键词数量",
+        "type": "int",
+        "default": 20
+      }
+    }
+  },
   "MetaThinking_Bot1": {
     "description": "第一个 Bot 身份配置（需配置 qq_id 以启用灵魂子系统）",
     "hint": "配置第一个绑定在本插件上的机器人身份。qq_id 是机器人的标识，name 是显示名称。必须配置至少一个 bot 才能启用 StudyService/SelfReflect/BeliefEngine 等灵魂子系统。",

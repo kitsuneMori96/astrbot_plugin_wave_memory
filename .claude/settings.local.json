@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python *)",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git commit -m 'fix: 添加 MetaThinking_Bot1 到 _conf_schema.json 和 config.json，修复灵魂子系统因 _bot_registry 为空导致的初始化失败 *)",
+      "Bash(git diff-tree *)",
+      "Bash(git remote *)",
+      "Bash(git push *)",
+      "Bash(git config *)",
+      "Bash(git commit -m 'fix: 添加 React 前端缺失的 /api/memories/import/* 路由，修复智能导入 HTTP 404 *)",
+      "Bash(git commit -m 'fix: 在 BookLoreIndex 初始化时自动创建 book_lore.db 的 SQL 表，修复 StudyService 查询 book_communities 报 no such table *)",
+      "Bash(git commit -m 'fix: 将 persona 通道默认超时从 180ms 提升到 2000ms，修复人格画像摘要持续超时 *)",
+      "Bash(person_registry)",
+      "Bash(user_profiles)",
+      "Bash(group_id)",
+      "Bash(bot_id)",
+      "Bash(git commit -m 'fix: 添加 v2.2 迁移调用，自动创建 relationship_events/experience_episodes 等表 *)"
+    ]
+  }
+}

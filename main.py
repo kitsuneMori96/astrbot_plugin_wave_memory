@@ -6,6 +6,7 @@ AstrBot Wave Memory 插件 — 基于 VCP TagMemo 浪潮算法的高性能记忆
 import asyncio
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -76,6 +77,42 @@ from .services.identity_safety import (
     is_identity_contamination,
     prepend_identity_safety_system_prompt,
 )
+
+
+# ─── 轻量中文话题延续检测（零依赖：CJK 双字 + 单词 Dice 相似度）───
+_GENERIC_STOP_CHARS = frozenset(
+    "的了在是我你他她它这那有就都也和么吗吧呢啊哦嗯哈嘿呀诶哎啥时候什么怎么没有就是真的一个这个那个我们你们它们自己现在这里那里这样那样东西事情时候觉得知道说话问是一的有点好多起来去回说看想觉得应该可以要不要还是会很非常最太"
+)
+
+
+def _zh_tokens(text: str) -> set[str]:
+    """提取 CJK 双字 + 拉丁/数字单词，用于话题延续判断。"""
+    toks: set[str] = set()
+    for m in re.finditer(r"[A-Za-z0-9_\-\u4e00-\u9fff]+", text):
+        word = m.group(0)
+        if re.search(r"[A-Za-z0-9]", word):
+            toks.add(word.lower())
+    chars = re.findall(r"[\u4e00-\u9fff]", text)
+    if len(chars) >= 2:
+        for i in range(len(chars) - 1):
+            bg = chars[i] + chars[i + 1]
+            if bg[0] not in _GENERIC_STOP_CHARS and bg[1] not in _GENERIC_STOP_CHARS:
+                toks.add(bg)
+    return toks
+
+
+def _topic_overlap(text_a: str, text_b: str) -> float:
+    """两条消息的话题重叠度（Dice 系数，0~1）。任一侧太短时返回 0。"""
+    if not text_a or not text_b:
+        return 0.0
+    ta = _zh_tokens(text_a)
+    tb = _zh_tokens(text_b)
+    if not ta or not tb:
+        return 0.0
+    inter = len(ta & tb)
+    if inter == 0:
+        return 0.0
+    return 2.0 * inter / (len(ta) + len(tb))
 
 
 @dataclass
@@ -1683,15 +1720,26 @@ class WaveMemoryPlugin(Star):
     # 追踪 bot 最近回复了谁（用于 ABA 连续对话判断）
     _reply_tracker: dict = {}  # {f"{sender_id}:{group_id}": timestamp}
 
+    # 追踪 bot 最近在该群发出的消息内容和时间（用于对话延续意图判断）
+    _bot_last_send: dict = {}  # {group_id: {"ts": float, "text": str}}
+
+    # 最近一次 _should_engage 的判定原因（供态度注入使用）
+    _engage_reason: str = ""
+
     def _should_engage(self, event: AstrMessageEvent) -> str:
         """规则链前置过滤：判断消息是否与 bot 相关。
-        
+
         返回: 'must_reply' / 'may_reply' / 'skip'
+        v1.5.1: bot 发言后，重点判断其他人是否真正有“继续对话的意思”——
+        显式信号（引用/@/名字别名）或与 bot 上一条发言的话题延续才允许回复，
+        不再因为“刚回复过某人”就无脑回，也避免把同时段的无关闲聊误当连续对话。
         """
+        self._engage_reason = ""
         is_at_bot = getattr(event, "is_at_or_wake_command", False)
 
         # 1. @bot 或唤醒词 → must_reply
         if is_at_bot:
+            self._engage_reason = "at"
             return "must_reply"
 
         message = event.get_message_str() or ""
@@ -1700,27 +1748,77 @@ class WaveMemoryPlugin(Star):
 
         # 2. 私聊 → must_reply
         if not group_id or group_id.startswith("private:"):
+            self._engage_reason = "private"
             return "must_reply"
 
         # 3. 引用了 bot 消息 → must_reply
         if "[引用消息" in message:
             for bid in self._bot_qq_ids:
                 if bid and bid in message:
+                    self._engage_reason = "quote_bot"
                     return "must_reply"
 
-        # 4. bot 30s 内回复过此人 → may_reply（ABA 连续对话）
-        reply_key = f"{sender_id}:{group_id}"
-        last_reply_ts = self._reply_tracker.get(reply_key, 0)
-        aba_window = int(self.hot_config.get("social.aba_window_seconds", 30)) if hasattr(self, 'hot_config') else 30
-        if time.time() - last_reply_ts < aba_window:
-            return "may_reply"
+        # 4. bot 发言后：重点看其他人是否想继续聊（对话延续门控）
+        last_send = self._bot_last_send.get(group_id)
+        if last_send and time.time() - last_send["ts"] < self._continue_window():
+            bot_last_text = (last_send.get("text") or "").strip()
+
+            # 4a. 显式继续信号：@bot / 命中 bot 名字或别名 → 视为接着聊
+            if self._matches_bot_identity(message):
+                self._engage_reason = "bot_identity"
+                return "may_reply"
+
+            # 4b. 话题延续：与 bot 上一条发言存在主题重叠
+            overlap = _topic_overlap(message, bot_last_text)
+            if overlap >= self._continue_overlap_threshold():
+                self._engage_reason = "topic_continue"
+                return "may_reply"
+
+            # 4c. 兜底：bot 近期回帖过此人，且对方语句与 bot 话题有一定粘连
+            reply_key = f"{sender_id}:{group_id}"
+            last_reply_ts = self._reply_tracker.get(reply_key, 0)
+            if overlap > 0 and time.time() - last_reply_ts < self._aba_window():
+                self._engage_reason = "aba_continue"
+                return "may_reply"
+
+            # 无延续意图 → 落入下面的兴趣词判断，否则 skip
 
         # 5. 包含兴趣关键词 → may_reply
         if self.meta_thinking and self.meta_thinking.is_interesting(message):
+            self._engage_reason = "interest"
             return "may_reply"
 
         # 6. 其他 → skip
         return "skip"
+
+    def _continue_window(self) -> int:
+        """bot 发言后的话题延续判断窗口（秒）。"""
+        if hasattr(self, "hot_config"):
+            return int(self.hot_config.get("social.continue_window_seconds", 90))
+        return 90
+
+    def _continue_overlap_threshold(self) -> float:
+        """判定“话题延续”的最低重叠度。"""
+        if hasattr(self, "hot_config"):
+            return float(self.hot_config.get("social.continue_overlap", 0.12))
+        return 0.12
+
+    def _aba_window(self) -> int:
+        """ABA 连续对话窗口（秒）。"""
+        if hasattr(self, "hot_config"):
+            return int(self.hot_config.get("social.aba_window_seconds", 30))
+        return 30
+
+    def _matches_bot_identity(self, message: str) -> bool:
+        """消息是否命中 bot 的 @ / 名字 / 别名。"""
+        for bid in self._bot_qq_ids:
+            if bid and bid in message:
+                return True
+        for profile in getattr(self, "_bot_registry", {}).values():
+            for word in profile.all_keywords:
+                if word and len(word) >= 2 and word in message:
+                    return True
+        return False
 
     @filter.on_llm_request(priority=1)
     async def meta_thinking_check(self, event: AstrMessageEvent, req=None):
@@ -1752,6 +1850,15 @@ class WaveMemoryPlugin(Star):
         if engage == "skip":
             # 不相关消息，不做任何处理（AstrBot 不会调 LLM 因为没 @）
             return
+
+        # ─── 对话延续态度：他人接着 bot 的话聊 → 自然承接 ───
+        if getattr(self, "_engage_reason", "") in (
+            "topic_continue", "aba_continue", "bot_identity", "quote_bot",
+        ):
+            from astrbot.core.agent.message import TextPart
+            req.extra_user_content_parts.append(TextPart(
+                text="[语气指令] 对方在顺着刚才的话题接着聊，说明有继续对话的意思。自然承接、顺着话题回应即可，不要重新自我介绍或客套兜圈子。"
+            ))
 
         # ─── 硬规则：极端攻击 + 辱骂冷却 ───
         from .services.meta_thinking import EXTREME_ATTACK
@@ -2902,6 +3009,13 @@ class WaveMemoryPlugin(Star):
             now = time.time()
             if len(self._reply_tracker) > 200:
                 self._reply_tracker = {k: v for k, v in self._reply_tracker.items() if now - v < 60}
+
+        # 记录 bot 上一条发出的消息（供对话延续意图判断）
+        if group_id:
+            self._bot_last_send[group_id] = {"ts": time.time(), "text": bot_text}
+            if len(self._bot_last_send) > 300:
+                now = time.time()
+                self._bot_last_send = {k: v for k, v in self._bot_last_send.items() if now - v["ts"] < 3600}
 
         # v1.5.0: 互动积累（纯规则，不调 LLM）
         if sender_id and sender_id != "bot":

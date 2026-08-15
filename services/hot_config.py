@@ -106,6 +106,10 @@ class HotConfig:
              "description": "辱骂冷却上限秒数"},
             {"key": "social.aba_window_seconds", "type": "int", "min": 10, "max": 120, "default": 30,
              "description": "ABA连续对话窗口（秒）"},
+            {"key": "social.continue_window_seconds", "type": "int", "min": 10, "max": 600, "default": 90,
+             "description": "bot发言后话题延续判断窗口（秒）"},
+            {"key": "social.continue_overlap", "type": "float", "min": 0.05, "max": 0.8, "default": 0.12,
+             "description": "话题延续最低重叠度（Dice）"},
         ]
 
     def _set_nested(self, key: str, value: Any):
