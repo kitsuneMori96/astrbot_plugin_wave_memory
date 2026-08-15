@@ -479,6 +479,48 @@
         "description": "兴趣关键词数量",
         "type": "int",
         "default": 20
+      },
+      "help_enabled": {
+        "description": "启用主动求助答疑（检测群友求助，尤其程序/报错类，主动提供解惑）",
+        "type": "bool",
+        "default": true,
+        "hint": "独立于日常主动插话的开关。旧配置升级后若想启用，请在此确认打开。"
+      },
+      "help_interval_seconds": {
+        "description": "求助答疑最小间隔（秒）",
+        "type": "int",
+        "default": 300
+      },
+      "help_max_per_hour": {
+        "description": "每小时最多主动答疑次数（单独配额，不占用日常主动插话上限）",
+        "type": "int",
+        "default": 6
+      },
+      "help_min_affection": {
+        "description": "好感度低于此值的群友求助时不主动抢答",
+        "type": "int",
+        "default": -10
+      },
+      "help_web_search": {
+        "description": "答疑时允许按 LLM 判断联网搜索（需配置下方 DeepSeek 联网搜索参数）",
+        "type": "bool",
+        "default": true,
+        "hint": "联网搜索走 DeepSeek /responses 官方 web_search 工具，需填写 API Key。无 Key 时自动跳过联网、仅凭模型知识解答。"
+      },
+      "web_search_api_key": {
+        "description": "DeepSeek API Key（用于答疑联网搜索，platform.deepseek.com 创建 sk- 开头）",
+        "type": "string",
+        "default": ""
+      },
+      "web_search_base_url": {
+        "description": "DeepSeek API 地址",
+        "type": "string",
+        "default": "https://api.deepseek.com"
+      },
+      "web_search_model": {
+        "description": "联网搜索模型（flash 或 pro）",
+        "type": "string",
+        "default": "deepseek-v4-flash"
       }
     }
   },

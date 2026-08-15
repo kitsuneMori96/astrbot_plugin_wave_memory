@@ -49,7 +49,7 @@ from .tools.config_suggestion import WaveMemorySuggestConfigTool
 from .tools.review_candidate import WaveMemorySubmitReviewCandidateTool
 from .tools.livingmemory_compat_tools import build_livingmemory_compat_tools
 from .engine.book_lore_index import BookLoreIndex
-from .services.meta_thinking import MetaThinking
+from .services.meta_thinking import MetaThinking, classify_help_request
 from .services.dream import DreamService
 from .services.study_service import StudyService
 from .services.self_reflect import SelfReflectService
@@ -3058,6 +3058,59 @@ class WaveMemoryPlugin(Star):
                         action="react_to_hongbao",
                         ttl=30.0,
                     )
+
+            # ─── 求助答疑触发：检测到群友求助（尤其程序/报错）主动提供解惑 ───
+            if (self.meta_thinking
+                and proactive_ok
+                and not getattr(event, "is_at_or_wake_command", False)
+                and group_id
+                and not group_id.startswith("private:")
+                and self.meta_thinking.should_check_help(group_id)):
+                try:
+                    help_kind = classify_help_request(locked_message)
+                    if help_kind == "program":
+                        # 编程问题是本功能核心场景，直接走 LLM 自判
+                        self.meta_thinking._bump_help(group_id)
+                        bot_id = event.get_self_id() or ""
+                        context_messages = self._get_recent_messages(event, max_messages=10)
+                        decision = await self.meta_thinking.should_proactive_help(
+                            group_id, context_messages, sender_id=sender_id
+                        )
+                        if decision.get("action") == "主动答疑":
+                            web_result = ""
+                            if decision.get("need_web_search"):
+                                web_query = decision.get("web_query") or locked_message[:120]
+                                web_result = await self.meta_thinking.web_search(web_query)
+                                if web_result:
+                                    logger.info(f"[MetaThinking] 求助答疑触发联网搜索: {web_query[:50]}")
+                            inner = decision.get("inner_thought", "")
+                            reply_text = await self.meta_thinking.generate_help_reply(
+                                context_messages, inner, help_kind,
+                                web_search_result=web_result or None,
+                                bot_id=bot_id,
+                            )
+                            if reply_text:
+                                logger.info(f"[MetaThinking] 主动答疑(编程): {inner[:50]}")
+                                await event.send(event.plain_result(reply_text))
+                    elif help_kind == "general" and self.meta_thinking.help_web_search:
+                        # 一般求助：若已配置联网搜索能力，也可偶尔介入
+                        self.meta_thinking._bump_help(group_id)
+                        bot_id = event.get_self_id() or ""
+                        context_messages = self._get_recent_messages(event, max_messages=10)
+                        decision = await self.meta_thinking.should_proactive_help(
+                            group_id, context_messages, sender_id=sender_id
+                        )
+                        if decision.get("action") == "主动答疑":
+                            inner = decision.get("inner_thought", "")
+                            reply_text = await self.meta_thinking.generate_help_reply(
+                                context_messages, inner, help_kind, bot_id=bot_id
+                            )
+                            if reply_text:
+                                logger.info(f"[MetaThinking] 主动答疑: {inner[:50]}")
+                                await event.send(event.plain_result(reply_text))
+                except Exception as e:
+                    logger.debug(f"[MetaThinking] Help proactive failed: {e}")
+                    _record_err("HelpProactive", e)
 
             # 主动对话触发：兴趣词匹配 OR 关切命中，才调 LLM 判断
             bot_id = event.get_self_id() or ""

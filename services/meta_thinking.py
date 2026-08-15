@@ -79,6 +79,81 @@ def window_analysis_candidate(
     return candidate
 
 
+# ─── 求助检测（纯函数）：判定消息是否是求助，尤其编程提问 ───
+_HELP_ASK_SIGNALS = (
+    "求助", "救救", "帮帮我", "帮忙", "求教", "请教", "请问", "求问",
+    "怎么做", "怎么实现", "怎么写", "怎么用", "怎么搞", "怎么改", "怎么办",
+    "如何做", "如何实现", "如何写", "如何用", "咋办", "咋搞", "在线等",
+    "求解决", "有人会吗", "有人知道吗", "有会吗", "教教我", "指点",
+    "报错", "报异常", "出错了", "出bug", "异常了", "吓死了", "help", "bug",
+)
+_HELP_ASK_RE = re.compile(
+    r"怎么|如何|咋|帮|教|请问|求助|不会|码一下|代码报错|报错|error|exception|traceback|failed|崩溃|crash|失败|不过|不行|挂了|坏了"
+)
+# 编程消息上的失败/异常信号：命中编程关键词后再配合此判断
+_PROG_FAIL_RE = re.compile(r"报错|出错|失败|不过|不行|不了|挂了|坏了|crash|error|exception|traceback|failed")
+_PROG_KEYWORDS = frozenset([
+    "python", "js", "javascript", "typescript", "ts", "java", "golang", "go",
+    "c++", "c#", "rust", "php", "vue", "react", "node", "npm", "pnpm", "yarn",
+    "git", "docker", "linux", "机器", "前端", "后端", "代码", "脚本", "程序",
+    "接口", "api", "sql", "数据库", "编译", "部署", "服务器", "运行报错",
+    "env", "pip", "conda", "import", "shell", "bash",
+])
+
+
+def classify_help_request(message: str) -> str:
+    """判定消息是否是求助，返回类型：'program' / 'general' / ''（非求助）。
+
+    求助信号（问句/求助词/报错词）命中后，若含编程关键词则归为 program。
+    此函数保持轻量（正则 + 集合匹配），不调用 LLM，供热路径预筛。
+    """
+    msg = (message or "").strip()
+    if len(msg) < 2:
+        return ""
+    msg_lower = msg[:500].lower()
+    if any(kw in msg_lower for kw in _PROG_KEYWORDS) and _PROG_FAIL_RE.search(msg_lower):
+        return "program"
+    for kw in _HELP_ASK_SIGNALS:
+        if kw in msg_lower:
+            return _prog_kind(msg_lower)
+    if _HELP_ASK_RE.search(msg_lower):
+        return _prog_kind(msg_lower)
+    return ""
+
+
+def _prog_kind(msg_lower: str) -> str:
+    for kw in _PROG_KEYWORDS:
+        if kw in msg_lower:
+            return "program"
+    return "general"
+
+
+def parse_help_response(text: str) -> dict:
+    """解析求助答疑 LLM 判断输出（纯函数）。"""
+    result = {
+        "action": "不答",
+        "inner_thought": "",
+        "need_web_search": False,
+        "web_query": "",
+    }
+    for line in (text or "").strip().split("\n"):
+        line = line.strip()
+        if line.startswith("内心：") or line.startswith("内心:"):
+            result["inner_thought"] = line.split("：", 1)[-1].split(":", 1)[-1].strip()
+        elif line.startswith("行动：") or line.startswith("行动:"):
+            action = line.split("：", 1)[-1].split(":", 1)[-1].strip()
+            if "答疑" in action or "解答" in action or ("答" in action and "不" not in action):
+                result["action"] = "主动答疑"
+        elif line.startswith("是否需要联网：") or line.startswith("是否需要联网:"):
+            v = line.split("：", 1)[-1].split(":", 1)[-1].strip()
+            result["need_web_search"] = ("是" in v) or ("需" in v) or ("yes" in v.lower())
+        elif line.startswith("搜索关键词：") or line.startswith("搜索关键词:"):
+            v = line.split("：", 1)[-1].split(":", 1)[-1].strip()
+            if v and v != "无":
+                result["web_query"] = v
+    return result
+
+
 class MetaThinking:
     """配置驱动的内心判断层 — 支持多 bot 身份。"""
 
@@ -123,6 +198,14 @@ class MetaThinking:
         self.spam_window_seconds = int(self.config.get("spam_window_seconds", 60))
         self.proactive_interval_seconds = int(self.config.get("proactive_interval_seconds", 600))
         self.proactive_max_per_hour = int(self.config.get("proactive_max_per_hour", 3))
+        self.help_enabled = bool(self.config.get("help_enabled", True))
+        self.help_interval_seconds = int(self.config.get("help_interval_seconds", 300))
+        self.help_max_per_hour = int(self.config.get("help_max_per_hour", 6))
+        self.help_min_affection = int(self.config.get("help_min_affection", -10))
+        self.help_web_search = bool(self.config.get("help_web_search", True))
+        self.web_search_api_key = str(self.config.get("web_search_api_key", "") or "")
+        self.web_search_base_url = str(self.config.get("web_search_base_url", "https://api.deepseek.com") or "")
+        self.web_search_model = str(self.config.get("web_search_model", "deepseek-v4-flash") or "")
         self.silent_hours_start = int(self.config.get("silent_hours_start", 0))
         self.silent_hours_end = int(self.config.get("silent_hours_end", 6))
         self.interest_sample_size = int(self.config.get("interest_sample_size", 20))
@@ -146,6 +229,11 @@ class MetaThinking:
         self._last_proactive: dict[str, float] = {}  # group_id → last proactive time
         self._proactive_count: dict[str, int] = {}  # group_id → count this hour
         self._proactive_hour: str = ""
+
+        # 求助答疑（独立限频，不占用日常主动插话配额）
+        self._last_help: dict[str, float] = {}  # group_id → last help time
+        self._help_count: dict[str, int] = {}  # group_id → count this hour
+        self._help_hour: str = ""
 
         # 兴趣关键词（从 DB 加载高频标签 + 固定词）
         self._interest_keywords: set[str] = set(self.FIXED_INTERESTS)
@@ -422,6 +510,172 @@ QQ：{sender_id}
 
         # 兴趣匹配
         return self.is_interesting(message)
+
+    def should_check_help(self, group_id: str) -> bool:
+        """判断当前是否允许发起求助答疑（独立限频，轻量，不调 LLM）。
+
+        求助答疑使用自己的频率配额，不与日常主动插话（proactive_*）互相挤占。
+        """
+        if not self.help_enabled:
+            return False
+
+        now = time.time()
+        hour = time.strftime("%H")
+        if hour != self._help_hour:
+            self._help_count.clear()
+            self._help_hour = hour
+
+        if self._help_count.get(group_id, 0) >= self.help_max_per_hour:
+            return False
+
+        last = self._last_help.get(group_id, 0)
+        if now - last < self.help_interval_seconds:
+            return False
+
+        if self._is_silent_hour(int(hour)):
+            return False
+
+        return True
+
+    def _bump_help(self, group_id: str):
+        """求助答疑计一次频率。"""
+        self._last_help[group_id] = time.time()
+        self._help_count[group_id] = self._help_count.get(group_id, 0) + 1
+
+    async def should_proactive_help(
+        self,
+        group_id: str,
+        context_messages: list[str],
+        sender_id: str = "",
+        self_persona_context: str = None,
+    ) -> dict:
+        """LLM 自判：是否主动为群里的求助提供解答，以及是否需要联网搜索。
+
+        返回:
+        {
+            "action": "主动答疑" | "不答",
+            "inner_thought": str,
+            "need_web_search": bool,
+            "web_query": str,   # 建议的搜索关键词（need_web_search 时有效）
+        }
+        """
+        # 软性人脸校验：好感度过低（恶意/被拉黑）的群友求助不主动抢答
+        if sender_id and self._get_affection(sender_id, group_id) < self.help_min_affection:
+            return {"action": "不答", "inner_thought": "好感度过低，不主动凑上去接话"}
+
+        bot_name = self.bot_names.get(self.bot_qq_id, "bot")
+        persona_context = (self_persona_context or "").strip()
+        if not persona_context:
+            persona_context = f"<self_persona>\n当前身份：{bot_name}。群友在求助时，在自己帮得上、且确有把握时才主动解答。\n</self_persona>"
+
+        prompt = f"""{prepend_identity_safety_system_prompt('', always=True)}
+
+{persona_context}
+
+【最近群聊（10条）】
+{chr(10).join(context_messages[-10:]) if context_messages else "（无）"}
+
+群友可能正在求助（尤其程序/报错/技术类问题）。如果这是真实的求助，且你确实能帮上忙，就主动提供解惑。
+
+输出：
+内心：<你的想法>
+行动：<主动答疑 / 不答>
+是否需要联网：<是 / 否>
+搜索关键词：<若需要联网，给出最合适的搜索关键词；不需要则写 无>"""
+
+        try:
+            response = await self._call_llm(prompt)
+            return self._parse_help(response)
+        except Exception as e:
+            logger.warning(f"[MetaThinking] 求助答疑判断失败: {e}")
+            return {"action": "不答", "inner_thought": "", "need_web_search": False, "web_query": ""}
+
+    async def generate_help_reply(
+        self,
+        context_messages: list[str],
+        inner_thought: str,
+        help_kind: str,
+        web_search_result: str = None,
+        bot_id: str = None,
+        self_persona_context: str = None,
+    ) -> str:
+        """生成求助答疑内容；如已联网检索到结果，注入使其基于实时信息作答。"""
+        context_text = "\n".join(context_messages[-5:])
+        bot_name = self.bot_names.get(bot_id or self.bot_qq_id, "bot")
+        persona_context = (self_persona_context or "").strip()
+        if not persona_context:
+            persona_context = f"<self_persona>\n当前身份：{bot_name}。耐心、直接地解答群友的提问，分析到位，给出可落地的做法。\n</self_persona>"
+
+        extra = ""
+        if web_search_result:
+            extra = f"\n【联网搜索结果】\n{web_search_result}\n"
+
+        prompt = f"""{persona_context}
+
+【最近群聊】
+{context_text}
+
+【想法】
+{inner_thought}
+{extra}
+直接给出自然、准确、克制的解答。要指出关键原因和可操作的做法，不要提前声明或解释你自己。"""
+        resp = await self.llm.text_chat(prompt=prompt, system_prompt=prepend_identity_safety_system_prompt(None, always=True), contexts=[])
+        reply = resp.completion_text.strip()
+        if is_identity_contamination(reply):
+            logger.warning("[MetaThinking] Contaminated help reply blocked")
+            return ""
+        return reply
+
+    async def web_search(self, query: str) -> str:
+        """通过 DeepSeek /responses 官方 web_search 工具联网搜索，返回摘要文本。
+
+        未配置 API Key 时返回空字符串，调用方据此跳过联网。
+        """
+        if not self.help_web_search or not self.web_search_api_key:
+            return ""
+        try:
+            import aiohttp
+
+            url = f"{self.web_search_base_url.rstrip('/')}/responses"
+            headers = {
+                "Authorization": f"Bearer {self.web_search_api_key}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": self.web_search_model,
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": query}],
+                    }
+                ],
+                "tools": [{"type": "web_search"}],
+                "max_output_tokens": 2048,
+            }
+            timeout = aiohttp.ClientTimeout(total=60)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, headers=headers, json=payload) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"[MetaThinking] web_search HTTP {resp.status}")
+                        return ""
+                    data = await resp.json()
+            text = (data.get("output_text") or "").strip()
+            if not text:
+                for item in data.get("output") or []:
+                    if item.get("type") != "message":
+                        continue
+                    for content in item.get("content") or []:
+                        t = (content.get("text") or "").strip()
+                        if t:
+                            text += "\n" + t
+            return text.strip()[:3000]
+        except Exception as e:
+            logger.warning(f"[MetaThinking] web_search failed: {e}")
+            return ""
+
+    def _parse_help(self, text: str) -> dict:
+        """解析求助答疑判断输出。"""
+        return parse_help_response(text)
 
     # ─── 内部方法 ─────────────────────────────────────────────────────────────
 
