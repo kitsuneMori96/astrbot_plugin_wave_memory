@@ -1999,6 +1999,34 @@ class WaveMemoryPlugin(Star):
         try:
             if not resp:
                 return resp
+
+            # ─── v4.26+：resp 是 LLMResponse 对象（不可迭代），需就地修改 ───
+            if not isinstance(resp, (list, tuple)):
+                text = getattr(resp, "completion_text", "") or ""
+                if "[[NO_REPLY]]" not in text:
+                    return resp
+                result_chain = getattr(resp, "result_chain", None)
+                chain = getattr(result_chain, "chain", None) if result_chain else None
+                if chain is not None:
+                    # 去掉含标记的部件；若还残留其它内容则保留，否则整体沉默
+                    cleaned = [
+                        p for p in chain
+                        if not (getattr(p, "text", "") and "[[NO_REPLY]]" in p.text)
+                    ]
+                    chain[:] = cleaned
+                    if not cleaned:
+                        logger.info("[WaveMemory] 内省判定无需回应 → 已吞掉回复")
+                    return resp
+                # 结果链不存在：只能退回 completion_text 清理
+                remaining = text.replace("[[NO_REPLY]]", "").strip()
+                if not remaining:
+                    resp._completion_text = ""
+                    logger.info("[WaveMemory] 内省判定无需回应 → 已吞掉回复")
+                else:
+                    resp._completion_text = remaining
+                return resp
+
+            # ─── 旧版兼容：resp 是部件列表 ───
             has_marker = False
             for part in resp:
                 if getattr(part, "text", "") and "[[NO_REPLY]]" in part.text:
