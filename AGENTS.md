@@ -144,12 +144,16 @@ UNIQUE(user_id, group_id, bot_id)
 
 ## Git 提交与推送规范
 
+- **重要：每次功能/修复改动完成后，必须记得 `git add` → `git commit` → `git push`，不许遗留未推送的提交**（历史教训：05-29 GitHub 回退覆盖）
+  - 改动涉及多个文件时，只 stage 本次相关文件，不顺手混入无关改动
+  - 改动含测试/配置时，一并提交对应测试文件与配置变更
+  - 文档类改动（如 AGENTS.md 本身）也要单独提交推送
 - remote 使用 SSH：`git@github.com:kitsuneMori96/astrbot_plugin_wave_memory.git`
   - 不用 HTTPS（无凭据会报 `fatal: could not read Username`）
   - 已误用 HTTPS 时：`git remote set-url origin git@github.com:kitsuneMori96/astrbot_plugin_wave_memory.git`
 - 提交风格：中文 conventional commits（`feat:` / `fix:` / `chore:` / `perf:` / `docs:`）
-- 提交前检查：`git status` / `git diff` / `git log --oneline -10`；只 stage 预期文件，不提交机密
-- 提交后必须 `git push`（历史教训：05-29 GitHub 回退覆盖；06-14 release notes 遗漏）
+- 提交前检查：`git status` / `git diff` / `git log --oneline -10`；确认无测试残留泄漏
+- 提交后必须 `git push`，push 失败不能跳过（历史教训：05-29 GitHub 回退覆盖；06-14 release notes 遗漏）
 
 ---
 
@@ -157,6 +161,7 @@ UNIQUE(user_id, group_id, bot_id)
 
 | 日期 | 事件 | 教训 |
 |------|------|------|
+| 08-15 | 改动完成后忘记提交推送 | 改动完成必须 git commit + push |
 | 05-29 | GitHub 回退覆盖 | 必须 push |
 | 06-14 | release notes 遗漏 | git log 检查 |
 | 06-15 | enable_auto_inject=False | 配置升级兼容 |
