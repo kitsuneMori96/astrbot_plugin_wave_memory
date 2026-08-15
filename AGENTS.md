@@ -142,6 +142,17 @@ UNIQUE(user_id, group_id, bot_id)
 
 ---
 
+## Git 提交与推送规范
+
+- remote 使用 SSH：`git@github.com:kitsuneMori96/astrbot_plugin_wave_memory.git`
+  - 不用 HTTPS（无凭据会报 `fatal: could not read Username`）
+  - 已误用 HTTPS 时：`git remote set-url origin git@github.com:kitsuneMori96/astrbot_plugin_wave_memory.git`
+- 提交风格：中文 conventional commits（`feat:` / `fix:` / `chore:` / `perf:` / `docs:`）
+- 提交前检查：`git status` / `git diff` / `git log --oneline -10`；只 stage 预期文件，不提交机密
+- 提交后必须 `git push`（历史教训：05-29 GitHub 回退覆盖；06-14 release notes 遗漏）
+
+---
+
 ## 历史教训
 
 | 日期 | 事件 | 教训 |
