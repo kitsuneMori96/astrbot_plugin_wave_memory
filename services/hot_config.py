@@ -110,6 +110,10 @@ class HotConfig:
              "description": "bot发言后话题延续判断窗口（秒）"},
             {"key": "social.continue_overlap", "type": "float", "min": 0.05, "max": 0.8, "default": 0.12,
              "description": "话题延续最低重叠度（Dice）"},
+            {"key": "social.window_analyze_enabled", "type": "bool", "default": True,
+             "description": "bot发言后窗口内是否强制 LLM 自判主动回答"},
+            {"key": "social.window_analyze_per_min", "type": "int", "min": 1, "max": 30, "default": 3,
+             "description": "每群每分钟最多强制分析的条数"},
         ]
 
     def _set_nested(self, key: str, value: Any):

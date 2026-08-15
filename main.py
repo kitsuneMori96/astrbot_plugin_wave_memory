@@ -1726,6 +1726,10 @@ class WaveMemoryPlugin(Star):
     # 最近一次 _should_engage 的判定原因（供态度注入使用）
     _engage_reason: str = ""
 
+    # 回话后窗口分析状态
+    _analysis_pending: dict = {}    # {group_id: ts} 候选待 _should_engage 消耗（30s TTL）
+    _analysis_counts: dict = {}     # {group_id: {"minute": int, "count": int}} 频率上限
+
     def _should_engage(self, event: AstrMessageEvent) -> str:
         """规则链前置过滤：判断消息是否与 bot 相关。
 
@@ -1759,6 +1763,12 @@ class WaveMemoryPlugin(Star):
                     return "must_reply"
 
         # 4. bot 发言后：重点看其他人是否想继续聊（对话延续门控）
+        # 4.0 窗口内预筛候选 → 直接交给 LLM 自判（on_message 已设 should_call_llm=True）
+        pending_ts = getattr(self, "_analysis_pending", {}).pop(group_id, 0)
+        if pending_ts and time.time() - pending_ts < 30:
+            self._engage_reason = "window_analyze"
+            return "analyze"
+
         last_send = self._bot_last_send.get(group_id)
         if last_send and time.time() - last_send["ts"] < self._continue_window():
             bot_last_text = (last_send.get("text") or "").strip()
@@ -1820,6 +1830,44 @@ class WaveMemoryPlugin(Star):
                     return True
         return False
 
+    # ─── 回话后窗口内：重点分析是否要主动回答 ───
+    def _window_active(self, group_id: str) -> bool:
+        """是否处于 bot 发言后的分析窗口内。"""
+        last = self._bot_last_send.get(group_id)
+        if not last:
+            return False
+        return time.time() - last["ts"] < self._continue_window()
+
+    def _window_analyze_enabled(self) -> bool:
+        if hasattr(self, "hot_config"):
+            val = self.hot_config.get("social.window_analyze_enabled", True)
+            return True if val is None else bool(val)
+        return True
+
+    def _window_analyze_per_min(self) -> int:
+        if hasattr(self, "hot_config"):
+            return max(1, int(self.hot_config.get("social.window_analyze_per_min", 3)))
+        return 3
+
+    def _window_analysis_candidate(self, message: str, sender_id: str, group_id: str) -> bool:
+        """窗口内粗筛：这条消息是否值得交给 LLM 自判是否主动回答。"""
+        from .services.meta_thinking import window_analysis_candidate
+        last = self._bot_last_send.get(group_id) or {}
+        bot_last_text = last.get("text") or ""
+        hit = window_analysis_candidate(
+            message,
+            topic_overlap=_topic_overlap(message, bot_last_text),
+            identity_hit=self._matches_bot_identity(message),
+            reply_ts=self._reply_tracker.get(f"{sender_id}:{group_id}", 0),
+            aba_window=self._aba_window(),
+            overlap_threshold=self._continue_overlap_threshold(),
+            per_min=self._window_analyze_per_min(),
+            count_state=self._analysis_counts.setdefault(group_id, {"minute": 0, "count": 0}),
+        )
+        if hit:
+            logger.info(f"[WaveMemory] 窗口候选命中: {group_id}:{sender_id}: {message.strip()[:30]}")
+        return hit
+
     @filter.on_llm_request(priority=1)
     async def meta_thinking_check(self, event: AstrMessageEvent, req=None):
         """v1.3.0: 纯规则判断 + 态度注入，不独立调 LLM。
@@ -1851,8 +1899,17 @@ class WaveMemoryPlugin(Star):
             # 不相关消息，不做任何处理（AstrBot 不会调 LLM 因为没 @）
             return
 
+        # ─── 回话后窗口内强制自判：是否要主动回答 ───
+        if engage == "analyze":
+            from astrbot.core.agent.message import TextPart
+            req.extra_user_content_parts.append(TextPart(
+                text="[内省指令] 对方刚和你聊完。请你判断这条消息是否在期待你回应、或与你当前的话题相关。"
+                     "如果是在跟你说话、接你的话茬或需要你回应：直接自然承接并回应。"
+                     "如果这是与你无关的旁人对聊、并不需要你插话：只输出 [[NO_REPLY]]，不要输出任何其他内容。"
+            ))
+
         # ─── 对话延续态度：他人接着 bot 的话聊 → 自然承接 ───
-        if getattr(self, "_engage_reason", "") in (
+        elif getattr(self, "_engage_reason", "") in (
             "topic_continue", "aba_continue", "bot_identity", "quote_bot",
         ):
             from astrbot.core.agent.message import TextPart
@@ -1935,6 +1992,29 @@ class WaveMemoryPlugin(Star):
         # ─── 态度判断由 inject_memory 的 PersonaEvolution 通道统一完成 ───
         # 不再有独立 LLM 调用。bot 在主对话中用自己的人格自然思考态度。
         # 好感度变化靠 LifecycleService 互动频率 + 极端事件规则驱动。
+
+    @filter.on_llm_response()
+    async def swallow_no_reply(self, event: AstrMessageEvent, resp=None):
+        """吞掉内省分析的 `[[NO_REPLY]]` 决策，实现真沉默。"""
+        try:
+            if not resp:
+                return resp
+            has_marker = False
+            for part in resp:
+                if getattr(part, "text", "") and "[[NO_REPLY]]" in part.text:
+                    has_marker = True
+                    break
+            if not has_marker:
+                return resp
+            # 去掉含标记的部件；若还残留其它内容则保留，否则整体沉默
+            cleaned = [p for p in resp if not (getattr(p, "text", "") and "[[NO_REPLY]]" in p.text)]
+            if cleaned:
+                return cleaned
+            logger.info("[WaveMemory] 内省判定无需回应 → 已吞掉回复")
+            return []
+        except Exception as e:
+            logger.warning(f"[WaveMemory] swallow_no_reply 异常: {e}")
+            return resp
 
     async def _belief_emergence_task(self) -> None:
         """后台关系事件信念涌现任务。"""
@@ -2772,6 +2852,17 @@ class WaveMemoryPlugin(Star):
 
             # 放行给后面的逻辑使用
             message = merged_content
+
+        # ─── 回话后窗口内：粗筛候选 → 强制 LLM 自判是否主动回答 ───
+        if (self._window_analyze_enabled()
+                and not group_id.startswith("private:")
+                and not getattr(event, "is_at_or_wake_command", False)
+                and self._window_active(group_id)
+                and self._window_analysis_candidate(message, sender_id, group_id)):
+            self._analysis_pending[group_id] = time.time()
+            self._engage_reason = "window_analyze"
+            event.should_call_llm(True)
+            logger.info(f"[WaveMemory] 窗口候选 → 强制 LLM 自判: {group_id}")
 
         # ─── 抢词被打断检测 (Hesitation Memory Capture) ───
         if hasattr(self, "_pending_proactive_plans") and self._pending_proactive_plans.get(group_id):

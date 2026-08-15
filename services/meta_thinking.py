@@ -19,6 +19,66 @@ from .identity_safety import is_identity_contamination, prepend_identity_safety_
 EXTREME_ATTACK = re.compile(r'(你[妈马]|nmsl|死[全妈]|全家|操你|fuck\s*you|滚去死|杀了你|弄死你)')
 
 
+# ─── 回话后窗口内：粗筛"是否值得交给 LLM 自判主动回答"（纯函数）───
+_WINDOW_CMD_PREFIXES = ("/teach", "/teach:", "记住", "记下", "remember", "忘记", "忘掉", "forget", "别记")
+_WINDOW_ASK_RE = re.compile(r"什么|怎么|为啥|为什么|在哪|干啥|干嘛")
+_WINDOW_COMPLAIN_RE = re.compile(r"不理我|别装死|人呢|回话|说话啊|无视我|咋不|怎么不说话|出来一下|在吗")
+_WINDOW_IMPERATIVE_RE = re.compile(r"^(去|请|帮我|给我|搜索|查|找|来|喊|叫|给)")
+
+
+def window_analysis_candidate(
+    message: str,
+    *,
+    topic_overlap: float,
+    identity_hit: bool,
+    reply_ts: float = 0.0,
+    now: float = None,
+    aba_window: float = 30.0,
+    overlap_threshold: float = 0.12,
+    per_min: int = 3,
+    count_state: dict = None,
+) -> bool:
+    """回话后窗口内粗筛候选消息。
+
+    R1 问句 / R2 抱怨或呼唤 / R3 身份或引用命中 / R4 话题重叠 / R5 我向祈使。
+    R5 需要发送者是 bot 刚互动过的对象（reply_ts 在 aba_window 内）。
+    命中即交给 LLM 自判是否主动回答。count_state 就地累计频率上限。
+    """
+    if now is None:
+        now = time.time()
+    msg = (message or "").strip()
+    if len(msg) < 2:
+        return False
+    for p in _WINDOW_CMD_PREFIXES:
+        if msg.startswith(p):
+            return False
+
+    minute = int(now // 60)
+    if count_state is None:
+        count_state = {}
+    if count_state.get("minute") != minute:
+        count_state["minute"], count_state["count"] = minute, 0
+    if count_state["count"] >= per_min:
+        return False
+
+    candidate = False
+    if msg.endswith(("？", "?", "吗", "呢")) or _WINDOW_ASK_RE.search(msg):
+        candidate = True                                  # R1 问句
+    elif _WINDOW_COMPLAIN_RE.search(msg):
+        candidate = True                                  # R2 抱怨/呼唤
+    elif identity_hit:
+        candidate = True                                  # R3 身份/引用
+    elif topic_overlap >= overlap_threshold:
+        candidate = True                                  # R4 话题重叠
+    else:
+        if now - reply_ts < aba_window and _WINDOW_IMPERATIVE_RE.match(msg):
+            candidate = True                              # R5 我向祈使
+
+    if candidate:
+        count_state["count"] += 1
+    return candidate
+
+
 class MetaThinking:
     """配置驱动的内心判断层 — 支持多 bot 身份。"""
 
