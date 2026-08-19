@@ -1740,15 +1740,20 @@ class WaveMemoryPlugin(Star):
         """
         self._engage_reason = ""
         is_at_bot = getattr(event, "is_at_or_wake_command", False)
+        message = event.get_message_str() or ""
+        sender_id = event.get_sender_id() or ""
+        group_id = event.get_group_id() or ""
+
+        # 0. 窗口内预筛候选 → 直接交给 LLM 自判（on_message 已模拟唤醒并允许 LLM）
+        pending_ts = getattr(self, "_analysis_pending", {}).pop(group_id, 0)
+        if pending_ts and time.time() - pending_ts < 30:
+            self._engage_reason = "window_analyze"
+            return "analyze"
 
         # 1. @bot 或唤醒词 → must_reply
         if is_at_bot:
             self._engage_reason = "at"
             return "must_reply"
-
-        message = event.get_message_str() or ""
-        sender_id = event.get_sender_id() or ""
-        group_id = event.get_group_id() or ""
 
         # 2. 私聊 → must_reply
         if not group_id or group_id.startswith("private:"):
@@ -1763,12 +1768,7 @@ class WaveMemoryPlugin(Star):
                     return "must_reply"
 
         # 4. bot 发言后：重点看其他人是否想继续聊（对话延续门控）
-        # 4.0 窗口内预筛候选 → 直接交给 LLM 自判（on_message 已设 should_call_llm=True）
-        pending_ts = getattr(self, "_analysis_pending", {}).pop(group_id, 0)
-        if pending_ts and time.time() - pending_ts < 30:
-            self._engage_reason = "window_analyze"
-            return "analyze"
-
+        # 4.0 窗口内预筛候选已在入口处优先交给 LLM 自判（on_message 已模拟唤醒）
         last_send = self._bot_last_send.get(group_id)
         if last_send and time.time() - last_send["ts"] < self._continue_window():
             bot_last_text = (last_send.get("text") or "").strip()
@@ -1926,7 +1926,8 @@ class WaveMemoryPlugin(Star):
         if sender_id in self._abuse_tracker:
             tracker = self._abuse_tracker[sender_id]
             if time.time() < tracker.get("cooldown_until", 0):
-                event.should_call_llm(False)
+                # v4.26+：should_call_llm 无法在 on_llm_request 内阻止调用，需 stop_event
+                event.stop_event()
                 return  # 冷却期间完全不回复
             # 冷却已过期：count 衰减（每过一次冷却期 -1，最低归 0）
             elif tracker.get("cooldown_until", 0) > 0:
@@ -1950,7 +1951,7 @@ class WaveMemoryPlugin(Star):
                     cap = int(self.hot_config.get("social.abuse_cooldown_max", 3600))
                     cooldown = min(cap, base * (2 ** (tracker["count"] - abuse_trigger)))
                     tracker["cooldown_until"] = time.time() + cooldown
-                    event.should_call_llm(False)
+                    event.stop_event()
                     logger.info(f"[MetaThinking] 辱骂冷却: {sender_id} 冷却 {cooldown}s")
                     return
                 # 前 2 次还是怼回去
@@ -1972,7 +1973,7 @@ class WaveMemoryPlugin(Star):
             self.meta_thinking._at_timestamps[sender_id].append(now)
             if (self.meta_thinking.spam_threshold > 0
                     and len(self.meta_thinking._at_timestamps[sender_id]) >= self.meta_thinking.spam_threshold):
-                event.should_call_llm(False)
+                event.stop_event()
                 logger.info(f"[MetaThinking] 刷屏拦截: {sender_id}")
                 return
 
@@ -2889,7 +2890,10 @@ class WaveMemoryPlugin(Star):
                 and self._window_analysis_candidate(message, sender_id, group_id)):
             self._analysis_pending[group_id] = time.time()
             self._engage_reason = "window_analyze"
-            event.should_call_llm(True)
+            # v4.26+：AstrBot 仅在 is_at_or_wake_command=True 且 call_llm=False 时才调 LLM。
+            # should_call_llm(True) 语义是「禁止默认 LLM 请求」，这里需模拟唤醒并显式放行。
+            event.is_at_or_wake_command = True
+            event.should_call_llm(False)
             logger.info(f"[WaveMemory] 窗口候选 → 强制 LLM 自判: {group_id}")
 
         # ─── 抢词被打断检测 (Hesitation Memory Capture) ───
