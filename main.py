@@ -3060,6 +3060,9 @@ class WaveMemoryPlugin(Star):
                     )
 
             # ─── 求助答疑触发：检测到群友求助（尤其程序/报错）主动提供解惑 ───
+            bot_id = event.get_self_id() or ""
+            bot_profile = self._get_bot(bot_id)
+            proactive_ok = bot_profile.proactive_enabled if bot_profile else self.meta_thinking.proactive_enabled if self.meta_thinking else False
             if (self.meta_thinking
                 and proactive_ok
                 and not getattr(event, "is_at_or_wake_command", False)
@@ -3113,9 +3116,6 @@ class WaveMemoryPlugin(Star):
                     _record_err("HelpProactive", e)
 
             # 主动对话触发：兴趣词匹配 OR 关切命中，才调 LLM 判断
-            bot_id = event.get_self_id() or ""
-            bot_profile = self._get_bot(bot_id)
-            proactive_ok = bot_profile.proactive_enabled if bot_profile else self.meta_thinking.proactive_enabled if self.meta_thinking else False
             concern_score = self.concern_tracker.match(locked_message) if getattr(self, 'concern_tracker', None) else 0.0
             is_interesting = self.meta_thinking.is_interesting(locked_message) if self.meta_thinking else False
             if (self.meta_thinking
