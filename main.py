@@ -649,8 +649,7 @@ class WaveMemoryPlugin(Star):
     def _get_admin_ids(self) -> list:
         """从 AstrBot 框架配置获取管理员 ID 列表。"""
         try:
-            from astrbot.core.config import get_config
-            cfg = get_config()
+            cfg = self.context.get_config()
             admins = cfg.get("admins_id", [])
             if admins:
                 return [str(a) for a in admins if a and a != "astrbot"]
