@@ -10,7 +10,7 @@
   "embedding_provider_id": {
     "description": "向量特征模型 (Embedding) 提供商",
     "type": "string",
-    "hint": "填写您在 AstrBot 中创建的 Embedding 提供商完整ID（如 'siliconflow/Qwen3-Embedding'）。向量模型负责对聊天记录进行空间语义转化，使其具备模糊联想能力。",
+    "hint": "向量模型负责对聊天记录进行空间语义转化，使其具备模糊联想能力。留空则自动使用 AstrBot 首个可用的 Embedding Provider。如需指定，填写 AstrBot 中配置的 Embedding 提供商完整 ID（通常以 _embedding 结尾，如 openai_embedding、qwen_embedding，可在 AstrBot 管理后台 → LLM 配置中查看；注意是 Embedding 模型，不是聊天模型）。",
     "obvious_hint": true,
     "default": "",
     "restart_required": true

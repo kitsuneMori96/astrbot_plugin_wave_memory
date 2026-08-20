@@ -2105,7 +2105,8 @@ class WaveMemoryPlugin(Star):
         """在 LLM 请求前注入相关记忆 — 并行版 (v0.9 US-2.1)。"""
         if not self.enable_auto_inject or not req:
             return
-        if not self.embedding_provider_id:
+        # embedding_provider_id 留空时自动选首个可用 provider，这里以实际可用性为准
+        if not await self.embedding_service.is_available():
             return
 
         message = event.get_message_str()
