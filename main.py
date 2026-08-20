@@ -3125,23 +3125,16 @@ class WaveMemoryPlugin(Star):
                             group_id, context_messages, sender_id=sender_id
                         )
                         if decision.get("action") == "主动答疑":
-                            web_result = ""
-                            if decision.get("need_web_search"):
-                                web_query = decision.get("web_query") or locked_message[:120]
-                                web_result = await self.meta_thinking.web_search(web_query)
-                                if web_result:
-                                    logger.info(f"[MetaThinking] 求助答疑触发联网搜索: {web_query[:50]}")
                             inner = decision.get("inner_thought", "")
                             reply_text = await self.meta_thinking.generate_help_reply(
                                 context_messages, inner, help_kind,
-                                web_search_result=web_result or None,
                                 bot_id=bot_id,
                             )
                             if reply_text:
                                 logger.info(f"[MetaThinking] 主动答疑(编程): {inner[:50]}")
                                 await event.send(event.plain_result(reply_text))
-                    elif help_kind == "general" and self.meta_thinking.help_web_search:
-                        # 一般求助：若已配置联网搜索能力，也可偶尔介入
+                    elif help_kind == "general":
+                        # 一般求助：也可偶尔介入
                         self.meta_thinking._bump_help(group_id)
                         bot_id = event.get_self_id() or ""
                         context_messages = self._get_recent_messages(event, max_messages=10)

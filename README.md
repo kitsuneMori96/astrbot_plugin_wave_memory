@@ -28,14 +28,14 @@
 - 📊 **交互式知识图谱** — Three.js 3D 星图渲染，六层数据图层，多跳路径探索
 - 🔧 **零配置启动** — 留空 `embedding_provider_id` 自动使用首个可用 Embedding Provider，填 2 个 Provider ID 即跑，所有子系统自动按条件就绪
 - 🤖 **Bot 互聊防护** — 名单 + 启发式识别其他 bot 发言，避免 bot 互相接话无限循环
-- 🙋 **主动求助答疑** — 群里求助（尤其编程/报错）自动提供解惑，可联网搜索，独立限频
+- 🙋 **主动求助答疑** — 群里求助（尤其编程/报错）自动提供解惑，独立限频
 
 ### Recent Releases
 
 | 版本 | 日期 | 重点 |
 |------|------|------|
 | **v4.6.1** | 2026-08-20 | 其他 bot 发言识别（名单 + 启发式），避免 bot 互聊循环；`embedding_provider_id` 留空自动选首个可用 Embedding Provider；v4.26 兼容（窗口候选模拟唤醒放行 LLM 自判、冷却/刷屏拦截改用 stop_event） |
-| **v4.6.0** | 2026-08-15 | 主动求助答疑：群里求助（尤其编程/报错）自动提供解惑，支持联网搜索，独立限频 |
+| **v4.6.0** | 2026-08-15 | 主动求助答疑：群里求助（尤其编程/报错）自动提供解惑，独立限频 |
 | **v4.5.1** | 2026-08-07 | 记忆衰减模型修复 + 死配置接线 + 参数合理化；窗口候选 LLM 自判 + 消息防抖配置 |
 | **v4.5.0** | 2026-07-06 | 前端优化 + 黑盒管理前端：黑盒管理矩阵 · `/api/blackbox` 只读 API · BookLore/FewShot/Facts/People/Indexes 真实数据闭环 |
 | **v4.2.1** | 2026-07-05 | Holyman GitHub 更新握手：轻量检查缓存 · 强制刷新 · 预览确认同步 · lint 清零 |
@@ -408,10 +408,6 @@ AstrBot >= 4.14.0 · Python 3.10+ · WebUI 默认端口 9876
 | help_interval_seconds | 300 | 两次答疑最小间隔 |
 | help_max_per_hour | 6 | 每小时答疑次数上限（独立于主动插话配额） |
 | help_min_affection | 0 | 好感度低于此值的群友求助不抢答 |
-| help_web_search | false | 需要联网时走 DeepSeek `/responses` 官方 web_search 工具（需配置 API Key） |
-| web_search_api_key | 空 | DeepSeek API Key（用于联网搜索） |
-| web_search_base_url | - | DeepSeek API Base URL |
-| web_search_model | - | DeepSeek 模型 |
 
 ### 与 SelfLearning / ChatPlus 共存
 

@@ -50,28 +50,21 @@ class ClassifyHelpRequestTest(unittest.TestCase):
 class ParseHelpTest(unittest.TestCase):
     def test_active_parse(self):
         text = """内心：这是真求助，我能答
-行动：主动答疑
-是否需要联网：是
-搜索关键词：python 报错 解决办法"""
+行动：主动答疑"""
         r = parse_help_response(text)
         self.assertEqual(r["action"], "主动答疑")
-        self.assertTrue(r["need_web_search"])
-        self.assertEqual(r["web_query"], "python 报错 解决办法")
+        self.assertEqual(r["inner_thought"], "这是真求助，我能答")
 
     def test_pass_parse(self):
         text = """内心：闲聊，不用管
-行动：不答
-是否需要联网：否
-搜索关键词：无"""
+行动：不答"""
         r = parse_help_response(text)
         self.assertEqual(r["action"], "不答")
-        self.assertFalse(r["need_web_search"])
-        self.assertEqual(r["web_query"], "")
+        self.assertEqual(r["inner_thought"], "闲聊，不用管")
 
     def test_empty_input_safe(self):
         r = parse_help_response("")
         self.assertEqual(r["action"], "不答")
-        self.assertFalse(r["need_web_search"])
 
 
 if __name__ == "__main__":

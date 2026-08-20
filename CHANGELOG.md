@@ -19,12 +19,15 @@
 ### 主动求助答疑：群里求助（尤其编程/报错）自动提供解惑
 
 - **求助检测**：`meta_thinking.py` 新增 `classify_help_request` 纯函数——识别求助句式（"求助/救救/帮帮我/怎么/如何/报错/error/…"）并区分**编程类**（含 python/js/git/docker/前端/后端/报错关键词，或编程词+失败词）与**一般求助**。
-- **LLM 自判是否答疑**：`MetaThinking.should_proactive_help` 会先看一遍最近 10 条群聊，独立判断"这算不算求助、我能不能帮、要不要联网搜索"，不把检测结果当默认回答。
-- **需要时联网搜索**：`MetaThinking.web_search` 走 DeepSeek `/responses` 官方 web_search 工具；仅当 LLM 判定需要联网时才调用，结果注入答案。未配置 API Key 时自动跳过联网、纯凭模型知识解答。
+- **LLM 自判是否答疑**：`MetaThinking.should_proactive_help` 会先看一遍最近 10 条群聊，独立判断"这算不算求助、我能不能帮"，不把检测结果当默认回答。
 - **独立限频**：求助答疑使用独立配额 `help_max_per_hour`（默认 6 次/小时）+ `help_interval_seconds`（默认 300s），不挤占日常主动插话的 `proactive_*` 配额。
 - **后续动作**：在 `main.py` 主动对话块前新增求助答疑触发分支，仅群聊、非被 @ 主动介入；好感度过低群友的求助不抢答。
-- **配置**：`MetaThinking_Settings` 新增 `help_enabled` / `help_interval_seconds` / `help_max_per_hour` / `help_min_affection` / `help_web_search` / `web_search_api_key` / `web_search_base_url` / `web_search_model`。升级用户请到配置页确认 `help_enabled` 为开启；`help_web_search` 需填 DeepSeek API Key 才会联网。
+- **配置**：`MetaThinking_Settings` 新增 `help_enabled` / `help_interval_seconds` / `help_max_per_hour` / `help_min_affection`。升级用户请到配置页确认 `help_enabled` 为开启。
 - **测试**：新增 `tests/test_help_proactive.py` 覆盖求助分类与 LLM 输出解析；相关单元测试全部通过。
+
+### 其他
+
+- **移除**：已放弃的 DeepSeek `/responses` 联网搜索（`web_search` / `web_search_*` 配置项）从代码、配置与文档中移除。
 
 ## v4.5.1 (2026-08-07)
 

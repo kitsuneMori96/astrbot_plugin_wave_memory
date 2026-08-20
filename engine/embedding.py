@@ -24,9 +24,15 @@ class EmbeddingService:
         self.provider_id = provider_id
         self.dimension = dimension
         self._provider = None
+        self._failed_provider_ids: set[str] = set()
 
     def _get_provider(self):
-        """获取 embedding provider 实例。"""
+        """获取 embedding provider 实例。
+
+        - 指定了 provider_id 时按 ID 匹配；
+        - 留空时按顺序选择第一个「可用」的 provider（跳过连接失败的）。
+        选择结果缓存；某次调用失败会在 get_embeddings 里降级切换。
+        """
         if self._provider is not None:
             return self._provider
 
@@ -47,13 +53,47 @@ class EmbeddingService:
                     self._provider = p
                     return p
 
-        # 没匹配到就用第一个
-        if providers:
-            self._provider = providers[0]
-            logger.info(f"[WaveMemory] Using first available embedding provider")
+        # 留空：选第一个未被标记为失败的 provider
+        for p in providers:
+            if self._is_failed(p):
+                continue
+            self._provider = p
+            return self._provider
+
+        # 全部失败过：重置标记，重新从第一个尝试
+        self._failed_provider_ids.clear()
+        for p in providers:
+            self._provider = p
             return self._provider
 
         return None
+
+    @staticmethod
+    def _provider_key(p) -> str:
+        """provider 的唯一标识。"""
+        if hasattr(p, 'meta'):
+            try:
+                return str(p.meta().id)
+            except Exception:
+                pass
+        return str(getattr(p, 'provider_id', '') or getattr(p, 'id', '') or id(p))
+
+    def _is_failed(self, p) -> bool:
+        """判断 provider 是否曾被标记为连接失败。"""
+        key = self._provider_key(p)
+        if key in self._failed_provider_ids:
+            logger.debug(f"[WaveMemory] Skipping failed embedding provider: {key}")
+            return True
+        return False
+
+    def _mark_failed(self, p) -> None:
+        """标记 provider 连接失败，后续选择时跳过。"""
+        if p is None:
+            return
+        key = self._provider_key(p)
+        if key:
+            self._failed_provider_ids.add(key)
+            logger.warning(f"[WaveMemory] Marked embedding provider failed: {key}")
 
     async def is_available(self) -> bool:
         """检查 embedding provider 是否可用。"""
@@ -96,6 +136,17 @@ class EmbeddingService:
 
         except Exception as e:
             logger.error(f"[WaveMemory] Embedding failed: {e}")
+            # 连接失败：标记当前 provider，清缓存降级到下一个可用 provider
+            self._mark_failed(provider)
+            self._provider = None
+            fallback = self._get_provider()
+            if fallback is not None and fallback is not provider:
+                try:
+                    logger.info(f"[WaveMemory] Falling back to embedding provider: {self._provider_key(fallback)}")
+                    raw_result = await fallback.get_embeddings(texts)
+                    return self._build_results(raw_result, len(texts))
+                except Exception as e2:
+                    logger.error(f"[WaveMemory] Embedding fallback failed: {e2}")
             return [None] * len(texts)
 
     @staticmethod

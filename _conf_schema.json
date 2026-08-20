@@ -524,27 +524,6 @@
         "description": "好感度低于此值的群友求助时不主动抢答",
         "type": "int",
         "default": -10
-      },
-      "help_web_search": {
-        "description": "答疑时允许按 LLM 判断联网搜索（需配置下方 DeepSeek 联网搜索参数）",
-        "type": "bool",
-        "default": true,
-        "hint": "联网搜索走 DeepSeek /responses 官方 web_search 工具，需填写 API Key。无 Key 时自动跳过联网、仅凭模型知识解答。"
-      },
-      "web_search_api_key": {
-        "description": "DeepSeek API Key（用于答疑联网搜索，platform.deepseek.com 创建 sk- 开头）",
-        "type": "string",
-        "default": ""
-      },
-      "web_search_base_url": {
-        "description": "DeepSeek API 地址",
-        "type": "string",
-        "default": "https://api.deepseek.com"
-      },
-      "web_search_model": {
-        "description": "联网搜索模型（flash 或 pro）",
-        "type": "string",
-        "default": "deepseek-v4-flash"
       }
     }
   },
