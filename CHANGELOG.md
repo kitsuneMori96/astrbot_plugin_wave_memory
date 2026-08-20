@@ -2,8 +2,11 @@
 
 ## v4.6.1 (2026-08-20)
 
-### 其他 bot 发言识别：避免 bot 互聊循环
+### 发布整理
+- 重新构建 React WebUI 前端产物（含 v4.6.0 以来的 soul/system 页面重构），`webui/static/app` 与源码同步。
+- `metadata.yaml` 版本号与仓库地址更新；README 快速开始/配置参考/Recent Releases 补全 v4.5.1~v4.6.1 内容与 Bot 互聊防护、求助答疑配置项。
 
+### 其他 bot 发言识别：避免 bot 互聊循环
 - **问题**：群里有其他 bot（如 Astral）时，其接话发言（"对，这版…"/快速长回复）会命中窗口候选/求助答疑/主动对话，导致两个 bot 互相接话无限循环。
 - **名单优先**：`Message_Filter` 新增 `other_bot_ids`（逗号分隔 QQ 号）——命中者的发言一律不触发主动回应，**被 @ 也不回复**（记忆仍正常写入）。
 - **启发式兜底**：`bot_chat_heuristic`（默认开）——检测「茉莉刚发言后极短时间（< `other_bot_quick_seconds`，默认 10s）内到达的超长文本（>= `other_bot_min_length`，默认 80 字）」视为疑似 bot 秒回，同样不触发主动回应。

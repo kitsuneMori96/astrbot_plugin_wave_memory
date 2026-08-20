@@ -2,7 +2,7 @@
 
 # Wave Memory
 
-[![Version](https://img.shields.io/badge/version-v4.5.0-blue.svg)](https://github.com/vivy1024/astrbot_plugin_wave_memory/releases)
+[![Version](https://img.shields.io/badge/version-v4.6.1-blue.svg)](https://github.com/kitsuneMori96/astrbot_plugin_wave_memory/releases)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-≥4.14-green.svg)](https://github.com/AstrBotDevs/AstrBot)
@@ -11,7 +11,7 @@
 
 *SQLite + HNSW + 纯数学 — 不需要 Neo4j、不需要 Elasticsearch、不需要向量数据库*
 
-[快速开始](#快速开始) · [检索引擎](#-检索引擎) · [灵魂系统](#-灵魂系统) · [WebUI](#-webui-管理面板) · [Releases](https://github.com/vivy1024/astrbot_plugin_wave_memory/releases)
+[快速开始](#快速开始) · [检索引擎](#-检索引擎) · [灵魂系统](#-灵魂系统) · [WebUI](#-webui-管理面板) · [Releases](https://github.com/kitsuneMori96/astrbot_plugin_wave_memory/releases)
 
 </div>
 
@@ -26,12 +26,17 @@
 - ⏰ **记忆生命周期** — 时间衰减 + 重要性分级 + 自动淘汰，像人一样遗忘
 - 🔍 **时间感知检索** — 说"昨天/上周"自动加时间过滤，群隔离精确加权
 - 📊 **交互式知识图谱** — Three.js 3D 星图渲染，六层数据图层，多跳路径探索
-- 🔧 **零配置启动** — 填 2 个 Provider ID 即跑，所有子系统自动按条件就绪
+- 🔧 **零配置启动** — 留空 `embedding_provider_id` 自动使用首个可用 Embedding Provider，填 2 个 Provider ID 即跑，所有子系统自动按条件就绪
+- 🤖 **Bot 互聊防护** — 名单 + 启发式识别其他 bot 发言，避免 bot 互相接话无限循环
+- 🙋 **主动求助答疑** — 群里求助（尤其编程/报错）自动提供解惑，可联网搜索，独立限频
 
 ### Recent Releases
 
 | 版本 | 日期 | 重点 |
 |------|------|------|
+| **v4.6.1** | 2026-08-20 | 其他 bot 发言识别（名单 + 启发式），避免 bot 互聊循环；`embedding_provider_id` 留空自动选首个可用 Embedding Provider；v4.26 兼容（窗口候选模拟唤醒放行 LLM 自判、冷却/刷屏拦截改用 stop_event） |
+| **v4.6.0** | 2026-08-15 | 主动求助答疑：群里求助（尤其编程/报错）自动提供解惑，支持联网搜索，独立限频 |
+| **v4.5.1** | 2026-08-07 | 记忆衰减模型修复 + 死配置接线 + 参数合理化；窗口候选 LLM 自判 + 消息防抖配置 |
 | **v4.5.0** | 2026-07-06 | 前端优化 + 黑盒管理前端：黑盒管理矩阵 · `/api/blackbox` 只读 API · BookLore/FewShot/Facts/People/Indexes 真实数据闭环 |
 | **v4.2.1** | 2026-07-05 | Holyman GitHub 更新握手：轻量检查缓存 · 强制刷新 · 预览确认同步 · lint 清零 |
 | **v4.2.0** | 2026-07-05 | React WebUI Holyman 黑话治理补全：筛选/批量审核 · 显式命中注入 · 神经云图与审计 UI 修复 |
@@ -266,13 +271,14 @@ cd webui/frontend && pnpm run build
 
 ### 安装
 
-将插件目录放入 AstrBot `data/plugins/`，自动安装依赖。
+1. **AstrBot 插件市场**：管理后台 → 插件管理 → 搜索 `Wave Memory` 一键安装；或
+2. **手动安装**：`git clone https://github.com/kitsuneMori96/astrbot_plugin_wave_memory` 放入 AstrBot `data/plugins/` 目录，重启 AstrBot 自动安装依赖（hnswlib / numpy / scikit-learn / quart / hypercorn）。
 
 ### 配置
 
 | 配置项 | 说明 | 推荐值 |
 |--------|------|--------|
-| `embedding_provider_id` | Embedding 模型 | `siliconflow/Qwen3-Embedding-0.6B` |
+| `embedding_provider_id` | Embedding 模型；**留空自动使用 AstrBot 首个可用 Embedding Provider** | 留空，或 `openai_embedding` 等 |
 | `tag_llm_provider_id` | Tag/黑话/风格用 LLM | `xiaomi/mimo-v2.5-pro` |
 | `embedding_dimension` | 向量维度 | `1024` |
 
@@ -288,7 +294,7 @@ AstrBot >= 4.14.0 · Python 3.10+ · WebUI 默认端口 9876
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| embedding_provider_id | （必填） | Embedding 模型 Provider ID |
+| embedding_provider_id | 留空自动选择 | Embedding 模型 Provider ID；留空自动使用 AstrBot 首个可用 Embedding Provider |
 | tag_llm_provider_id | （必填） | Tag/黑话/风格用 LLM |
 | embedding_dimension | 1024 | 向量维度 |
 
@@ -383,6 +389,29 @@ AstrBot >= 4.14.0 · Python 3.10+ · WebUI 默认端口 9876
 | MetaThinking_Bot1 / Bot2 | bot QQ、名称、db_id、别名、主动插话、排除 source |
 | MetaThinking_Settings | 规则过滤、主动插话频率、静默时段、Provider fallback |
 | PersonaComposer | 无单独配置；自动使用 bot registry、BeliefEngine、经历检索、Few-Shot |
+
+### 消息过滤 (Message_Filter)
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| other_bot_ids | 空 | 其他 bot 的 QQ 号（逗号/分号/换行分隔多个）；命中者发言一律不触发主动回应，被 @ 也不回复（记忆仍正常写入） |
+| bot_chat_heuristic | true | 启发式识别其他 bot：对方刚发言后极短时间内到达的超长文本视为疑似 bot 秒回，不触发主动回应 |
+| other_bot_quick_seconds | 10 | 启发式「秒回」判定窗口（秒） |
+| other_bot_min_length | 80 | 启发式「超长文本」判定字数 |
+| debounce_seconds | 0 | 同 bot 连续发言防抖（秒） |
+
+### 主动求助答疑 (MetaThinking_Settings)
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| help_enabled | true | 开启主动求助答疑 |
+| help_interval_seconds | 300 | 两次答疑最小间隔 |
+| help_max_per_hour | 6 | 每小时答疑次数上限（独立于主动插话配额） |
+| help_min_affection | 0 | 好感度低于此值的群友求助不抢答 |
+| help_web_search | false | 需要联网时走 DeepSeek `/responses` 官方 web_search 工具（需配置 API Key） |
+| web_search_api_key | 空 | DeepSeek API Key（用于联网搜索） |
+| web_search_base_url | - | DeepSeek API Base URL |
+| web_search_model | - | DeepSeek 模型 |
 
 ### 与 SelfLearning / ChatPlus 共存
 
