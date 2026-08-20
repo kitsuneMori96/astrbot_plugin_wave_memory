@@ -325,7 +325,7 @@ class WaveMemoryPlugin(Star):
         self.group_whitelist = [g.strip() for g in filter_cfg.get("group_whitelist", "").split(",") if g.strip()]
         self.group_blacklist = [g.strip() for g in filter_cfg.get("group_blacklist", "").split(",") if g.strip()]
         # 其他 bot 识别：名单优先 + 启发式兜底（避免 bot 互聊循环）
-        self.other_bot_ids = {s.strip() for s in filter_cfg.get("other_bot_ids", "").split(",") if s.strip()}
+        self.other_bot_ids = {s.strip() for s in re.split(r"[，,;\n\r]+", filter_cfg.get("other_bot_ids", "")) if s.strip()}
         heuristic = filter_cfg.get("bot_chat_heuristic", True)
         self.bot_chat_heuristic = True if heuristic is None else bool(heuristic)
         self.other_bot_quick_seconds = max(1, int(filter_cfg.get("other_bot_quick_seconds", 10)))

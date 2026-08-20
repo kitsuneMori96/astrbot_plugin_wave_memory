@@ -50,6 +50,13 @@ class OtherBotDetectTest(unittest.TestCase):
 class OtherBotConfigReadTest(unittest.TestCase):
     """配置读取：名单/启发式开关/阈值解析。"""
 
+    def test_multi_ids_parsing(self):
+        """多个 QQ 号：支持英文逗号、中文逗号、换行分隔。"""
+        import re
+        for raw in ("123,456", "123，456", "123\n456", "123, 456,789"):
+            ids = {s.strip() for s in re.split(r"[，,;\n\r]+", raw) if s.strip()}
+            self.assertEqual(ids, {"123", "456"} if "789" not in raw else {"123", "456", "789"})
+
     def _load(self, cfg):
         from main import WaveMemoryPlugin
         with self.assertRaises(ImportError):
