@@ -14,10 +14,12 @@ class _Meta:
 class _FakeProvider:
     """模拟 AstrBot embedding provider。"""
 
-    def __init__(self, pid: str, fail: bool = False, dim: int = 1024):
+    def __init__(self, pid: str, fail: bool = False, dim: int = 1024, disabled: bool = False):
         self._meta = _Meta(pid)
         self.fail = fail
         self.dim = dim
+        self.disabled = disabled
+        self.provider_config = {"id": pid, "enable": not disabled}
         self.calls = 0
 
     def meta(self):
@@ -79,6 +81,20 @@ class EmbeddingServiceTest(unittest.IsolatedAsyncioTestCase):
     async def test_all_failed_returns_none_vectors(self):
         a, b = _FakeProvider("a", fail=True), _FakeProvider("b", fail=True)
         svc = EmbeddingService(_Ctx([a, b]), provider_id="")
+        vecs = await svc.get_embeddings(["x"])
+        self.assertEqual(vecs, [None])
+
+    async def test_skips_disabled_provider(self):
+        """已禁用（enable=false）的 provider 留空选择时被跳过。"""
+        a = _FakeProvider("siliconflow", disabled=True)
+        b = _FakeProvider("nvidia_embedding")
+        svc = EmbeddingService(_Ctx([a, b]), provider_id="")
+        p = svc._get_provider()
+        self.assertEqual(p.meta().id, "nvidia_embedding")
+
+    async def test_all_disabled_returns_none_provider(self):
+        """全部 provider 被禁用时返回 None。"""
+        svc = EmbeddingService(_Ctx([_FakeProvider("a", disabled=True)]), provider_id="")
         vecs = await svc.get_embeddings(["x"])
         self.assertEqual(vecs, [None])
 

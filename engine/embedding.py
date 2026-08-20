@@ -53,20 +53,34 @@ class EmbeddingService:
                     self._provider = p
                     return p
 
-        # 留空：选第一个未被标记为失败的 provider
+        # 留空：选第一个未被标记为失败、且未被禁用的 provider
         for p in providers:
-            if self._is_failed(p):
+            if self._is_disabled(p) or self._is_failed(p):
                 continue
             self._provider = p
             return self._provider
 
-        # 全部失败过：重置标记，重新从第一个尝试
+        # 全部失败/禁用过：重置失败标记（不禁用标记），重新从第一个尝试
         self._failed_provider_ids.clear()
         for p in providers:
+            if self._is_disabled(p):
+                continue
             self._provider = p
             return self._provider
 
         return None
+
+    @staticmethod
+    def _is_disabled(p) -> bool:
+        """provider 是否在 AstrBot 配置中被禁用（enable=false）。"""
+        try:
+            cfg = getattr(p, "provider_config", None) or {}
+            if not cfg.get("enable", True):
+                logger.debug(f"[WaveMemory] Skipping disabled embedding provider: {cfg.get('id', '')}")
+                return True
+        except Exception:
+            pass
+        return False
 
     @staticmethod
     def _provider_key(p) -> str:
