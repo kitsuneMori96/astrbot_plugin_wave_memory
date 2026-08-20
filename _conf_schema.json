@@ -373,6 +373,30 @@
         "hint": "用户连续说话时，记忆写入的合并窗口。设 0 关闭防抖（每条消息立即写入记忆库）。低延迟场景推荐 0。",
         "type": "float",
         "default": 0
+      },
+      "other_bot_ids": {
+        "description": "其他机器人 QQ 号名单",
+        "hint": "逗号分隔的 QQ 号。这些账号的发言不被主动对话/窗口候选/求助答疑触发，被 @ 也不回复（但记忆仍会写入）。用于避免 bot 互聊循环。",
+        "type": "string",
+        "default": ""
+      },
+      "bot_chat_heuristic": {
+        "description": "其他 bot 发言启发式检测",
+        "hint": "开启后，检测「茉莉刚发言后极短时间内（< other_bot_quick_seconds 秒）到达的超长文本（>= other_bot_min_length 字）」视为疑似 bot 发言并跳过主动回应。",
+        "type": "bool",
+        "default": true
+      },
+      "other_bot_quick_seconds": {
+        "description": "启发式：疑似 bot 回复的最快间隔（秒）",
+        "hint": "消息距茉莉上一条发言小于该秒数，且长度达到 other_bot_min_length，视为疑似 bot 秒回。",
+        "type": "int",
+        "default": 10
+      },
+      "other_bot_min_length": {
+        "description": "启发式：疑似 bot 回复的最短长度（字）",
+        "hint": "消息长度达到该值且回复速度超过 other_bot_quick_seconds 时，视为疑似 bot 发言。",
+        "type": "int",
+        "default": 80
       }
     }
   },

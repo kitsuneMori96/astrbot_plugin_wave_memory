@@ -19,6 +19,36 @@ from .identity_safety import is_identity_contamination, prepend_identity_safety_
 EXTREME_ATTACK = re.compile(r'(你[妈马]|nmsl|死[全妈]|全家|操你|fuck\s*you|滚去死|杀了你|弄死你)')
 
 
+# ─── 其他 bot 发言识别（纯函数）：名单优先 + 启发式兜底，避免 bot 互聊循环 ───
+def detect_other_bot_message(
+    sender_id: str,
+    message: str,
+    last_send_ts: float = 0.0,
+    now: float = None,
+    other_bot_ids: set = None,
+    heuristic_enabled: bool = True,
+    quick_seconds: int = 10,
+    min_length: int = 80,
+) -> bool:
+    """判断这条消息是否疑似其他 bot 的发言。
+
+    名单命中：无条件视为其他 bot（含被 @ 也不回复）。
+    启发式：bot 刚发言后的极短窗口内（< quick_seconds 秒）到达的超长文本
+    （>= min_length 字），视为疑似 bot 秒回。
+    """
+    if sender_id and other_bot_ids and sender_id in other_bot_ids:
+        return True
+    if not heuristic_enabled:
+        return False
+    if not last_send_ts:
+        return False
+    if now is None:
+        now = time.time()
+    if now - last_send_ts >= quick_seconds:
+        return False
+    return len(message or "") >= min_length
+
+
 # ─── 回话后窗口内：粗筛"是否值得交给 LLM 自判主动回答"（纯函数）───
 _WINDOW_CMD_PREFIXES = ("/teach", "/teach:", "记住", "记下", "remember", "忘记", "忘掉", "forget", "别记")
 _WINDOW_ASK_RE = re.compile(r"什么|怎么|为啥|为什么|在哪|干啥|干嘛")

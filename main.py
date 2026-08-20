@@ -324,6 +324,13 @@ class WaveMemoryPlugin(Star):
         self.ignore_bot_messages = filter_cfg.get("ignore_bot_messages", False)
         self.group_whitelist = [g.strip() for g in filter_cfg.get("group_whitelist", "").split(",") if g.strip()]
         self.group_blacklist = [g.strip() for g in filter_cfg.get("group_blacklist", "").split(",") if g.strip()]
+        # 其他 bot 识别：名单优先 + 启发式兜底（避免 bot 互聊循环）
+        self.other_bot_ids = {s.strip() for s in filter_cfg.get("other_bot_ids", "").split(",") if s.strip()}
+        heuristic = filter_cfg.get("bot_chat_heuristic", True)
+        self.bot_chat_heuristic = True if heuristic is None else bool(heuristic)
+        self.other_bot_quick_seconds = max(1, int(filter_cfg.get("other_bot_quick_seconds", 10)))
+        self.other_bot_min_length = max(10, int(filter_cfg.get("other_bot_min_length", 80)))
+        self._other_bot_msg = False
 
         # 性能配置
         self.embedding_batch_size = int(perf_cfg.get("embedding_batch_size", 10))
@@ -1730,6 +1737,25 @@ class WaveMemoryPlugin(Star):
     _analysis_pending: dict = {}    # {group_id: ts} 候选待 _should_engage 消耗（30s TTL）
     _analysis_counts: dict = {}     # {group_id: {"minute": int, "count": int}} 频率上限
 
+    def _detect_other_bot(self, event: AstrMessageEvent, sender_id: str, message: str, group_id: str) -> bool:
+        """识别「其他 bot」的发言：名单优先 + 启发式兜底（避免 bot 互聊循环）。
+
+        名单命中：无条件视为其他 bot（含被 @ 也不回复）。
+        启发式：茉莉刚发言后的极短窗口内（< other_bot_quick_seconds 秒）到达的超长文本
+        （>= other_bot_min_length 字），视为疑似 bot 秒回。
+        """
+        from .services.meta_thinking import detect_other_bot_message
+        last = self._bot_last_send.get(group_id) or {}
+        return detect_other_bot_message(
+            sender_id=sender_id,
+            message=message,
+            last_send_ts=last.get("ts", 0.0),
+            other_bot_ids=self.other_bot_ids,
+            heuristic_enabled=self.bot_chat_heuristic,
+            quick_seconds=self.other_bot_quick_seconds,
+            min_length=self.other_bot_min_length,
+        )
+
     def _should_engage(self, event: AstrMessageEvent) -> str:
         """规则链前置过滤：判断消息是否与 bot 相关。
 
@@ -1744,47 +1770,52 @@ class WaveMemoryPlugin(Star):
         sender_id = event.get_sender_id() or ""
         group_id = event.get_group_id() or ""
 
-        # 0. 窗口内预筛候选 → 直接交给 LLM 自判（on_message 已模拟唤醒并允许 LLM）
+        # 0. 其他 bot 发言 → 一律 skip（含被 @，避免 bot 互聊循环）
+        if getattr(self, "_other_bot_msg", False):
+            self._engage_reason = "other_bot"
+            return "skip"
+
+        # 1. 窗口内预筛候选 → 直接交给 LLM 自判（on_message 已模拟唤醒并允许 LLM）
         pending_ts = getattr(self, "_analysis_pending", {}).pop(group_id, 0)
         if pending_ts and time.time() - pending_ts < 30:
             self._engage_reason = "window_analyze"
             return "analyze"
 
-        # 1. @bot 或唤醒词 → must_reply
+        # 2. @bot 或唤醒词 → must_reply
         if is_at_bot:
             self._engage_reason = "at"
             return "must_reply"
 
-        # 2. 私聊 → must_reply
+        # 3. 私聊 → must_reply
         if not group_id or group_id.startswith("private:"):
             self._engage_reason = "private"
             return "must_reply"
 
-        # 3. 引用了 bot 消息 → must_reply
+        # 4. 引用了 bot 消息 → must_reply
         if "[引用消息" in message:
             for bid in self._bot_qq_ids:
                 if bid and bid in message:
                     self._engage_reason = "quote_bot"
                     return "must_reply"
 
-        # 4. bot 发言后：重点看其他人是否想继续聊（对话延续门控）
-        # 4.0 窗口内预筛候选已在入口处优先交给 LLM 自判（on_message 已模拟唤醒）
+        # 5. bot 发言后：重点看其他人是否想继续聊（对话延续门控）
+        # 5.0 窗口内预筛候选已在入口处优先交给 LLM 自判（on_message 已模拟唤醒）
         last_send = self._bot_last_send.get(group_id)
         if last_send and time.time() - last_send["ts"] < self._continue_window():
             bot_last_text = (last_send.get("text") or "").strip()
 
-            # 4a. 显式继续信号：@bot / 命中 bot 名字或别名 → 视为接着聊
+            # 5a. 显式继续信号：@bot / 命中 bot 名字或别名 → 视为接着聊
             if self._matches_bot_identity(message):
                 self._engage_reason = "bot_identity"
                 return "may_reply"
 
-            # 4b. 话题延续：与 bot 上一条发言存在主题重叠
+            # 5b. 话题延续：与 bot 上一条发言存在主题重叠
             overlap = _topic_overlap(message, bot_last_text)
             if overlap >= self._continue_overlap_threshold():
                 self._engage_reason = "topic_continue"
                 return "may_reply"
 
-            # 4c. 兜底：bot 近期回帖过此人，且对方语句与 bot 话题有一定粘连
+            # 5c. 兜底：bot 近期回帖过此人，且对方语句与 bot 话题有一定粘连
             reply_key = f"{sender_id}:{group_id}"
             last_reply_ts = self._reply_tracker.get(reply_key, 0)
             if overlap > 0 and time.time() - last_reply_ts < self._aba_window():
@@ -1793,12 +1824,12 @@ class WaveMemoryPlugin(Star):
 
             # 无延续意图 → 落入下面的兴趣词判断，否则 skip
 
-        # 5. 包含兴趣关键词 → may_reply
+        # 6. 包含兴趣关键词 → may_reply
         if self.meta_thinking and self.meta_thinking.is_interesting(message):
             self._engage_reason = "interest"
             return "may_reply"
 
-        # 6. 其他 → skip
+        # 7. 其他 → skip
         return "skip"
 
     def _continue_window(self) -> int:
@@ -2768,6 +2799,13 @@ class WaveMemoryPlugin(Star):
         group_id = event.get_group_id() or f"private:{sender_id}"
         bot_id = event.get_self_id() or ""
 
+        # 其他 bot 发言识别：名单优先 + 启发式兜底（避免 bot 互聊循环）
+        self._other_bot_msg = self._detect_other_bot(event, sender_id, message, group_id)
+        if self._other_bot_msg:
+            # v4.26+：should_call_llm(True) = 禁止默认 LLM 请求，被 @ 也不回复
+            event.should_call_llm(True)
+            logger.info(f"[WaveMemory] 其他bot发言已拦截: {sender_id} ({message.strip()[:30]})")
+
         # 平台会把 bot 自己发出的文本/图片回推成普通消息事件。
         # ignore_bot_messages=true 时必须在这里也截断；after_message_sent 不是唯一入口。
         if sender_id and (sender_id == bot_id or sender_id in self._bot_qq_ids):
@@ -2884,6 +2922,7 @@ class WaveMemoryPlugin(Star):
 
         # ─── 回话后窗口内：粗筛候选 → 强制 LLM 自判是否主动回答 ───
         if (self._window_analyze_enabled()
+                and not self._other_bot_msg
                 and not group_id.startswith("private:")
                 and not getattr(event, "is_at_or_wake_command", False)
                 and self._window_active(group_id)
@@ -3069,6 +3108,7 @@ class WaveMemoryPlugin(Star):
             proactive_ok = bot_profile.proactive_enabled if bot_profile else self.meta_thinking.proactive_enabled if self.meta_thinking else False
             if (self.meta_thinking
                 and proactive_ok
+                and not self._other_bot_msg
                 and not getattr(event, "is_at_or_wake_command", False)
                 and group_id
                 and not group_id.startswith("private:")
@@ -3124,6 +3164,7 @@ class WaveMemoryPlugin(Star):
             is_interesting = self.meta_thinking.is_interesting(locked_message) if self.meta_thinking else False
             if (self.meta_thinking
                 and proactive_ok
+                and not self._other_bot_msg
                 and not getattr(event, "is_at_or_wake_command", False)
                 and group_id
                 and (is_interesting or concern_score > 0.3)):

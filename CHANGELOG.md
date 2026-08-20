@@ -1,5 +1,16 @@
 # Changelog
 
+## v4.6.1 (2026-08-20)
+
+### 其他 bot 发言识别：避免 bot 互聊循环
+
+- **问题**：群里有其他 bot（如 Astral）时，其接话发言（"对，这版…"/快速长回复）会命中窗口候选/求助答疑/主动对话，导致两个 bot 互相接话无限循环。
+- **名单优先**：`Message_Filter` 新增 `other_bot_ids`（逗号分隔 QQ 号）——命中者的发言一律不触发主动回应，**被 @ 也不回复**（记忆仍正常写入）。
+- **启发式兜底**：`bot_chat_heuristic`（默认开）——检测「茉莉刚发言后极短时间（< `other_bot_quick_seconds`，默认 10s）内到达的超长文本（>= `other_bot_min_length`，默认 80 字）」视为疑似 bot 秒回，同样不触发主动回应。
+- **拦截点**：窗口候选（main.py 窗口候选分支）、求助答疑、主动对话三个主动入口全部加闸；`_should_engage` 入口对已识别的 bot 消息直接 skip（含被 @），on_message 中同时设置 `should_call_llm(True)` 禁止 LLM 请求。
+- **测试**：新增 `tests/test_other_bot_filter.py` 覆盖名单命中、启发式命中/慢速/短文本/边界、配置 schema 存在性。
+- **配置**：`Message_Filter` 新增 `other_bot_ids` / `bot_chat_heuristic` / `other_bot_quick_seconds` / `other_bot_min_length`。升级用户如需精确拦截请将对方 bot 的 QQ 号填入 `other_bot_ids`。
+
 ## v4.6.0 (2026-08-15)
 
 ### 主动求助答疑：群里求助（尤其编程/报错）自动提供解惑
