@@ -1834,6 +1834,37 @@ class WaveMemoryPlugin(Star):
             pass
         return False
 
+    def _quote_targets_other(self, event: AstrMessageEvent) -> bool:
+        """消息是否引用（回复）了非本 bot 的其他用户的消息。
+
+        「[引用 群友A] 怎么这么强」是在跟 A 说话——窗口候选会把这类句子
+        误当对 bot 说。组件 sender_id 缺失时回退到文本判定：引用段含自己 QQ
+        视为引用 bot，否则视为引用他人。
+        """
+        try:
+            comps = getattr(getattr(event, "message_obj", None), "message", None) or []
+            my_ids = {str(q) for q in self._bot_qq_ids if q}
+            for comp in comps:
+                if comp.__class__.__name__ != "Reply":
+                    continue
+                sender = str(getattr(comp, "sender_id", "") or "")
+                if not sender or sender == "0":
+                    text = str(getattr(comp, "message_str", "") or "") + str(
+                        getattr(comp, "sender_nickname", "") or ""
+                    )
+                    if not any(bid and bid in text for bid in my_ids):
+                        return True
+                    continue
+                if sender not in my_ids:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _points_at_other(self, event: AstrMessageEvent) -> bool:
+        """统一点名检测：At 或 引用 了非本 bot 的其他成员（含@全体）。"""
+        return self._at_targets_other(event) or self._quote_targets_other(event)
+
     def _mark_at_other(self, group_id: str, sender_id: str) -> None:
         """记录「该成员刚刚 At 了别人」——紧随其后的无 At 续接句大概率仍在对那位成员说话。"""
         self._last_at_other[group_id] = {"ts": time.time(), "sender_id": sender_id}
@@ -1863,25 +1894,33 @@ class WaveMemoryPlugin(Star):
         )
 
     def _at_info_text(self, event: AstrMessageEvent, bot_qq: str = "") -> str:
-        """提取消息 At 目标描述，供 Planner prompt 消歧。"""
+        """提取消息点名目标描述（At + 引用），供 Planner prompt 消歧。"""
         try:
+            parts = []
             comps = getattr(getattr(event, "message_obj", None), "message", None) or []
-            targets = []
             for comp in comps:
-                if comp.__class__.__name__ == "At":
+                cls = comp.__class__.__name__
+                if cls == "At":
                     qq = str(getattr(comp, "qq", "") or "")
                     name = getattr(comp, "name", "") or ""
                     if qq == "all":
-                        targets.append("@全体成员")
+                        parts.append("@全体成员")
                     else:
-                        targets.append(f"@{name}({qq})" if name else f"@(QQ:{qq})")
-            if not targets:
+                        parts.append(f"At 了 {name}({qq})" if name else f"At 了 (QQ:{qq})")
+                elif cls == "Reply":
+                    sender = str(getattr(comp, "sender_id", "") or "")
+                    nick = getattr(comp, "sender_nickname", "") or ""
+                    if sender and nick:
+                        parts.append(f"引用了 {nick}({sender}) 的消息")
+                    elif nick:
+                        parts.append(f"引用了 {nick} 的消息")
+            if not parts:
                 return "没有点任何人"
             me = bot_qq or (self._bot_qq_ids[0] if self._bot_qq_ids else "")
-            for t in targets:
-                if me and me in t:
-                    return f"{t} —— 点的是你"
-            return f"{'、'.join(targets)} —— 点的不是你，是别的成员"
+            joined = "；".join(parts)
+            if me and me in joined:
+                return f"{joined} —— 点的是你"
+            return f"{joined} —— 点的不是你，是别的成员"
         except Exception:
             return "没有点任何人"
 
@@ -1993,7 +2032,7 @@ class WaveMemoryPlugin(Star):
 
         # 0.5 At 了别的成员 → 不是在叫自己，主动态度全部关闭
         #     （@自己时 is_at_bot=True 走 must_reply，不受影响）
-        if not is_at_bot and self._at_targets_other(event):
+        if not is_at_bot and self._points_at_other(event):
             self._engage_reason = "at_other"
             return "skip"
 
@@ -3211,7 +3250,7 @@ class WaveMemoryPlugin(Star):
         # 硬触发(@/私聊/引用)不进此分支，由框架自然唤醒；forced 风格在 meta_thinking_check 产出。
         # At 了别人（含@全体）的消息不做主动响应——点名别人不是叫自己。
         # 同一成员紧随其后的无 At 续接句（≤8s）也跳过：「@A」+「你怎么这么强」是在跟 A 说话。
-        at_other_now = self._at_targets_other(event)
+        at_other_now = self._points_at_other(event)
         follows_at = self._follows_recent_at_other(group_id, sender_id)
         if at_other_now:
             self._mark_at_other(group_id, sender_id)
