@@ -234,6 +234,21 @@ class ConversationPlanner:
                 logger.warning(f"[ConversationPipeline] resolve_persona failed: {e}")
         return f"当前身份：{bot_name or 'bot'}。保持自然、克制、有边界感。"
 
+    def _persona_display_name(self, bot_id: str, group_id: str, bot_name: str) -> str:
+        """人设显示名：优先提示词中心人设名（如『茉莉』），回退 registry 配置名。
+
+        identity_guard 用 registry 名（可能与 wave 人设名不同）会造成双身份冲突。
+        """
+        if self.prompt_service is not None:
+            try:
+                p = self.prompt_service.resolve_persona(bot_id=bot_id, group_id=group_id, bot_name=bot_name)
+                name = (p.get("name") or "").strip()
+                if name and p.get("id"):
+                    return name
+            except Exception:
+                pass
+        return bot_name
+
     def _identity_guard(self, bot_name: str) -> str:
         if self.prompt_service is not None:
             try:
@@ -264,7 +279,8 @@ class ConversationPlanner:
                     at_hint: str = "", forced: bool = False) -> dict:
         ps = self.prompt_service
         persona = self._resolve_persona_text(bot_id, group_id, bot_name)
-        guard = self._identity_guard(bot_name)
+        display_name = self._persona_display_name(bot_id, group_id, bot_name) or bot_name
+        guard = self._identity_guard(display_name)
 
         marker = "沉默"
         if ps is not None:
