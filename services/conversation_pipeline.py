@@ -255,7 +255,7 @@ class ConversationPlanner:
     async def _plan(self, *, template_key: str, context_messages: list[str],
                     message: str, bot_id: str = "", group_id: str = "",
                     bot_name: str = "bot", scenario_hint: str = "",
-                    forced: bool = False) -> dict:
+                    at_hint: str = "", forced: bool = False) -> dict:
         ps = self.prompt_service
         persona = self._resolve_persona_text(bot_id, group_id, bot_name)
         guard = self._identity_guard(bot_name)
@@ -270,6 +270,7 @@ class ConversationPlanner:
             "context": self._format_context(context_messages),
             "message": (message or "").strip(),
             "scenario_hint": scenario_hint or "",
+            "at_info": at_hint or "",
         }
         prompt = ps.render(template_key, **variables) if ps is not None else ""
         if not prompt:
@@ -298,13 +299,13 @@ class ConversationPlanner:
 
     async def plan_gate(self, *, context_messages: list[str], message: str,
                         bot_id: str = "", group_id: str = "", bot_name: str = "bot",
-                        scenario_hint: str = "") -> dict:
+                        scenario_hint: str = "", at_hint: str = "") -> dict:
         """窗口候选 / 特例场景：完整判定（yes/no + 风格）。"""
         return await self._plan(
             template_key="planner_gate",
             context_messages=context_messages, message=message,
             bot_id=bot_id, group_id=group_id, bot_name=bot_name,
-            scenario_hint=scenario_hint, forced=False,
+            scenario_hint=scenario_hint, at_hint=at_hint, forced=False,
         )
 
     async def plan_forced(self, *, context_messages: list[str], message: str,

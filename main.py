@@ -1812,6 +1812,50 @@ class WaveMemoryPlugin(Star):
     _analysis_pending: dict = {}    # {group_id: {"ts","style","kind"}} 候选待 _should_engage 消耗（30s TTL）
     _analysis_counts: dict = {}     # {group_id: {"minute": int, "count": int}} 频率上限
 
+    def _at_targets_other(self, event: AstrMessageEvent) -> bool:
+        """消息是否 At 了非本 bot 的其他用户（或 @全体）。
+
+        点名别人时（如「@A 帮我画」）不做任何主动响应——
+        这是身份混淆误回复的主要入口：窗口候选 R5 祈使/场景匹配会把
+        「帮我 X」句式当成在叫自己。硬触发（@自己）由 AstrBot 判定，不受影响。
+        """
+        try:
+            comps = getattr(getattr(event, "message_obj", None), "message", None) or []
+            my_ids = {str(q) for q in self._bot_qq_ids if q}
+            for comp in comps:
+                if comp.__class__.__name__ == "At":
+                    qq = str(getattr(comp, "qq", "") or "")
+                    if not qq or qq == "all":
+                        return True
+                    if qq not in my_ids:
+                        return True
+        except Exception:
+            pass
+        return False
+
+    def _at_info_text(self, event: AstrMessageEvent, bot_qq: str = "") -> str:
+        """提取消息 At 目标描述，供 Planner prompt 消歧。"""
+        try:
+            comps = getattr(getattr(event, "message_obj", None), "message", None) or []
+            targets = []
+            for comp in comps:
+                if comp.__class__.__name__ == "At":
+                    qq = str(getattr(comp, "qq", "") or "")
+                    name = getattr(comp, "name", "") or ""
+                    if qq == "all":
+                        targets.append("@全体成员")
+                    else:
+                        targets.append(f"@{name}({qq})" if name else f"@(QQ:{qq})")
+            if not targets:
+                return "没有点任何人"
+            me = bot_qq or (self._bot_qq_ids[0] if self._bot_qq_ids else "")
+            for t in targets:
+                if me and me in t:
+                    return f"{t} —— 点的是你"
+            return f"{'、'.join(targets)} —— 点的不是你，是别的成员"
+        except Exception:
+            return "没有点任何人"
+
     def _detect_other_bot(self, event: AstrMessageEvent, sender_id: str, message: str, group_id: str) -> bool:
         """识别「其他 bot」的发言：名单优先 + 启发式兜底（避免 bot 互聊循环）。
 
@@ -1916,6 +1960,12 @@ class WaveMemoryPlugin(Star):
         # 0. 其他 bot 发言 → 一律 skip（含被 @，避免 bot 互聊循环）
         if getattr(self, "_other_bot_msg", False):
             self._engage_reason = "other_bot"
+            return "skip"
+
+        # 0.5 At 了别的成员 → 不是在叫自己，主动态度全部关闭
+        #     （@自己时 is_at_bot=True 走 must_reply，不受影响）
+        if not is_at_bot and self._at_targets_other(event):
+            self._engage_reason = "at_other"
             return "skip"
 
         # 1. 窗口内预筛候选 → Planner gate 已放行，直接进管线（风格在 meta_thinking_check 注入）
@@ -3125,7 +3175,9 @@ class WaveMemoryPlugin(Star):
 
         # ─── 三段式架构（v5.0）：候选收集 → Planner gate → 模拟唤醒 ───
         # 硬触发(@/私聊/引用)不进此分支，由框架自然唤醒；forced 风格在 meta_thinking_check 产出。
+        # At 了别人（含@全体）的消息不做主动响应——点名别人不是叫自己。
         if (not self._other_bot_msg
+                and not self._at_targets_other(event)
                 and group_id
                 and not group_id.startswith("private:")
                 and not getattr(event, "is_at_or_wake_command", False)):
@@ -3149,6 +3201,7 @@ class WaveMemoryPlugin(Star):
                             group_id=group_id,
                             bot_name=self._get_bot_name(bot_id_for_plan),
                             scenario_hint=getattr(scenario_hit, "prompt_hint", ""),
+                            at_hint=self._at_info_text(event, bot_qq=bot_id_for_plan),
                         )
                     except Exception as e:
                         logger.warning(f"[WaveMemory] Planner gate failed: {e}")
