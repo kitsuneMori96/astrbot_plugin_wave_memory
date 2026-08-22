@@ -36,6 +36,32 @@ class PromptTemplateTest(_Base):
             self.assertIsNotNone(tpl, key)
             self.assertEqual(tpl["content"], BUILT_IN_TEMPLATES[key][2])
 
+    def test_legacy_default_follows_upgrade(self):
+        """DB 中未被用户修改的旧内置文案，seed 时自动跟随升级到当前默认。"""
+        from engine.db.prompt_repo import _LEGACY_DEFAULTS
+        key = "style_directive"
+        legacy = _LEGACY_DEFAULTS.get(key)
+        self.assertIsNotNone(legacy, "需要 _LEGACY_DEFAULTS 记录旧版文案")
+        # 模拟老库：写入旧版文案
+        self.cm.execute_write(
+            "UPDATE prompt_templates SET content = ? WHERE key = ?", (legacy, key)
+        )
+        self.cm.commit()
+        # 重新构造 repo（模拟插件重启时 seed）
+        PromptRepo(self.cm)
+        self.assertEqual(
+            self.prompt_repo.get(key)["content"],
+            BUILT_IN_TEMPLATES[key][2],
+            "旧默认文案应跟随升级到新内置文案",
+        )
+
+    def test_user_customized_content_not_overwritten_by_seed(self):
+        """用户改过的文案 seed 时不覆盖。"""
+        key = "style_directive"
+        self.prompt_repo.save(key, "我的自定义模板 XYZ")
+        PromptRepo(self.cm)  # 重跑 seed
+        self.assertEqual(self.prompt_repo.get(key)["content"], "我的自定义模板 XYZ")
+
     def test_save_and_render_custom_content(self):
         self.prompt_repo.save("style_directive", "[X] tone={tone} detail={detail}")
         out = self.svc.render("style_directive", tone="克制", detail="简洁")

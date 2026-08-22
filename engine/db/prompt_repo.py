@@ -113,7 +113,7 @@ class PromptRepo:
         seeded = 0
         for key, (name, category, content, variables) in BUILT_IN_TEMPLATES.items():
             row = self.cm.execute_read(
-                "SELECT key FROM prompt_templates WHERE key = ?", (key,)
+                "SELECT content FROM prompt_templates WHERE key = ?", (key,)
             ).fetchone()
             if row is None:
                 self.cm.execute_write(
