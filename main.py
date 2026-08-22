@@ -1810,6 +1810,7 @@ class WaveMemoryPlugin(Star):
 
     # 回话后窗口分析状态
     _analysis_pending: dict = {}    # {group_id: {"ts","style","kind"}} 候选待 _should_engage 消耗（30s TTL）
+    _last_at_other: dict = {}       # {group_id: {"ts","sender_id"}} 最近一次 At 他人事件（续接句消歧）
     _analysis_counts: dict = {}     # {group_id: {"minute": int, "count": int}} 频率上限
 
     def _at_targets_other(self, event: AstrMessageEvent) -> bool:
@@ -1832,6 +1833,34 @@ class WaveMemoryPlugin(Star):
         except Exception:
             pass
         return False
+
+    def _mark_at_other(self, group_id: str, sender_id: str) -> None:
+        """记录「该成员刚刚 At 了别人」——紧随其后的无 At 续接句大概率仍在对那位成员说话。"""
+        self._last_at_other[group_id] = {"ts": time.time(), "sender_id": sender_id}
+
+    def _follows_recent_at_other(self, group_id: str, sender_id: str, window: float = 8.0) -> bool:
+        """同一成员在极短窗口内的续接句（如先『@A』再『你怎么这么强』），
+        大概率仍在和被点的成员对话，不视为对 bot 说话。"""
+        rec = self._last_at_other.get(group_id)
+        if not rec:
+            return False
+        return (
+            rec.get("sender_id") == sender_id
+            and time.time() - rec.get("ts", 0) <= window
+        )
+
+    def _recent_at_context(self, group_id: str, sender_id: str, window: float = 30.0) -> str:
+        """8~30s 边缘情况：续接闸已放行但 At 记录仍新鲜时，给 Planner 提供证据文本。"""
+        rec = self._last_at_other.get(group_id)
+        if not rec or rec.get("sender_id") != sender_id:
+            return ""
+        age = time.time() - rec.get("ts", 0)
+        if not (window >= age > 8.0):
+            return ""
+        return (
+            f"；注意：该成员 {int(age)} 秒前刚 At 过其他成员——"
+            "这句话很可能是在跟那位成员说话，除非内容明确转向了你"
+        )
 
     def _at_info_text(self, event: AstrMessageEvent, bot_qq: str = "") -> str:
         """提取消息 At 目标描述，供 Planner prompt 消歧。"""
@@ -1966,6 +1995,11 @@ class WaveMemoryPlugin(Star):
         #     （@自己时 is_at_bot=True 走 must_reply，不受影响）
         if not is_at_bot and self._at_targets_other(event):
             self._engage_reason = "at_other"
+            return "skip"
+
+        # 0.6 同一成员紧随 At 他人之后的续接句 → 仍在对那位成员说话
+        if not is_at_bot and group_id and self._follows_recent_at_other(group_id, sender_id):
+            self._engage_reason = "follows_at_other"
             return "skip"
 
         # 1. 窗口内预筛候选 → Planner gate 已放行，直接进管线（风格在 meta_thinking_check 注入）
@@ -3176,8 +3210,14 @@ class WaveMemoryPlugin(Star):
         # ─── 三段式架构（v5.0）：候选收集 → Planner gate → 模拟唤醒 ───
         # 硬触发(@/私聊/引用)不进此分支，由框架自然唤醒；forced 风格在 meta_thinking_check 产出。
         # At 了别人（含@全体）的消息不做主动响应——点名别人不是叫自己。
+        # 同一成员紧随其后的无 At 续接句（≤8s）也跳过：「@A」+「你怎么这么强」是在跟 A 说话。
+        at_other_now = self._at_targets_other(event)
+        follows_at = self._follows_recent_at_other(group_id, sender_id)
+        if at_other_now:
+            self._mark_at_other(group_id, sender_id)
         if (not self._other_bot_msg
-                and not self._at_targets_other(event)
+                and not at_other_now
+                and not follows_at
                 and group_id
                 and not group_id.startswith("private:")
                 and not getattr(event, "is_at_or_wake_command", False)):
@@ -3201,7 +3241,9 @@ class WaveMemoryPlugin(Star):
                             group_id=group_id,
                             bot_name=self._get_bot_name(bot_id_for_plan),
                             scenario_hint=getattr(scenario_hit, "prompt_hint", ""),
-                            at_hint=self._at_info_text(event, bot_qq=bot_id_for_plan),
+                            at_hint=(
+                                self._at_info_text(event, bot_qq=bot_id_for_plan) + self._recent_at_context(group_id, sender_id)
+                            ),
                         )
                     except Exception as e:
                         logger.warning(f"[WaveMemory] Planner gate failed: {e}")
