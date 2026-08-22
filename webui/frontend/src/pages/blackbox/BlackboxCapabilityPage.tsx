@@ -33,17 +33,29 @@ interface BlackboxCapabilityPageProps {
   governance: GovernanceRow[]
 }
 
-export function BlackboxCapabilityPage({ title, description, badges, metrics, sections, governance }: BlackboxCapabilityPageProps) {
+interface BlackboxCapabilityPageProps {
+  title: string
+  description: string
+  badges: string[]
+  metrics: MetricItem[]
+  sections: InfoSection[]
+  governance: GovernanceRow[]
+  showBackLink?: boolean
+}
+
+export function BlackboxCapabilityPage({ title, description, badges, metrics, sections, governance, showBackLink = true }: BlackboxCapabilityPageProps) {
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex flex-col gap-2">
-          <Button asChild variant="ghost" size="sm" className="w-fit px-0 text-muted-foreground hover:bg-transparent">
-            <Link to="/blackbox">
-              <ArrowLeftIcon data-icon="inline-start" />
-              返回黑盒矩阵
-            </Link>
-          </Button>
+          {showBackLink && (
+            <Button asChild variant="ghost" size="sm" className="w-fit px-0 text-muted-foreground hover:bg-transparent">
+              <Link to="/blackbox">
+                <ArrowLeftIcon data-icon="inline-start" />
+                返回黑盒矩阵
+              </Link>
+            </Button>
+          )}
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
             {badges.map((badge) => (

@@ -256,9 +256,9 @@ export function SettingsPage() {
       <Card>
         <CardHeader className="flex flex-row items-center justify-between gap-4 py-4 shrink-0">
           <div className="flex flex-col gap-1">
-            <CardTitle>系统配置</CardTitle>
+            <CardTitle>运行时调参</CardTitle>
             <CardDescription>
-              配置整个 WaveMemory 引擎的各项核心行为，包含实时热更新调参和静态参数全量管理。
+              实时热调参滑块修改立即生效；全量 Schema 属静态配置，日常请前往 AstrBot 6185 配置页管理。
             </CardDescription>
           </div>
           {isDirty ? (
@@ -271,7 +271,7 @@ export function SettingsPage() {
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="grid w-full grid-cols-2 max-w-md shrink-0">
-          <TabsTrigger value="full">全量配置表单</TabsTrigger>
+          <TabsTrigger value="full">静态 Schema（低频）</TabsTrigger>
           <TabsTrigger value="hot">⚡ 实时热调参</TabsTrigger>
         </TabsList>
 

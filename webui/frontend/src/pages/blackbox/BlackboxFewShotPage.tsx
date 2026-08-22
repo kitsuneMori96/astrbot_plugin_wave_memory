@@ -36,7 +36,7 @@ function textField(item: BlackboxFewShotExample, key: keyof BlackboxFewShotExamp
   return value === undefined || value === null || value === '' ? fallback : String(value)
 }
 
-export function BlackboxFewShotPage() {
+export function BlackboxFewShotPage({ embedded = false }: { embedded?: boolean } = {}) {
   const [summary, setSummary] = useState<BlackboxFewShotSummary | null>(null)
   const [examplesPayload, setExamplesPayload] = useState<BlackboxListPayload<BlackboxFewShotExample> | null>(null)
   const [loading, setLoading] = useState(true)
@@ -77,6 +77,7 @@ export function BlackboxFewShotPage() {
   return (
     <div className="flex flex-col gap-6">
       <BlackboxCapabilityPage
+        showBackLink={!embedded}
         title="FewShot 管理"
         description="风格范例库，不是事实记忆，不代表真实发生过。"
         badges={['只读诊断', '治理配置', '通道配置']}

@@ -18,12 +18,10 @@ import {
 } from '@/components/ui/sidebar'
 
 const routeGroups = [
-  { label: '总览', paths: ['/dashboard'] },
-  { label: '记忆与导入', paths: ['/memories', '/import'] },
-  { label: '注入与通道', paths: ['/injection', '/channels'] },
-  { label: '认知与审查', paths: ['/beliefs', '/jargon', '/prompts', '/soul', '/learning-objects', '/agent-feedback'] },
-  { label: '黑盒管理', paths: ['/blackbox'] },
-  { label: '系统与维护', paths: ['/compatibility', '/settings'] },
+  { label: '日常运营', paths: ['/dashboard', '/memories', '/prompts', '/soul'] },
+  { label: '数据管理', paths: ['/import', '/bindings', '/beliefs', '/jargon', '/blackbox'] },
+  { label: '开发调试', paths: ['/injection', '/channels', '/learning-objects', '/agent-feedback'] },
+  { label: '系统维护', paths: ['/settings', '/compatibility'] },
 ]
 
 const toolLinks = [

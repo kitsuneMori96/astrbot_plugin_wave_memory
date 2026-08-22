@@ -33,7 +33,7 @@ function textField(item: Record<string, unknown>, key: string, fallback = '-'): 
   return value === undefined || value === null || value === '' ? fallback : String(value)
 }
 
-export function BlackboxBookLorePage() {
+export function BlackboxBookLorePage({ embedded = false }: { embedded?: boolean } = {}) {
   const [summary, setSummary] = useState<BlackboxBookLoreSummary | null>(null)
   const [entitiesPayload, setEntitiesPayload] = useState<BlackboxListPayload<BlackboxBookLoreEntity> | null>(null)
   const [communitiesPayload, setCommunitiesPayload] = useState<BlackboxListPayload<BlackboxBookLoreCommunity> | null>(null)
@@ -86,6 +86,7 @@ export function BlackboxBookLorePage() {
   return (
     <div className="flex flex-col gap-6">
       <BlackboxCapabilityPage
+        showBackLink={!embedded}
         title="BookLore 管理"
         description="世界观/书设知识库，不是群聊记忆，不是人格指令。"
         badges={['只读诊断', '治理配置', '重建索引需二次确认']}

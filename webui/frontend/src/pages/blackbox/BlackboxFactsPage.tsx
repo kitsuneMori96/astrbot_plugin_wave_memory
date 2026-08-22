@@ -26,7 +26,7 @@ function textField(item: BlackboxFactItem, key: keyof BlackboxFactItem, fallback
   return value === undefined || value === null || value === '' ? fallback : String(value)
 }
 
-export function BlackboxFactsPage() {
+export function BlackboxFactsPage({ embedded = false }: { embedded?: boolean } = {}) {
   const [factsPayload, setFactsPayload] = useState<BlackboxListPayload<BlackboxFactItem> | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -69,6 +69,7 @@ export function BlackboxFactsPage() {
   return (
     <div className="flex flex-col gap-6">
       <BlackboxCapabilityPage
+        showBackLink={!embedded}
         title="Facts / 关系管理"
         description="稳定事实关系与人物/实体关系，不是自由文本记忆。"
         badges={['只读诊断', '治理配置', '删除、合并重复 facts 需二次确认']}

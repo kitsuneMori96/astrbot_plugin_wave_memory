@@ -2,15 +2,13 @@ import type { ComponentType } from 'react'
 import {
   ActivityIcon,
   BookHeartIcon,
-  BookOpenIcon,
   BrainCircuitIcon,
   DatabaseIcon,
   DownloadIcon,
   GaugeIcon,
-  GitBranchIcon,
   GitCompareArrowsIcon,
   HeartIcon,
-
+  LinkIcon,
   MessageSquareWarningIcon,
   SearchCheckIcon,
   Settings2Icon,
@@ -19,6 +17,7 @@ import {
   UsersIcon,
 } from 'lucide-react'
 
+import { IdentityBindingSection as IdentityBindingPage } from '@/pages/bindings'
 import { AgentFeedbackPage } from '@/pages/review/AgentFeedbackPage'
 import { ChannelConfigPage } from '@/pages/channels/ChannelConfigPage'
 import { CompatibilityPage } from '@/pages/review/CompatibilityPage'
@@ -33,9 +32,6 @@ import { JargonPage } from '@/pages/jargon/JargonPage'
 import { SoulPage } from '@/pages/soul/SoulPage'
 import { PromptsPage } from '@/pages/prompts/PromptsPage'
 import { BlackboxHubPage } from '@/pages/blackbox/BlackboxHubPage'
-import { BlackboxBookLorePage } from '@/pages/blackbox/BlackboxBookLorePage'
-import { BlackboxFewShotPage } from '@/pages/blackbox/BlackboxFewShotPage'
-import { BlackboxFactsPage } from '@/pages/blackbox/BlackboxFactsPage'
 import { BlackboxPeoplePage, BlackboxPersonDetailPage } from '@/pages/blackbox'
 import { BlackboxIndexesPage } from '@/pages/blackbox/BlackboxIndexesPage'
 
@@ -100,6 +96,13 @@ export const appRoutes: AppRoute[] = [
     element: AgentFeedbackPage,
   },
   {
+    path: '/bindings',
+    title: '身份绑定',
+    description: 'local_id 与 master_id 的身份映射管理',
+    icon: LinkIcon,
+    element: IdentityBindingPage,
+  },
+  {
     path: '/beliefs',
     title: '信念审核',
     description: '审核/新建 Bot 对世界/自我的心智信念，追溯证据链',
@@ -135,27 +138,6 @@ export const appRoutes: AppRoute[] = [
     element: BlackboxHubPage,
   },
   {
-    path: '/blackbox/book-lore',
-    title: 'BookLore 管理',
-    description: '世界观/书设知识库、索引健康与 BookLore-only 查询入口',
-    icon: BookOpenIcon,
-    element: BlackboxBookLorePage,
-  },
-  {
-    path: '/blackbox/fewshot',
-    title: 'FewShot 管理',
-    description: '风格范例库、候选治理、漂移检测与测试匹配入口',
-    icon: BrainCircuitIcon,
-    element: BlackboxFewShotPage,
-  },
-  {
-    path: '/blackbox/facts',
-    title: 'Facts / 关系管理',
-    description: '稳定事实关系、PERSON_ALIAS 和 facts channel 测试入口',
-    icon: GitBranchIcon,
-    element: BlackboxFactsPage,
-  },
-  {
     path: '/blackbox/people',
     title: '人物与好感管理',
     description: '人物画像、UserProfile、Affinity、关系事件与别名入口',
@@ -185,8 +167,8 @@ export const appRoutes: AppRoute[] = [
   },
   {
     path: '/settings',
-    title: '系统配置',
-    description: 'Schema 全量配置表单与运行时滑块热更新调参',
+    title: '运行时调参',
+    description: '运行时滑块热更新调参；静态 Schema 配置请前往 AstrBot 6185',
     icon: SlidersIcon,
     element: SettingsPage,
   },

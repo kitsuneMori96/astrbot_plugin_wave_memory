@@ -1,11 +1,15 @@
 import { Link } from 'react-router-dom'
-import { ArrowRightIcon, BookOpenIcon, BrainCircuitIcon, DatabaseIcon, GitBranchIcon, SearchCheckIcon, UsersIcon } from 'lucide-react'
+import { ArrowRightIcon, BrainCircuitIcon, DatabaseIcon, SearchCheckIcon, UsersIcon } from 'lucide-react'
+
+import { BlackboxBookLorePage } from './BlackboxBookLorePage'
+import { BlackboxFactsPage } from './BlackboxFactsPage'
+import { BlackboxFewShotPage } from './BlackboxFewShotPage'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
-import { Separator } from '@/components/ui/separator'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
 interface CapabilityCard {
   title: string
@@ -15,40 +19,13 @@ interface CapabilityCard {
   badges: string[]
   nextStep: string
   implemented: boolean
-  icon: typeof BookOpenIcon
+  icon: typeof DatabaseIcon
 }
 
 const capabilities: CapabilityCard[] = [
-  {
-    title: 'BookLore',
-    route: '/blackbox/book-lore',
-    description: '世界观/书设知识库，不是群聊记忆，不是人格指令',
-    status: '只读入口 · 等待独立管理页',
-    badges: ['只读诊断', '治理配置'],
-    nextStep: '已补只读页面：实体、关系、社区、索引健康与 BookLore-only 查询契约。',
-    implemented: true,
-    icon: BookOpenIcon,
-  },
-  {
-    title: 'FewShot',
-    route: '/blackbox/fewshot',
-    description: '风格范例库，不是事实记忆，不代表真实发生过',
-    status: '只读入口 · 候选/审核页待补',
-    badges: ['治理配置', '通道配置'],
-    nextStep: '已补只读页面：pending/approved/rejected、漂移检测与测试匹配契约。',
-    implemented: true,
-    icon: BrainCircuitIcon,
-  },
-  {
-    title: 'Facts',
-    route: '/blackbox/facts',
-    description: '事实关系管理入口：稳定关系、证据、来源与注入影响。',
-    status: '只读入口 · 关系 CRUD 待设计',
-    badges: ['只读诊断', '中风险'],
-    nextStep: '已补只读页面：事实列表字段、PERSON_ALIAS、facts channel 测试契约。',
-    implemented: true,
-    icon: GitBranchIcon,
-  },
+
+
+
   {
     title: '人物与好感',
     route: '/blackbox/people',
@@ -130,7 +107,7 @@ export function BlackboxHubPage() {
               <CardTitle>黑盒管理前端矩阵</CardTitle>
               <CardDescription>v4.5.0 先建立能力总入口，再按能力逐个补管理页。</CardDescription>
             </div>
-            <Badge variant="outline">BookLore | FewShot | Facts | 人物 | 索引 | 学习对象</Badge>
+            <Badge variant="outline">人物 | 索引 | 学习对象 + BookLore/FewShot/Facts 只读摘要</Badge>
           </div>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
@@ -138,15 +115,34 @@ export function BlackboxHubPage() {
             <BrainCircuitIcon />
             <AlertTitle>{'发现 -> 管理 -> 验证 -> 调参'}</AlertTitle>
             <AlertDescription>
-              这是 v4.5.0 的黑盒能力总入口。当前卡片以只读入口为主；删除、合并、重建、禁用等危险操作需二次确认并在后续子页面单独实现。
+              黑盒能力总入口。BookLore / FewShot / Facts 为只读诊断摘要（Tab 切换，切到才加载数据）；
+              人物与索引有独立管理页。删除、合并、重建等危险操作需二次确认。
             </AlertDescription>
           </Alert>
-          <Separator />
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {capabilities.map((capability) => (
-              <CapabilityCardView key={capability.title} capability={capability} />
-            ))}
-          </div>
+          <Tabs defaultValue="matrix">
+            <TabsList>
+              <TabsTrigger value="matrix">能力总览</TabsTrigger>
+              <TabsTrigger value="book-lore">BookLore 摘要</TabsTrigger>
+              <TabsTrigger value="fewshot">FewShot 摘要</TabsTrigger>
+              <TabsTrigger value="facts">Facts 摘要</TabsTrigger>
+            </TabsList>
+            <TabsContent value="matrix" className="mt-4">
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                {capabilities.map((capability) => (
+                  <CapabilityCardView key={capability.title} capability={capability} />
+                ))}
+              </div>
+            </TabsContent>
+            <TabsContent value="book-lore" className="mt-4">
+              <BlackboxBookLorePage embedded />
+            </TabsContent>
+            <TabsContent value="fewshot" className="mt-4">
+              <BlackboxFewShotPage embedded />
+            </TabsContent>
+            <TabsContent value="facts" className="mt-4">
+              <BlackboxFactsPage embedded />
+            </TabsContent>
+          </Tabs>
         </CardContent>
       </Card>
     </div>

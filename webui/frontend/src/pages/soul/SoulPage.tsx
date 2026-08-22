@@ -1,5 +1,10 @@
 import { useEffect, useState } from 'react'
-import { AlertCircleIcon, RefreshCwIcon } from 'lucide-react'
+import { AlertCircleIcon, RefreshCwIcon,
+  PencilIcon,
+  Trash2Icon,
+  TargetIcon,
+  MessageSquareHeartIcon,
+} from 'lucide-react'
 import { toast } from 'sonner'
 
 import { getSystemStatus, type SystemPayload } from '@/api/system'
@@ -381,8 +386,8 @@ export function SoulPage() {
               <Badge variant="outline" className="font-semibold">{m.type}</Badge>
               <span className="font-mono text-[10px] text-muted-foreground">{Math.round((m.intensity ?? 0.5) * 100)}%</span>
               {m.is_active ? <Badge className="bg-emerald-500/10 text-emerald-500 border border-emerald-500/10 text-[9px]">当前</Badge> : null}
-              <Button variant="ghost" className="size-5 p-0 text-muted-foreground hover:text-foreground" onClick={() => handleOpenEditMood(m)} title="编辑">✎</Button>
-              <Button variant="ghost" className="size-5 p-0 text-destructive hover:bg-destructive/10" onClick={() => void handleDeleteMoodSingle(m.id)} title="删除">🗑</Button>
+              <Button variant="ghost" className="size-5 p-0 text-muted-foreground hover:text-foreground" onClick={() => handleOpenEditMood(m)} title="编辑"><PencilIcon className="size-3.5" /></Button>
+              <Button variant="ghost" className="size-5 p-0 text-destructive hover:bg-destructive/10" onClick={() => void handleDeleteMoodSingle(m.id)} title="删除"><Trash2Icon className="size-3.5" /></Button>
             </div>
           ))}
         </div>
@@ -423,7 +428,7 @@ export function SoulPage() {
     <div className="flex flex-col gap-6">
       <Card>
         <CardHeader>
-          <CardTitle>只读内部状态管理</CardTitle>
+          <CardTitle>内部状态管理</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
           <Alert>
@@ -484,7 +489,7 @@ export function SoulPage() {
         <Card className="border border-pink-500/10 bg-gradient-to-br from-muted/5 to-pink-500/5">
           <CardHeader className="py-3 shrink-0 flex flex-row items-center justify-between gap-3 border-b border-pink-500/10">
             <CardTitle className="text-xs font-bold text-pink-400 flex items-center gap-1.5">
-              💭 咽回去的心里话
+              <MessageSquareHeartIcon className='size-4 text-pink-400' /> 咽回去的心里话
             </CardTitle>
             <Badge variant="outline" className="border-pink-500/20 text-pink-400 text-[9px] scale-90">30分内有效</Badge>
           </CardHeader>
@@ -537,7 +542,7 @@ export function SoulPage() {
         {/* 关切焦点 (Concern) */}
         <Card>
           <CardHeader className="py-4 border-b shrink-0 bg-muted/10">
-            <CardTitle className="text-sm font-semibold flex items-center gap-1.5">🎯 当前思想关切焦点</CardTitle>
+            <CardTitle className="text-sm font-semibold flex items-center gap-1.5"><TargetIcon className='size-4' /> 当前思想关切焦点</CardTitle>
           </CardHeader>
           <CardContent className="pt-6 flex flex-col gap-4">
             {concerns.length === 0 ? (
@@ -558,10 +563,10 @@ export function SoulPage() {
                     <div className="flex items-center justify-between text-[10px] text-muted-foreground mt-1">
                       <span>Bot：{c.bot_id} · 最近触发：{formatTime(c.last_triggered)}</span>
                       <div className="flex items-center gap-1">
-                        <Button variant="ghost" className="size-5 p-0 text-muted-foreground" onClick={() => handleOpenEditConcern(c)} title="编辑">✎</Button>
+                        <Button variant="ghost" className="size-5 p-0 text-muted-foreground" onClick={() => handleOpenEditConcern(c)} title="编辑"><PencilIcon className="size-3.5" /></Button>
                         <Button variant="ghost" className="size-5 p-0 text-emerald-500 hover:bg-emerald-500/10 font-bold" onClick={() => void handleAdjustConcernSingle(c.id, 'boost')} title="提升权重">↑</Button>
                         <Button variant="ghost" className="size-5 p-0 text-amber-500 hover:bg-amber-500/10 font-bold" onClick={() => void handleAdjustConcernSingle(c.id, 'degrade')} title="降权缓和">↓</Button>
-                        <Button variant="ghost" className="size-5 p-0 text-destructive hover:bg-destructive/10" onClick={() => void handleDeleteConcernSingle(c.id)}>🗑</Button>
+                        <Button variant="ghost" className="size-5 p-0 text-destructive hover:bg-destructive/10" onClick={() => void handleDeleteConcernSingle(c.id)}><Trash2Icon className="size-3.5" /></Button>
                       </div>
                     </div>
                   </div>
@@ -603,8 +608,8 @@ export function SoulPage() {
                             时间：{formatTime(a.timestamp)} | 情绪印记：{Math.round((a.emotional_weight ?? 0.5) * 100)}%
                           </span>
                           <div className="flex items-center gap-1">
-                            <Button variant="ghost" className="size-5 p-0 text-muted-foreground" onClick={() => handleOpenEditAnchor(a)} title="编辑">✎</Button>
-                            <Button variant="ghost" className="size-5 p-0 text-destructive hover:bg-destructive/10" onClick={() => void handleDeleteAnchorSingle(a.id)}>🗑</Button>
+                            <Button variant="ghost" className="size-5 p-0 text-muted-foreground" onClick={() => handleOpenEditAnchor(a)} title="编辑"><PencilIcon className="size-3.5" /></Button>
+                            <Button variant="ghost" className="size-5 p-0 text-destructive hover:bg-destructive/10" onClick={() => void handleDeleteAnchorSingle(a.id)}><Trash2Icon className="size-3.5" /></Button>
                           </div>
                         </div>
                       </div>
