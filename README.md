@@ -2,7 +2,7 @@
 
 # Wave Memory
 
-[![Version](https://img.shields.io/badge/version-v4.6.1-blue.svg)](https://github.com/kitsuneMori96/astrbot_plugin_wave_memory/releases)
+[![Version](https://img.shields.io/badge/version-v5.0.0-blue.svg)](https://github.com/kitsuneMori96/astrbot_plugin_wave_memory/releases)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-≥4.14-green.svg)](https://github.com/AstrBotDevs/AstrBot)
@@ -28,13 +28,15 @@
 - 📊 **交互式知识图谱** — Three.js 3D 星图渲染，六层数据图层，多跳路径探索
 - 🔧 **零配置启动** — 留空 `embedding_provider_id` 自动使用首个可用 Embedding Provider，填 2 个 Provider ID 即跑，所有子系统自动按条件就绪
 - 🤖 **Bot 互聊防护** — 名单 + 启发式识别其他 bot 发言，避免 bot 互相接话无限循环
-- 💬 **主动对话与继续聊天** — 对话延续（话题重叠承接）、主动插话、主动求助答疑三条通道，各自独立限频
+- 🧩 **三段式对话架构** — Planner 判定要不要回+产出语气详略，Replayer 统一生成；特例场景注册表可自定义主动参与时机
+- 🖋 **提示词中心（自成体系）** — wave 自管人设库+三级绑定+架构模板，WebUI 即改即生效
 - 🙋 **主动求助答疑** — 群里求助（尤其编程/报错）自动提供解惑，独立限频
 
 ### Recent Releases
 
 | 版本 | 日期 | 重点 |
 |------|------|------|
+| **v5.0.0** | 2026-08-22 | 三段式对话架构（Planner⊕Player→Replayer，真沉默/风格指令/特例场景注册表）；提示词中心：wave 自成人设库+三级绑定+架构模板 WebUI 可编辑，自成体系 |
 | **v4.6.1** | 2026-08-20 | 其他 bot 发言识别（名单 + 启发式），避免 bot 互聊循环；`embedding_provider_id` 留空自动选首个可用 Embedding Provider；v4.26 兼容（窗口候选模拟唤醒放行 LLM 自判、冷却/刷屏拦截改用 stop_event） |
 | **v4.6.0** | 2026-08-15 | 主动求助答疑：群里求助（尤其编程/报错）自动提供解惑，独立限频 |
 | **v4.5.1** | 2026-08-07 | 记忆衰减模型修复 + 死配置接线 + 参数合理化；窗口候选 LLM 自判 + 消息防抖配置 |
@@ -217,49 +219,73 @@ WaveMemory 是 AstrBot 记忆插件：负责记录、整理、检索、注入、
 
 ---
 
-## 💬 主动对话与继续聊天
+## 💬 主动对话与继续聊天（三段式架构，v5.0）
 
-让 bot 不止「被 @ 才回」，还能自然参与群聊、顺着话题聊下去。三条触发通道各自独立限频，互不挤占。
+类 maibot 的三段式管线：**Planner⊕Player**（判定要不要回+产出语气/详略风格）→ **Replayer**（AstrBot 管线统一生成）。所有回复走同一生成通道，人格、记忆、黑话等注入通道全路径生效。
 
-### 通道一：对话延续（他人接话 → 自然承接）
+```
+消息 → 函数闸门(other_bot/冷却) → 候选收集(优先级: 硬触发>窗口候选>场景)
+     → Planner 单次 LLM: {是否回复, 语气, 详略, 内心想法}
+         no → 真沉默(不进 LLM 管线)   yes → [风格指令]注入 → 管线生成
+硬触发(@/私聊/引用) → forced 模式跳过判定，仅产出风格
+```
 
-bot 发言后有一个延续窗口（默认 90 秒），期间群里的消息会判断是不是「在跟 bot 聊」：
+### 候选来源
 
-| 信号 | 判定 |
-|------|------|
-| 引用 / @ / 命中 bot 名字或别名 | 视为接着聊，直接回应 |
-| 与 bot 上一条发言存在主题重叠（`_topic_overlap`，阈值默认 0.12） | 视为话题延续，回应 |
-| bot 近期回帖过此人，且对方语句有主题粘连（ABA 连续对话，窗口 30s） | 视为连续对话，回应 |
-| 窗口内粗筛候选（`window_analysis_candidate`，默认 3 次/分钟） | 交给 LLM 自判：与 bot 话题相关才自然承接，无关旁聊输出 `[[NO_REPLY]]` 不插话 |
+| 来源 | 触发条件 | 说明 |
+|------|----------|------|
+| 硬触发 | @bot / 私聊 / 引用 bot | 必回；forced 模式产出语气详略 |
+| 对话延续窗口 | bot 发言后 90s 内：问句/抱怨呼唤/身份命中/话题重叠≥0.12/我向祈使（默认 3 次/分钟） | 函数过滤后由 Planner 判定 |
+| 特例场景 | ScenarioRegistry 匹配（内置三类 + 自定义行） | 只管「什么情况主动参与」 |
 
-命中后注入「顺着话题自然承接」的语气指令，不重新自我介绍、不客套兜圈子。无延续意图的消息落入下方兴趣词判断。
+### 特例场景（Proactive_Scenario_Settings）
 
-### 通道二：主动插话（兴趣词 / 关切命中）
-
-消息命中**兴趣关键词**或**ConcernTracker 当前在意话题**（匹配度 > 0.3）时，调用 LLM 独立判断是否值得主动插话（`should_proactive`），判定「主动插话」才回复。受独立限频控制（默认 600 秒间隔 / 每小时 3 次）。
-
-### 通道三：主动求助答疑
-
-群里出现求助（尤其编程/报错）时自动提供解惑，见「主动求助答疑 (MetaThinking_Settings)」章节。
+| 场景 | 触发 | 配额（沿用既有配置） |
+|------|------|---------------------|
+| 求助答疑 | `classify_help_request` 识别求助句式 | help_max_per_hour / help_interval_seconds |
+| 兴趣话题 | 兴趣关键词命中 | proactive_max_per_hour / proactive_interval_seconds |
+| 关切话题 | ConcernTracker 匹配 > 0.3 | 同上独立计数 |
+| 自定义行 | 每行 `名称\|关键词,逗号\|语气提示\|每小时上限` | 行内上限，坏行自动跳过 |
 
 ### 拦截与防护
 
-- **其他 bot 发言**：名单命中（`other_bot_ids`）一律不触发主动回应，被 @ 也不回；启发式兜底识别「秒回超长文本」——避免两个 bot 互相接话死循环（记忆仍正常写入）。
-- **@bot / 私聊 / 引用**：永远 `must_reply`，不受限频影响。
-- **辱骂冷却**：极端攻击言论计数，触发阈值后进入静默冷却（默认 600s 起、封顶 3600s），冷却期完全不出声。
-- **v4.26 兼容**：窗口候选通过模拟唤醒 + 显式放行让 LLM 自判；冷却/刷屏拦截改用 `stop_event` 阻止调用。
+- **其他 bot 发言**：名单命中一律不触发（被 @ 也不回）；启发式兜底识别「秒回超长文本」，避免 bot 互聊死循环。
+- **辱骂冷却**：极端攻击累计触发静默冷却（600s 起封顶 3600s）。
+- **Planner 失败安全侧**：gate 调用失败按沉默处理，forced 失败仍必回（风格走默认）。
 
 ### 可调配置
 
 | 配置组 | 说明 |
 |--------|------|
-| `MetaThinking_Bot1/Bot2.proactive_*` | 每台 bot 的主动插话开关、间隔、每小时上限 |
-| `MetaThinking_Settings.proactive_*` | 规则过滤、主动插话频率、静默时段、Provider fallback |
-| `Social_Settings.social.continue_window_seconds` | 对话延续窗口（默认 90s） |
-| `Social_Settings.social.continue_overlap` | 话题延续判定阈值（默认 0.12） |
-| `Social_Settings.social.aba_window_seconds` | ABA 连续对话窗口（默认 30s） |
-| `Social_Settings.social.window_analyze_enabled / per_min` | 窗口候选 LLM 自判开关与每分钟上限（默认 3） |
-| `Message_Filter.other_bot_ids / bot_chat_heuristic` | 其他 bot 识别名单与启发式兜底 |
+| `Conversation_Planner_Settings.planner_enabled / planner_provider_id` | Planner 开关与专用模型（建议配便宜快速的） |
+| `Proactive_Scenario_Settings.scenario_*_enabled / custom_scenarios` | 三类场景开关与自定义场景 |
+| `Social_Settings.social.continue_window_seconds / continue_overlap / aba_window_seconds` | 延续窗口/话题阈值/ABA 窗口 |
+| `Social_Settings.social.window_analyze_enabled / per_min` | 窗口候选过滤开关与每分钟上限 |
+| `Message_Filter.other_bot_ids / bot_chat_heuristic` | 其他 bot 名单与启发式 |
+
+---
+
+## 🖋 提示词中心（v5.0，自成体系）
+
+wave 自管人设与架构提示词，不再依赖 AstrBot 的 default_personality。入口：WebUI → **提示词中心**。
+
+### 人设库与三级绑定
+
+- **人设库**：新建/编辑/删除角色设定（system_prompt 注入 `<wave_persona>` 块）；支持从 AstrBot 一键导入现有角色。
+- **三级绑定**：群绑定 > bot 绑定 > 全局默认，运行时按此优先级解析。
+- **共存策略**：检测到 AstrBot default_personality 非空时启动 WARNING；`Prompt_Center_Settings.persona_override_astrbot=true` 可剥离 AstrBot 追加的 Persona Instructions 完全接管。
+
+### 架构模板（全部 WebUI 可编辑）
+
+| 模板 key | 用途 |
+|----------|------|
+| planner_gate | 窗口候选/场景的判定+风格产出提示词 |
+| planner_forced | @/私聊/引用的风格产出提示词 |
+| style_directive | [风格指令] 注入文本格式 |
+| continuation_directive | 对话延续 [语气指令] |
+| identity_guard | 身份安全边界（advanced，谨慎修改） |
+
+变量用 `{name}` 占位（如 `{persona}` `{context}` `{message}`），未提供的变量渲染为空。修改即时生效（缓存自动失效），可一键恢复默认。
 
 ---
 
@@ -274,6 +300,7 @@ bot 发言后有一个延续窗口（默认 90 秒），期间群里的消息会
 | `/#/channels` | 通道配置 | enabled/priority/top_k/token_budget/timeout_ms/min_score 热更新 · validation diff 预览 |
 | `/#/learning` | 学习对象审查 | memory/facts/belief/jargon/few-shot/persona/affinity/timeline/operation memory 登记表 |
 | `/#/feedback` | Agent 反馈 | 记忆反馈 · 配置建议 · 审查候选 · 人工批准/拒绝/忽略 |
+| `/#/prompts` | 提示词中心 | wave 自成人设库 · 三级绑定 · Planner/风格/安全架构模板编辑 · 恢复默认 |
 | `/#/compatibility` | 兼容模式 | LivingMemory-compatible facade 状态 · 工具别名 · 重复记忆插件风险 |
 | `/legacy` | 旧版首页 | 原单文件 Alpine.js 面板，作为回滚入口 |
 

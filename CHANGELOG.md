@@ -1,5 +1,28 @@
 # Changelog
 
+## v5.0.0 (2026-08-22)
+
+### 三段式对话架构（类 maibot）：Planner⊕Player → Replayer
+
+- **Planner⊕Player 合并判定**：新增 `services/conversation_pipeline.py`——窗口候选/特例场景命中后由 `ConversationPlanner.plan_gate` 单次 LLM 输出「是否回复 + 语气 + 详略 + 内心想法」；no 则不模拟唤醒（**真沉默**，不再走 `[[NO_REPLY]]` 吞回复）。@/私聊/引用硬触发走 `plan_forced`（跳过是否判定，仅产出风格）。
+- **Replayer 单通道**：删除求助答疑/主动插话两大直连生成块，所有回复统一经 AstrBot 管线生成——PersonaComposer、记忆、黑话等全部注入通道对主动对话同样生效。
+- **特例场景注册表**：内置三类场景（求助答疑/兴趣话题/关切话题，配额沿用既有 help_*/proactive_* 配置）+ 自定义行格式「名称|关键词|语气提示|每小时上限」，坏行容错。
+- **风格指令注入**：`build_style_directive` 按 Planner 产出的语气/详略/动机构建 [风格指令] 注入管线；对话延续态度指令模板化。
+- **配置**：新增 `Conversation_Planner_Settings`（planner_enabled/planner_provider_id，可指定廉价快速模型）、`Proactive_Scenario_Settings`。升级用户无需改配置即可用；关闭 planner 后函数过滤命中即放行。
+
+### 提示词中心（自成体系）
+
+- **wave 自成人设库**：不再依赖 AstrBot default_personality——人设存 wave DB，按 **群绑定 > bot绑定 > 全局默认** 三级解析注入 `<wave_persona>` 块；启动时检测 AstrBot 人设冲突并 WARNING 提示，可选 `persona_override_astrbot` 完全接管。
+- **架构模板全部可编辑**：planner_gate / planner_forced / style_directive / continuation_directive / identity_guard 五个内置模板存 DB seed，WebUI 即改即生效（缓存自动失效），支持恢复默认。
+- **WebUI 新增「提示词中心」页**（/prompts）：人设库 CRUD、从 AstrBot 一键导入现有角色、三级绑定管理、模板编辑器（变量提示+恢复默认）。
+- **数据层**：新增 `PersonaRepo` / `PromptRepo` / `PromptService`（幂等建表，additive 无迁移风险）。
+
+### 死代码清理
+
+- 移除从未接线的 `should_respond` 及整条旧主动链路（`should_proactive` / `should_proactive_help` / `generate_help_reply` / `generate_proactive_reply` / `parse_help_response` 等），净减 ~600 行。
+- `[[NO_REPLY]]` 吞掉器保留一版作安全网（已无生产者）。
+- 测试更新：新增 test_conversation_pipeline.py(20) / test_prompt_service.py(12)；适配 test_help_proactive.py / test_persona_belief_rework.py。345 测试通过。
+
 ## v4.6.1 (2026-08-20)
 
 ### 发布整理
