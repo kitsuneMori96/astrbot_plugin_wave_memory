@@ -117,13 +117,19 @@ class ScenarioHit:
 
 @dataclass
 class Scenario:
-    """一个主动对话特例场景：matcher 判定命中，quota 控制频率。"""
+    """一个主动对话特例场景：matcher 判定命中，quota 控制频率。
+
+    require_engagement_signal=True 时，除关键词命中外还要求消息带对话关联信号
+    （身份命中或与 bot 最近发言话题重叠）——裸句「你怎么还活着」光关键词命中
+    不足以触发，否则会大量误回。
+    """
     name: str
     matcher: Callable[[str], Any]                 # message -> 命中返回真值
     hint: str = ""                                # 注入 planner 的场景提示
     max_per_hour: int = 3                         # 0 = 不限
     interval_seconds: int = 0                     # 同群两次最小间隔
     enabled: bool = True
+    require_engagement_signal: bool = True        # 求助类场景可关掉此门槛
     _last_ts: dict = field(default_factory=dict)   # {group_id: ts}
     _hourly: dict = field(default_factory=dict)    # {group_id: (hour, count)}
 

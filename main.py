@@ -1972,6 +1972,7 @@ class WaveMemoryPlugin(Star):
                      "不是真求助或你答不了则选沉默。）",
                 max_per_hour=help_max,
                 interval_seconds=help_interval,
+                require_engagement_signal=False,  # 求助面向全场，句式即意图
             ))
         if _flag("scenario_interest_enabled") and mt is not None:
             scenarios.append(Scenario(
@@ -3267,6 +3268,18 @@ class WaveMemoryPlugin(Star):
             )
             scenario_hit = None if window_hit else self._match_scenario(message, group_id)
 
+            # 场景触发对话关联门槛：光关键词命中不够，还要求消息与 bot 有对话关系
+            # （身份命中 / 与 bot 最近发言话题重叠），否则裸句「你怎么还活着」会大量误回
+            if scenario_hit is not None and scenario_hit.require_engagement_signal:
+                identity_signal = self._matches_bot_identity(message)
+                topic_overlap = 0.0
+                last_send = self._bot_last_send.get(group_id) or {}
+                if last_send:
+                    topic_overlap = _topic_overlap(message, (last_send.get("text") or "").strip())
+                if not (identity_signal or topic_overlap >= self._continue_overlap_threshold()):
+                    logger.debug(f"[WaveMemory] 场景({scenario_hit.name})关键词命中但无对话关联信号，跳过")
+                    scenario_hit = None
+
             if window_hit or scenario_hit is not None:
                 candidate_kind = "window_analyze" if window_hit else f"scenario:{scenario_hit.name}"
                 bot_id_for_plan = event.get_self_id() or ""
@@ -3624,16 +3637,28 @@ class WaveMemoryPlugin(Star):
         if count:
             logger.info(f"[WaveMemory] Tag index rebuilt: {count} vectors")
 
-    def _get_recent_messages(self, event, max_messages: int = 8) -> list[str]:
+    def _get_recent_messages(self, event, max_messages: int = 8, with_sender: bool = True) -> list[str]:
+        """最近群聊上下文。
+
+        with_sender=True 时返回 "发言人: 内容" 格式——Planner 判定对话指向
+        （「你」指谁）依赖发言人名，纯文本流会导致代词脑补误回复。
+        """
         try:
             group_id = event.get_group_id()
             rows = self.db.conn.execute(
-                """SELECT content FROM memories
+                """SELECT sender_name, sender_id, content FROM memories
                    WHERE group_id = ? AND content IS NOT NULL
                    ORDER BY id DESC LIMIT ?""",
                 (group_id, max_messages),
             ).fetchall()
-            return [r[0] for r in reversed(rows)] if rows else []
+            result = []
+            for name, sid, content in reversed(rows):
+                text = (content or "").strip()
+                if not text:
+                    continue
+                who = (name or "").strip() or (str(sid) if sid else "")
+                result.append(f"{who}: {text}" if with_sender and who else text)
+            return result
         except Exception:
             return []
 
