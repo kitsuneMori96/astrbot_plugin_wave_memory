@@ -15,10 +15,17 @@
 │   ├── geodesic_rerank.py / intrinsic_residual.py / semantic_gain.py
 │   ├── book_lore_index.py / fact_classifier.py / context_segmenter.py
 │   ├── graph_metrics.py / metrics_store.py
+│   ├── persona_repo.py         # ★ 提示词中心：人设库 + 群/bot/全局 三级绑定
+│   ├── prompt_repo.py          # ★ 架构提示词模板表（内置 seed + legacy 升级跟随）
 │   └── db/                     #   仓储层：memory_repo / tag_repo / social_repo / belief_repo /
 │                               #   booklore_repo / knowledge_repo + migrations/
+│                               #   注意：persona_repo/prompt_repo 在 engine/db/ 根目录
 ├── services/                   # 灵魂系统 + 业务服务 + 注入编排
-│   ├── meta_thinking.py        #   发言前 LLM 内心判断层（回复/主动插话/语气/好感度）
+│   ├── conversation_pipeline.py # ★ 三段式对话架构核心（v5.0）：ConversationPlanner
+│   │                           #   （gate 判定+forced 风格）/ build_style_directive /
+│   │                           #   ScenarioRegistry（特例场景注册表）
+│   ├── prompt_service.py        # ★ 提示词中心运行时门面：模板渲染缓存 / 人设三级解析
+│   ├── meta_thinking.py         #   遗留：兴趣词/求助分类/黑话/好感 LLM 打分（v5.0 起判定链路已迁出）
 │   ├── message_writer.py       #   统一写入（去重、source 分层门控）
 │   ├── llm_fallback.py         #   Provider 链调用（build_provider_chain / LLMFallbackClient）
 │   ├── persona_composer.py / persona_evolution.py
@@ -54,12 +61,16 @@
 │   ├── blueprints/             #   API：system / config / memories / tags / beliefs / soul /
 │   │                           #   jargon / kg / explore / channel_config / injection_observatory /
 │   │                           #   learning_object_review / agent_feedback / blackbox /
-│   │                           #   compatibility / bindings / pages / auth
+│   │                           #   compatibility / bindings / prompts(提示词中心) / pages / auth
 │   ├── middleware/             #   鉴权（auth.py）
 │   ├── static/app/             #   React 构建产物（Vite + React + TS + Tailwind v4 + shadcn/ui）
 │   ├── static/                 #   旧版 Alpine 首页/探索页/维护页（回滚入口）
 │   └── frontend/               #   React 源码（src/api、src/pages、src/components/ui），
-│                               #   开发命令：pnpm dev / typecheck / build
+│                               #   页面：prompts(提示词中心)/dashboard(CommandPalette Ctrl+K)/…
+│                               #   侧边栏菜单由 WaveSidebar.routeGroups 白名单驱动——
+│                               #   加页面必须同时改 routes.tsx 和 routeGroups！
+│                               #   开发命令（WSL 下经 Windows node）：cmd.exe /c
+│                               #   "D:\soft\node.exe ...\pnpm.cjs typecheck|build"
 ├── assets/holyman/             # 内置分层知识库资产（concepts/phrases/examples/corpus + raw skill）
 ├── scripts/                    # 运维/修复/迁移脚本（sqlite_runtime_guard、repair、migrate_sources 等）
 ├── tests/                      # pytest 测试（注入编排/通道/知识库/兼容/WebUI 契约等）
@@ -106,6 +117,61 @@ AstrBot 插件配置生命周期：
 改底层方法签名时 grep 所有调用点确认匹配。
 
 <!-- SPLICE_1 -->
+
+## 核心架构速览（v5.0 三段式对话，改代码前必读）
+
+### 一条群消息的处理链（main.py）
+
+```
+on_message(防抖合并)
+  1. other_bot 检测 → 命中即全跳过（含被@）
+  2. _points_at_other：At/引用了别人（含@全体）→ 跳过主动响应 + _mark_at_other 记录
+     同人 ≤8s 无 At 续接句 → 也跳过（_follows_recent_at_other）
+  3. 候选收集（互斥优先级）：
+     硬触发(@自己/私聊/引用自己) > 窗口候选R1-R5(bot发言后90s) > ScenarioRegistry
+     场景命中还需 require_engagement_signal：身份命中 或 与bot最近发言话题重叠≥0.12
+     （help 求助场景豁免；光关键词命中的裸句如「你怎么还活着」不触发）
+  4. ConversationPlanner.plan_gate 单次 LLM：{行动:回复/沉默, 语气, 详略, 内心}
+     prompt 由 PromptService 渲染（planner_gate 模板，context 带「发言人: 内容」，
+     at_info 报告点名人）。no → 不模拟唤醒 = 真沉默
+  5. yes → _analysis_pending{ts,style} + 模拟唤醒(is_at_or_wake_command=True,
+     should_call_llm(False))
+meta_thinking_check(on_llm_request)：
+  身份安全边界前置 → wave 人设注入(<wave_persona>，群>bot>全局解析，可选剥离
+  AstrBot Persona Instructions) → must_reply 走 plan_forced(跳过是否判定只产风格) /
+  analyze 读 pending 风格 → build_style_directive 注入 extra_user_content_parts
+Replayer = AstrBot 管线本身（PersonaComposer+记忆+黑话+安全 全生效），插件不做直连生成。
+```
+
+### 提示词中心（自成体系）
+
+- **模板**：`prompt_templates` 表，key 寻址。内置 5 个：planner_gate / planner_forced /
+  style_directive / continuation_directive / identity_guard。WebUI 可编辑即时生效
+  （PromptService.invalidate）。`BUILT_IN_TEMPLATES` 改默认文案时必须同步在
+  `_LEGACY_DEFAULTS` 记录旧文案——seed 升级跟随靠它区分「用户改过」与「旧默认」
+- **人设**：`personas` 表 + `persona_bindings` 三级绑定（群 > bot > 全局）。
+  identity_guard 的 bot_name 用 `_persona_display_name`（人设名优先于 registry 名），
+  否则双名冲突（registry=二阶堂真红 vs wave 人设=茉莉）
+- **从 AstrBot 导入**：读 `data_v4.db`（get_astrbot_data_path），**不是** wave_memory.db——
+  两库都有 personas 表但列不同（AstrBot: persona_id / wave: name）
+
+### 好感度（lifecycle.AffinityEngine）
+
+- 所有加分通道要求 `interacts_with_bot`（@bot / 回复 bot / 含 bot QQ）——
+  刷屏/群友互聊/深夜潜水不再涨好感（v5.1 修复）
+- 合成：familiarity .25 / trust .30 / fun .20 / depth .25 − hostility×1.0，clamp ±100
+- conversation_depth 参数 main.py 未传（恒 0），depth 实际只来自长文与深夜互动
+
+### WebUI 要点
+
+- 新增页面四步：pages/XxxPage.tsx → api/x.ts → routes.tsx 注册 → **WaveSidebar.routeGroups**
+  （漏最后一个菜单不显示）
+- 构建唯一可用命令（WSL 下 rolldown 缺原生绑定）：webui/frontend 下
+  `cmd.exe /c "D:\soft\node.exe D:\soft\node_modules\pnpm\bin\pnpm.cjs typecheck|build"`
+- 测试跑法：`PYTHONPATH=$(pwd)` + `/mnt/d/soft/AstrBot/tools/astrbot/Scripts/python.exe -m unittest`
+  （WSL 系统 python3 缺 numpy/pydantic）
+
+---
 
 ## AstrBot 框架关键知识
 
@@ -161,6 +227,11 @@ UNIQUE(user_id, group_id, bot_id)
 
 | 日期 | 事件 | 教训 |
 |------|------|------|
+| 08-22 | 修复推送后 AstrBot 未重启，用户测试仍报旧问题 | **每次改完 Python 插件代码必须重启 AstrBot**；排查前先核对进程 StartTime vs 最新提交时间 |
+| 08-22 | prompt_repo seed 升级跟随永不生效 | SELECT 的列与对比值要一致（SELECT key 却拿 row[0] 比文案）；此类逻辑必须有单测 |
+| 08-22 | 人设导入报 no such column | wave_memory.db 与 AstrBot data_v4.db 都有 personas 表且列不同——查库前先确认连的是哪个库 |
+| 08-22 | WebUI 加了页面菜单不显示 | WaveSidebar.routeGroups 白名单必须同步加路径 |
+| 08-22 | identity_guard 用 registry 名与人设名冲突双身份 | guard 名字优先取提示词中心人设名 |
 | 08-15 | 改动完成后忘记提交推送 | 改动完成必须 git commit + push |
 | 05-29 | GitHub 回退覆盖 | 必须 push |
 | 06-14 | release notes 遗漏 | git log 检查 |
