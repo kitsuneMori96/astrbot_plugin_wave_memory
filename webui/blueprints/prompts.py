@@ -208,27 +208,65 @@ async def reset_template(key: str):
 
 # ─── AstrBot 人设导入 ────────────────────────────────────────────
 
+def _read_astrbot_personas() -> tuple[list[tuple[str, str]], str]:
+    """读取 AstrBot 人设：(名字, system_prompt) 列表。
+
+    优先 v4.x 的 data_v4.db personas 表；失败时兜底 cmd_config.json 的
+    personas 数组与 default_personality。只读访问，不碰 AstrBot 连接。
+    """
+    found: list[tuple[str, str]] = []
+    # 1) AstrBot v4 SQLite 库（注意：不是 wave_memory.db——那里也有同名 personas 表）
+    try:
+        from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+        import os as _os
+        import sqlite3 as _sqlite3
+        db_path = _os.path.join(get_astrbot_data_path(), "data_v4.db")
+        if _os.path.exists(db_path):
+            con = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            try:
+                rows = con.execute(
+                    "SELECT persona_id, system_prompt FROM personas"
+                ).fetchall()
+                found = [(str(r[0] or "").strip(), r[1] or "") for r in rows]
+            finally:
+                con.close()
+    except Exception:
+        pass
+    if any(name and prompt.strip() for name, prompt in found):
+        return [f for f in found if f[0]], ""
+    # 2) 兜底：cmd_config.json（旧版/配置文件人设）
+    try:
+        from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+        import json as _json
+        import os as _os
+        cfg_path = _os.path.join(get_astrbot_data_path(), "cmd_config.json")
+        with open(cfg_path, encoding="utf-8-sig") as f:
+            cfg = _json.load(f)
+        for p in cfg.get("personas", []) or []:
+            name = str(p.get("name", "") or "").strip()
+            prompt = str(p.get("prompt", "") or "")
+            if name and prompt.strip():
+                found.append((name, prompt))
+        default_name = str(cfg.get("provider_settings", {}).get("default_personality", "") or "").strip()
+        if not found and default_name:
+            found.append((default_name, ""))
+    except Exception:
+        pass
+    return found, ""
+
+
 @prompts_bp.route("/import_astrbot", methods=["POST"])
 @require_auth
 async def import_from_astrbot():
-    """从 AstrBot personas 表导入人设到 wave 提示词中心。"""
+    """从 AstrBot 人设导入到 wave 提示词中心（data_v4.db → cmd_config.json 兜底）。"""
     persona_repo, _, _ = _repos()
     if persona_repo is None:
         return jsonify({"error": "prompt center unavailable"}), 503
-    c = get_container()
-    db = getattr(c, "db", None)
-    if db is None:
-        return jsonify({"error": "db unavailable"}), 503
+    found, err = _read_astrbot_personas()
+    if err:
+        return jsonify({"error": f"read astrbot personas failed: {err}"}), 500
     imported, skipped = 0, []
-    try:
-        rows = db.conn.execute_read(
-            "SELECT persona_id, system_prompt FROM personas"
-        ).fetchall()
-    except Exception as e:
-        return jsonify({"error": f"read astrbot personas failed: {e}"}), 500
-    for row in rows:
-        name = (row[0] or "").strip()
-        prompt = row[1] or ""
+    for name, prompt in found:
         if not name or not prompt.strip():
             skipped.append(name or "(empty)")
             continue
