@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from services.meta_thinking import parse_help_response, classify_help_request
+from services.meta_thinking import classify_help_request
 
 
 class ClassifyHelpRequestTest(unittest.TestCase):
@@ -48,23 +48,14 @@ class ClassifyHelpRequestTest(unittest.TestCase):
 
 
 class ParseHelpTest(unittest.TestCase):
-    def test_active_parse(self):
-        text = """内心：这是真求助，我能答
-行动：主动答疑"""
-        r = parse_help_response(text)
-        self.assertEqual(r["action"], "主动答疑")
-        self.assertEqual(r["inner_thought"], "这是真求助，我能答")
+    """v5.0 起判定链路由 ConversationPlanner 承接（见 tests/test_conversation_pipeline.py），
+    旧 parse_help_response 已随 should_proactive_help 一并移除。"""
 
-    def test_pass_parse(self):
-        text = """内心：闲聊，不用管
-行动：不答"""
-        r = parse_help_response(text)
-        self.assertEqual(r["action"], "不答")
-        self.assertEqual(r["inner_thought"], "闲聊，不用管")
-
-    def test_empty_input_safe(self):
-        r = parse_help_response("")
-        self.assertEqual(r["action"], "不答")
+    def test_legacy_parser_removed(self):
+        import services.meta_thinking as mt
+        self.assertFalse(hasattr(mt, "parse_help_response"))
+        self.assertFalse(hasattr(mt.MetaThinking, "should_proactive_help"))
+        self.assertFalse(hasattr(mt.MetaThinking, "generate_help_reply"))
 
 
 if __name__ == "__main__":

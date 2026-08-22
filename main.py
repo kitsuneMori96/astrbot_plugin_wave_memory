@@ -50,6 +50,12 @@ from .tools.review_candidate import WaveMemorySubmitReviewCandidateTool
 from .tools.livingmemory_compat_tools import build_livingmemory_compat_tools
 from .engine.book_lore_index import BookLoreIndex
 from .services.meta_thinking import MetaThinking, classify_help_request
+from .services.conversation_pipeline import (
+    ConversationPlanner,
+    Scenario,
+    build_style_directive,
+    parse_custom_scenarios,
+)
 from .services.dream import DreamService
 from .services.study_service import StudyService
 from .services.self_reflect import SelfReflectService
@@ -1292,6 +1298,76 @@ class WaveMemoryPlugin(Star):
         else:
             self.meta_thinking = None
 
+        # ─── 提示词中心 + 三段式对话架构（v5.0）───
+        try:
+            from .engine.db.persona_repo import PersonaRepo
+            from .engine.db.prompt_repo import PromptRepo
+            from .services.prompt_service import PromptService
+
+            self.persona_repo = PersonaRepo(self.db.conn)
+            self.prompt_repo = PromptRepo(self.db.conn)
+            self.prompt_service = PromptService(self.prompt_repo, self.persona_repo)
+            if getattr(self, "webui", None):
+                from .webui.container import get_container
+                container = get_container()
+                container.prompt_service = self.prompt_service
+                container.persona_repo = self.persona_repo
+                container.prompt_repo = self.prompt_repo
+
+            planner_cfg = self.config.get("Conversation_Planner_Settings", {}) or {}
+            planner_enabled = planner_cfg.get("planner_enabled")
+            if planner_enabled is None:
+                planner_enabled = True
+            self.planner_enabled = bool(planner_enabled)
+            planner_provider = (planner_cfg.get("planner_provider_id", "") or "").strip() \
+                or getattr(self, "tag_llm_provider_id", "")
+            planner_llm = LLMFallbackClient(
+                context=self.context,
+                provider_ids=build_provider_chain(planner_provider),
+                log_prefix="[Planner]",
+            )
+            self.planner = ConversationPlanner(
+                llm=planner_llm,
+                prompt_service=self.prompt_service,
+                context=self.context,
+            ) if self.planner_enabled else None
+            if not self.planner_enabled:
+                logger.info("[WaveMemory] ConversationPlanner disabled: 窗口候选/场景命中将直接放行")
+
+            self._scenario_registry = self._build_scenario_registry()
+
+            # AstrBot 人设共存检测
+            prompt_center_cfg = self.config.get("Prompt_Center_Settings", {}) or {}
+            override = prompt_center_cfg.get("persona_override_astrbot")
+            if override is None:
+                override = False
+            injection_on = prompt_center_cfg.get("persona_injection")
+            if injection_on is None:
+                injection_on = True
+            self.persona_injection_enabled = bool(injection_on)
+            self.persona_override_astrbot = bool(override)
+            try:
+                astrbot_default_persona = ((self.context.get_config().get("provider_settings", {}) or {})
+                                           .get("default_personality", "") or "")
+            except Exception:
+                astrbot_default_persona = ""
+            if astrbot_default_persona and self.persona_injection_enabled and not self.persona_override_astrbot:
+                logger.warning(
+                    f"[WaveMemory] 提示词中心：AstrBot default_personality='{astrbot_default_persona}' 仍会注入，"
+                    f"可能与 wave 自成人设叠加。建议在 AstrBot 配置页留空 default_personality，"
+                    f"或开启 Prompt_Center_Settings.persona_override_astrbot"
+                )
+            logger.info("[WaveMemory] Prompt center initialized "
+                        f"(planner={'on' if self.planner_enabled else 'off'}, "
+                        f"scenarios={len(self._scenario_registry)}, "
+                        f"persona_injection={self.persona_injection_enabled})")
+        except Exception as e:
+            logger.warning(f"[WaveMemory] Prompt center init failed (fallback to legacy): {e}")
+            _record_err("PromptCenter", e)
+            self.prompt_service = None
+            self.planner = None
+            self._scenario_registry = []
+
         # 启动做梦系统
         if self.enable_dream:
             self.dream_service = DreamService(
@@ -1733,7 +1809,7 @@ class WaveMemoryPlugin(Star):
     _engage_reason: str = ""
 
     # 回话后窗口分析状态
-    _analysis_pending: dict = {}    # {group_id: ts} 候选待 _should_engage 消耗（30s TTL）
+    _analysis_pending: dict = {}    # {group_id: {"ts","style","kind"}} 候选待 _should_engage 消耗（30s TTL）
     _analysis_counts: dict = {}     # {group_id: {"minute": int, "count": int}} 频率上限
 
     def _detect_other_bot(self, event: AstrMessageEvent, sender_id: str, message: str, group_id: str) -> bool:
@@ -1755,6 +1831,74 @@ class WaveMemoryPlugin(Star):
             min_length=self.other_bot_min_length,
         )
 
+    def _build_scenario_registry(self) -> list:
+        """构建主动对话特例场景注册表：内置三类 + 自定义行。
+
+        配额沿用既有配置语义：help 用 MetaThinking_Settings.help_*，
+        interest/concern 用 proactive_*，自定义行内上限。
+        """
+        cfg = self.config.get("Proactive_Scenario_Settings", {}) or {}
+
+        def _flag(key: str, default: bool = True) -> bool:
+            val = cfg.get(key)
+            return default if val is None else bool(val)
+
+        meta_cfg = self.config.get("MetaThinking_Settings", {}) or {}
+        help_max = int(meta_cfg.get("help_max_per_hour", 6) or 6)
+        help_interval = int(meta_cfg.get("help_interval_seconds", 300) or 300)
+        proactive_max = int(meta_cfg.get("proactive_max_per_hour", 3) or 3)
+        proactive_interval = int(meta_cfg.get("proactive_interval_seconds", 600) or 600)
+
+        scenarios: list = []
+        mt = self.meta_thinking
+
+        if _flag("scenario_help_enabled"):
+            scenarios.append(Scenario(
+                name="求助答疑",
+                matcher=lambda m: classify_help_request(m) != "",
+                hint="（触发场景：群友求助。若你能帮上忙就耐心解答、给可落地的做法；"
+                     "不是真求助或你答不了则选沉默。）",
+                max_per_hour=help_max,
+                interval_seconds=help_interval,
+            ))
+        if _flag("scenario_interest_enabled") and mt is not None:
+            scenarios.append(Scenario(
+                name="兴趣话题",
+                matcher=mt.is_interesting,
+                hint="（触发场景：命中你感兴趣的话题。确实有话想说才开口，能补充价值再回。）",
+                max_per_hour=proactive_max,
+                interval_seconds=proactive_interval,
+            ))
+        if _flag("scenario_concern_enabled") and getattr(self, "concern_tracker", None) is not None:
+            tracker = self.concern_tracker
+            scenarios.append(Scenario(
+                name="关切话题",
+                matcher=lambda m: tracker.match(m) > 0.3,
+                hint="（触发场景：聊到你在意的话题。想参与就自然加入，否则沉默。）",
+                max_per_hour=max(1, proactive_max),
+                interval_seconds=max(300, proactive_interval // 2),
+            ))
+
+        custom_text = str(cfg.get("custom_scenarios", "") or "")
+        custom_list, errors = parse_custom_scenarios(
+            custom_text, default_interval=proactive_interval
+        )
+        for err in errors:
+            logger.warning(f"[WaveMemory] 自定义场景解析跳过: {err}")
+        scenarios.extend(custom_list)
+
+        names = [s.name for s in scenarios]
+        logger.info(f"[WaveMemory] Scenario registry: {names}")
+        return scenarios
+
+    def _match_scenario(self, message: str, group_id: str):
+        """按注册顺序返回第一个命中的场景（配额不足视为未命中）。"""
+        for sc in (getattr(self, "_scenario_registry", None) or []):
+            hit = sc.hit(message, group_id)
+            if hit is not None:
+                return hit
+        return None
+
     def _should_engage(self, event: AstrMessageEvent) -> str:
         """规则链前置过滤：判断消息是否与 bot 相关。
 
@@ -1774,8 +1918,14 @@ class WaveMemoryPlugin(Star):
             self._engage_reason = "other_bot"
             return "skip"
 
-        # 1. 窗口内预筛候选 → 直接交给 LLM 自判（on_message 已模拟唤醒并允许 LLM）
-        pending_ts = getattr(self, "_analysis_pending", {}).pop(group_id, 0)
+        # 1. 窗口内预筛候选 → Planner gate 已放行，直接进管线（风格在 meta_thinking_check 注入）
+        pending = getattr(self, "_analysis_pending", {}).pop(group_id, None) or {}
+        if isinstance(pending, dict):
+            pending_ts = pending.get("ts", 0)
+            self._pending_style = pending.get("style") or {}
+        else:
+            pending_ts = pending
+            self._pending_style = {}
         if pending_ts and time.time() - pending_ts < 30:
             self._engage_reason = "window_analyze"
             return "analyze"
@@ -1900,10 +2050,11 @@ class WaveMemoryPlugin(Star):
 
     @filter.on_llm_request(priority=1)
     async def meta_thinking_check(self, event: AstrMessageEvent, req=None):
-        """v1.3.0: 纯规则判断 + 态度注入，不独立调 LLM。
-        
-        - skip 的消息：直接 return（由 AstrBot 决定是否调 LLM）
-        - must/may：保留硬规则（极端攻击/刷屏），态度由 persona_text 注入（inject_memory 通道 5）
+        """三段式架构（v5.0）：人设注入 + Planner forced 风格产出 + 风格/延续指令注入。
+
+        - skip 的消息：直接 return（AstrBot 不会调 LLM）
+        - must_reply（@/私聊/引用）：forced plan 单次 LLM 产出语气/详略/内心
+        - analyze（候选已过 gate）：读 pending style 注入 [风格指令]
         """
         if not req:
             return
@@ -1923,29 +2074,77 @@ class WaveMemoryPlugin(Star):
             from astrbot.core.agent.message import TextPart
             req.extra_user_content_parts.append(TextPart(text=safety_injection))
 
+        # ─── wave 自成人设注入（提示词中心：群绑定 > bot绑定 > 全局默认）───
+        if getattr(self, "persona_injection_enabled", False) and self.prompt_service is not None:
+            try:
+                persona_text = self.prompt_service.resolve_persona(
+                    bot_id=bot_id, group_id=group_id,
+                    bot_name=self._get_bot_name(bot_id),
+                ).get("system_prompt", "")
+                if persona_text:
+                    sp = req.system_prompt or ""
+                    if getattr(self, "persona_override_astrbot", False):
+                        # 剥离 AstrBot 追加的 Persona Instructions 段，wave 人设完全接管
+                        import re as _re
+                        sp = _re.sub(r"\n?# Persona Instructions\n[\s\S]*?(?=\n# |\Z)", "", sp)
+                    req.system_prompt = f"{sp}\n<wave_persona>\n{persona_text}\n</wave_persona>"
+            except Exception as e:
+                logger.warning(f"[WaveMemory] wave persona injection failed: {e}")
+
         # ─── 规则链前置过滤 ───
         engage = self._should_engage(event)
         if engage == "skip":
             # 不相关消息，不做任何处理（AstrBot 不会调 LLM 因为没 @）
             return
 
-        # ─── 回话后窗口内强制自判：是否要主动回答 ───
-        if engage == "analyze":
-            from astrbot.core.agent.message import TextPart
-            req.extra_user_content_parts.append(TextPart(
-                text="[内省指令] 对方刚和你聊完。请你判断这条消息是否在期待你回应、或与你当前的话题相关。"
-                     "如果是在跟你说话、接你的话茬或需要你回应：直接自然承接并回应。"
-                     "如果这是与你无关的旁人对聊、并不需要你插话：只输出 [[NO_REPLY]]，不要输出任何其他内容。"
-            ))
+        # ─── 硬触发（@/私聊/引用）→ Planner forced：单次 LLM 产出风格 ───
+        if engage == "must_reply" and getattr(self, "planner", None):
+            try:
+                forced = await self.planner.plan_forced(
+                    context_messages=self._get_recent_messages(event, max_messages=10),
+                    message=message,
+                    bot_id=bot_id,
+                    group_id=group_id,
+                    bot_name=self._get_bot_name(bot_id),
+                )
+                directive = build_style_directive(
+                    self.prompt_service,
+                    tone=forced.get("tone", "正常"),
+                    detail=forced.get("detail", "简洁"),
+                    inner_thought=forced.get("inner_thought", ""),
+                )
+                from astrbot.core.agent.message import TextPart
+                req.extra_user_content_parts.append(TextPart(text=directive))
+            except Exception as e:
+                logger.warning(f"[WaveMemory] Planner forced failed: {e}")
 
-        # ─── 对话延续态度：他人接着 bot 的话聊 → 自然承接 ───
+        # ─── 候选路径（gate 已放行）：注入 pending 风格指令 ───
+        elif engage == "analyze":
+            style = getattr(self, "_pending_style", {}) or {}
+            directive = build_style_directive(
+                self.prompt_service,
+                tone=style.get("tone", "正常"),
+                detail=style.get("detail", "简洁"),
+                inner_thought=style.get("inner_thought", ""),
+            )
+            from astrbot.core.agent.message import TextPart
+            req.extra_user_content_parts.append(TextPart(text=directive))
+
+        # ─── 对话延续态度：他人接着 bot 的话聊 → 自然承接（模板可编辑）───
         elif getattr(self, "_engage_reason", "") in (
             "topic_continue", "aba_continue", "bot_identity", "quote_bot",
         ):
+            continuation = ""
+            if self.prompt_service is not None:
+                try:
+                    continuation = self.prompt_service.get_template("continuation_directive")
+                except Exception:
+                    continuation = ""
+            if not continuation:
+                continuation = ("[语气指令] 对方在顺着刚才的话题接着聊，说明有继续对话的意思。"
+                                "自然承接、顺着话题回应即可，不要重新自我介绍或客套兜圈子。")
             from astrbot.core.agent.message import TextPart
-            req.extra_user_content_parts.append(TextPart(
-                text="[语气指令] 对方在顺着刚才的话题接着聊，说明有继续对话的意思。自然承接、顺着话题回应即可，不要重新自我介绍或客套兜圈子。"
-            ))
+            req.extra_user_content_parts.append(TextPart(text=continuation))
 
         # ─── 硬规则：极端攻击 + 辱骂冷却 ───
         from .services.meta_thinking import EXTREME_ATTACK
@@ -2920,20 +3119,57 @@ class WaveMemoryPlugin(Star):
             # 放行给后面的逻辑使用
             message = merged_content
 
-        # ─── 回话后窗口内：粗筛候选 → 强制 LLM 自判是否主动回答 ───
-        if (self._window_analyze_enabled()
-                and not self._other_bot_msg
+        # ─── 三段式架构（v5.0）：候选收集 → Planner gate → 模拟唤醒 ───
+        # 硬触发(@/私聊/引用)不进此分支，由框架自然唤醒；forced 风格在 meta_thinking_check 产出。
+        if (not self._other_bot_msg
+                and group_id
                 and not group_id.startswith("private:")
-                and not getattr(event, "is_at_or_wake_command", False)
+                and not getattr(event, "is_at_or_wake_command", False)):
+            window_hit = bool(
+                self._window_analyze_enabled()
                 and self._window_active(group_id)
-                and self._window_analysis_candidate(message, sender_id, group_id)):
-            self._analysis_pending[group_id] = time.time()
-            self._engage_reason = "window_analyze"
-            # v4.26+：AstrBot 仅在 is_at_or_wake_command=True 且 call_llm=False 时才调 LLM。
-            # should_call_llm(True) 语义是「禁止默认 LLM 请求」，这里需模拟唤醒并显式放行。
-            event.is_at_or_wake_command = True
-            event.should_call_llm(False)
-            logger.info(f"[WaveMemory] 窗口候选 → 强制 LLM 自判: {group_id}")
+                and self._window_analysis_candidate(message, sender_id, group_id)
+            )
+            scenario_hit = None if window_hit else self._match_scenario(message, group_id)
+
+            if window_hit or scenario_hit is not None:
+                candidate_kind = "window_analyze" if window_hit else f"scenario:{scenario_hit.name}"
+                bot_id_for_plan = event.get_self_id() or ""
+                decision = None
+                if getattr(self, "planner", None):
+                    try:
+                        decision = await self.planner.plan_gate(
+                            context_messages=self._get_recent_messages(event, max_messages=10),
+                            message=message,
+                            bot_id=bot_id_for_plan,
+                            group_id=group_id,
+                            bot_name=self._get_bot_name(bot_id_for_plan),
+                            scenario_hint=getattr(scenario_hit, "prompt_hint", ""),
+                        )
+                    except Exception as e:
+                        logger.warning(f"[WaveMemory] Planner gate failed: {e}")
+                if decision is None or decision.get("reply"):
+                    # planner 关闭 → 函数过滤命中即放行；gate yes → 带风格放行
+                    self._analysis_pending[group_id] = {
+                        "ts": time.time(),
+                        "style": decision or {},
+                        "kind": candidate_kind,
+                    }
+                    if scenario_hit is not None:
+                        for _sc in (self._scenario_registry or []):
+                            if _sc.name == scenario_hit.name:
+                                _sc.record(group_id)
+                                break
+                    self._engage_reason = candidate_kind
+                    # v4.26+：AstrBot 仅在 is_at_or_wake_command=True 且 call_llm=False 时才调 LLM。
+                    # should_call_llm(True) 语义是「禁止默认 LLM 请求」，这里需模拟唤醒并显式放行。
+                    event.is_at_or_wake_command = True
+                    event.should_call_llm(False)
+                    logger.info(f"[WaveMemory] 候选({candidate_kind}) → Planner 放行: "
+                                f"{group_id}:{sender_id} tone={decision.get('tone') if decision else '-'}")
+                else:
+                    logger.info(f"[WaveMemory] 候选({candidate_kind}) → Planner 判沉默: "
+                                f"{group_id}:{sender_id}")
 
         # ─── 抢词被打断检测 (Hesitation Memory Capture) ───
         if hasattr(self, "_pending_proactive_plans") and self._pending_proactive_plans.get(group_id):
@@ -3102,80 +3338,9 @@ class WaveMemoryPlugin(Star):
                         ttl=30.0,
                     )
 
-            # ─── 求助答疑触发：检测到群友求助（尤其程序/报错）主动提供解惑 ───
-            bot_id = event.get_self_id() or ""
-            bot_profile = self._get_bot(bot_id)
-            proactive_ok = bot_profile.proactive_enabled if bot_profile else self.meta_thinking.proactive_enabled if self.meta_thinking else False
-            if (self.meta_thinking
-                and proactive_ok
-                and not self._other_bot_msg
-                and not getattr(event, "is_at_or_wake_command", False)
-                and group_id
-                and not group_id.startswith("private:")
-                and self.meta_thinking.should_check_help(group_id)):
-                try:
-                    help_kind = classify_help_request(locked_message)
-                    if help_kind == "program":
-                        # 编程问题是本功能核心场景，直接走 LLM 自判
-                        self.meta_thinking._bump_help(group_id)
-                        bot_id = event.get_self_id() or ""
-                        context_messages = self._get_recent_messages(event, max_messages=10)
-                        decision = await self.meta_thinking.should_proactive_help(
-                            group_id, context_messages, sender_id=sender_id
-                        )
-                        if decision.get("action") == "主动答疑":
-                            inner = decision.get("inner_thought", "")
-                            reply_text = await self.meta_thinking.generate_help_reply(
-                                context_messages, inner, help_kind,
-                                bot_id=bot_id,
-                            )
-                            if reply_text:
-                                logger.info(f"[MetaThinking] 主动答疑(编程): {inner[:50]}")
-                                await event.send(event.plain_result(reply_text))
-                    elif help_kind == "general":
-                        # 一般求助：也可偶尔介入
-                        self.meta_thinking._bump_help(group_id)
-                        bot_id = event.get_self_id() or ""
-                        context_messages = self._get_recent_messages(event, max_messages=10)
-                        decision = await self.meta_thinking.should_proactive_help(
-                            group_id, context_messages, sender_id=sender_id
-                        )
-                        if decision.get("action") == "主动答疑":
-                            inner = decision.get("inner_thought", "")
-                            reply_text = await self.meta_thinking.generate_help_reply(
-                                context_messages, inner, help_kind, bot_id=bot_id
-                            )
-                            if reply_text:
-                                logger.info(f"[MetaThinking] 主动答疑: {inner[:50]}")
-                                await event.send(event.plain_result(reply_text))
-                except Exception as e:
-                    logger.debug(f"[MetaThinking] Help proactive failed: {e}")
-                    _record_err("HelpProactive", e)
-
-            # 主动对话触发：兴趣词匹配 OR 关切命中，才调 LLM 判断
-            concern_score = self.concern_tracker.match(locked_message) if getattr(self, 'concern_tracker', None) else 0.0
-            is_interesting = self.meta_thinking.is_interesting(locked_message) if self.meta_thinking else False
-            if (self.meta_thinking
-                and proactive_ok
-                and not self._other_bot_msg
-                and not getattr(event, "is_at_or_wake_command", False)
-                and group_id
-                and (is_interesting or concern_score > 0.3)):
-                try:
-                    bot_id = event.get_self_id() or ""
-                    context_messages = self._get_recent_messages(event, max_messages=10)
-                    result = await self.meta_thinking.should_proactive(group_id, context_messages)
-                    if result.get("action") == "主动插话":
-                        inner = result.get("inner_thought", "")
-                        reply_text = await self.meta_thinking.generate_proactive_reply(
-                            context_messages, inner, bot_id=bot_id
-                        )
-                        if reply_text:
-                            logger.info(f"[MetaThinking] 主动插话: {inner[:50]}")
-                            await event.send(event.plain_result(reply_text))
-                except Exception as e:
-                    logger.debug(f"[MetaThinking] Proactive failed: {e}")
-                    _record_err("Proactive", e)
+            # v5.0：求助答疑/主动插话两大直连生成块已移除。
+            # 主动对话由三段式架构接管：on_message 候选收集（ScenarioRegistry）→
+            # Planner gate → 模拟唤醒 → AstrBot 管线统一生成。
 
         # 锁保护下唤醒执行整个事件流
         async with group_lock:

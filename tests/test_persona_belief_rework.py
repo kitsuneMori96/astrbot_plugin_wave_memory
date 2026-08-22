@@ -164,66 +164,6 @@ class PersonaBeliefReworkTest(unittest.TestCase):
         self.assertIn("core", sources)
         self.assertIn("book_lore", sources)
 
-    def test_metathinking_extreme_attack_uses_boundary_not_attack_back(self):
-        from services.meta_thinking import MetaThinking
-
-        meta = MetaThinking(
-            db=SimpleNamespace(conn=self._connect()),
-            context=None,
-            bot_qq_id="1336495069",
-            bot_qq_ids=["1336495069"],
-            bot_names={"1336495069": "白真真"},
-            bot_db_ids={"1336495069": "baizhenzhen"},
-            config={"enabled": True},
-        )
-        meta.llm = _FakeLLM()
-
-        result = asyncio.run(meta.should_respond(
-            sender_id="u1",
-            group_id="g1",
-            nickname="芒果",
-            message="@白真真 nmsl",
-            is_at_bot=True,
-            context_messages=[],
-            bot_id="1336495069",
-            system_prompt="你是白真真。保持克制。",
-        ))
-
-        self.assertNotEqual(result.get("action"), "attack_back")
-        self.assertIn(result.get("action"), {"reply", "short_reply", "ignore"})
-        prompt_text = "\n".join(p["prompt"] for p in meta.llm.prompts)
-        self.assertNotIn("怼回去", prompt_text)
-        self.assertNotIn("不要客气", prompt_text)
-
-    def test_metathinking_without_system_prompt_uses_neutral_prompt_not_hardcoded_persona(self):
-        from services.meta_thinking import MetaThinking
-
-        meta = MetaThinking(
-            db=SimpleNamespace(conn=self._connect()),
-            context=None,
-            bot_qq_id="1336495069",
-            bot_qq_ids=["1336495069"],
-            bot_names={"1336495069": "白真真"},
-            bot_db_ids={"1336495069": "baizhenzhen"},
-            config={"enabled": True},
-        )
-        meta.llm = _FakeLLM()
-
-        asyncio.run(meta.should_respond(
-            sender_id="u1",
-            group_id="g1",
-            nickname="芒果",
-            message="你在吗",
-            is_at_bot=True,
-            context_messages=[],
-            bot_id="1336495069",
-            system_prompt=None,
-        ))
-
-        prompt_text = "\n".join(p["prompt"] for p in meta.llm.prompts)
-        self.assertNotIn("你是一个有感情的人。你有喜好、有脾气、有记忆", prompt_text)
-        self.assertNotIn("怼回去", prompt_text)
-
     def test_few_shot_filters_aggressive_or_identity_contaminated_examples(self):
         from services.few_shot.service import FewShotService
 

@@ -527,6 +527,69 @@
       }
     }
   },
+  "Conversation_Planner_Settings": {
+    "description": "三段式对话架构 Planner（v5.0）：判定「要不要回」+ 产出语气/详略风格",
+    "hint": "窗口候选与特例场景命中后由 Planner 单次 LLM 判定；@/私聊/引用由 forced 模式产出风格。关闭后函数过滤命中即直接放行（无 AI 判定）。",
+    "type": "object",
+    "items": {
+      "planner_enabled": {
+        "description": "启用 Planner 判定",
+        "type": "bool",
+        "default": true
+      },
+      "planner_provider_id": {
+        "description": "Planner 专用 Provider ID（留空回退 tag_llm_provider_id）",
+        "hint": "判定调用频繁（每条候选一次），建议配便宜快速的模型。",
+        "type": "string",
+        "default": ""
+      }
+    }
+  },
+  "Proactive_Scenario_Settings": {
+    "description": "主动对话特例场景（v5.0）：配置什么情况下 bot 主动参与",
+    "hint": "内置求助答疑/兴趣话题/关切话题三类，配额沿用 MetaThinking_Settings 对应参数；自定义场景每行格式：名称|关键词,逗号分隔|语气提示|每小时上限。",
+    "type": "object",
+    "items": {
+      "scenario_help_enabled": {
+        "description": "启用「求助答疑」场景",
+        "type": "bool",
+        "default": true
+      },
+      "scenario_interest_enabled": {
+        "description": "启用「兴趣话题」场景",
+        "type": "bool",
+        "default": true
+      },
+      "scenario_concern_enabled": {
+        "description": "启用「关切话题」场景",
+        "type": "bool",
+        "default": true
+      },
+      "custom_scenarios": {
+        "description": "自定义场景（每行一个：名称|关键词|语气提示|每小时上限）",
+        "type": "string",
+        "default": ""
+      }
+    }
+  },
+  "Prompt_Center_Settings": {
+    "description": "提示词中心（v5.0）：wave 自成人设与架构模板",
+    "hint": "人设与模板在 WebUI(9876) 提示词中心页编辑；此处控制注入行为。",
+    "type": "object",
+    "items": {
+      "persona_injection": {
+        "description": "注入 wave 自成人设到 system_prompt",
+        "type": "bool",
+        "default": true
+      },
+      "persona_override_astrbot": {
+        "description": "剥离 AstrBot 追加的 Persona Instructions（完全接管）",
+        "hint": "开启后 AstrBot 配置页的人设不再生效，以 wave 提示词中心为准。建议同时在 AstrBot 留空 default_personality。",
+        "type": "bool",
+        "default": false
+      }
+    }
+  },
   "MetaThinking_Bot1": {
     "description": "第一个 Bot 身份配置（需配置 qq_id 以启用灵魂子系统）",
     "hint": "配置第一个绑定在本插件上的机器人身份。qq_id 是机器人的标识，name 是显示名称。必须配置至少一个 bot 才能启用 StudyService/SelfReflect/BeliefEngine 等灵魂子系统。",
