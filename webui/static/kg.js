@@ -1305,7 +1305,14 @@ function applyKgConfig() {
     renderGraph(nodes, edges, { layout: 'galaxy' });
     updateRuntimeConfigStatus();
     const status = document.getElementById('cfg-status');
-    if (status) status.textContent = `显示 ${nodes.length} 实体 / ${edges.length} 关系（总 ${_kgFullEdges.length} 条）`;
+    if (status) {
+        status.textContent = `显示 ${nodes.length} 实体 / ${edges.length} 关系（总 ${_kgFullEdges.length} 条）`;
+        status.style.transition = 'opacity 0.4s';
+        status.style.opacity = '1';
+        clearTimeout(status._hideTimer);
+        // 提醒性质的状态条：3 秒后淡出，避免长期占据面板底部与角标重叠
+        status._hideTimer = setTimeout(() => { status.style.opacity = '0'; }, 3000);
+    }
 }
 
 // ─── Query ───

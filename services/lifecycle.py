@@ -149,9 +149,13 @@ class AffinityEngine:
         before = dict(buf)
         event_reasons: dict[str, list[str]] = defaultdict(list)
 
-        # 基础：每条消息 familiarity +0.5
-        buf["familiarity"] += 0.5
-        event_reasons["familiarity"].append("看见一条群友消息")
+        # 与 bot 的交互信号：好感度只从这里累积——单纯在群里刷屏不涨好感
+        interacts_with_bot = bool(is_at_bot or is_reply_to_bot or (self.bot_qq_id and self.bot_qq_id in content))
+
+        # 基础熟悉度：仅与 bot 互动时累积（原为每条消息无条件 +0.5，刷屏即涨好感）
+        if interacts_with_bot:
+            buf["familiarity"] += 0.5
+            event_reasons["familiarity"].append("主动@或唤醒 bot" if is_at_bot else "与 bot 对话")
 
         # 主动@bot
         if is_at_bot:
@@ -174,15 +178,15 @@ class AffinityEngine:
             event_reasons["depth"].append("连续多轮深入对话")
             event_reasons["trust"].append("连续多轮深入对话")
 
-        # 分享链接/长文
-        if len(content) > 200 or re.search(r'https?://', content):
+        # 分享链接/长文（对 bot 说的才算——群里互相甩链接不涨好感）
+        if interacts_with_bot and (len(content) > 200 or re.search(r'https?://', content)):
             buf["trust"] += 1.5
             buf["depth"] += 1.0
-            event_reasons["trust"].append("分享长文或链接")
-            event_reasons["depth"].append("分享长文或链接")
+            event_reasons["trust"].append("向 bot 分享长文或链接")
+            event_reasons["depth"].append("向 bot 分享长文或链接")
 
-        # 情感标签（tag 或 关键词 fallback）
-        if emotion_tag_ids:
+        # 情感标签（tag 或 关键词 fallback）：同样要求与 bot 交互
+        if interacts_with_bot and emotion_tag_ids:
             classification = self._get_emotion_classification()
             for tid in emotion_tag_ids:
                 cls = classification.get(tid)
@@ -192,8 +196,9 @@ class AffinityEngine:
                 elif cls == 'fun':
                     buf["fun"] += 2.0
                     event_reasons["fun"].append("消息带来趣味感")
-        else:
-            # Fallback: 消息内容关键词匹配情感（tag 异步提取尚未完成时）
+        elif interacts_with_bot:
+            # Fallback: 消息内容关键词匹配情感（tag 异步提取尚未完成时）；
+            # 仅限与 bot 的对话——群友之间聊天带正面词不涨 bot 好感
             msg_sample = content[:200]
             if any(kw in msg_sample for kw in POSITIVE_EMOTION_KW):
                 buf["trust"] += 0.3
@@ -220,12 +225,12 @@ class AffinityEngine:
             event_reasons["hostility"].append("攻击或辱骂 bot")
             event_reasons["trust"].append("攻击或辱骂 bot")
 
-        # 深夜陪聊 (0-4点)
-        if 0 <= hour <= 4:
+        # 深夜陪聊 (0-4点)：与 bot 对话才算「陪」，深夜刷屏不涨好感
+        if interacts_with_bot and 0 <= hour <= 4:
             buf["familiarity"] += 1.5
             buf["depth"] += 1.0
-            event_reasons["familiarity"].append("深夜陪聊")
-            event_reasons["depth"].append("深夜陪聊")
+            event_reasons["familiarity"].append("深夜与 bot 互动")
+            event_reasons["depth"].append("深夜与 bot 互动")
 
         self._record_relationship_events(sender_id, group_id, before, buf, event_reasons)
 
