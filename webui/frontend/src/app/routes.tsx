@@ -31,6 +31,7 @@ import { ImportPage } from '@/pages/import/ImportPage'
 import { BeliefsPage } from '@/pages/beliefs/BeliefsPage'
 import { JargonPage } from '@/pages/jargon/JargonPage'
 import { SoulPage } from '@/pages/soul/SoulPage'
+import { PromptsPage } from '@/pages/prompts/PromptsPage'
 import { BlackboxHubPage } from '@/pages/blackbox/BlackboxHubPage'
 import { BlackboxBookLorePage } from '@/pages/blackbox/BlackboxBookLorePage'
 import { BlackboxFewShotPage } from '@/pages/blackbox/BlackboxFewShotPage'
@@ -118,6 +119,13 @@ export const appRoutes: AppRoute[] = [
     description: '心里话动机展示、生平大事 Timeline、SVG 情绪波动轨迹图',
     icon: HeartIcon,
     element: SoulPage,
+  },
+  {
+    path: '/prompts',
+    title: '提示词中心',
+    description: 'wave 自成人设库、三级绑定、Planner/风格/安全架构模板编辑',
+    icon: BookHeartIcon,
+    element: PromptsPage,
   },
   {
     path: '/blackbox',
