@@ -436,19 +436,20 @@ export function DashboardPage() {
 
       <div className="grid gap-4 lg:grid-cols-2">
         <SystemHealthCard services={data.system?.services_health} />
-        <Card>
-          <CardHeader>
-            <CardTitle>注入摘要</CardTitle>
-            <CardDescription>近 7 天 token 聚合</CardDescription>
-          </CardHeader>
-          <CardContent className="grid gap-3 sm:grid-cols-2">
-            <KpiCard title="总 token" value={formatNumber(metricSummary(data.metrics, 'total_tokens', 'sum'))} description="累计值" icon={WavesIcon} />
-            <KpiCard title="平均 token" value={formatNumber(metricSummary(data.metrics, 'total_tokens', 'avg'))} description="平均值" icon={WavesIcon} />
-          </CardContent>
-        </Card>
+        <div className="flex flex-col gap-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>注入摘要</CardTitle>
+              <CardDescription>近 7 天 token 聚合</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-3 sm:grid-cols-2">
+              <KpiCard title="总 token" value={formatNumber(metricSummary(data.metrics, 'total_tokens', 'sum'))} description="累计值" icon={WavesIcon} />
+              <KpiCard title="平均 token" value={formatNumber(metricSummary(data.metrics, 'total_tokens', 'avg'))} description="平均值" icon={WavesIcon} />
+            </CardContent>
+          </Card>
+          <RecentErrors errors={data.errors} />
+        </div>
       </div>
-
-      <RecentErrors errors={data.errors} />
     </div>
   )
 }
