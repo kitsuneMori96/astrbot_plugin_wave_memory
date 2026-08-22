@@ -2107,6 +2107,10 @@ class WaveMemoryPlugin(Star):
                     group_id=group_id,
                     bot_name=self._get_bot_name(bot_id),
                 )
+                logger.info(
+                    f"[Planner] forced(@/私聊/引用): tone={forced.get('tone')} "
+                    f"detail={forced.get('detail')} inner={str(forced.get('inner_thought', ''))[:40]}"
+                )
                 directive = build_style_directive(
                     self.prompt_service,
                     tone=forced.get("tone", "正常"),
@@ -3166,7 +3170,9 @@ class WaveMemoryPlugin(Star):
                     event.is_at_or_wake_command = True
                     event.should_call_llm(False)
                     logger.info(f"[WaveMemory] 候选({candidate_kind}) → Planner 放行: "
-                                f"{group_id}:{sender_id} tone={decision.get('tone') if decision else '-'}")
+                                f"{group_id}:{sender_id} tone={decision.get('tone') if decision else '-'} "
+                                f"detail={decision.get('detail') if decision else '-'} "
+                                f"inner={str(decision.get('inner_thought', ''))[:40] if decision else '-'}")
                 else:
                     logger.info(f"[WaveMemory] 候选({candidate_kind}) → Planner 判沉默: "
                                 f"{group_id}:{sender_id}")

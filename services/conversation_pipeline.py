@@ -87,19 +87,24 @@ def build_style_directive(prompt_service: Any, *, tone: str, detail: str,
     tone = normalize_tone(tone)
     detail = normalize_detail(detail)
     motivation = f"你想插话的动机：{inner_thought.strip()}" if (inner_thought or "").strip() else ""
+    detail_rule = (
+        "只输出一两句话，禁止展开解释、禁止列举、禁止超过 40 字"
+        if detail == "简洁" else "最多一个自然段，不超过三句话"
+    )
     if prompt_service is None:
-        base = f"[风格指令] 语气{tone}，回应{detail}。"
+        base = (f"[回复格式硬性要求] 本次回复：语气{tone}；篇幅{detail}（{detail_rule}）。"
+                "直接输出回复正文，不要任何前缀或分段编号。")
         return f"{base}{motivation}" if motivation else base
     try:
         return prompt_service.render(
             "style_directive",
-            default="[风格指令] 语气{tone}，回应{detail}。{motivation}",
+            default="[回复格式硬性要求] 本次回复：语气{tone}；篇幅{detail}。",
             tone=tone, detail=detail,
             motivation=(f" {motivation}" if motivation else ""),
         ).strip()
     except Exception as e:
         logger.warning(f"[ConversationPipeline] style directive render failed: {e}")
-        return f"[风格指令] 语气{tone}，回应{detail}。"
+        return f"[回复格式硬性要求] 本次回复：语气{tone}；篇幅{detail}。"
 
 
 # ─── 特例场景注册表 ──────────────────────────────────────────────

@@ -46,8 +46,11 @@ BUILT_IN_TEMPLATES: dict[str, tuple[str, str, str, list[str]]] = {
     "style_directive": (
         "[风格指令] 注入文本",
         "style",
-        "[风格指令] 语气{tone}，回应{detail}。{motivation}",
-        ["tone", "detail", "motivation"],
+        "{identity_guard}\n\n[回复格式硬性要求] 本次回复：语气{tone}；篇幅{detail}。"
+        "若 detail 为「简洁」：只输出一两句话，禁止展开解释、禁止列举、禁止超过 40 字。"
+        "若 detail 为「详细」：最多一个自然段，不超过三句话。{motivation}"
+        "\n直接输出回复正文，不要任何前缀、标题或分段编号。",
+        ["identity_guard", "tone", "detail", "motivation"],
     ),
     "continuation_directive": (
         "对话延续 [语气指令]",
@@ -67,6 +70,12 @@ BUILT_IN_TEMPLATES: dict[str, tuple[str, str, str, list[str]]] = {
         "</identity_safety_system>",
         ["bot_name"],
     ),
+}
+
+
+# v5.0.0 初版默认文案：seed 时若 DB 值等于这些旧值（未被用户修改过），跟随升级到当前默认
+_LEGACY_DEFAULTS: dict[str, str] = {
+    "style_directive": "[风格指令] 语气{tone}，回应{detail}。{motivation}",
 }
 
 
@@ -113,6 +122,13 @@ class PromptRepo:
                     (key, name, category, content, repr(variables), now),
                 )
                 seeded += 1
+            elif (row[0] or "") == _LEGACY_DEFAULTS.get(key):
+                # 用户未改动旧版内置文案 → 跟随升级
+                self.cm.execute_write(
+                    "UPDATE prompt_templates SET content = ?, name = ?, category = ?, variables = ?, updated_at = ?"
+                    " WHERE key = ?",
+                    (content, name, category, repr(variables), now, key),
+                )
         self.cm.commit()
         return seeded
 

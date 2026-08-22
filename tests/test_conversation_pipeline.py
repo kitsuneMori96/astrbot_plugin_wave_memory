@@ -57,10 +57,15 @@ class StyleDirectiveTest(unittest.TestCase):
 
     def test_fallback_without_service(self):
         out = build_style_directive(None, tone="热情", detail="详细", inner_thought="想帮忙")
-        self.assertIn("[风格指令]", out)
+        self.assertIn("[回复格式硬性要求]", out)
         self.assertIn("热情", out)
         self.assertIn("详细", out)
         self.assertIn("想帮忙", out)
+
+    def test_fallback_brief_rule(self):
+        out = build_style_directive(None, tone="正常", detail="简洁")
+        self.assertIn("禁止展开解释", out)
+        self.assertIn("40 字", out)
 
     def test_with_service_template(self):
         class FakePS:
