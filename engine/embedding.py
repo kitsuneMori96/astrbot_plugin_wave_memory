@@ -101,8 +101,16 @@ class EmbeddingService:
         return False
 
     def _mark_failed(self, p) -> None:
-        """标记 provider 连接失败，后续选择时跳过。"""
+        """标记 provider 连接失败，后续选择时跳过。
+
+        只有当可用 provider > 1 时才标记（避免唯一供应商被永久禁用）。
+        """
         if p is None:
+            return
+        providers = self.context.get_all_embedding_providers()
+        available = [x for x in providers if not self._is_disabled(x)]
+        if len(available) <= 1:
+            logger.debug(f"[WaveMemory] Skip marking failed: only {len(available)} provider(s) available")
             return
         key = self._provider_key(p)
         if key:
