@@ -2189,6 +2189,14 @@ class WaveMemoryPlugin(Star):
         bot_id = event.get_self_id() or ""
         is_at_bot = getattr(event, "is_at_or_wake_command", False)
 
+        # 上下文裁剪：历史轮数过多时旧回复会作为 few-shot 压过人设风格
+        try:
+            _ctxs = getattr(req, "contexts", None)
+            if _ctxs and len(_ctxs) > 16:
+                req.contexts = _ctxs[-16:]
+        except Exception:
+            pass
+
         # 最高优先级身份/风格防线：不让历史回复、记忆或当前诱导覆盖当前人格。
         req.system_prompt = prepend_identity_safety_system_prompt(
             getattr(req, "system_prompt", ""), message, always=True
@@ -2214,6 +2222,36 @@ class WaveMemoryPlugin(Star):
                     req.system_prompt = f"{sp}\n<wave_persona>\n{persona_text}\n</wave_persona>"
             except Exception as e:
                 logger.warning(f"[WaveMemory] wave persona injection failed: {e}")
+
+        # [TEMP-DEBUG] 落盘最终 system_prompt 供排查（确认后删除）
+        try:
+            import json as _json, time as _t
+            _ctxs = getattr(req, "contexts", []) or []
+            _last_asst = ""
+            for _c in reversed(_ctxs):
+                _role = _c.get("role") if isinstance(_c, dict) else getattr(_c, "role", "")
+                if _role == "assistant":
+                    _mc = _c.get("content") if isinstance(_c, dict) else getattr(_c, "content", "")
+                    _last_asst = str(_mc)[:100]
+                    break
+            _dbg_path = r"C:\Users\Administrator\data\plugin_data\astrbot_plugin_wave_memory\_debug_prompt.log"
+            with open(_dbg_path, "a", encoding="utf-8") as _f:
+                _f.write(_json.dumps({
+                    "ts": _t.strftime("%H:%M:%S"),
+                    "session": getattr(event, "unified_msg_origin", "") or "",
+                    "msg": message[:40],
+                    "ctx_len": len(_ctxs),
+                    "last_asst": _last_asst,
+                    "persona_enabled": getattr(self, "persona_injection_enabled", None),
+                    "override": getattr(self, "persona_override_astrbot", None),
+                    "sp_len": len(req.system_prompt or ""),
+                    "has_wave_persona": "<wave_persona>" in (req.system_prompt or ""),
+                    "has_aya_keyword": "元气直率" in (req.system_prompt or ""),
+                    "head": (req.system_prompt or "")[:120],
+                    "tail": (req.system_prompt or "")[-160:],
+                }, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
 
         # ─── 规则链前置过滤 ───
         engage = self._should_engage(event)
