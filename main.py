@@ -2172,6 +2172,23 @@ class WaveMemoryPlugin(Star):
             logger.info(f"[WaveMemory] 窗口候选命中: {group_id}:{sender_id}: {message.strip()[:30]}")
         return hit
 
+    def _mood_hint(self) -> str:
+        """当前心境 → 风格调制提示（mood_trajectory 存在时）。"""
+        mt = getattr(self, "mood_trajectory", None)
+        if mt is None:
+            return ""
+        try:
+            v = float(getattr(mt, "current_valence", 0.0) or 0.0)
+            if getattr(mt, "is_upset", lambda: False)():
+                return "[当前心境] 有点低落：玩闹和语气词收敛，语气更轻更慢。"
+            if v > 0.5:
+                return "[当前心境] 心情不错，可以放开玩。"
+            if v < -0.2:
+                return "[当前心境] 提不起劲：短句平直，别硬装活泼。"
+            return "[当前心境] 平和。"
+        except Exception:
+            return ""
+
     @filter.on_llm_request(priority=1)
     async def meta_thinking_check(self, event: AstrMessageEvent, req=None):
         """三段式架构（v5.0）：人设注入 + Planner forced 风格产出 + 风格/延续指令注入。
@@ -2279,6 +2296,9 @@ class WaveMemoryPlugin(Star):
                     detail=forced.get("detail", "简洁"),
                     inner_thought=forced.get("inner_thought", ""),
                 )
+                _mh = self._mood_hint()
+                if _mh:
+                    directive += "\n" + _mh
                 from astrbot.core.agent.message import TextPart
                 # 指令贴在本轮输入之后（生成点最近处），比 system_prompt 更有约束力
                 req.extra_user_content_parts.append(TextPart(text="<wave_style>\n" + directive + "\n</wave_style>"))
@@ -2294,6 +2314,9 @@ class WaveMemoryPlugin(Star):
                 detail=style.get("detail", "简洁"),
                 inner_thought=style.get("inner_thought", ""),
             )
+            _mh = self._mood_hint()
+            if _mh:
+                directive += "\n" + _mh
             from astrbot.core.agent.message import TextPart
             req.extra_user_content_parts.append(TextPart(text="<wave_style>\n" + directive + "\n</wave_style>"))
 
