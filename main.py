@@ -1340,7 +1340,7 @@ class WaveMemoryPlugin(Star):
             prompt_center_cfg = self.config.get("Prompt_Center_Settings", {}) or {}
             override = prompt_center_cfg.get("persona_override_astrbot")
             if override is None:
-                override = False
+                override = True
             injection_on = prompt_center_cfg.get("persona_injection")
             if injection_on is None:
                 injection_on = True

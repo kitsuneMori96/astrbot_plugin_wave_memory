@@ -584,9 +584,9 @@
       },
       "persona_override_astrbot": {
         "description": "剥离 AstrBot 追加的 Persona Instructions（完全接管）",
-        "hint": "开启后 AstrBot 配置页的人设不再生效，以 wave 提示词中心为准。建议同时在 AstrBot 留空 default_personality。",
+        "hint": "默认开启，AstrBot 配置页的人设不再生效，以 wave 提示词中心为准。关闭后两者共存（通常会导致冲突，不建议）。",
         "type": "bool",
-        "default": false
+        "default": true
       }
     }
   },
