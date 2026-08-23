@@ -2279,7 +2279,9 @@ class WaveMemoryPlugin(Star):
                     detail=forced.get("detail", "简洁"),
                     inner_thought=forced.get("inner_thought", ""),
                 )
-                req.system_prompt = (req.system_prompt or "") + "\n<wave_style>\n" + directive + "\n</wave_style>"
+                from astrbot.core.agent.message import TextPart
+                # 指令贴在本轮输入之后（生成点最近处），比 system_prompt 更有约束力
+                req.extra_user_content_parts.append(TextPart(text="<wave_style>\n" + directive + "\n</wave_style>"))
             except Exception as e:
                 logger.warning(f"[WaveMemory] Planner forced failed: {e}")
 
@@ -2292,7 +2294,8 @@ class WaveMemoryPlugin(Star):
                 detail=style.get("detail", "简洁"),
                 inner_thought=style.get("inner_thought", ""),
             )
-            req.system_prompt = (req.system_prompt or "") + "\n<wave_style>\n" + directive + "\n</wave_style>"
+            from astrbot.core.agent.message import TextPart
+            req.extra_user_content_parts.append(TextPart(text="<wave_style>\n" + directive + "\n</wave_style>"))
 
         # ─── 对话延续态度：他人接着 bot 的话聊 → 自然承接（模板可编辑）───
         elif getattr(self, "_engage_reason", "") in (
@@ -2386,6 +2389,33 @@ class WaveMemoryPlugin(Star):
         # ─── 态度判断由 inject_memory 的 PersonaEvolution 通道统一完成 ───
         # 不再有独立 LLM 调用。bot 在主对话中用自己的人格自然思考态度。
         # 好感度变化靠 LifecycleService 互动频率 + 极端事件规则驱动。
+
+    @filter.on_llm_response()
+    @filter.on_llm_response()
+    async def strip_emoji_on_response(self, event: AstrMessageEvent, resp=None):
+        """剥离回复中的 emoji/表情符号（人设要求不用，正则兜底保证）。"""
+        try:
+            if not resp or isinstance(resp, (list, tuple)):
+                return
+            import re as _re
+            _emoji_re = _re.compile(
+                "[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u2190-\u21FF\u2300-\u23FF]"
+            )
+            def _clean(t: str) -> str:
+                return _emoji_re.sub("", t) if t else t
+
+            text = getattr(resp, "completion_text", "") or ""
+            cleaned = _clean(text)
+            if cleaned != text and hasattr(resp, "_completion_text"):
+                resp._completion_text = cleaned
+            chain = getattr(getattr(resp, "result_chain", None), "chain", None)
+            if chain:
+                for part in chain:
+                    pt = getattr(part, "text", None)
+                    if pt:
+                        part.text = _clean(pt)
+        except Exception as e:
+            logger.debug(f"[WaveMemory] strip emoji failed: {e}")
 
     @filter.on_llm_response()
     async def swallow_no_reply(self, event: AstrMessageEvent, resp=None):
