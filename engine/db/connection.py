@@ -68,6 +68,17 @@ class ConnectionManager:
 
         self.memory_index = None  # 可选，删除时同步清索引
 
+    def register_scalar_function(self, name: str, fn, *, nargs: int = 1, deterministic: bool = True) -> None:
+        """在写连接上注册标量函数（触发器体可调用）。
+
+        触发器只在执行写入的那条连接上生效，因此只需注册到 _write_conn；
+        读连接不跑触发器。deterministic 不被旧 SQLite 支持时降级注册。
+        """
+        try:
+            self._write_conn.create_function(name, nargs, fn, deterministic=deterministic)
+        except (TypeError, AttributeError, sqlite3.NotSupportedError):
+            self._write_conn.create_function(name, nargs, fn)
+
     def _create_connection(self) -> sqlite3.Connection:
         """创建配置好的 SQLite 连接。"""
         conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30.0)

@@ -70,12 +70,33 @@ def _keywords(message: str, limit: int = 6) -> list[str]:
     return words
 
 
+def _cjk_spaced(text: str) -> str:
+    """与 engine.database._fts_normalize 一致：每个汉字两侧加空格。"""
+    out = []
+    for ch in str(text or ""):
+        code = ord(ch)
+        if 0x4E00 <= code <= 0x9FFF or 0x3400 <= code <= 0x4DBF:
+            out.append(" ")
+            out.append(ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def _match_expr(words: list[str]) -> str:
+    """每个关键词归一化为 CJK 单字短语（"生 日"），短语内 AND、词间 OR。
+
+    索引侧触发器对 content 做同样的单字切分，短语匹配即可命中
+    连续中文里的任意子词——unicode61 巨型 token 问题的双侧修复。
+    """
     quoted = []
     for word in words:
-        safe = word.replace('"', ' ').strip()
-        if safe:
-            quoted.append(f'"{safe}"')
+        safe = word.replace('"', " ").strip()
+        if not safe:
+            continue
+        spaced = _cjk_spaced(safe).split()
+        if spaced:
+            quoted.append('"' + " ".join(spaced) + '"')
     return " OR ".join(quoted)
 
 

@@ -445,8 +445,39 @@ class WaveMemoryDB:
 
     # ─── FTS5 + Audit ───
 
+    @staticmethod
+    def _fts_normalize(text) -> str:
+        """CJK 单字切分：每个汉字两侧加空格，使 unicode61 分词器按单字成 token。
+
+        中文连续文本在 unicode61 下会变成一整个巨型 token，导致关键词永远
+        匹配不到。索引与查询两侧都用本函数处理即可做短语精确匹配。
+        """
+        out = []
+        for ch in str(text or ""):
+            code = ord(ch)
+            if 0x4E00 <= code <= 0x9FFF or 0x3400 <= code <= 0x4DBF:
+                # 前后都加空格：保证与英文/数字相邻时也切断（如「玩galgame」）
+                out.append(" ")
+                out.append(ch)
+                out.append(" ")
+            else:
+                out.append(ch)
+        return "".join(out)
+
     def _setup_fts5(self):
         try:
+            # 归一化函数注册到写连接上（触发器在写入连接上触发）
+            self._cm.register_scalar_function("fts_norm", self._fts_normalize)
+
+            # 迁移检测：旧版触发器不含 fts_norm → 删掉重建
+            trig = self.conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='fts_memories_ai'"
+            ).fetchone()
+            needs_trigger_rebuild = bool(trig) and "fts_norm" not in (trig[0] or "")
+            if needs_trigger_rebuild:
+                for tname in ("fts_memories_ai", "fts_memories_ad", "fts_memories_au"):
+                    self.conn.execute(f"DROP TRIGGER IF EXISTS {tname}")
+
             self.conn.executescript("""
                 CREATE VIRTUAL TABLE IF NOT EXISTS fts_memories USING fts5(
                     content, sender_name, group_id,
@@ -454,19 +485,30 @@ class WaveMemoryDB:
                 );
                 CREATE TRIGGER IF NOT EXISTS fts_memories_ai AFTER INSERT ON memories BEGIN
                     INSERT INTO fts_memories(rowid, content, sender_name, group_id)
-                    VALUES (new.id, new.content, new.sender_name, new.group_id);
+                    VALUES (new.id, fts_norm(new.content), new.sender_name, new.group_id);
                 END;
                 CREATE TRIGGER IF NOT EXISTS fts_memories_ad AFTER DELETE ON memories BEGIN
                     INSERT INTO fts_memories(fts_memories, rowid, content, sender_name, group_id)
-                    VALUES ('delete', old.id, old.content, old.sender_name, old.group_id);
+                    VALUES ('delete', old.id, fts_norm(old.content), old.sender_name, old.group_id);
                 END;
                 CREATE TRIGGER IF NOT EXISTS fts_memories_au AFTER UPDATE ON memories BEGIN
                     INSERT INTO fts_memories(fts_memories, rowid, content, sender_name, group_id)
-                    VALUES ('delete', old.id, old.content, old.sender_name, old.group_id);
+                    VALUES ('delete', old.id, fts_norm(old.content), old.sender_name, old.group_id);
                     INSERT INTO fts_memories(rowid, content, sender_name, group_id)
-                    VALUES (new.id, new.content, new.sender_name, new.group_id);
+                    VALUES (new.id, fts_norm(new.content), new.sender_name, new.group_id);
                 END;
             """)
+
+            # 存量重建：触发器升级后全量重灌为归一化文本
+            if needs_trigger_rebuild:
+                total = self.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+                self.conn.execute("DELETE FROM fts_memories")
+                self.conn.execute(
+                    """INSERT INTO fts_memories(rowid, content, sender_name, group_id)
+                       SELECT id, fts_norm(content), sender_name, group_id FROM memories"""
+                )
+                self.conn.commit()
+                logger.info(f"[WaveMemory] FTS 索引已迁移为 CJK 单字分词并全量重建 ({total} 条)")
             # FTS5 初始填充
             fts_count = self.conn.execute("SELECT COUNT(*) FROM fts_memories").fetchone()[0]
             if fts_count == 0:
@@ -479,7 +521,7 @@ class WaveMemoryDB:
                     logger.info(f"[WaveMemory] FTS5 initial fill: {mem_count} memories indexed")
             self.conn.commit()
         except Exception as e:
-            logger.debug(f"[WaveMemory] FTS5 setup note: {e}")
+            logger.warning(f"[WaveMemory] FTS5 setup failed: {e}")
 
     def _setup_audit_table(self):
         try:
