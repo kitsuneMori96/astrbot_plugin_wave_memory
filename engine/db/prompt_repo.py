@@ -30,7 +30,7 @@ BUILT_IN_TEMPLATES: dict[str, tuple[str, str, str, list[str]]] = {
         "输出（逐行，不要多余内容）：\n"
         "内心：<一句话想法>\n"
         "行动：<回复 / 沉默>\n"
-        "语气：<热情 / 正常 / 冷淡 / 克制>\n"
+        "语气：<热情 / 正常 / 冷淡 / 克制>（拿不准选正常；对方开玩笑或气氛活跃时优先热情）\n"
         "详略：<详细 / 简洁>",
         ["identity_guard", "persona", "context", "message", "at_info", "scenario_hint"],
     ),
@@ -43,7 +43,7 @@ BUILT_IN_TEMPLATES: dict[str, tuple[str, str, str, list[str]]] = {
         "【对方消息】\n{message}\n"
         "\n对方正在直接和你说话。判断该怎么回应，输出（逐行，不要多余内容）：\n"
         "内心：<一句话想法>\n"
-        "语气：<热情 / 正常 / 冷淡 / 克制>\n"
+        "语气：<热情 / 正常 / 冷淡 / 克制>（拿不准选正常；对方开玩笑或气氛活跃时优先热情）\n"
         "详略：<详细 / 简洁>",
         ["identity_guard", "persona", "context", "message"],
     ),
@@ -94,7 +94,7 @@ _LEGACY_DEFAULTS: dict[str, str] = {
         "输出（逐行，不要多余内容）：\n"
         "内心：<一句话想法>\n"
         "行动：<回复 / 沉默>\n"
-        "语气：<热情 / 正常 / 冷淡 / 克制>\n"
+        "语气：<热情 / 正常 / 冷淡 / 克制>（拿不准选正常；对方开玩笑或气氛活跃时优先热情）\n"
         "详略：<详细 / 简洁>"
     ),
     "identity_guard": (

@@ -2241,8 +2241,7 @@ class WaveMemoryPlugin(Star):
                     detail=forced.get("detail", "简洁"),
                     inner_thought=forced.get("inner_thought", ""),
                 )
-                from astrbot.core.agent.message import TextPart
-                req.extra_user_content_parts.append(TextPart(text=directive))
+                req.system_prompt = (req.system_prompt or "") + "\n<wave_style>\n" + directive + "\n</wave_style>"
             except Exception as e:
                 logger.warning(f"[WaveMemory] Planner forced failed: {e}")
 
@@ -2255,8 +2254,7 @@ class WaveMemoryPlugin(Star):
                 detail=style.get("detail", "简洁"),
                 inner_thought=style.get("inner_thought", ""),
             )
-            from astrbot.core.agent.message import TextPart
-            req.extra_user_content_parts.append(TextPart(text=directive))
+            req.system_prompt = (req.system_prompt or "") + "\n<wave_style>\n" + directive + "\n</wave_style>"
 
         # ─── 对话延续态度：他人接着 bot 的话聊 → 自然承接（模板可编辑）───
         elif getattr(self, "_engage_reason", "") in (
