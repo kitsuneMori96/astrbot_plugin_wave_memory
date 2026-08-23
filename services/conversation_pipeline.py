@@ -113,6 +113,7 @@ def build_style_directive(prompt_service: Any, *, tone: str, detail: str,
 class ScenarioHit:
     name: str
     prompt_hint: str
+    require_engagement_signal: bool = True
 
 
 @dataclass
@@ -162,7 +163,11 @@ class Scenario:
 
     def hit(self, message: str, group_id: str) -> Optional[ScenarioHit]:
         if self.matches(message) and self.quota_ok(group_id):
-            return ScenarioHit(name=self.name, prompt_hint=self.hint)
+            return ScenarioHit(
+                name=self.name,
+                prompt_hint=self.hint,
+                require_engagement_signal=self.require_engagement_signal,
+            )
         return None
 
 
