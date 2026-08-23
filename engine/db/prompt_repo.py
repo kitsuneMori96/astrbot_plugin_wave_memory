@@ -53,7 +53,8 @@ BUILT_IN_TEMPLATES: dict[str, tuple[str, str, str, list[str]]] = {
         "{identity_guard}\n\n[回复格式硬性要求] 本次回复：语气{tone}；篇幅{detail}。"
         "若 detail 为「简洁」：只输出一两句话，禁止展开解释、禁止列举、禁止超过 40 字。"
         "若 detail 为「详细」：最多一个自然段，不超过三句话。{motivation}"
-        "\n直接输出回复正文，不要任何前缀、标题或分段编号。",
+        "\n【强制格式】输出必须是完整的一段文字（不换行、不分行、不列要点、不用破折号分隔），"
+        "禁止出现任何列表结构或换行符，否则会被系统拆成多条消息。",
         ["identity_guard", "tone", "detail", "motivation"],
     ),
     "continuation_directive": (
