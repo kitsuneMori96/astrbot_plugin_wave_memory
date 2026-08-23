@@ -150,10 +150,11 @@ class FactsChannel:
             return result
 
     def _query_primary(self, ctx: Any, *, keywords: list[str], max_items: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        conditions = " OR ".join(["subject LIKE ? OR object LIKE ?"] * len(keywords))
+        # 关键词同时匹配 subject/object/predicate——predicate 常承载关系词（如「生日是」），漏掉会查不到既有事实
+        conditions = " OR ".join(["subject LIKE ? OR object LIKE ? OR predicate LIKE ?"] * len(keywords))
         params: list[Any] = []
         for keyword in keywords:
-            params.extend([f"%{keyword}%", f"%{keyword}%"])
+            params.extend([f"%{keyword}%", f"%{keyword}%", f"%{keyword}%"])
         rows = self.db.conn.execute(
             f"SELECT rowid, subject, predicate, object, confidence, last_reinforced, created_at FROM facts WHERE {conditions} ORDER BY confidence DESC LIMIT ?",
             params + [max_items * 3],
