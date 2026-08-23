@@ -141,6 +141,13 @@ class WaveMemoryDB:
             (source, cutoff),
         ).fetchall()
         ids = [r[0] for r in rows]
+        # 先清标签关联，避免孤儿行虚增「标签覆盖率」统计
+        if ids:
+            placeholders = ",".join("?" * len(ids))
+            self.conn.execute(
+                f"DELETE FROM memory_tags WHERE memory_id IN ({placeholders})",
+                ids,
+            )
         cursor = self.conn.execute(
             "DELETE FROM memories WHERE source = ? AND timestamp < ?",
             (source, cutoff),

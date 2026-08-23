@@ -77,8 +77,9 @@ async def system_status():
     except Exception:
         pass
 
+    # 真实打标记忆数：JOIN memories 排除孤儿关联（历史删除路径未清 memory_tags 遗留）
     tagged_memories = c.db.conn.execute(
-        "SELECT COUNT(DISTINCT memory_id) FROM memory_tags"
+        "SELECT COUNT(DISTINCT mt.memory_id) FROM memory_tags mt JOIN memories m ON m.id = mt.memory_id"
     ).fetchone()[0]
 
     structured_tags = c.db.conn.execute(
