@@ -377,7 +377,7 @@ export function DashboardPage() {
       {
         title: '标签覆盖率',
         value: `${data.system?.coverage?.tag_pct ?? 0}%`,
-        description: `结构化标签 ${formatNumber(data.system?.tags?.structured)}`,
+        description: `已打标 ${formatNumber(data.system?.memories?.with_tags)}/${formatNumber(data.system?.memories?.total)} 条 · 标签词库 ${formatNumber(data.system?.tags?.total)} 个`,
         icon: TagsIcon,
       },
       {
