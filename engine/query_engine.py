@@ -454,7 +454,7 @@ class QueryEngine:
 
         # 群聊记忆：标准格式
         if chat_memories:
-            lines = ["<wave_memory>"]
+            lines = ["<wave_memory>", "（历史快照：行首为当时说话人与时间；文中的「你/我」指当时对话双方，不是本轮）"]
             for mem in chat_memories:
                 sender = mem.get("sender_name") or mem.get("sender_id") or "unknown"
                 ts = time.strftime("%m-%d %H:%M", time.localtime(mem["timestamp"]))

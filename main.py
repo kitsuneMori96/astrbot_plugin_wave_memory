@@ -2172,6 +2172,48 @@ class WaveMemoryPlugin(Star):
             logger.info(f"[WaveMemory] 窗口候选命中: {group_id}:{sender_id}: {message.strip()[:30]}")
         return hit
 
+    def _label_context_senders(self, group_id: str, ctxs) -> None:
+        """为框架历史中的 user 轮次回标说话人（就地修改）。
+
+        匹配依据：wave 消息库（memories 表）中该群最近的消息，按规范化文本对齐。
+        未命中或 bot 自己的发言保持原样。
+        """
+        import re as _re6
+        def _norm(t):
+            t = str(t or "")
+            t = _re6.sub(r"\[[^\]]{1,12}\]", "", t)   # [图片]/[CQ:...] 等
+            return _re6.sub(r"\s+", "", t)
+        try:
+            rows = self.db.conn.execute(
+                """SELECT sender_name, sender_id, content FROM memories
+                   WHERE group_id=? AND content IS NOT NULL ORDER BY id DESC LIMIT 300""",
+                (group_id,),
+            ).fetchall()
+            lookup = {}
+            for name, sid, content in rows:
+                key = _norm(content)
+                if key and len(key) >= 4:
+                    lookup[key] = (name or "").strip() or str(sid or "")
+            for entry in ctxs:
+                role = entry.get("role") if isinstance(entry, dict) else getattr(entry, "role", "")
+                if role != "user":
+                    continue
+                mc = entry.get("content") if isinstance(entry, dict) else getattr(entry, "content", "")
+                if isinstance(mc, list):
+                    mc = "".join((x.get("text", "") if isinstance(x, dict) else str(x)) for x in mc)
+                text = str(mc or "")
+                if not text or ": " in text[:20]:   # 已有前缀则跳过
+                    continue
+                who = lookup.get(_norm(text))
+                if who and who != "bot":
+                    labeled = f"{who}: {text}"
+                    if isinstance(entry, dict):
+                        entry["content"] = labeled
+                    else:
+                        setattr(entry, "content", labeled)
+        except Exception as e:
+            logger.debug(f"[WaveMemory] label_context_senders failed: {e}")
+
     def _build_sender_profile_block(self, group_id: str, sender_id: str) -> str:
         """对话者档案：身份/关系/关键事实，防止清史后把熟人当新人。"""
         try:
@@ -2313,11 +2355,16 @@ class WaveMemoryPlugin(Star):
         bot_id = event.get_self_id() or ""
         is_at_bot = getattr(event, "is_at_or_wake_command", False)
 
-        # 上下文裁剪：历史轮数过多时旧回复会作为 few-shot 压过人设风格
+        # 上下文裁剪 + 说话人回标：框架历史把群友都记成同一 user 角色，
+        # 跨用户言论会被模型归到当前对话者头上——用 wave 消息库回查发言人
         try:
             _ctxs = getattr(req, "contexts", None)
-            if _ctxs and len(_ctxs) > 16:
-                req.contexts = _ctxs[-16:]
+            if _ctxs:
+                if len(_ctxs) > 16:
+                    req.contexts = _ctxs[-16:]
+                    _ctxs = req.contexts
+                if group_id:
+                    self._label_context_senders(group_id, _ctxs)
         except Exception:
             pass
 
