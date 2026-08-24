@@ -2198,23 +2198,26 @@ class WaveMemoryPlugin(Star):
                 return ""
             name = (row[1] if row else "") or sender_id
             cnt = int(row[2] or 0) if row else 0
-            alias_txt = ""
-            if row and row[2]:
-                try:
-                    al = [a for a in _json.loads(row[2]) if a and a != name][:3]
-                    if al:
-                        alias_txt = "，也被称为：" + "、".join(al)
-                except Exception:
-                    pass
+            # 别名不注入：群聊玩笑外号（如嘲讽性称呼）进档案会被模型当正式称呼使用，易冒犯
+            # facts 只保留属性型事实（生日/喜好/身份），过滤「提到X」「说了Y」类一次性事件碎片
+            import re as _re4f
+            _attr_pat = _re4f.compile(r"(生日|喜欢|讨厌|害怕|是|叫|名字|在读|毕业|住在|家乡|专业|工作)")
             fact_rows = self.db.conn.execute(
                 "SELECT predicate || object FROM facts WHERE subject=? AND confidence>=0.6 "
-                "ORDER BY last_reinforced DESC LIMIT 4",
+                "ORDER BY last_reinforced DESC LIMIT 12",
                 (sender_id,),
             ).fetchall()
-            facts_txt = "；".join(r[0] for r in fact_rows)
-            lines = [f"<sender_profile>", f"对方：{name}（QQ {sender_id}）"]
-            if alias_txt:
-                lines[1] += alias_txt
+            kept = []
+            seen_f = set()
+            for fr in fact_rows:
+                txt = str(fr[0] or "").strip()
+                if txt and _attr_pat.search(txt) and txt not in seen_f:
+                    kept.append(txt)
+                    seen_f.add(txt)
+                if len(kept) >= 3:
+                    break
+            facts_txt = "；".join(kept)
+            lines = ["<sender_profile>", f"对方：{name}（QQ {sender_id}）"]
             rel = []
             if fam:
                 rel.append(f"熟悉度{fam}")
