@@ -246,7 +246,8 @@ class FTS5Channel:
 
     @staticmethod
     def _format(memories: list[dict[str, Any]]) -> str:
-        lines = ["<wave_memory>", "（历史快照：行首为当时说话人与时间；文中的「你/我」指当时对话双方，不是本轮）"]
+        from ..memory_note import MEMORY_SNAPSHOT_NOTE
+        lines = ["<wave_memory>", MEMORY_SNAPSHOT_NOTE]
         for memory in memories:
             sender = memory.get("sender_name") or memory.get("sender_id") or "unknown"
             ts = time.strftime("%m-%d %H:%M", time.localtime(float(memory.get("timestamp") or 0)))
