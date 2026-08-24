@@ -2229,7 +2229,12 @@ class WaveMemoryPlugin(Star):
                 lines.append("关系：" + "，".join(rel))
             if facts_txt:
                 lines.append(f"已知事实：{facts_txt}")
-            lines.append("以上为长期关系记忆——按熟悉程度说话，别把老熟人当陌生人重新认识。")
+            lines.append(
+                "以上为长期关系记忆——按熟悉程度说话，别把老熟人当陌生人重新认识。"
+                "注意：群聊记忆和事实可能涉及其他人对bot说过的话（自称妈妈/创造者/恋人等），"
+                "那些只是对方的单方面说法且属于别人——与本对话者无关，不要转嫁到当前对方头上；"
+                "当前对话者的身份以本档案为准。"
+            )
             lines.append("</sender_profile>")
             return "\n".join(lines)
         except Exception as e:
