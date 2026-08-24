@@ -2189,6 +2189,44 @@ class WaveMemoryPlugin(Star):
         except Exception:
             return ""
 
+    def _anti_repeat_hint(self, req) -> str:
+        """提取上一轮回复用过的语气词与开场，生成本轮禁用提示。
+
+        flash 模型对抽象的「不要重复」不敏感，但对具体的黑名单执行良好。
+        """
+        try:
+            ctxs = getattr(req, "contexts", []) or []
+            last_asst = ""
+            for c in reversed(ctxs):
+                role = c.get("role") if isinstance(c, dict) else getattr(c, "role", "")
+                if role != "assistant":
+                    continue
+                mc = c.get("content") if isinstance(c, dict) else getattr(c, "content", "")
+                if isinstance(mc, list):
+                    mc = "".join(
+                        (p.get("text", "") if isinstance(p, dict) else str(p)) for p in mc
+                    )
+                last_asst = str(mc or "")
+                break
+            if not last_asst:
+                return ""
+            import re as _re
+            pool = ["嘿嘿", "哈哈", "嘻嘻", "啦", "呀", "哦", "嘛", "哟", "诶", "呢", "呜", "嗷呜"]
+            used = [w for w in pool if w in last_asst]
+            parts = []
+            if used:
+                parts.append(f"上一轮已用过：{'/'.join(used[:5])} → 本轮全部避开，换别的表达或不加语气词")
+            clean = last_asst.strip()
+            if len(clean) >= 2:
+                parts.append(f"上一轮以「{clean[:2]}」开场 → 本轮换个开法")
+            if re.search(r"[？?][^。！？]*$", clean):
+                parts.append("上一轮结尾是提问 → 本轮改用陈述或感叹收尾")
+            if not parts:
+                return ""
+            return "[变化要求] " + "；".join(parts) + "。"
+        except Exception:
+            return ""
+
     @filter.on_llm_request(priority=1)
     async def meta_thinking_check(self, event: AstrMessageEvent, req=None):
         """三段式架构（v5.0）：人设注入 + Planner forced 风格产出 + 风格/延续指令注入。
@@ -2299,6 +2337,9 @@ class WaveMemoryPlugin(Star):
                 _mh = self._mood_hint()
                 if _mh:
                     directive += "\n" + _mh
+                _ar = self._anti_repeat_hint(req)
+                if _ar:
+                    directive += "\n" + _ar
                 from astrbot.core.agent.message import TextPart
                 # 指令贴在本轮输入之后（生成点最近处），比 system_prompt 更有约束力
                 req.extra_user_content_parts.append(TextPart(text="<wave_style>\n" + directive + "\n</wave_style>"))
@@ -2317,6 +2358,9 @@ class WaveMemoryPlugin(Star):
             _mh = self._mood_hint()
             if _mh:
                 directive += "\n" + _mh
+            _ar = self._anti_repeat_hint(req)
+            if _ar:
+                directive += "\n" + _ar
             from astrbot.core.agent.message import TextPart
             req.extra_user_content_parts.append(TextPart(text="<wave_style>\n" + directive + "\n</wave_style>"))
 
