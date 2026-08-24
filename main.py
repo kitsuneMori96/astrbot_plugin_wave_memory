@@ -2172,6 +2172,67 @@ class WaveMemoryPlugin(Star):
             logger.info(f"[WaveMemory] 窗口候选命中: {group_id}:{sender_id}: {message.strip()[:30]}")
         return hit
 
+    def _build_sender_profile_block(self, group_id: str, sender_id: str) -> str:
+        """对话者档案：身份/关系/关键事实，防止清史后把熟人当新人。"""
+        try:
+            if not sender_id or sender_id == "bot" or self.db is None:
+                return ""
+            row = self.db.conn.execute(
+                "SELECT display_name, aliases, message_count FROM person_registry WHERE qq_id=?",
+                (sender_id,),
+            ).fetchone()
+            prof = self.db.conn.execute(
+                "SELECT metadata FROM user_profiles WHERE user_id=? ORDER BY "
+                "CASE WHEN group_id=? THEN 0 WHEN group_id LIKE '%'||?||'%' THEN 1 ELSE 2 END LIMIT 1",
+                (sender_id, group_id or "", (group_id or "")[-12:]),
+            ).fetchone()
+            import json as _json
+            fam = att = ""
+            if prof and prof[0]:
+                md = _json.loads(prof[0])
+                dims = md.get("dimensions", {}) or {}
+                fam_i = float(dims.get("familiarity", 0) or 0)
+                fam = f"{min(100, fam_i):.0f}/100"
+                att = str(md.get("attitude_level", "") or "")
+            if not row and not fam:
+                return ""
+            name = (row[1] if row else "") or sender_id
+            cnt = int(row[2] or 0) if row else 0
+            alias_txt = ""
+            if row and row[2]:
+                try:
+                    al = [a for a in _json.loads(row[2]) if a and a != name][:3]
+                    if al:
+                        alias_txt = "，也被称为：" + "、".join(al)
+                except Exception:
+                    pass
+            fact_rows = self.db.conn.execute(
+                "SELECT predicate || object FROM facts WHERE subject=? AND confidence>=0.6 "
+                "ORDER BY last_reinforced DESC LIMIT 4",
+                (sender_id,),
+            ).fetchall()
+            facts_txt = "；".join(r[0] for r in fact_rows)
+            lines = [f"<sender_profile>", f"对方：{name}（QQ {sender_id}）"]
+            if alias_txt:
+                lines[1] += alias_txt
+            rel = []
+            if fam:
+                rel.append(f"熟悉度{fam}")
+            if att:
+                rel.append(f"当前态度：{att}")
+            if cnt:
+                rel.append(f"累计互动约{cnt}条")
+            if rel:
+                lines.append("关系：" + "，".join(rel))
+            if facts_txt:
+                lines.append(f"已知事实：{facts_txt}")
+            lines.append("以上为长期关系记忆——按熟悉程度说话，别把老熟人当陌生人重新认识。")
+            lines.append("</sender_profile>")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.debug(f"[WaveMemory] sender profile build failed: {e}")
+            return ""
+
     def _mood_hint(self) -> str:
         """当前心境 → 风格调制提示（mood_trajectory 存在时）。"""
         mt = getattr(self, "mood_trajectory", None)
@@ -2305,6 +2366,15 @@ class WaveMemoryPlugin(Star):
                     "head": (req.system_prompt or "")[:120],
                     "tail": (req.system_prompt or "")[-160:],
                 }, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+        # 对话者档案：身份与关系记忆（独立于向量召回，毫秒级查表）
+        try:
+            _sp = self._build_sender_profile_block(group_id, sender_id)
+            if _sp:
+                from astrbot.core.agent.message import TextPart as _TP
+                req.extra_user_content_parts.append(_TP(text=_sp))
         except Exception:
             pass
 
