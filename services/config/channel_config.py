@@ -133,14 +133,14 @@ def build_default_channel_config(
 
     defaults = {
         "safety": ChannelConfig("safety", True, priority=1000, token_budget=0, timeout_ms=50, modes=_modes_for("safety", mode)),
-        "memory": ChannelConfig("memory", _enabled_for("memory", mode, inject_cfg), priority=100, top_k=inject_top_k, token_budget=600, timeout_ms=2500, min_score=min_similarity, modes=_modes_for("memory", mode)),
+        "memory": ChannelConfig("memory", _enabled_for("memory", mode, inject_cfg), priority=100, top_k=inject_top_k, token_budget=600, timeout_ms=1500, min_score=min_similarity, modes=_modes_for("memory", mode)),
         "timeline": ChannelConfig("timeline", _enabled_for("timeline", mode, inject_cfg), priority=80, max_items=timeline_max, token_budget=220, timeout_ms=120, modes=_modes_for("timeline", mode)),
         "facts": ChannelConfig("facts", _enabled_for("facts", mode, inject_cfg), priority=75, max_items=facts_max, token_budget=260, timeout_ms=120, modes=_modes_for("facts", mode)),
         "persona": ChannelConfig("persona", _enabled_for("persona", mode, inject_cfg), priority=70, max_items=1, token_budget=350, timeout_ms=2000, modes=_modes_for("persona", mode)),
         "belief": ChannelConfig("belief", _enabled_for("belief", mode, inject_cfg), priority=65, max_items=5, token_budget=220, timeout_ms=180, modes=_modes_for("belief", mode)),
         "jargon": ChannelConfig("jargon", _enabled_for("jargon", mode, inject_cfg), priority=60, max_items=3, token_budget=180, timeout_ms=160, modes=_modes_for("jargon", mode)),
         "fewshot": ChannelConfig("fewshot", _enabled_for("fewshot", mode, inject_cfg), priority=50, max_items=3, token_budget=260, timeout_ms=180, modes=_modes_for("fewshot", mode)),
-        "book_lore": ChannelConfig("book_lore", _enabled_for("book_lore", mode, inject_cfg), priority=45, max_items=1, token_budget=260, timeout_ms=1500, min_score=0.35, modes=_modes_for("book_lore", mode)),
+        "book_lore": ChannelConfig("book_lore", _enabled_for("book_lore", mode, inject_cfg), priority=45, max_items=1, token_budget=260, timeout_ms=1200, min_score=0.35, modes=_modes_for("book_lore", mode)),
         "fts5": ChannelConfig("fts5", _enabled_for("fts5", mode, inject_cfg), priority=85, top_k=10, token_budget=350, timeout_ms=180, min_score=0.0, modes=_modes_for("fts5", mode)),
         "affinity": ChannelConfig("affinity", _enabled_for("affinity", mode, inject_cfg), priority=68, max_items=3, token_budget=180, timeout_ms=120, modes=_modes_for("affinity", mode)),
     }

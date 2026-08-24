@@ -19,12 +19,17 @@ class EmbeddingService:
     配置中的 embedding_provider_id 用于匹配 embedding provider 的 ID。
     """
 
+    _QUERY_CACHE_TTL = 600.0  # 查询向量缓存 10 分钟
+
     def __init__(self, context, provider_id: str, dimension: int = 1024):
         self.context = context
         self.provider_id = provider_id
         self.dimension = dimension
         self._provider = None
         self._failed_provider_ids: set[str] = set()
+        # 查询向量缓存：text -> (timestamp, vec)。上游 API 慢时（实测可达 1.5s+）
+        # 相同文本的重复查询直接命中缓存，避免每轮都吃一次全延迟。
+        self._query_cache: dict[str, tuple[float, np.ndarray]] = {}
 
     def _get_provider(self):
         """获取 embedding provider 实例。
@@ -127,34 +132,63 @@ class EmbeddingService:
         return result[0] if result else None
 
     async def get_embeddings(self, texts: list[str]) -> list[Optional[np.ndarray]]:
-        """批量获取 embedding 向量。"""
+        """批量获取 embedding 向量（带查询级缓存）。"""
+        import time as _time
+
         if not texts:
             return []
 
+        now = _time.time()
+        results: list[Optional[np.ndarray]] = [None] * len(texts)
+        missing_idx: list[int] = []
+        for i, t in enumerate(texts):
+            cached = self._query_cache.get(t)
+            if cached and now - cached[0] < self._QUERY_CACHE_TTL:
+                results[i] = cached[1]
+            else:
+                missing_idx.append(i)
+        if not missing_idx:
+            return results
+
+        sub_texts = [texts[i] for i in missing_idx]
         provider = self._get_provider()
         if not provider:
-            return [None] * len(texts)
+            return results
+
+        async def _call(prov):
+            raw = await prov.get_embeddings(sub_texts)
+            built = self._build_results(raw, len(sub_texts))
+            # 写缓存
+            now2 = _time.time()
+            for idx, vec in zip(missing_idx, built):
+                if vec is not None:
+                    self._query_cache[texts[idx]] = (now2, vec)
+                    # 简单防膨胀：超过 512 条时清掉一半最旧的
+                    if len(self._query_cache) > 512:
+                        for k in sorted(self._query_cache, key=lambda k: self._query_cache[k][0])[:256]:
+                            self._query_cache.pop(k, None)
+            for idx, vec in zip(missing_idx, built):
+                results[idx] = vec
+            return results
 
         try:
             # AstrBot embedding provider 的标准接口
-            raw_result = await provider.get_embeddings(texts)
-            return self._build_results(raw_result, len(texts))
+            return await _call(provider)
 
         except RuntimeError as e:
             if "Event loop is closed" in str(e):
                 # Provider 的 event loop 已关闭（热重载/重启残留），清缓存重试一次
-                logger.warning(f"[WaveMemory] Embedding provider event loop closed, refreshing...")
+                logger.warning("[WaveMemory] Embedding provider event loop closed, refreshing...")
                 self._provider = None
                 provider = self._get_provider()
                 if provider:
                     try:
-                        raw_result = await provider.get_embeddings(texts)
-                        return self._build_results(raw_result, len(texts))
+                        return await _call(provider)
                     except Exception as e2:
                         logger.error(f"[WaveMemory] Embedding retry failed: {e2}")
             else:
                 logger.error(f"[WaveMemory] Embedding failed: {e}")
-            return [None] * len(texts)
+            return results
 
         except Exception as e:
             logger.error(f"[WaveMemory] Embedding failed: {e}")
@@ -165,11 +199,10 @@ class EmbeddingService:
             if fallback is not None and fallback is not provider:
                 try:
                     logger.info(f"[WaveMemory] Falling back to embedding provider: {self._provider_key(fallback)}")
-                    raw_result = await fallback.get_embeddings(texts)
-                    return self._build_results(raw_result, len(texts))
+                    return await _call(fallback)
                 except Exception as e2:
                     logger.error(f"[WaveMemory] Embedding fallback failed: {e2}")
-            return [None] * len(texts)
+            return results
 
     @staticmethod
     def _build_results(raw_result, expected_count: int) -> list[Optional[np.ndarray]]:
