@@ -62,14 +62,16 @@ class QueryEngine:
         exclude_sources: Optional[list[str]] = None,
         source_filter: Optional[str | list[str]] = None,
         time_filter_ts: float = 0,
+        time_filter_end_ts: float = 0,
         group_boost: Optional[dict] = None,
     ) -> list[dict]:
         """执行完整的浪潮查询管线。
-        
+
         Args:
             exclude_sources: 排除特定 source 类型的记忆（如 ["bzz_experience"]）
             source_filter: 只保留特定 source 类型的记忆，支持单个或列表
             time_filter_ts: 时间戳阈值，>0 时只返回 timestamp >= 此值的记忆
+            time_filter_end_ts: 排他上界，>0 时只返回 timestamp < 此值的记忆（日历日窗口用）
             group_boost: 群权重字典，如 {"current": 1.5, "cross": 0.8, "group_id": "gid"}
         """
         start = time.time()
@@ -125,6 +127,8 @@ class QueryEngine:
             time_decay = 0.997 ** max(0, days_old)
             if time_filter_ts > 0 and ts < time_filter_ts:
                 time_decay = 0
+            if time_filter_end_ts > 0 and ts >= time_filter_end_ts:
+                time_decay = 0
 
             access_count = mem.get("access_count", 0) or 0
             import math
@@ -143,6 +147,8 @@ class QueryEngine:
         # 时间过滤 + 群权重（Geodesic 后执行防止绕过，非 Geodesic 时也在此统一应用）
         for mem in memories:
             if time_filter_ts > 0 and mem.get("_parsed_ts", 0) < time_filter_ts:
+                mem["score"] = -1
+            if time_filter_end_ts > 0 and mem.get("_parsed_ts", 0) >= time_filter_end_ts:
                 mem["score"] = -1
             if group_boost and group_boost.get("group_id"):
                 m_group = mem.get("group_id", "")
@@ -260,6 +266,7 @@ class QueryEngine:
         group_id: Optional[str] = None,
         top_k: int = 5,
         time_filter_ts: float = 0,
+        time_filter_end_ts: float = 0,
         group_boost: Optional[dict] = None,
     ) -> list[dict]:
         """多路霰弹枪检索。"""
@@ -319,6 +326,8 @@ class QueryEngine:
             time_decay = 0.997 ** max(0, days_old)
             if time_filter_ts > 0 and ts < time_filter_ts:
                 time_decay = 0
+            if time_filter_end_ts > 0 and ts >= time_filter_end_ts:
+                time_decay = 0
 
             mem["score"] = mem["similarity"] * mem.get("importance", 1.0) * time_decay
 
@@ -333,6 +342,8 @@ class QueryEngine:
         # 时间过滤 + 群权重（Geodesic 后执行防止绕过，非 Geodesic 时也在此统一应用）
         for mem in memories:
             if time_filter_ts > 0 and mem.get("_parsed_ts", 0) < time_filter_ts:
+                mem["score"] = -1
+            if time_filter_end_ts > 0 and mem.get("_parsed_ts", 0) >= time_filter_end_ts:
                 mem["score"] = -1
             if group_boost and group_boost.get("group_id"):
                 m_group = mem.get("group_id", "")

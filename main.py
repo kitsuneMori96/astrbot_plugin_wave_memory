@@ -2784,27 +2784,13 @@ class WaveMemoryPlugin(Star):
         from .utils.perf import estimate_tokens
         t_start = _time.perf_counter()
 
-        # ─── 时间感知检索（可选）：检测时间词，设置时间过滤 ───
-        _time_filter_ts = 0  # 0 = 不过滤
+        # ─── 时间感知检索（可选）：检测时间词，设置日历日窗口 ───
+        _time_window = None
         if self.time_filter_enabled:
-            _time_patterns = [
-                (r'昨天|昨晚', 1 * 86400),
-                (r'前天', 2 * 86400),
-                (r'上周|前几天|这几天|一周前', 7 * 86400),
-                (r'之前|以前|上次|那次|上个月', 30 * 86400),
-            ]
-            for pattern, seconds in _time_patterns:
-                if _re.search(pattern, message[:50]):
-                    _time_filter_ts = _time.time() - seconds
-                    break
-            if not _time_filter_ts:
-                _match = _re.search(r'(\d+)天前', message[:50])
-                if _match:
-                    _time_filter_ts = _time.time() - int(_match.group(1)) * 86400
-                else:
-                    _match = _re.search(r'(\d+)小时前', message[:50])
-                    if _match:
-                        _time_filter_ts = _time.time() - int(_match.group(1)) * 3600
+            from .utils.temporal_parser import parse_time_range
+            _time_window = parse_time_range(message[:50])
+        _time_filter_ts = _time_window[0] if _time_window else 0
+        _time_filter_end = _time_window[1] if _time_window else 0
 
         # ─── v2.0: 去重——跳过最近 N 分钟的记忆（AstrBot 对话历史已覆盖）───
         _skip_before_ts = _time.time() - self.skip_recent_minutes * 60
@@ -2826,11 +2812,15 @@ class WaveMemoryPlugin(Star):
                             text=message, context_messages=context_messages,
                             group_id=group_id, top_k=self.inject_top_k,
                             time_filter_ts=_time_filter_ts,
+                            time_filter_end_ts=_time_filter_end,
                             group_boost=_group_boost,
                         ), timeout=_CHANNEL_TIMEOUT)
                 else:
-                    # 只搜高价值记忆（不搜 chat/noise，避免复读群友的话）
+                    # 只搜高价值记忆（不搜 chat/noise，避免复读群友的话）；
+                    # 但时间词问句（写日记/昨天聊了啥）恰恰需要 chat 原文，放开
                     default_sources = ["core", "evolution", "experience", "lore", "bzz_experience", "bzz_evolution", "book_lore"]
+                    if _time_window:
+                        default_sources.append("chat")
                     memories = await asyncio.wait_for(
                         self.query_engine.query(
                             text=message, group_id=group_id,
@@ -2838,6 +2828,7 @@ class WaveMemoryPlugin(Star):
                             exclude_sources=exclude_sources,
                             source_filter=default_sources if not exclude_sources else None,
                             time_filter_ts=_time_filter_ts,
+                            time_filter_end_ts=_time_filter_end,
                             group_boost=_group_boost,
                         ), timeout=_CHANNEL_TIMEOUT)
                 if memories:
