@@ -234,7 +234,9 @@ class MemoryRepo:
 
     def get_memories_without_vector(self, limit: int = 100) -> list:
         rows = self.cm.execute_read(
-            "SELECT id FROM memories WHERE vector IS NULL ORDER BY id DESC LIMIT ?",
+            "SELECT id FROM memories WHERE vector IS NULL "
+            "AND source NOT IN ('noise', 'identity_quarantine') "
+            "ORDER BY id DESC LIMIT ?",
             (limit,),
         ).fetchall()
         return [r[0] for r in rows]

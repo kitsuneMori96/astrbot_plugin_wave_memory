@@ -101,6 +101,41 @@ class MemoryDedupPolicy:
             return 1.0
 
 
+# 信息信号白名单：命中即视为有记忆价值（即使 <10 字也保底 chat）。
+# 设计依据：对全库 13k 条记忆的特征实测（2026-08）——
+# 长度门槛覆盖约 97% 价值分界；误伤面集中在「自我事实短句」且仅数十条，
+# 其中一半是会话碎片（「我喜欢你」「还好我不是给」），因此用精确锚点而非宽泛模式：
+#   · 身份类别需收尾后缀（我是福建人/我是猫控），排除「我是正常xp」类俚语碎片
+#   · 偏好动词后排除宾语「你」（我喜欢你 ≠ 用户画像）
+_INFO_SIGNAL_RE = re.compile(
+    r"我叫|我的名字"
+    r"|我的(职业|工作|专业|学校|家乡|老家|爱好|生日|QQ|微信|电话)"
+    r"|我生日|今年\d{1,3}\s*岁|\d{1,3}\s*周岁"
+    r"|我是[\u4e00-\u9fa5A-Za-z0-9]{1,12}(人|族|迷|粉|控)(?![\u4e00-\u9fa5])"
+    r"|(?<![说没])我(超|超级|特|特别|很|最|好|也|比较|不太|不)?(喜欢|讨厌|爱吃|爱喝|爱玩)(?!你)"
+    r"|我在.{0,8}(上班|上学|工作|读书|实习)"
+    r"|记住我|别忘了我|本人是"
+)
+
+# 噪声模式黑名单：即使够长也是纯情绪刷屏，无检索价值。
+# 实测 chat 中此类仅 ~4 条，属顺手治理。
+_NOISE_PATTERN_RE = re.compile(
+    r"^[\s！？。，、～~\.!\?,…]+$"  # 纯标点空白
+    r"|^[哈嘿呵嘻]{3,}$"            # 纯笑声
+    r"|^(.)\1{4,}$"                 # 单字符连打 ≥5
+)
+
+
+def has_info_signal(message: str) -> bool:
+    """消息是否命中信息信号白名单。"""
+    return bool(_INFO_SIGNAL_RE.search(str(message or "").strip()))
+
+
+def is_noise_pattern(message: str) -> bool:
+    """消息是否为纯噪声模式（纯标点/纯笑声/单字连打）。"""
+    return bool(_NOISE_PATTERN_RE.search(str(message or "").strip()))
+
+
 def classify_source(
     message: str,
     sender_id: str,
@@ -122,10 +157,18 @@ def classify_source(
     msg_lower = message.lower()
     if any(kw.lower() in msg_lower for kw in bot_keywords if kw):
         return "core"
-    # 4. 过短 → noise
-    if len(message.strip()) < noise_max_length:
+
+    msg = message.strip()
+    # 4. 纯噪声模式（纯标点/纯笑声/单字连打）→ noise（无论长度）
+    if is_noise_pattern(msg):
         return "noise"
-    # 5. 其余 → chat
+    # 5. 信息信号白名单：个人信息/事实短句保底 chat（绕过长度门槛）
+    if has_info_signal(msg):
+        return "chat"
+    # 6. 过短 → noise
+    if len(msg) < noise_max_length:
+        return "noise"
+    # 7. 其余 → chat
     return "chat"
 
 
@@ -242,6 +285,11 @@ class MessageWriter:
         # 写入有向量的消息
         for item, vec in zip(need_embed, vectors):
             try:
+                base_importance = MemoryDedupPolicy._importance(item)
+                # 信息信号分层：命中白名单的 chat 携带更高基分，
+                # 检索端 score 乘算 importance，天然在同类中优先
+                if item["source"] == "chat" and has_info_signal(item["content"]):
+                    base_importance = max(base_importance, 1.5)
                 memory_id = self.db.add_memory(
                     group_id=item["group_id"],
                     content=item["content"],
@@ -249,7 +297,7 @@ class MessageWriter:
                     sender_id=item.get("sender_id", ""),
                     sender_name=item.get("sender_name", ""),
                     timestamp=item.get("timestamp", time.time()),
-                    importance=MemoryDedupPolicy._importance(item),
+                    importance=base_importance,
                     source=item["source"],
                 )
 
