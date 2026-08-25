@@ -1561,7 +1561,7 @@ class WaveMemoryPlugin(Star):
         _reg("测地线重排", "ok" if self.geodesic else "off", "" if self.geodesic else "依赖共现矩阵", dependency="共现矩阵节点 > 1000")
         _reg("Embedding", "ok" if self.embedding_service else "off", "" if self.embedding_service else "embedding_provider_id 未配置", dependency="AstrBot Provider 配置")
         _reg("Tag 提取", "ok" if self.tag_extractor else "off", "" if self.tag_extractor else "tag_llm_provider_id 未配置", dependency="Tag LLM Provider 配置")
-        _reg("EPA 基底", "ok" if (self.epa and self.epa.initialized) else "degraded", "" if (self.epa and self.epa.initialized) else f"需 ≥{self.epa.min_tags if self.epa else 20} 个 tag 向量", dependency="Tag 覆盖率 > 20%")
+        _reg("EPA 基底", "ok" if (self.epa and self.epa.initialized) else "degraded", "" if (self.epa and self.epa.initialized) else "异步初始化中（完成后自动更新）", dependency="Tag 覆盖率 > 20%")
         _reg("MetaThinking", "ok" if getattr(self, 'meta_thinking', None) else "off", "" if getattr(self, 'meta_thinking', None) else "MetaThinking 配置缺失或初始化失败", dependency="MetaThinking_Settings.enabled + LLM Provider")
         _reg("做梦系统", "ok" if getattr(self, 'dream_service', None) else "off", "" if getattr(self, 'dream_service', None) else "enable_dream=false 或初始化失败", dependency="enable_dream=true")
         _reg("自主学习", "ok" if getattr(self, 'study_service', None) else "off", "" if getattr(self, 'study_service', None) else "StudyService 未启用或 BookLore 不可用", dependency="LLM Provider + 记忆 > 100 条")
@@ -3945,5 +3945,24 @@ class WaveMemoryPlugin(Star):
             _record_err("IntrinsicResidual", e)
 
     async def _init_epa(self):
-        """EPA 初始化（在线程池中执行，避免阻塞事件循环）。"""
-        await asyncio.to_thread(self.epa.initialize)
+        """EPA 初始化（在线程池中执行，避免阻塞事件循环）。
+
+        完成后回写健康面板：启动时的注册是同步快照，必然早于本异步任务，
+        若不回写，面板会永远停留在「降级/需 ≥N 个 tag 向量」。
+        """
+        from .utils.health_registry import register as _reg
+        try:
+            ok = await asyncio.to_thread(self.epa.initialize)
+        except Exception as e:
+            ok = False
+            logger.warning(f"[WaveMemory] EPA init failed: {e}")
+            _record_err("EPA", e)
+        if ok:
+            _reg("EPA 基底", "ok", "", dependency="Tag 覆盖率 > 20%")
+        else:
+            _reg(
+                "EPA 基底",
+                "degraded",
+                f"需 ≥{self.epa.min_tags} 个同维度 tag 向量（持续聊天积累后就绪）",
+                dependency="Tag 覆盖率 > 20%",
+            )
