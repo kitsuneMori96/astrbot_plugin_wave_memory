@@ -59,7 +59,27 @@ class EPAModule:
             logger.debug(f"[WaveMemory] EPA: not enough tags ({len(tag_data)} < {self.min_tags})")
             return False
 
-        vectors = np.array([t[2] for t in tag_data], dtype=np.float32)
+        # 维度一致性防御：embedding 供应商切换后库里可能混有多维度向量，
+        # np.array 遇到 inhomogeneous 序列会直接 ValueError → 整个 EPA 降级。
+        # 只保留众数维度的向量，异维交给 TagWorker 重嵌入。
+        raw = [t[2] for t in tag_data]
+        dim_counts: dict[int, int] = {}
+        for v in raw:
+            d = int(v.shape[0])
+            dim_counts[d] = dim_counts.get(d, 0) + 1
+        major_dim = max(dim_counts, key=dim_counts.get)
+        dropped = len(raw) - dim_counts[major_dim]
+        if dropped:
+            logger.warning(
+                f"[WaveMemory] EPA: {dropped}/{len(raw)} tag vectors have non-major dims "
+                f"{ {d: c for d, c in dim_counts.items() if d != major_dim} }, excluded from PCA"
+            )
+        vectors = np.array(
+            [v for v in raw if int(v.shape[0]) == major_dim], dtype=np.float32
+        )
+        if len(vectors) < self.min_tags:
+            logger.debug(f"[WaveMemory] EPA: not enough consistent-dim tags ({len(vectors)} < {self.min_tags})")
+            return False
         dim = vectors.shape[1]
 
         # 去中心化
