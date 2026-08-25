@@ -2,7 +2,7 @@
 
 # Wave Memory
 
-[![Version](https://img.shields.io/badge/version-v5.0.0-blue.svg)](https://github.com/kitsuneMori96/astrbot_plugin_wave_memory/releases)
+[![Version](https://img.shields.io/badge/version-v5.1.0-blue.svg)](https://github.com/kitsuneMori96/astrbot_plugin_wave_memory/releases)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-≥4.14-green.svg)](https://github.com/AstrBotDevs/AstrBot)
@@ -45,6 +45,7 @@
 
 | 版本 | 日期 | 重点 |
 |------|------|------|
+| **v5.1.0** | 2026-08-25 | 风格系统重设计（感叹号升调语义/语气词频率校准/表达底色锚/动态反重复）；对话者档案注入 + 说话人回标根治跨用户污染；FTS 中文检索重建；seed 升级链多版本化修复；点名闸系列误回复修复 |
 | **v5.0.0** | 2026-08-22 | 三段式对话架构（Planner⊕Player→Replayer，真沉默/风格指令/特例场景注册表）；提示词中心：wave 自成人设库+三级绑定+架构模板 WebUI 可编辑，自成体系 |
 | **v4.6.1** | 2026-08-20 | 其他 bot 发言识别（名单 + 启发式），避免 bot 互聊循环；`embedding_provider_id` 留空自动选首个可用 Embedding Provider；v4.26 兼容（窗口候选模拟唤醒放行 LLM 自判、冷却/刷屏拦截改用 stop_event） |
 | **v4.6.0** | 2026-08-15 | 主动求助答疑：群里求助（尤其编程/报错）自动提供解惑，独立限频 |
