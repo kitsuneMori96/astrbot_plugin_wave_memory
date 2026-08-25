@@ -37,22 +37,34 @@ class PromptTemplateTest(_Base):
             self.assertEqual(tpl["content"], BUILT_IN_TEMPLATES[key][2])
 
     def test_legacy_default_follows_upgrade(self):
-        """DB 中未被用户修改的旧内置文案，seed 时自动跟随升级到当前默认。"""
+        """DB 中未被用户修改的旧内置文案（任一历史版本），seed 时自动跟随升级到当前默认。"""
         from engine.db.prompt_repo import _LEGACY_DEFAULTS
         key = "style_directive"
-        legacy = _LEGACY_DEFAULTS.get(key)
-        self.assertIsNotNone(legacy, "需要 _LEGACY_DEFAULTS 记录旧版文案")
-        # 模拟老库：写入旧版文案
-        self.cm.execute_write(
-            "UPDATE prompt_templates SET content = ? WHERE key = ?", (legacy, key)
-        )
-        self.cm.commit()
-        # 重新构造 repo（模拟插件重启时 seed）
-        PromptRepo(self.cm)
+        histories = _LEGACY_DEFAULTS.get(key)
+        self.assertTrue(histories, "需要 _LEGACY_DEFAULTS 记录旧版文案")
+        for i, legacy in enumerate(histories):
+            # 模拟老库：写入某一历史版本文案
+            self.cm.execute_write(
+                "UPDATE prompt_templates SET content = ? WHERE key = ?", (legacy, key)
+            )
+            self.cm.commit()
+            # 重新构造 repo（模拟插件重启时 seed）
+            PromptRepo(self.cm)
+            self.assertEqual(
+                self.prompt_repo.get(key)["content"],
+                BUILT_IN_TEMPLATES[key][2],
+                f"历史版本#{i} 应跟随升级到新内置文案",
+            )
+
+    def test_current_default_in_db_not_duplicated(self):
+        """DB 已是当前默认时 seed 不改写、不重复插入。"""
+        key = "style_directive"
+        row_before = self.prompt_repo.get(key)
+        PromptRepo(self.cm)  # 重跑 seed
+        row_after = self.prompt_repo.get(key)
+        self.assertEqual(row_before["content"], row_after["content"])
         self.assertEqual(
-            self.prompt_repo.get(key)["content"],
-            BUILT_IN_TEMPLATES[key][2],
-            "旧默认文案应跟随升级到新内置文案",
+            row_before["updated_at"], row_after["updated_at"], "未改动时不应触碰 updated_at"
         )
 
     def test_user_customized_content_not_overwritten_by_seed(self):

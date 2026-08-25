@@ -83,7 +83,11 @@ def parse_plan_response(text: str, *, no_reply_marker: str = "沉默") -> dict:
 
 def build_style_directive(prompt_service: Any, *, tone: str, detail: str,
                           inner_thought: str = "") -> str:
-    """用 style_directive 模板构建 [风格指令]；无服务时退回固定文案。"""
+    """用 style_directive 模板构建 [风格指令]；无服务时退回固定文案。
+
+    末尾恒定追加风格锚：人设底色逐回合强化，tone 只调强度不改底色——
+    静态 system 人设会在长对话中权重衰减，靠每回合提醒维持风格。
+    """
     tone = normalize_tone(tone)
     detail = normalize_detail(detail)
     motivation = f"你想插话的动机：{inner_thought.strip()}" if (inner_thought or "").strip() else ""
@@ -91,20 +95,33 @@ def build_style_directive(prompt_service: Any, *, tone: str, detail: str,
         "只输出一两句话，禁止展开解释、禁止列举、禁止超过 40 字"
         if detail == "简洁" else "最多一个自然段，不超过三句话"
     )
+    intensity = {
+        "热情": "全开",
+        "正常": "自然释放",
+        "冷淡": "收着但保持短句节奏",
+        "克制": "收着但保持短句节奏",
+    }.get(tone, "自然释放")
+    anchor = (
+        "\n[表达底色·始终生效] 元气直率、短句连发；明亮感靠语气词（吧/呢/哦/哟）和～承担，"
+        "感叹号只属于干脆应答、慌张惊呼、真生气三种场合；情绪上头就拖长音——。"
+        f"本次语气「{tone}」= 彩味{intensity}，只调强度不改底色。"
+    )
     if prompt_service is None:
         base = (f"[回复格式硬性要求] 本次回复：语气{tone}；篇幅{detail}（{detail_rule}）。"
                 "直接输出回复正文，不要任何前缀或分段编号。")
-        return f"{base}{motivation}" if motivation else base
+        out = f"{base}{anchor}{motivation}" if motivation else f"{base}{anchor}"
+        return out
     try:
-        return prompt_service.render(
+        rendered = prompt_service.render(
             "style_directive",
             default="[回复格式硬性要求] 本次回复：语气{tone}；篇幅{detail}。",
             tone=tone, detail=detail,
             motivation=(f" {motivation}" if motivation else ""),
         ).strip()
+        return f"{rendered}{anchor}"
     except Exception as e:
         logger.warning(f"[ConversationPipeline] style directive render failed: {e}")
-        return f"[回复格式硬性要求] 本次回复：语气{tone}；篇幅{detail}。"
+        return f"[回复格式硬性要求] 本次回复：语气{tone}；篇幅{detail}。{anchor}"
 
 
 # ─── 特例场景注册表 ──────────────────────────────────────────────
