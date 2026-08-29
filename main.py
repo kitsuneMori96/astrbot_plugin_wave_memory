@@ -515,6 +515,7 @@ class WaveMemoryPlugin(Star):
                 "abuse_cooldown_base": int(social_cfg.get("abuse_cooldown_base", 600)),
                 "abuse_cooldown_max": int(social_cfg.get("abuse_cooldown_max", 3600)),
                 "aba_window_seconds": int(social_cfg.get("aba_window_seconds", 30)),
+                "window_analyze_enabled": True,
             },
         })
         if self.spike_router:
@@ -2390,7 +2391,17 @@ class WaveMemoryPlugin(Star):
                         # 剥离 AstrBot 追加的 Persona Instructions 段，wave 人设完全接管
                         import re as _re
                         sp = _re.sub(r"\n?# Persona Instructions\n[\s\S]*?(?=\n# |\Z)", "", sp)
-                    req.system_prompt = f"{sp}\n<wave_persona>\n{persona_text}\n</wave_persona>"
+                    # identity_guard 含工具调用指引（如 rule 6：图片识图必须调用 anime_trace_search），
+                    # 注入到回复生成 LLM 的 system_prompt，否则仅 Planner gate 能看到。
+                    guard_text = ""
+                    if self.prompt_service is not None:
+                        try:
+                            guard_text = self.prompt_service.render_identity_guard(
+                                bot_name=self._get_bot_name(bot_id)
+                            ) or ""
+                        except Exception:
+                            pass
+                    req.system_prompt = f"{sp}\n{guard_text}\n<wave_persona>\n{persona_text}\n</wave_persona>"
             except Exception as e:
                 logger.warning(f"[WaveMemory] wave persona injection failed: {e}")
 
