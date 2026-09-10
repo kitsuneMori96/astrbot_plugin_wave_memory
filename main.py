@@ -2462,13 +2462,15 @@ class WaveMemoryPlugin(Star):
                 )
                 logger.info(
                     f"[Planner] forced(@/私聊/引用): tone={forced.get('tone')} "
-                    f"detail={forced.get('detail')} inner={str(forced.get('inner_thought', ''))[:40]}"
+                    f"detail={forced.get('detail')} conf={forced.get('confidence', '-')} "
+                    f"thought={str(forced.get('inner_thought', ''))[:40]}"
                 )
                 directive = build_style_directive(
                     self.prompt_service,
-                    tone=forced.get("tone", "正常"),
+                    tone=forced.get("tone", "热情"),
                     detail=forced.get("detail", "简洁"),
                     inner_thought=forced.get("inner_thought", ""),
+                    confidence=forced.get("confidence", ""),
                 )
                 _mh = self._mood_hint()
                 if _mh:
@@ -2487,9 +2489,10 @@ class WaveMemoryPlugin(Star):
             style = getattr(self, "_pending_style", {}) or {}
             directive = build_style_directive(
                 self.prompt_service,
-                tone=style.get("tone", "正常"),
+                tone=style.get("tone", "热情"),
                 detail=style.get("detail", "简洁"),
                 inner_thought=style.get("inner_thought", ""),
+                confidence=style.get("confidence", ""),
             )
             _mh = self._mood_hint()
             if _mh:
@@ -3579,7 +3582,8 @@ class WaveMemoryPlugin(Star):
                     logger.info(f"[WaveMemory] 候选({candidate_kind}) → Planner 放行: "
                                 f"{group_id}:{sender_id} tone={decision.get('tone') if decision else '-'} "
                                 f"detail={decision.get('detail') if decision else '-'} "
-                                f"inner={str(decision.get('inner_thought', ''))[:40] if decision else '-'}")
+                                f"conf={decision.get('confidence', '-') if decision else '-'} "
+                                f"thought={str(decision.get('inner_thought', ''))[:40] if decision else '-'}")
                 else:
                     logger.info(f"[WaveMemory] 候选({candidate_kind}) → Planner 判沉默: "
                                 f"{group_id}:{sender_id}")

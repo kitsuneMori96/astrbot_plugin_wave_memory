@@ -216,4 +216,28 @@ def build_duplicate_memory_warnings(detected_plugins: list[dict[str, Any]]) -> l
     return warnings
 
 
-__all__ = ["KNOWN_MEMORY_PLUGINS", "detect_memory_plugins", "build_duplicate_memory_warnings"]
+_ANIMETRACE_NAMES = {"astrbot_plugin_anime_trace", "anime_trace"}
+
+
+def is_anime_trace_active() -> bool:
+    """Check whether the animetrace plugin is loaded and activated.
+
+    Fail-safe: returns False on any error (import failure, registry unavailable, etc.).
+    """
+    try:
+        from astrbot.core.star.star import star_registry  # type: ignore[import-untyped]
+    except Exception:
+        return False
+    for star in star_registry:
+        name = (getattr(star, "name", "") or "").lower()
+        if name in _ANIMETRACE_NAMES and _active(star):
+            return True
+    return False
+
+
+__all__ = [
+    "KNOWN_MEMORY_PLUGINS",
+    "detect_memory_plugins",
+    "build_duplicate_memory_warnings",
+    "is_anime_trace_active",
+]

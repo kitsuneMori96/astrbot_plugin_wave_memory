@@ -22,15 +22,21 @@ logger = logging.getLogger(__name__)
 
 _TONES = ("热情", "正常", "冷淡", "克制")
 _DETAILS = ("详细", "简洁")
+_NEG = ("沉默", "不回复", "不回应", "无需回复", "跳过", "不答复", "不回")
+_POS = ("回复", "回应")
 
 
-def _line_field(line: str, *keys: str) -> Optional[str]:
-    stripped = line.lstrip("-*# 　\t").replace("**", "").replace("`", "")
-    for k in keys:
-        for sep in ("：", ":"):
-            if stripped.startswith(k + sep):
-                return stripped[len(k) + 1:].strip()
-    return None
+def _norm(s: str) -> str:
+    """归一化：全角→半角、去空白、去 markdown/序号符号。"""
+    s = s.replace("：", ":").replace("　", "").replace(" ", "")
+    return re.sub(r"[*`#>]+|\d+\.", "", s)
+
+
+def _field(line: str, key: str) -> Optional[str]:
+    """从 'key:value' 格式的行中提取值。"""
+    line = _norm(line)
+    m = re.match(rf"^{re.escape(key)}[:：](.*)$", line)
+    return m.group(1).strip() if m else None
 
 
 def normalize_tone(raw: str) -> str:
@@ -38,7 +44,7 @@ def normalize_tone(raw: str) -> str:
     for t in _TONES:
         if t in raw:
             return t
-    return "正常"
+    return "热情"
 
 
 def normalize_detail(raw: str) -> str:
@@ -49,40 +55,63 @@ def normalize_detail(raw: str) -> str:
     return "简洁"
 
 
-def parse_plan_response(text: str, *, no_reply_marker: str = "沉默") -> dict:
-    """解析 Planner 输出：{reply, tone, detail, inner_thought}。"""
-    result = {"reply": False, "tone": "正常", "detail": "简洁", "inner_thought": ""}
+def parse_plan_response(text: str, *, default_reply: bool = False) -> dict:
+    """解析 Planner 输出：5 行字段格式。
+
+    Returns: {reply, tone, detail, inner_thought, confidence, _miss}
+    """
+    result: dict[str, Any] = {
+        "reply": default_reply,
+        "tone": "热情",
+        "detail": "简洁",
+        "inner_thought": "",
+        "confidence": "中",
+        "_miss": [],
+    }
     if not text:
         return result
+
     action_raw = ""
     for raw_line in text.strip().split("\n"):
         line = raw_line.strip()
         if not line:
             continue
-        v = _line_field(line, "内心")
-        if v is not None:
-            result["inner_thought"] = v
+        if ":" not in line and "：" not in line:
             continue
-        v = _line_field(line, "行动")
-        if v is not None:
-            action_raw = v
-            continue
-        v = _line_field(line, "语气")
-        if v is not None:
-            result["tone"] = normalize_tone(v)
-            continue
-        v = _line_field(line, "详略")
-        if v is not None:
-            result["detail"] = normalize_detail(v)
-            continue
-    result["reply"] = bool(action_raw) and no_reply_marker not in action_raw and "回复" in action_raw
+        for key, dst in (("行动", "action"), ("把握", "conf"),
+                         ("语气", "tone"), ("详略", "detail"), ("念头", "thought")):
+            v = _field(line, key)
+            if v is None:
+                continue
+            if dst == "action":
+                action_raw = v
+            elif dst == "conf":
+                result["confidence"] = v if v in ("高", "中", "低") else "中"
+            elif dst == "thought":
+                result["inner_thought"] = v
+            elif dst == "tone":
+                result["tone"] = v if v in _TONES else "热情"
+            elif dst == "detail":
+                result["detail"] = v if v in _DETAILS else "简洁"
+            break
+
+    # 否定优先（修 P0-1：「不回复」不再被判成回复）
+    if any(n in action_raw for n in _NEG):
+        result["reply"] = False
+    elif any(p in action_raw for p in _POS):
+        result["reply"] = True
+    else:
+        result["reply"] = default_reply
+
+    if not result["inner_thought"]:
+        result["_miss"].append("inner_thought")
     return result
 
 
 # ─── 风格指令构建 ────────────────────────────────────────────────
 
 def build_style_directive(prompt_service: Any, *, tone: str, detail: str,
-                          inner_thought: str = "") -> str:
+                          inner_thought: str = "", confidence: str = "") -> str:
     """用 style_directive 模板构建 [风格指令]；无服务时退回固定文案。
 
     末尾恒定追加风格锚：人设底色逐回合强化，tone 只调强度不改底色——
@@ -90,7 +119,11 @@ def build_style_directive(prompt_service: Any, *, tone: str, detail: str,
     """
     tone = normalize_tone(tone)
     detail = normalize_detail(detail)
-    motivation = f"你想插话的动机：{inner_thought.strip()}" if (inner_thought or "").strip() else ""
+    cue = (
+        f"\n<opening_cue>\n开口前你的念头：{inner_thought.strip()}\n</opening_cue>\n"
+        if (inner_thought or "").strip()
+        else ""
+    )
     detail_rule = (
         "只输出一两句话，禁止展开解释、禁止列举、禁止超过 40 字"
         if detail == "简洁" else "最多一个自然段，不超过三句话"
@@ -109,14 +142,14 @@ def build_style_directive(prompt_service: Any, *, tone: str, detail: str,
     if prompt_service is None:
         base = (f"[回复格式硬性要求] 本次回复：语气{tone}；篇幅{detail}（{detail_rule}）。"
                 "直接输出回复正文，不要任何前缀或分段编号。")
-        out = f"{base}{anchor}{motivation}" if motivation else f"{base}{anchor}"
+        out = f"{base}{anchor}{cue}" if cue else f"{base}{anchor}"
         return out
     try:
         rendered = prompt_service.render(
             "style_directive",
             default="[回复格式硬性要求] 本次回复：语气{tone}；篇幅{detail}。",
             tone=tone, detail=detail,
-            motivation=(f" {motivation}" if motivation else ""),
+            cue=cue,
         ).strip()
         return f"{rendered}{anchor}"
     except Exception as e:
@@ -299,14 +332,11 @@ class ConversationPlanner:
                     message: str, bot_id: str = "", group_id: str = "",
                     bot_name: str = "bot", scenario_hint: str = "",
                     at_hint: str = "", forced: bool = False) -> dict:
+        from engine.db.prompt_repo import PLANNER_FIELD_GUIDE
         ps = self.prompt_service
         persona = self._resolve_persona_text(bot_id, group_id, bot_name)
         display_name = self._persona_display_name(bot_id, group_id, bot_name) or bot_name
         guard = self._identity_guard(display_name)
-
-        marker = "沉默"
-        if ps is not None:
-            marker = (ps.get_template("no_reply_marker") or "沉默").strip() or "沉默"
 
         variables = {
             "identity_guard": guard,
@@ -315,30 +345,36 @@ class ConversationPlanner:
             "message": (message or "").strip(),
             "scenario_hint": scenario_hint or "",
             "at_info": at_hint or "",
+            "field_guide": PLANNER_FIELD_GUIDE,
         }
         prompt = ps.render(template_key, **variables) if ps is not None else ""
         if not prompt:
             # 兜底：模板服务缺失时用极简内联结构
+            action_line = "行动：回复\n" if forced else "行动：<回复 / 沉默>\n"
             prompt = (
                 f"{guard}\n\n<self_persona>\n{persona}\n</self_persona>\n\n"
                 f"【最近群聊】\n{self._format_context(context_messages)}\n\n"
-                f"【消息】\n{variables['message']}\n"
+                f"【消息】\n{variables['message']}\n\n"
                 + ("对方正在直接和你说话。\n" if forced
                    else "请判断这条消息是否需要你回应。\n")
-                + "输出（逐行）：\n内心：<一句话>\n"
-                + ("" if forced else "行动：<回复 / 沉默>\n")
-                + "语气：<热情 / 正常 / 冷淡 / 克制>\n详略：<详细 / 简洁>"
+                + "【输出格式】\n严格按以下 5 行输出：\n\n"
+                + action_line
+                + "把握：<高 / 中 / 低>\n"
+                + "语气：<热情 / 正常 / 冷淡 / 克制>\n"
+                + "详略：<详细 / 简洁>\n"
+                + "念头：<开口前的一句内心话，第一人称，10-25字>"
             )
 
         try:
             raw = await self._call(prompt)
         except Exception as e:
             logger.warning(f"[ConversationPipeline] plan ({template_key}) LLM failed: {e}")
-            return {"reply": forced, "tone": "正常", "detail": "简洁", "inner_thought": ""}
+            return {"reply": forced, "tone": "热情", "detail": "简洁",
+                    "inner_thought": "", "confidence": "中"}
 
-        parsed = parse_plan_response(raw, no_reply_marker=marker)
+        parsed = parse_plan_response(raw, default_reply=forced)
         if forced:
-            parsed["reply"] = True  # forced 路径无行动字段，必回
+            parsed["reply"] = True  # forced 路径固定回复
         return parsed
 
     async def plan_gate(self, *, context_messages: list[str], message: str,

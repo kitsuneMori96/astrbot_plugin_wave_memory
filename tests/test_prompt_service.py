@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -155,6 +156,133 @@ class PersonaBindingTest(_Base):
         self.persona_repo.set_binding("global", b)
         self.svc.invalidate()
         self.assertEqual(self.svc.resolve_persona()["id"], b)
+
+
+class RenderIdentityGuardTest(_Base):
+    """render_identity_guard() 三分支 + 插件状态条件注入测试。"""
+
+    def _render(self, active: bool, template_content: str | None = None) -> tuple[str, list[str]]:
+        """Helper: 渲染 identity_guard 并捕获 warning 日志。
+
+        Returns: (rendered_text, warning_messages)
+        """
+        if template_content is not None:
+            self.prompt_repo.save("identity_guard", template_content)
+            self.svc.invalidate()
+
+        import logging
+
+        class _WarningCollector(logging.Handler):
+            def __init__(self):
+                super().__init__(logging.WARNING)
+                self.messages: list[str] = []
+
+            def emit(self, record):
+                self.messages.append(record.getMessage())
+
+        collector = _WarningCollector()
+        logger = logging.getLogger("services.prompt_service")
+        old_level = logger.level
+        logger.setLevel(logging.WARNING)
+        logger.addHandler(collector)
+        try:
+            with patch(
+                "services.compat.plugin_detection.is_anime_trace_active",
+                return_value=active,
+            ):
+                result = self.svc.render_identity_guard("test_bot")
+            warnings = collector.messages
+        finally:
+            logger.removeHandler(collector)
+            logger.setLevel(old_level)
+        return result, warnings
+
+    def test_active_new_template(self):
+        """用例 1: 启用 + 新版（有占位符）→ rule 6 出现 1 次，无 warning。"""
+        result, warnings = self._render(active=True)
+        self.assertEqual(result.count("anime_trace_search"), 1)
+        self.assertFalse(warnings)
+
+    def test_inactive_new_template(self):
+        """用例 2: 禁用 + 新版 → rule 6 出现 0 次，无 warning。"""
+        result, warnings = self._render(active=False)
+        self.assertEqual(result.count("anime_trace_search"), 0)
+        self.assertFalse(warnings)
+
+    def test_active_old_template_no_placeholder(self):
+        """用例 3: 启用 + 自定义旧版（无占位符，含 rule 6）→ 1 次 + "lacks placeholder" warning。
+
+        已知残留态，非期望行为。
+        """
+        old_template = (
+            "<identity_safety_system>\n"
+            "你是 {bot_name}。\n"
+            "1. 规则一。\n"
+            "6. 用户发送图片时必须调用 anime_trace_search。\n"
+            "</identity_safety_system>"
+        )
+        result, warnings = self._render(active=True, template_content=old_template)
+        self.assertEqual(result.count("anime_trace_search"), 1)
+        self.assertTrue(any("lacks" in w and "placeholder" in w for w in warnings))
+
+    def test_inactive_old_template_with_rule6(self):
+        """用例 4: 禁用 + 自定义旧版（含 rule 6）→ 1 次 + disabled warning。
+
+        已知残留态，非期望行为。
+        """
+        old_template = (
+            "<identity_safety_system>\n"
+            "你是 {bot_name}。\n"
+            "1. 规则一。\n"
+            "6. 用户发送图片时必须调用 anime_trace_search。\n"
+            "</identity_safety_system>"
+        )
+        result, warnings = self._render(active=False, template_content=old_template)
+        self.assertEqual(result.count("anime_trace_search"), 1)
+        self.assertTrue(any("disabled but rule 6 still present" in w for w in warnings))
+
+    def test_active_custom_with_placeholder_and_rule6(self):
+        """用例 5: 启用 + 自定义版含占位符且自带 rule 6 → 2 次 + duplicate warning。"""
+        custom_template = (
+            "<identity_safety_system>\n"
+            "你是 {bot_name}。\n"
+            "1. 规则一。\n"
+            "6. 用户发送图片时必须调用 anime_trace_search。\n"
+            "</identity_safety_system>\n"
+            "{animetrace_rule}"
+        )
+        result, warnings = self._render(active=True, template_content=custom_template)
+        self.assertEqual(result.count("anime_trace_search"), 2)
+        self.assertTrue(any("duplicate" in w for w in warnings))
+
+    def test_import_failure(self):
+        """用例 6: is_anime_trace_active 抛异常 → rule 6 为 0，不崩。"""
+        import logging
+
+        class _WarningCollector(logging.Handler):
+            def __init__(self):
+                super().__init__(logging.WARNING)
+                self.messages: list[str] = []
+
+            def emit(self, record):
+                self.messages.append(record.getMessage())
+
+        collector = _WarningCollector()
+        logger = logging.getLogger("services.prompt_service")
+        old_level = logger.level
+        logger.setLevel(logging.WARNING)
+        logger.addHandler(collector)
+        try:
+            with patch(
+                "services.compat.plugin_detection.is_anime_trace_active",
+                side_effect=ImportError("no star_registry"),
+            ):
+                result = self.svc.render_identity_guard("test_bot")
+            self.assertEqual(result.count("anime_trace_search"), 0)
+            self.assertTrue(any("check failed" in w for w in collector.messages))
+        finally:
+            logger.removeHandler(collector)
+            logger.setLevel(old_level)
 
 
 if __name__ == "__main__":

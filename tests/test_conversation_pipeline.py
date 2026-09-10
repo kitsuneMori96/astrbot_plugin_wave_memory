@@ -22,35 +22,86 @@ from services.conversation_pipeline import (
 
 class ParsePlanResponseTest(unittest.TestCase):
 
-    def test_full_parse(self):
-        text = "内心：他在问我问题\n行动：回复\n语气：热情\n详略：详细"
+    def test_full_parse_5fields(self):
+        """5 行输出格式：行动/把握/语气/详略/念头。"""
+        text = (
+            "行动：回复\n"
+            "把握：高\n"
+            "语气：热情\n"
+            "详略：详细\n"
+            "念头：得赶紧帮他搞明白"
+        )
         r = parse_plan_response(text)
         self.assertTrue(r["reply"])
         self.assertEqual(r["tone"], "热情")
         self.assertEqual(r["detail"], "详细")
-        self.assertEqual(r["inner_thought"], "他在问我问题")
+        self.assertEqual(r["inner_thought"], "得赶紧帮他搞明白")
+        self.assertEqual(r["confidence"], "高")
 
-    def test_silent_rejects(self):
-        for action in ("沉默", "不回", "行动：保持沉默"):
-            r = parse_plan_response(f"内心：与我无关\n行动：{action}")
-            self.assertFalse(r["reply"], action)
+    def test_negation_priority(self):
+        """P0-1 修复：「不回复」「无需回复」被判为沉默。"""
+        for action in ("不回复", "无需回复", "不回应", "沉默", "跳过", "不答复", "不回"):
+            r = parse_plan_response(f"行动：{action}")
+            self.assertFalse(r["reply"], f"action='{action}' should be False")
+
+    def test_positive_reply(self):
+        """肯定式回复正常识别。"""
+        for action in ("回复", "回应"):
+            r = parse_plan_response(f"行动：{action}")
+            self.assertTrue(r["reply"], f"action='{action}' should be True")
+
+    def test_markdown_normalization(self):
+        """P10 修复：markdown 符号归一化。"""
+        r = parse_plan_response("**行动**：回复\n**把握**：中")
+        self.assertTrue(r["reply"])
+        self.assertEqual(r["confidence"], "中")
+
+    def test_halfwidth_colon(self):
+        """P10 修复：半角冒号。"""
+        r = parse_plan_response("行动:回复\n把握:低")
+        self.assertTrue(r["reply"])
+        self.assertEqual(r["confidence"], "低")
 
     def test_empty_and_garbage(self):
         self.assertFalse(parse_plan_response("")["reply"])
         self.assertFalse(parse_plan_response("乱七八糟")["reply"])
-        # 无行动字段 → 默认不回
+        # 无行动字段 → default_reply
         self.assertFalse(parse_plan_response("语气：冷淡")["reply"])
 
-    def test_normalize(self):
-        self.assertEqual(normalize_tone("非常热情洋溢"), "热情")
-        self.assertEqual(normalize_tone(""), "正常")
-        self.assertEqual(normalize_tone("未知词"), "正常")
-        self.assertEqual(normalize_detail("尽量简洁一点"), "简洁")
-        self.assertEqual(normalize_detail(""), "简洁")
+    def test_default_reply_parameter(self):
+        """default_reply 参数：forced 传 True。"""
+        r = parse_plan_response("语气：热情", default_reply=True)
+        self.assertTrue(r["reply"])
 
-    def test_custom_no_reply_marker(self):
-        r = parse_plan_response("行动：PASS", no_reply_marker="PASS")
-        self.assertFalse(r["reply"])
+    def test_confidence_field(self):
+        r = parse_plan_response("行动：沉默\n把握：低")
+        self.assertEqual(r["confidence"], "低")
+
+    def test_confidence_unknown_fallback(self):
+        r = parse_plan_response("行动：回复\n把握：也许")
+        self.assertEqual(r["confidence"], "中")
+
+    def test_thought_field(self):
+        r = parse_plan_response("行动：回复\n念头：想逗他一下")
+        self.assertEqual(r["inner_thought"], "想逗他一下")
+
+    def test_missing_thought_recorded(self):
+        """念头缺失时 _miss 记录。"""
+        r = parse_plan_response("行动：回复\n语气：热情")
+        self.assertIn("inner_thought", r["_miss"])
+
+    def test_unknown_tone_fallback(self):
+        r = parse_plan_response("行动：回复\n语气：温柔")
+        self.assertEqual(r["tone"], "热情")
+
+    def test_unknown_detail_fallback(self):
+        r = parse_plan_response("行动：回复\n详略：一般")
+        self.assertEqual(r["detail"], "简洁")
+
+    def test_forced_fixed_action(self):
+        """forced 模板固定行动：回复。"""
+        r = parse_plan_response("行动：回复\n把握：高\n语气：热情\n详略：简洁\n念头：好")
+        self.assertTrue(r["reply"])
 
 
 class StyleDirectiveTest(unittest.TestCase):
@@ -61,6 +112,7 @@ class StyleDirectiveTest(unittest.TestCase):
         self.assertIn("热情", out)
         self.assertIn("详细", out)
         self.assertIn("想帮忙", out)
+        self.assertIn("开口前你的念头", out)
 
     def test_fallback_brief_rule(self):
         out = build_style_directive(None, tone="正常", detail="简洁")
@@ -70,15 +122,23 @@ class StyleDirectiveTest(unittest.TestCase):
     def test_with_service_template(self):
         class FakePS:
             def render(self, key, default="", **kw):
-                return f"T[{key}]{kw}"
+                return f"T[{key}]" + "|".join(f"{k}={v}" for k, v in kw.items())
 
         out = build_style_directive(FakePS(), tone="克制", detail="简洁")
         self.assertIn("style_directive", out)
         self.assertIn("克制", out)
 
-    def test_motivation_omitted_when_empty(self):
+    def test_cue_omitted_when_empty(self):
         out = build_style_directive(None, tone="正常", detail="简洁", inner_thought="")
-        self.assertNotIn("动机", out)
+        self.assertNotIn("念头", out)
+        self.assertNotIn("opening_cue", out)
+
+    def test_cue_independent_block(self):
+        """念头放在 <opening_cue> 独立标签中。"""
+        out = build_style_directive(None, tone="热情", detail="简洁", inner_thought="想帮他")
+        self.assertIn("<opening_cue>", out)
+        self.assertIn("开口前你的念头：想帮他", out)
+        self.assertIn("</opening_cue>", out)
 
 
 class ScenarioTest(unittest.TestCase):
@@ -127,7 +187,7 @@ class CustomScenarioParseTest(unittest.TestCase):
         self.assertFalse(scenarios[0].matches("无关消息"))
         self.assertEqual(scenarios[0].max_per_hour, 5)
         self.assertIn("游戏讨论", scenarios[0].hint)
-        self.assertEqual(scenarios[1].max_per_hour, 3)  # 缺省上限
+        self.assertEqual(scenarios[1].max_per_hour, 3)
 
     def test_bad_lines_reported_and_skipped(self):
         scenarios, errors = parse_custom_scenarios("只有一段\n名称||\n好的|词|提示")
@@ -176,29 +236,32 @@ class _FakePS:
 class ConversationPlannerTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_gate_yes(self):
-        llm = _FakeLLM("内心：问我\n行动：回复\n语气：克制\n详略：详细")
+        llm = _FakeLLM(
+            "行动：回复\n把握：高\n语气：克制\n详略：详细\n念头：他在问我问题"
+        )
         planner = ConversationPlanner(llm, _FakePS())
         r = await planner.plan_gate(context_messages=["a: 你好"], message="怎么部署",
                                     bot_name="茉莉")
         self.assertTrue(r["reply"])
         self.assertEqual(r["tone"], "克制")
         self.assertEqual(r["detail"], "详细")
+        self.assertEqual(r["inner_thought"], "他在问我问题")
         prompt = llm.prompts[0]
-        self.assertIn("测试人格", prompt)          # persona 注入
-        self.assertIn("<guard>茉莉</guard>", prompt)  # 安全边界注入
-        self.assertIn("怎么部署", prompt)          # 消息注入
+        self.assertIn("测试人格", prompt)
+        self.assertIn("<guard>茉莉</guard>", prompt)
+        self.assertIn("怎么部署", prompt)
 
     async def test_gate_no(self):
-        llm = _FakeLLM("内心：与我无关\n行动：沉默")
+        llm = _FakeLLM("行动：沉默\n把握：中\n语气：热情\n详略：简洁\n念头：与我无关")
         planner = ConversationPlanner(llm, _FakePS())
         r = await planner.plan_gate(context_messages=[], message="旁人对聊")
         self.assertFalse(r["reply"])
 
     async def test_forced_always_replies(self):
-        llm = _FakeLLM("内心：主人叫我\n语气：热情\n详略：简洁")
+        llm = _FakeLLM("行动：回复\n把握：高\n语气：热情\n详略：简洁\n念头：主人叫我")
         planner = ConversationPlanner(llm, _FakePS())
         r = await planner.plan_forced(context_messages=[], message="@茉莉 在吗")
-        self.assertTrue(r["reply"])   # forced 无行动字段也必回
+        self.assertTrue(r["reply"])
         self.assertEqual(r["tone"], "热情")
 
     async def test_llm_failure_defaults(self):
@@ -208,13 +271,13 @@ class ConversationPlannerTest(unittest.IsolatedAsyncioTestCase):
 
         planner = ConversationPlanner(BoomLLM(), _FakePS())
         r = await planner.plan_gate(context_messages=[], message="x")
-        self.assertFalse(r["reply"])  # gate 失败 → 不回（安全侧）
+        self.assertFalse(r["reply"])
         r2 = await planner.plan_forced(context_messages=[], message="x")
-        self.assertTrue(r2["reply"])  # forced 失败 → 仍必回，风格走默认
-        self.assertEqual(r2["tone"], "正常")
+        self.assertTrue(r2["reply"])
+        self.assertEqual(r2["tone"], "热情")
 
     async def test_scenario_hint_injected(self):
-        llm = _FakeLLM("行动：回复")
+        llm = _FakeLLM("行动：回复\n把握：中\n语气：热情\n详略：简洁\n念头：好")
         planner = ConversationPlanner(llm, _FakePS())
         await planner.plan_gate(context_messages=[], message="求助",
                                 scenario_hint="（触发场景：求助答疑）")

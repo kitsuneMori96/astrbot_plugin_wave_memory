@@ -106,4 +106,37 @@ class PromptService:
         return result
 
     def render_identity_guard(self, bot_name: str) -> str:
-        return self.render("identity_guard", bot_name=bot_name)
+        from .compat.plugin_detection import is_anime_trace_active
+
+        try:
+            from engine.db.prompt_repo import ANIMETRACE_GUARD_RULE
+            rule = ANIMETRACE_GUARD_RULE if is_anime_trace_active() else ""
+        except Exception as e:
+            logger.warning("animetrace check failed, treating as disabled: %s", e)
+            rule = ""
+
+        raw_template = self.get_template("identity_guard")
+        has_placeholder = "{animetrace_rule}" in raw_template
+        result = self.render("identity_guard", bot_name=bot_name, animetrace_rule=rule)
+        count = result.count("anime_trace_search")
+
+        if rule:
+            if not has_placeholder:
+                logger.warning(
+                    "animetrace enabled but identity_guard template lacks "
+                    "{animetrace_rule} placeholder — reset via "
+                    "POST /api/prompts/templates/identity_guard/reset"
+                )
+            elif count > 1:
+                logger.warning(
+                    "duplicate animetrace rule in identity_guard (%d occurrences) "
+                    "— reset via POST /api/prompts/templates/identity_guard/reset",
+                    count,
+                )
+        elif count > 0:
+            logger.warning(
+                "animetrace disabled but rule 6 still present in identity_guard "
+                "— reset via POST /api/prompts/templates/identity_guard/reset"
+            )
+
+        return result
