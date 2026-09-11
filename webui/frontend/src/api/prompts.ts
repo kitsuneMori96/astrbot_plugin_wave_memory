@@ -87,6 +87,13 @@ export async function resetTemplate(key: string): Promise<{ content: string }> {
   return fetchJson(`/api/prompts/templates/${key}/reset`, { method: 'POST' })
 }
 
+export async function makeDefaultTemplate(key: string, content: string): Promise<{ ok: boolean }> {
+  return fetchJson(`/api/prompts/templates/${key}/make_default`, {
+    method: 'POST',
+    body: JSON.stringify({ content }),
+  })
+}
+
 export async function importFromAstrbot(): Promise<{ imported: number; skipped: string[] }> {
   return fetchJson('/api/prompts/import_astrbot', { method: 'POST' })
 }

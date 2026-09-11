@@ -7,6 +7,9 @@ key 寻址的可编辑模板；内置版本随代码 seed，用户在 WebUI 修�
 from __future__ import annotations
 
 import ast
+import json
+import os
+import tempfile
 import time
 from typing import Optional
 
@@ -230,8 +233,11 @@ def _parse_vars(raw) -> list[str]:
 class PromptRepo:
     """prompt_templates 表存储层；内置模板惰性 seed。"""
 
-    def __init__(self, cm: ConnectionManager):
+    def __init__(self, cm: ConnectionManager, overrides_path: str = ""):
         self.cm = cm
+        self._overrides_path = overrides_path
+        self._user_overrides: dict[str, str] = {}
+        self._load_overrides()
         self._create_tables()
         self.seed_built_ins()
 
@@ -246,6 +252,52 @@ class PromptRepo:
                 updated_at REAL
             );
         """)
+
+    # ─── 用户默认值 override 层 ────────────────────────────────────
+
+    def _load_overrides(self):
+        """从 JSON 文件加载用户设定的默认模板。"""
+        if not self._overrides_path:
+            return
+        try:
+            with open(self._overrides_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                self._user_overrides = {k: str(v) for k, v in data.items() if k in BUILT_IN_TEMPLATES}
+        except (FileNotFoundError, json.JSONDecodeError):
+            self._user_overrides = {}
+
+    def _save_overrides(self):
+        """原子写入 JSON 文件（先写 .tmp 再 rename）。"""
+        if not self._overrides_path:
+            return
+        os.makedirs(os.path.dirname(self._overrides_path) or ".", exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(self._overrides_path) or ".")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(self._user_overrides, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self._overrides_path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+    def _effective_default(self, key: str) -> str:
+        """返回当前生效的默认文案：用户 override > 代码内置。"""
+        if key in self._user_overrides:
+            return self._user_overrides[key]
+        return BUILT_IN_TEMPLATES.get(key, ("", "", "", []))[2]
+
+    def make_default(self, key: str, content: str) -> bool:
+        """将编辑内容保存为该安装的新默认值。"""
+        if key not in BUILT_IN_TEMPLATES:
+            raise ValueError(f"unknown prompt template key: {key}")
+        self._user_overrides[key] = content
+        self._save_overrides()
+        # 同步更新 DB，使 is_custom 归零
+        return self.save(key, content)
 
     def seed_built_ins(self) -> int:
         """内置模板写入 DB：仅插入缺失的 key；已存在的视为用户资产不动（可「恢复默认」）。"""
@@ -290,12 +342,12 @@ class PromptRepo:
         ).fetchall()
         out = []
         for row in rows:
-            built_in_content = BUILT_IN_TEMPLATES.get(row[0], ("", "", "", []))[2]
+            effective = self._effective_default(row[0])
             out.append({
                 "key": row[0], "name": row[1], "category": row[2],
                 "content": row[3], "variables": _parse_vars(row[4]),
-                "updated_at": row[5], "is_custom": (row[3] or "") != built_in_content,
-                "built_in_content": built_in_content,
+                "updated_at": row[5], "is_custom": (row[3] or "") != effective,
+                "built_in_content": effective,
             })
         return out
 
@@ -311,10 +363,10 @@ class PromptRepo:
         return cur.rowcount > 0
 
     def reset(self, key: str) -> str:
-        """恢复默认：写回内置文案，返回新内容。"""
+        """恢复默认：写回当前生效的默认文案（含用户 override），返回新内容。"""
         if key not in BUILT_IN_TEMPLATES:
             raise ValueError(f"unknown prompt template key: {key}")
-        name, category, content, _ = BUILT_IN_TEMPLATES[key]
+        content = self._effective_default(key)
         self.cm.execute_write(
             "UPDATE prompt_templates SET content = ?, updated_at = ? WHERE key = ?",
             (content, time.time(), key),

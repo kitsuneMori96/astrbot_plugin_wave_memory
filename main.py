@@ -1306,7 +1306,10 @@ class WaveMemoryPlugin(Star):
             from .services.prompt_service import PromptService
 
             self.persona_repo = PersonaRepo(self.db.conn)
-            self.prompt_repo = PromptRepo(self.db.conn)
+            self.prompt_repo = PromptRepo(
+                self.db.conn,
+                overrides_path=os.path.join(self.data_dir, "prompt_overrides.json"),
+            )
             self.prompt_service = PromptService(self.prompt_repo, self.persona_repo)
             if getattr(self, "webui", None):
                 from .webui.container import get_container

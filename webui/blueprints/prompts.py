@@ -206,6 +206,23 @@ async def reset_template(key: str):
     return jsonify({"content": content})
 
 
+@prompts_bp.route("/templates/<key>/make_default", methods=["POST"])
+@require_auth
+async def make_default_template(key: str):
+    """将当前编辑内容保存为该安装的新默认值。"""
+    _, prompt_repo, _ = _repos()
+    if prompt_repo is None:
+        return jsonify({"error": "prompt center unavailable"}), 503
+    data = await request.get_json(silent=True) or {}
+    content = str(data.get("content", ""))
+    try:
+        ok = prompt_repo.make_default(key, content)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    _invalidate()
+    return (jsonify({"ok": True}) if ok else (jsonify({"error": "not found"}), 404))
+
+
 # ─── AstrBot 人设导入 ────────────────────────────────────────────
 
 def _read_astrbot_personas() -> tuple[list[tuple[str, str]], str]:

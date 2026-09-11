@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Bot, FileCode2, Import, Loader2, Pencil, Plus, RotateCcw, Trash2 } from 'lucide-react'
+import { Bot, FileCode2, Import, Loader2, Pencil, Plus, RotateCcw, Star, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 
 import {
@@ -9,6 +9,7 @@ import {
   listBindings,
   listPersonas,
   listTemplates,
+  makeDefaultTemplate,
   removeBinding,
   resetTemplate,
   saveTemplate,
@@ -159,6 +160,16 @@ export function PromptsPage() {
       await reload()
     } catch (e) {
       toast.error(`恢复失败: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  const doMakeDefault = async () => {
+    try {
+      await makeDefaultTemplate(activeKey, tplContent)
+      toast.success('已保存为默认值')
+      await reload()
+    } catch (e) {
+      toast.error(`保存为默认失败: ${e instanceof Error ? e.message : String(e)}`)
     }
   }
 
@@ -357,6 +368,14 @@ export function PromptsPage() {
                   <Button variant="outline" onClick={doResetTemplate} disabled={!activeKey}>
                     <RotateCcw className="mr-1 h-4 w-4" /> 恢复默认
                   </Button>
+                  <Button
+                    variant="outline"
+                    onClick={doMakeDefault}
+                    disabled={!activeKey || !activeTpl?.is_custom}
+                    title={!activeTpl?.is_custom ? '当前已是默认值，无需保存' : '将当前内容保存为该模板的新默认值'}
+                  >
+                    <Star className="mr-1 h-4 w-4" /> 保存为默认
+                  </Button>
                   <Button onClick={saveTemplateContent} disabled={tplSaving || !activeKey}>
                     {tplSaving ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null} 保存
                   </Button>
@@ -374,11 +393,11 @@ export function PromptsPage() {
             <DialogTitle>{editing ? '编辑人设' : '新建人设'}</DialogTitle>
             <DialogDescription>system_prompt 将注入到 LLM 的 system 段（wave_persona 块）</DialogDescription>
           </DialogHeader>
-          <div className="space-y-3">
+          <div className="space-y-3 flex-1 min-h-0 overflow-y-auto">
             <Input placeholder="人设名称（如 二阶堂真红）" value={formName} onChange={(e) => setFormName(e.target.value)} />
             <Textarea
               placeholder="角色设定 / 说话风格 / 台词锚……"
-              className="min-h-[280px] max-h-[60vh] overflow-y-auto"
+              className="min-h-[280px] max-h-[60vh]"
               value={formPrompt}
               onChange={(e) => setFormPrompt(e.target.value)}
             />
