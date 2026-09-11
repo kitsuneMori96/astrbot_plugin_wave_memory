@@ -374,7 +374,7 @@ export function PromptsPage() {
             <DialogTitle>{editing ? '编辑人设' : '新建人设'}</DialogTitle>
             <DialogDescription>system_prompt 将注入到 LLM 的 system 段（wave_persona 块）</DialogDescription>
           </DialogHeader>
-          <div className="space-y-3 flex-1 overflow-y-auto min-h-0">
+          <div className="space-y-3">
             <Input placeholder="人设名称（如 二阶堂真红）" value={formName} onChange={(e) => setFormName(e.target.value)} />
             <Textarea
               placeholder="角色设定 / 说话风格 / 台词锚……"
