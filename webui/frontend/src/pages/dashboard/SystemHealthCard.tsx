@@ -16,12 +16,6 @@ function serviceNameLabel(name: unknown): string {
   return labels[value] ?? value
 }
 
-function serviceReasonLabel(reason: unknown): string {
-  return String(reason ?? '')
-    .replace(/tag 向量/g, '标签向量')
-    .replace(/tag/g, '标签')
-}
-
 function serviceStatusLabel(status: unknown): string {
   const value = String(status ?? 'unknown')
   if (value === 'ok') return '正常'
@@ -46,19 +40,14 @@ export function SystemHealthCard({ services = [] }: { services?: ServiceHealth[]
         {isEmpty ? (
           <p className="text-sm text-muted-foreground p-6">暂无服务健康数据。</p>
         ) : (
-          <div className="flex flex-col gap-3">
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {services.map((service, index) => {
               const ok = service.status === 'ok'
               const Icon = ok ? CheckCircle2Icon : AlertCircleIcon
               return (
-                <div key={`${service.name}-${index}`} className="flex items-start justify-between gap-3 rounded-lg border p-3">
-                  <div className="flex min-w-0 items-start gap-3">
-                    <Icon className={ok ? 'mt-0.5 size-4 text-muted-foreground shrink-0' : 'mt-0.5 size-4 text-destructive shrink-0'} />
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium truncate">{serviceNameLabel(service.name)}</p>
-                      {service.reason ? <p className="text-xs text-muted-foreground break-words">{serviceReasonLabel(service.reason)}</p> : null}
-                    </div>
-                  </div>
+                <div key={`${service.name}-${index}`} className="flex items-center gap-2 rounded-lg border px-3 py-2">
+                  <Icon className={ok ? 'size-3.5 text-muted-foreground shrink-0' : 'size-3.5 text-destructive shrink-0'} />
+                  <span className="min-w-0 flex-1 truncate text-sm">{serviceNameLabel(service.name)}</span>
                   <Badge variant={ok ? 'secondary' : 'destructive'} className="shrink-0 font-mono text-xs">{serviceStatusLabel(service.status)}</Badge>
                 </div>
               )
