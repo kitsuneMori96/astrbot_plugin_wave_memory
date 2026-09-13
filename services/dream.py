@@ -147,11 +147,12 @@ class DreamService:
             return []
 
         sampled = random.sample(rows, min(count, len(rows)))
+        from ..engine.vector_lifecycle import decode_vector
         return [
             {
                 "id": r[0],
                 "content": r[1],
-                "vector": np.frombuffer(r[2], dtype=np.float32) if r[2] else None,
+                "vector": decode_vector(r[2]) if r[2] else None,
                 "timestamp": r[3],
             }
             for r in sampled

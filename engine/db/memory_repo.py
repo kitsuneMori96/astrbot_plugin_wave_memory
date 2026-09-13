@@ -67,9 +67,17 @@ class MemoryRepo:
         timestamp: Optional[float] = None,
         importance: float = 1.0,
         source: str = "live",
+        quantize: bool = True,
     ) -> int:
         ts = timestamp or time.time()
-        vec_blob = vector.astype(np.float32).tobytes() if vector is not None else None
+        if vector is not None:
+            if quantize:
+                from ..vector_lifecycle import quantize_int8
+                vec_blob = quantize_int8(vector)
+            else:
+                vec_blob = vector.astype(np.float32).tobytes()
+        else:
+            vec_blob = None
         cur = self.cm.execute_write(
             """INSERT INTO memories (group_id, sender_id, sender_name, content, vector, timestamp, importance, source)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -85,14 +93,16 @@ class MemoryRepo:
         ).fetchone()
         if not row:
             return None
+        from ..vector_lifecycle import decode_vector
         return {
             "id": row[0], "group_id": row[1], "sender_id": row[2],
             "sender_name": row[3], "content": row[4],
-            "vector": np.frombuffer(row[5], dtype=np.float32) if row[5] else None,
+            "vector": decode_vector(row[5]) if row[5] else None,
             "timestamp": row[6], "importance": row[7], "access_count": row[8],
         }
 
     def get_all_memory_vectors(self, group_id: Optional[str] = None) -> list:
+        from ..vector_lifecycle import decode_vector
         if group_id:
             rows = self.cm.execute_read(
                 "SELECT id, vector FROM memories WHERE group_id=? AND vector IS NOT NULL AND memory_type = 'message'", (group_id,)
@@ -101,7 +111,12 @@ class MemoryRepo:
             rows = self.cm.execute_read(
                 "SELECT id, vector FROM memories WHERE vector IS NOT NULL AND memory_type = 'message'"
             ).fetchall()
-        return [(r[0], np.frombuffer(r[1], dtype=np.float32)) for r in rows]
+        result = []
+        for r in rows:
+            vec = decode_vector(r[1])
+            if vec is not None:
+                result.append((r[0], vec))
+        return result
 
     def get_memories_by_ids(self, ids: list) -> list:
         if not ids:
@@ -146,6 +161,7 @@ class MemoryRepo:
 
     def get_memory_vectors(self, memory_ids: list) -> dict:
         """批量获取记忆向量。返回 {memory_id: np.ndarray}。"""
+        from ..vector_lifecycle import decode_vector
         if not memory_ids:
             return {}
         placeholders = ",".join("?" * len(memory_ids))
@@ -156,12 +172,9 @@ class MemoryRepo:
         ).fetchall()
         result = {}
         for row in rows:
-            try:
-                vec = np.frombuffer(row[1], dtype=np.float32)
-                if len(vec) > 0:
-                    result[row[0]] = vec
-            except Exception:
-                continue
+            vec = decode_vector(row[1])
+            if vec is not None and len(vec) > 0:
+                result[row[0]] = vec
         # fallback: 从 memories.vector 列读
         missing = [mid for mid in memory_ids if mid not in result]
         if missing:
@@ -171,12 +184,9 @@ class MemoryRepo:
                 missing,
             ).fetchall()
             for row in rows2:
-                try:
-                    vec = np.frombuffer(row[1], dtype=np.float32)
-                    if len(vec) > 0:
-                        result[row[0]] = vec
-                except Exception:
-                    continue
+                vec = decode_vector(row[1])
+                if vec is not None and len(vec) > 0:
+                    result[row[0]] = vec
         return result
 
     def delete_memory(self, memory_id: int) -> bool:

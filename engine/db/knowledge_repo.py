@@ -76,7 +76,8 @@ class KnowledgeRepo:
         row = self.cm.execute_read("SELECT value, vector FROM kv_store WHERE key=?", (key,)).fetchone()
         if not row:
             return None
-        vec = np.frombuffer(row[1], dtype=np.float32) if row[1] else None
+        from ..vector_lifecycle import decode_vector
+        vec = decode_vector(row[1]) if row[1] else None
         return (row[0], vec)
 
     def insert_fact(

@@ -143,6 +143,7 @@ class TagRepo:
         return self.cm.execute_read("SELECT COUNT(*) FROM tags").fetchone()[0]
 
     def get_all_tag_vectors(self, limit: Optional[int] = None) -> list:
+        from ..vector_lifecycle import decode_vector
         if limit is not None:
             rows = self.cm.execute_read(
                 "SELECT id, name, vector FROM tags WHERE vector IS NOT NULL ORDER BY frequency DESC LIMIT ?",
@@ -152,10 +153,16 @@ class TagRepo:
             rows = self.cm.execute_read(
                 "SELECT id, name, vector FROM tags WHERE vector IS NOT NULL"
             ).fetchall()
-        return [(r[0], r[1], np.frombuffer(r[2], dtype=np.float32)) for r in rows]
+        result = []
+        for r in rows:
+            vec = decode_vector(r[2])
+            if vec is not None:
+                result.append((r[0], r[1], vec))
+        return result
 
     def get_tag_vectors_by_ids(self, ids: list[int]) -> dict[int, np.ndarray]:
         """按需批量查询指定 tag_id 的向量，避免全量加载到内存。"""
+        from ..vector_lifecycle import decode_vector
         if not ids:
             return {}
         result: dict[int, np.ndarray] = {}
@@ -169,7 +176,9 @@ class TagRepo:
                 chunk,
             ).fetchall()
             for r in rows:
-                result[r[0]] = np.frombuffer(r[1], dtype=np.float32)
+                vec = decode_vector(r[1])
+                if vec is not None:
+                    result[r[0]] = vec
         return result
 
     def add_tag_relation(

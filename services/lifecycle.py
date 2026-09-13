@@ -579,6 +579,7 @@ class LifecycleService:
         self.negative_emotion_threshold = negative_emotion_threshold
         self.run_global_jobs = run_global_jobs
         self.mood_trajectory = None  # 外部注入：MoodTrajectory 实例
+        self.vector_lifecycle = None  # 外部注入：VectorLifecycleService 实例
 
     def start(self):
         if self._running:
@@ -674,6 +675,13 @@ class LifecycleService:
                 self.mood_trajectory.record(valence=round(valence, 3), arousal=round(arousal, 3), cause=cause)
             except Exception as e:
                 logger.debug(f"[WaveMemory] Mood snapshot record failed: {e}")
+
+        # 6. 向量生命周期管理（量化、压缩、一致性检查）
+        if self.vector_lifecycle:
+            try:
+                await self.vector_lifecycle.tick()
+            except Exception as e:
+                logger.debug(f"[WaveMemory] Vector lifecycle tick failed: {e}")
 
     def _run_decay(self) -> int:
         """标记过期记忆为 archived 并且对 user_profiles 执行多维情感衰减。"""

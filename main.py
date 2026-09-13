@@ -1162,8 +1162,20 @@ class WaveMemoryPlugin(Star):
                 negative_emotion_threshold=self.negative_emotion_threshold,
             )
             self.lifecycle.start()
+
+            # 向量生命周期管理（集成到 lifecycle tick）
+            from .engine.vector_lifecycle import VectorLifecycleService
+            self.vector_lifecycle = VectorLifecycleService(
+                db=self.db,
+                memory_index=self.memory_index,
+                embedding_service=self.writer.embedding if self.writer else None,
+            )
+            self.lifecycle.vector_lifecycle = self.vector_lifecycle
+            # 启动时自动迁移（异步，不阻塞启动）
+            self._spawn(self.vector_lifecycle.startup_migration())
         else:
             self.lifecycle = None
+            self.vector_lifecycle = None
 
         # LLM 摘要整合（独立于 affinity 门控）
         if self.enable_consolidation and self.tag_llm_provider_id:

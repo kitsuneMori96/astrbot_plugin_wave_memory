@@ -49,7 +49,8 @@ class IntrinsicResidualCalculator:
                     batch,
                 ).fetchall()
                 for r in rows:
-                    result[r[0]] = np.frombuffer(r[1], dtype=np.float32)
+                    from .vector_lifecycle import decode_vector
+                    result[r[0]] = decode_vector(r[1])
             return result
         else:
             return self.db.get_tag_vectors_by_ids(
