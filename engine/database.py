@@ -98,11 +98,17 @@ class WaveMemoryDB:
     def get_memories_by_ids(self, ids):
         return self._memory_repo.get_memories_by_ids(ids)
 
-    def touch_memories(self, ids, importance_boost: float = 0.01):
-        return self._memory_repo.touch_memories(ids, importance_boost=importance_boost)
+    def touch_memories(self, ids, importance_boost: float = 0.01, query_id: str = ""):
+        return self._memory_repo.touch_memories(ids, importance_boost=importance_boost, query_id=query_id)
 
     def apply_memory_decay(self, config: dict) -> dict:
         return self._memory_repo.apply_memory_decay(config)
+
+    def apply_recall_boost(self, query_id: str, cited_memory_ids: list):
+        return self._memory_repo.apply_recall_boost(query_id, cited_memory_ids)
+
+    def get_retention_fields(self, memory_ids: list) -> list:
+        return self._memory_repo.get_retention_fields(memory_ids)
 
     def unarchive_memory(self, memory_id: int) -> bool:
         return self._memory_repo.unarchive_memory(memory_id)

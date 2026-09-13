@@ -752,5 +752,11 @@
         "default": 0.3
       }
     }
+  },
+  "migration_hold_eviction": {
+    "description": "迁移期间暂停衰减淘汰",
+    "hint": "Phase 1 迁移期间关闭旧版 apply_memory_decay 和新版 retention decay，防止误删数据。迁移完成后关闭此开关。",
+    "type": "bool",
+    "default": true
   }
 }

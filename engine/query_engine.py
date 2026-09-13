@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 from typing import Optional
 
 import numpy as np
@@ -18,6 +19,14 @@ from .spike_routing import SpikeRouter
 from .residual_pyramid import ResidualPyramid
 from .epa import EPAModule
 from .geodesic_rerank import GeodesicReranker
+
+
+class QueryResult(list):
+    """list 子类，携带 query_id 用于 recall_log 回填。"""
+
+    def __init__(self, items=None, query_id: str = ""):
+        super().__init__(items or [])
+        self.query_id = query_id
 
 
 class QueryEngine:
@@ -53,6 +62,7 @@ class QueryEngine:
         self.enable_pyramid = config.get("enable_residual_pyramid", True)
         self.enable_epa = config.get("enable_epa", True)
         self.enable_geodesic = config.get("enable_geodesic_rerank", True)
+        self._last_query_id: str = ""
 
     async def query(
         self,
@@ -162,15 +172,18 @@ class QueryEngine:
         memories.sort(key=lambda m: m["score"], reverse=True)
         memories = memories[:top_k]
 
+        query_id = f"q-{uuid.uuid4().hex[:12]}"
+        self._last_query_id = query_id
+
         if memories:
-            self.db.touch_memories([m["id"] for m in memories])
+            self.db.touch_memories([m["id"] for m in memories], query_id=query_id)
 
         total_ms = (time.time() - start) * 1000
         logger.debug(
             f"[WaveMemory] Query done: {len(memories)} results, "
             f"embed={embed_ms:.0f}ms, total={total_ms:.0f}ms"
         )
-        return memories
+        return QueryResult(memories, query_id=query_id)
 
     def _wave_boost(self, query_vec: np.ndarray) -> tuple[np.ndarray, dict]:
         """VCP TagMemo 浪潮增强。"""
@@ -359,15 +372,18 @@ class QueryEngine:
             memories.sort(key=lambda m: m["score"], reverse=True)
             memories = memories[:top_k]
 
+        query_id = f"q-{uuid.uuid4().hex[:12]}"
+        self._last_query_id = query_id
+
         if memories:
-            self.db.touch_memories([m["id"] for m in memories])
+            self.db.touch_memories([m["id"] for m in memories], query_id=query_id)
 
         total_ms = (time.time() - start) * 1000
         logger.debug(
             f"[WaveMemory] Shotgun query done: {len(memories)} results, "
             f"candidates={len(all_candidates)}, total={total_ms:.0f}ms"
         )
-        return memories
+        return QueryResult(memories, query_id=query_id)
 
     def _svd_dedup(self, memories: list[dict], query_vec: np.ndarray, top_k: int) -> list[dict]:
         """SVD 主题去重。"""

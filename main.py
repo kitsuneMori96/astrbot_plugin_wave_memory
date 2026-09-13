@@ -916,6 +916,19 @@ class WaveMemoryPlugin(Star):
                     mid = item.get("id")
                     if mid and mid not in memory_ids:
                         memory_ids.append(mid)
+            # 捕获 memory channel 的 query_id
+            for ch in self.injection_shadow_channels:
+                if getattr(ch, "name", "") == "memory" and hasattr(ch, "last_query_id"):
+                    qid = ch.last_query_id
+                    if qid:
+                        self._pending_recall_query_id = qid
+                        # 获取记忆内容用于 infer_cited
+                        if memory_ids and hasattr(self.db, "get_memories_by_ids"):
+                            _mems = self.db.get_memories_by_ids(memory_ids[:10])
+                            self._pending_recall_memories = _mems
+                        else:
+                            self._pending_recall_memories = []
+                    break
             for mid in memory_ids[:10]:
                 try:
                     row = self.db.conn.execute("SELECT importance FROM memories WHERE id=?", (mid,)).fetchone()
@@ -1723,10 +1736,12 @@ class WaveMemoryPlugin(Star):
                         logger.debug(f"[WaveMemory] few_shot extract failed: {e}")
                 if getattr(self, "db", None):
                     try:
-                        decay_cfg = self.config.get("Memory_Decay_Settings", {})
-                        result = self.db.apply_memory_decay(decay_cfg)
-                        if result and result.get("decayed", 0) + result.get("archived", 0) + result.get("evicted", 0) > 0:
-                            logger.info(f"[WaveMemory] 记忆衰减: {result}")
+                        # migration_hold_eviction: 迁移期间暂停旧版衰减
+                        if not self.config.get("migration_hold_eviction", True):
+                            decay_cfg = self.config.get("Memory_Decay_Settings", {})
+                            result = self.db.apply_memory_decay(decay_cfg)
+                            if result and result.get("decayed", 0) + result.get("archived", 0) + result.get("evicted", 0) > 0:
+                                logger.info(f"[WaveMemory] 记忆衰减: {result}")
                     except Exception as e:
                         logger.debug(f"[WaveMemory] apply_memory_decay failed: {e}")
         except asyncio.CancelledError:
@@ -2689,6 +2704,43 @@ class WaveMemoryPlugin(Star):
             logger.warning(f"[WaveMemory] swallow_no_reply 异常: {e}")
             return resp
 
+    @filter.on_llm_response()
+    async def apply_recall_boost_on_reply(self, event: AstrMessageEvent, resp=None):
+        """回复生成后回填 recall_log.g + 更新 stability_mult。"""
+        try:
+            query_id = getattr(self, "_pending_recall_query_id", "")
+            memories = getattr(self, "_pending_recall_memories", [])
+            if not query_id or not memories:
+                return
+
+            reply_text = ""
+            if resp and hasattr(resp, "completion_text"):
+                reply_text = getattr(resp, "completion_text", "") or ""
+
+            # infer_cited：记忆内容片段是否出现在回复中
+            cited_ids = []
+            if reply_text:
+                for mem in memories:
+                    content = mem.get("content", "")
+                    if not content or len(content) < 12:
+                        continue
+                    # 停用词过滤：太短或纯标点不参与
+                    stripped = content.strip()
+                    if not stripped or all(not c.isalnum() for c in stripped):
+                        continue
+                    # 取内容前 30 字符做子串匹配
+                    snippet = content[:30]
+                    if snippet in reply_text:
+                        cited_ids.append(mem.get("id", 0))
+
+            self.db.apply_recall_boost(query_id, cited_ids)
+
+            # 清理
+            self._pending_recall_query_id = ""
+            self._pending_recall_memories = []
+        except Exception as e:
+            logger.debug(f"[WaveMemory] apply_recall_boost failed: {e}")
+
     async def _belief_emergence_task(self) -> None:
         """后台关系事件信念涌现任务。"""
         try:
@@ -3220,6 +3272,9 @@ class WaveMemoryPlugin(Star):
                 _ch_timeline(),
             )
 
+            # 捕获 query_id 用于 recall_boost 回填
+            _recall_query_id = getattr(memories, "query_id", "") if memories else ""
+
             # ─── 合并结果 ───
             # FTS5 结果合并（去重后追加）
             if fts5_memories and memories is not None:
@@ -3309,6 +3364,9 @@ class WaveMemoryPlugin(Star):
                 req.extra_user_content_parts.append(TextPart(text=injection))
                 consumption["total_chars"] = len(injection)
                 consumption["total_tokens"] = estimate_tokens(injection)
+                # 存储 query_id 供 on_llm_response 回填 recall_boost
+                self._pending_recall_query_id = _recall_query_id
+                self._pending_recall_memories = memories[:10] if memories else []
 
             # 记录性能数据 (US-3.2)
             timing["total_ms"] = round((_time.perf_counter() - t_start) * 1000, 1)

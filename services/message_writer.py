@@ -172,6 +172,32 @@ def classify_source(
     return "chat"
 
 
+# 衰减类别关键词启发
+_DURATIVE_KW = {"约定", "生日", "纪念日", "计划", "目标", "承诺", "deadline", "预约"}
+_EVENT_KW = {"发现", "得知", "听说", "去过", "看到", "遇到", "昨天", "今天", "上午", "下午"}
+
+
+def classify_decay_class(content: str, source: str = "chat") -> str:
+    """根据内容启发式判断 decay_class。
+
+    规则链：
+      1. core（bot 自己/被 @bot）→ DURATIVE
+      2. 含未来约定/长期记忆关键词 → DURATIVE
+      3. 含具体事件/时间标记 → EVENT
+      4. 其余 → STATE（默认 90 天）
+    """
+    if source == "core":
+        return "DURATIVE"
+
+    text = content.lower()
+
+    if any(kw in text for kw in _DURATIVE_KW):
+        return "DURATIVE"
+    if any(kw in text for kw in _EVENT_KW):
+        return "EVENT"
+    return "STATE"
+
+
 class MessageWriter:
     """异步消息写入服务。
 
@@ -299,6 +325,7 @@ class MessageWriter:
                     timestamp=item.get("timestamp", time.time()),
                     importance=base_importance,
                     source=item["source"],
+                    decay_class=classify_decay_class(item["content"], item["source"]),
                 )
 
                 if vec is not None:
@@ -322,6 +349,7 @@ class MessageWriter:
                     timestamp=item.get("timestamp", time.time()),
                     importance=0.3,  # noise 低初始重要性
                     source="noise",
+                    decay_class="NONE",
                 )
                 self._stats["noise"] = self._stats.get("noise", 0) + 1
             except Exception:
@@ -339,6 +367,7 @@ class MessageWriter:
                     timestamp=item.get("timestamp", time.time()),
                     importance=0.01,
                     source="identity_quarantine",
+                    decay_class="NONE",
                 )
                 self.db.conn.execute(
                     "UPDATE memories SET memory_type='archived', summary='quarantined: transient roleplay/identity confusion' WHERE id=?",

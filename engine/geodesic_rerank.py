@@ -80,13 +80,15 @@ class GeodesicReranker:
         # 如果没有任何 L0 命中，降级为 L1（减小 alpha）
         effective_alpha = self.alpha if l0_count > 0 else self.alpha * 0.5
 
-        # 归一化并混合
+        # 归一化并混合（乘性门控：geodesic 作为乘数而非加数）
         if max_geo > 0:
             for candidate in candidates:
                 mem_id = candidate["id"]
                 knn_score = candidate.get("score", 0)
                 normalized_geo = geo_scores.get(mem_id, 0) / max_geo
-                candidate["score"] = (1 - effective_alpha) * knn_score + effective_alpha * normalized_geo
+                # geo_gate: 无测地线信号时 → 0.7，强信号 → 1.0
+                geo_gate = (1 - effective_alpha) + effective_alpha * normalized_geo
+                candidate["score"] = knn_score * geo_gate
                 candidate["geo_score"] = normalized_geo
 
         # 重排

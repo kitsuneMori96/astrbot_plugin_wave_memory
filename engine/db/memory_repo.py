@@ -68,6 +68,7 @@ class MemoryRepo:
         importance: float = 1.0,
         source: str = "live",
         quantize: bool = True,
+        decay_class: str = "STATE",
     ) -> int:
         ts = timestamp or time.time()
         if vector is not None:
@@ -79,12 +80,32 @@ class MemoryRepo:
         else:
             vec_blob = None
         cur = self.cm.execute_write(
-            """INSERT INTO memories (group_id, sender_id, sender_name, content, vector, timestamp, importance, source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (group_id, sender_id, sender_name, content, vec_blob, ts, importance, source),
+            """INSERT INTO memories (group_id, sender_id, sender_name, content, vector, timestamp, importance, source, decay_class, retention_state)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 4)""",
+            (group_id, sender_id, sender_name, content, vec_blob, ts, importance, source, decay_class),
         )
         self.cm.commit()
         return cur.lastrowid
+
+    def get_retention_fields(self, memory_ids: list) -> list:
+        """批量获取记忆衰减字段。返回 list of dicts。"""
+        if not memory_ids:
+            return []
+        placeholders = ",".join("?" * len(memory_ids))
+        rows = self.cm.execute_read(
+            f"""SELECT id, source_msg_id, msg_score, stability_mult,
+                       last_recall_at, decay_class, retention_state,
+                       timestamp, LENGTH(content) AS content_len
+                FROM memories WHERE id IN ({placeholders})""",
+            memory_ids,
+        ).fetchall()
+        return [
+            {"id": r[0], "source_msg_id": r[1], "msg_score": r[2],
+             "stability_mult": r[3], "last_recall_at": r[4],
+             "decay_class": r[5], "retention_state": r[6],
+             "timestamp": r[7], "content_len": r[8]}
+            for r in rows
+        ]
 
     def get_memory_by_id(self, memory_id: int) -> Optional[dict]:
         row = self.cm.execute_read(
@@ -103,13 +124,14 @@ class MemoryRepo:
 
     def get_all_memory_vectors(self, group_id: Optional[str] = None) -> list:
         from ..vector_lifecycle import decode_vector
+        where = "vector IS NOT NULL AND memory_type = 'message' AND retention_state IN (3,4)"
         if group_id:
             rows = self.cm.execute_read(
-                "SELECT id, vector FROM memories WHERE group_id=? AND vector IS NOT NULL AND memory_type = 'message'", (group_id,)
+                f"SELECT id, vector FROM memories WHERE group_id=? AND {where}", (group_id,)
             ).fetchall()
         else:
             rows = self.cm.execute_read(
-                "SELECT id, vector FROM memories WHERE vector IS NOT NULL AND memory_type = 'message'"
+                f"SELECT id, vector FROM memories WHERE {where}"
             ).fetchall()
         result = []
         for r in rows:
@@ -123,25 +145,36 @@ class MemoryRepo:
             return []
         placeholders = ",".join("?" * len(ids))
         rows = self.cm.execute_read(
-            f"""SELECT id, group_id, sender_id, sender_name, content, timestamp, importance, access_count, source, memory_type
+            f"""SELECT id, group_id, sender_id, sender_name, content, timestamp, importance,
+                       access_count, source, memory_type, source_msg_id, msg_score,
+                       stability_mult, last_recall_at, decay_class, retention_state
                 FROM memories WHERE id IN ({placeholders}) AND memory_type = 'message'""",
             ids,
         ).fetchall()
         return [
             {"id": r[0], "group_id": r[1], "sender_id": r[2], "sender_name": r[3],
              "content": r[4], "timestamp": r[5], "importance": r[6],
-             "access_count": r[7] if len(r) > 7 else 0, "source": r[8], "memory_type": r[9]}
+             "access_count": r[7] if len(r) > 7 else 0, "source": r[8], "memory_type": r[9],
+             "source_msg_id": r[10], "msg_score": r[11], "stability_mult": r[12],
+             "last_recall_at": r[13], "decay_class": r[14], "retention_state": r[15]}
             for r in rows
         ]
 
-    def touch_memories(self, ids: list, importance_boost: float = 0.01):
-        """标记记忆被访问 + 微量提升 importance + 重置衰减时钟。"""
+    def touch_memories(self, ids: list, importance_boost: float = 0.01, query_id: str = ""):
+        """标记记忆被访问 + 微量提升 importance + 写 recall_log（g=NULL 待回填）。"""
         now = time.time()
         for mid in ids:
             self.cm.execute_write(
                 "UPDATE memories SET access_count = access_count + 1, last_accessed = ?, importance = MIN(3.0, importance + ?), last_decay_at = ? WHERE id = ?",
                 (now, importance_boost, now, mid),
             )
+        # 写 recall_log（g=NULL，apply_recall_boost 回填）
+        if query_id and ids:
+            for mid in ids:
+                self.cm.execute_write(
+                    "INSERT INTO recall_log (query_id, target_type, target_id, r_at_recall, g, content_len, ts) VALUES (?, 'memory', ?, 0, NULL, 0, ?)",
+                    (query_id, mid, now),
+                )
         self.cm.commit()
 
     def get_memory_count(self, group_id: Optional[str] = None) -> int:
@@ -352,3 +385,62 @@ class MemoryRepo:
         )
         self.cm.commit()
         return True
+
+    def apply_recall_boost(self, query_id: str, cited_memory_ids: list):
+        """回填 recall_log.g + 更新 stability_mult。
+
+        cited_memory_ids: 被回复引用的记忆 ID 列表（infer_cited 产出）。
+        g=1.0(被引用) / g=0.3(未被引用)。
+        """
+        if not query_id:
+            return
+        now = time.time()
+        G_CITED = 1.0
+        G_NOT = 0.3
+
+        rows = self.cm.execute_read(
+            "SELECT id, target_id FROM recall_log WHERE query_id = ? AND g IS NULL",
+            (query_id,),
+        ).fetchall()
+        if not rows:
+            return
+
+        cited_set = set(cited_memory_ids or [])
+        α = 3.0
+
+        for log_id, mem_id in rows:
+            G = G_CITED if mem_id in cited_set else G_NOT
+            self.cm.execute_write(
+                "UPDATE recall_log SET g = ? WHERE id = ?",
+                (G, log_id),
+            )
+            mem = self.cm.execute_read(
+                "SELECT stability_mult, decay_class, msg_score, timestamp, last_recall_at FROM memories WHERE id = ?",
+                (mem_id,),
+            ).fetchone()
+            if not mem:
+                continue
+            stab, decay_cls, msg_score, ts, last_recall = mem
+            stab = float(stab or 1.0)
+            msg_score = float(msg_score or 0.5)
+            ts = float(ts or 0)
+            last_recall = float(last_recall or 0)
+
+            from ..retention import RetentionCalculator
+            rc = RetentionCalculator()
+            base_R = rc.calc_R({
+                "decay_class": decay_cls,
+                "msg_score": msg_score,
+                "stability_mult": stab,
+                "last_recall_at": last_recall,
+                "timestamp": ts,
+            })
+            boost = 1 + α * (1 - base_R) * G
+            new_stab = min(5.0, stab * boost)
+
+            self.cm.execute_write(
+                "UPDATE memories SET stability_mult = ?, last_recall_at = ? WHERE id = ?",
+                (round(new_stab, 4), now, mem_id),
+            )
+
+        self.cm.commit()

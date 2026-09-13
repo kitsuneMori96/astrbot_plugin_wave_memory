@@ -95,6 +95,11 @@ class MemoryRecallChannel:
     def __init__(self, *, query_engine: Any, safety_channel: SafetyChannel | None = None):
         self.query_engine = query_engine
         self.safety = safety_channel or SafetyChannel()
+        self._last_query_id: str = ""
+
+    @property
+    def last_query_id(self) -> str:
+        return self._last_query_id
 
     async def build(self, ctx: Any) -> InjectionResult:
         started = time.perf_counter()
@@ -144,24 +149,28 @@ class MemoryRecallChannel:
         enable_shotgun = _as_bool(recall_cfg.get("enable_shotgun"), False)
         if enable_shotgun:
             context_messages = recall_cfg.get("context_messages") or getattr(ctx, "recent_context", []) or []
-            return await self.query_engine.shotgun_query(
+            result = await self.query_engine.shotgun_query(
                 text=getattr(ctx, "message", ""),
                 context_messages=list(context_messages),
                 group_id=getattr(ctx, "group_id", None),
                 top_k=top_k,
             )
+            self._last_query_id = getattr(result, "query_id", "") or self.query_engine._last_query_id
+            return result
 
         exclude_sources = recall_cfg.get("exclude_sources")
         source_filter = recall_cfg.get("source_filter")
         if source_filter is None and not exclude_sources:
             source_filter = list(_DEFAULT_SOURCE_FILTER)
-        return await self.query_engine.query(
+        result = await self.query_engine.query(
             text=getattr(ctx, "message", ""),
             group_id=getattr(ctx, "group_id", None),
             top_k=top_k,
             exclude_sources=exclude_sources,
             source_filter=source_filter,
         )
+        self._last_query_id = getattr(result, "query_id", "") or self.query_engine._last_query_id
+        return result
 
     @staticmethod
     def _latency_ms(started: float) -> float:
