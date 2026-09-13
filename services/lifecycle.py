@@ -603,14 +603,14 @@ class LifecycleService:
         while self._running:
             try:
                 await asyncio.sleep(1800)  # 30 min
-                self._tick()
+                await self._tick()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.warning(f"[WaveMemory] Lifecycle error: {e}")
                 await asyncio.sleep(60)
 
-    def _tick(self):
+    async def _tick(self):
         """一次 tick：好感度持久化 + 模式更新 + 衰减 + 情绪。"""
         now = time.time()
 
