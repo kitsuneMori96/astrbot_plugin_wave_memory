@@ -18,6 +18,15 @@ from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
+PLANNER_FIELD_GUIDE = """字段说明：
+- 行动：只在确认对方在跟你说话时选回复。拿不准选沉默。
+- 把握：你对「行动」判断的确定程度。高=上下文明确；中=上下文不全但仍可推断；低=信息不足、基本靠猜。
+- 语气：热情=对方正常交流/求助/闲聊的常态；正常=事务性沟通、对方语气平淡、或已连续多轮降温；冷淡=对方明显低落/生气/想独处；克制=话题沉重、不宜外放。默认热情，无需刻意偏离。
+- 详略：简洁=一句话能说清（是非判断、寒暄、简单确认、短观点）；详细=需要步骤/列举/解释原理/多个要点，或对方明确要求展开，或是评价/总结/分析类，或是 how-to/操作指导类问题。默认简洁。
+- 念头：最后写。用你自己的口吻说出此刻最想表达的那一点。写意图或态度，不写事实复述。
+  好：得赶紧给他说明白 / 这事儿我得先接住他的情绪 / 我想逗他一下
+  差：他问我怎么部署 / 用户在求助 / 对方说了一句闲聊"""
+
 # ─── 输出解析 ────────────────────────────────────────────────────
 
 _TONES = ("热情", "正常", "冷淡", "克制")
@@ -332,7 +341,6 @@ class ConversationPlanner:
                     message: str, bot_id: str = "", group_id: str = "",
                     bot_name: str = "bot", scenario_hint: str = "",
                     at_hint: str = "", forced: bool = False) -> dict:
-        from engine.db.prompt_repo import PLANNER_FIELD_GUIDE
         ps = self.prompt_service
         persona = self._resolve_persona_text(bot_id, group_id, bot_name)
         display_name = self._persona_display_name(bot_id, group_id, bot_name) or bot_name
