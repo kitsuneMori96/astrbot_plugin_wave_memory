@@ -160,7 +160,7 @@ class MemoryRepo:
             for r in rows
         ]
 
-    def touch_memories(self, ids: list, importance_boost: float = 0.01, query_id: str = ""):
+    def touch_memories(self, ids: list, importance_boost: float = 0.01, query_id: str = "", bot_id: str = ""):
         """标记记忆被访问 + 微量提升 importance + 写 recall_log（g=NULL 待回填）。"""
         now = time.time()
         for mid in ids:
@@ -168,14 +168,53 @@ class MemoryRepo:
                 "UPDATE memories SET access_count = access_count + 1, last_accessed = ?, importance = MIN(3.0, importance + ?), last_decay_at = ? WHERE id = ?",
                 (now, importance_boost, now, mid),
             )
-        # 写 recall_log（g=NULL，apply_recall_boost 回填）
+        # 写 recall_log（g=NULL，apply_recall_boost 延迟回填）
         if query_id and ids:
-            for mid in ids:
-                self.cm.execute_write(
-                    "INSERT INTO recall_log (query_id, target_type, target_id, r_at_recall, g, content_len, ts) VALUES (?, 'memory', ?, 0, NULL, 0, ?)",
-                    (query_id, mid, now),
-                )
+            rows = [(query_id, "memory", mid, 0, None, 0, now, bot_id or None) for mid in ids]
+            self.cm.executemany(
+                "INSERT INTO recall_log (query_id, target_type, target_id, r_at_recall, g, content_len, ts, bot_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
         self.cm.commit()
+
+    def get_pending_recall(self, max_age: float = 86400) -> dict:
+        """获取待结算的 recall 记录。返回 {query_id: {bot_id, ts, group_id, ids}}。"""
+        cutoff = time.time() - max_age
+        rows = self.cm.execute_read(
+            """SELECT r.query_id, r.bot_id, r.ts, r.target_id, m.group_id
+               FROM recall_log r
+               LEFT JOIN memories m ON m.id = r.target_id
+               WHERE r.g IS NULL AND r.ts > ?
+               ORDER BY r.ts""", (cutoff,),
+        ).fetchall()
+        pending = {}
+        for qid, bot_id, ts, tid, gid in rows:
+            if not gid:
+                continue  # memory 已删除，跳过
+            p = pending.setdefault(qid, {"bot_id": bot_id, "ts": ts, "group_id": gid, "ids": []})
+            p["ids"].append(tid)
+            p["ts"] = max(p["ts"], ts)
+        return pending
+
+    def get_bot_reply_after(self, group_id: str, ts: float, bot_id: str, upper_ts: float) -> Optional[str]:
+        """查找 bot 在 (ts, upper_ts] 窗口内的最早回复。精确匹配 bot_id，无白名单兜底。"""
+        row = self.cm.execute_read(
+            """SELECT content FROM memories
+               WHERE group_id=? AND sender_id=?
+                 AND timestamp>? AND timestamp<=?
+               ORDER BY timestamp LIMIT 1""",
+            (group_id, bot_id, ts, upper_ts),
+        ).fetchone()
+        return row[0] if row else None
+
+    def cleanup_stale_recall(self, max_age: float = 86400):
+        """清理超时未结算的 recall_log 记录。"""
+        cutoff = time.time() - max_age
+        cur = self.cm.execute_write(
+            "DELETE FROM recall_log WHERE g IS NULL AND ts < ?", (cutoff,),
+        )
+        self.cm.commit()
+        return cur.rowcount
 
     def get_memory_count(self, group_id: Optional[str] = None) -> int:
         if group_id:

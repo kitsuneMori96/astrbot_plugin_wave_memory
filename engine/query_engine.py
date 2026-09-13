@@ -21,6 +21,28 @@ from .epa import EPAModule
 from .geodesic_rerank import GeodesicReranker
 
 
+def infer_cited(reply_text: str, memories: list[dict]) -> list[int]:
+    """判断回复中引用了哪些记忆。返回被引用的记忆 ID 列表。
+
+    策略：取记忆内容前 30 字符做子串匹配，要求记忆内容 ≥12 字符。
+    短消息群聊天花板低，Phase 2 改用 LLM [mem:N] 引用标记。
+    """
+    if not reply_text or not memories:
+        return []
+    cited = []
+    for mem in memories:
+        content = mem.get("content", "")
+        if not content or len(content) < 12:
+            continue
+        stripped = content.strip()
+        if not stripped or all(not c.isalnum() for c in stripped):
+            continue
+        snippet = content[:30]
+        if snippet in reply_text:
+            cited.append(mem.get("id", 0))
+    return cited
+
+
 class QueryResult(list):
     """list 子类，携带 query_id 用于 recall_log 回填。"""
 
@@ -63,6 +85,46 @@ class QueryEngine:
         self.enable_epa = config.get("enable_epa", True)
         self.enable_geodesic = config.get("enable_geodesic_rerank", True)
         self._last_query_id: str = ""
+        self._last_settle_ts: float = 0
+
+    def _settle_previous_recall(self):
+        """延迟回填：结算上一轮 recall_log（g=NULL），用 bot 回复做 infer_cited。"""
+        now = time.time()
+        if now - self._last_settle_ts < 10:
+            return
+        self._last_settle_ts = now
+
+        pending = self.db.get_pending_recall(max_age=86400)
+        if not pending:
+            return
+
+        items = sorted(pending.items(), key=lambda kv: kv[1]["ts"])
+
+        # 按 (group_id, bot_id) 求下一次 recall 的 ts 作为上界
+        order = {}
+        for qid, p in items:
+            order.setdefault((p["group_id"], p.get("bot_id")), []).append((p["ts"], qid))
+        upper_map = {}
+        for key, lst in order.items():
+            lst.sort()
+            for i, (ts, qid) in enumerate(lst):
+                upper_map[qid] = lst[i + 1][0] if i + 1 < len(lst) else ts + 600
+
+        settled = 0
+        for qid, p in items:
+            bot_id = p.get("bot_id")
+            if not bot_id:
+                continue
+            upper = min(p["ts"] + 600, upper_map.get(qid, p["ts"] + 600))
+            reply = self.db.get_bot_reply_after(p["group_id"], p["ts"], bot_id, upper)
+            if not reply:
+                continue
+            mems = self.db.get_memories_by_ids(p["ids"])
+            self.db.apply_recall_boost(qid, infer_cited(reply, mems))
+            settled += 1
+
+        if settled:
+            logger.debug(f"[WaveMemory] Settled {settled} recall batches")
 
     async def query(
         self,
@@ -74,6 +136,7 @@ class QueryEngine:
         time_filter_ts: float = 0,
         time_filter_end_ts: float = 0,
         group_boost: Optional[dict] = None,
+        bot_id: Optional[str] = None,
     ) -> list[dict]:
         """执行完整的浪潮查询管线。
 
@@ -84,6 +147,9 @@ class QueryEngine:
             time_filter_end_ts: 排他上界，>0 时只返回 timestamp < 此值的记忆（日历日窗口用）
             group_boost: 群权重字典，如 {"current": 1.5, "cross": 0.8, "group_id": "gid"}
         """
+        # 延迟回填上一轮 recall
+        self._settle_previous_recall()
+
         start = time.time()
 
         query_vec = await self.embedding.get_embedding(text)
@@ -176,7 +242,7 @@ class QueryEngine:
         self._last_query_id = query_id
 
         if memories:
-            self.db.touch_memories([m["id"] for m in memories], query_id=query_id)
+            self.db.touch_memories([m["id"] for m in memories], query_id=query_id, bot_id=bot_id or "")
 
         total_ms = (time.time() - start) * 1000
         logger.debug(
@@ -281,8 +347,12 @@ class QueryEngine:
         time_filter_ts: float = 0,
         time_filter_end_ts: float = 0,
         group_boost: Optional[dict] = None,
+        bot_id: Optional[str] = None,
     ) -> list[dict]:
         """多路霰弹枪检索。"""
+        # 延迟回填上一轮 recall
+        self._settle_previous_recall()
+
         start = time.time()
 
         query_vec = await self.embedding.get_embedding(text)
@@ -376,7 +446,7 @@ class QueryEngine:
         self._last_query_id = query_id
 
         if memories:
-            self.db.touch_memories([m["id"] for m in memories], query_id=query_id)
+            self.db.touch_memories([m["id"] for m in memories], query_id=query_id, bot_id=bot_id or "")
 
         total_ms = (time.time() - start) * 1000
         logger.debug(

@@ -98,14 +98,23 @@ class WaveMemoryDB:
     def get_memories_by_ids(self, ids):
         return self._memory_repo.get_memories_by_ids(ids)
 
-    def touch_memories(self, ids, importance_boost: float = 0.01, query_id: str = ""):
-        return self._memory_repo.touch_memories(ids, importance_boost=importance_boost, query_id=query_id)
+    def touch_memories(self, ids, importance_boost: float = 0.01, query_id: str = "", bot_id: str = ""):
+        return self._memory_repo.touch_memories(ids, importance_boost=importance_boost, query_id=query_id, bot_id=bot_id)
 
     def apply_memory_decay(self, config: dict) -> dict:
         return self._memory_repo.apply_memory_decay(config)
 
     def apply_recall_boost(self, query_id: str, cited_memory_ids: list):
         return self._memory_repo.apply_recall_boost(query_id, cited_memory_ids)
+
+    def get_pending_recall(self, max_age: float = 86400) -> dict:
+        return self._memory_repo.get_pending_recall(max_age=max_age)
+
+    def get_bot_reply_after(self, group_id: str, ts: float, bot_id: str, upper_ts: float):
+        return self._memory_repo.get_bot_reply_after(group_id, ts, bot_id, upper_ts)
+
+    def cleanup_stale_recall(self, max_age: float = 86400) -> int:
+        return self._memory_repo.cleanup_stale_recall(max_age=max_age)
 
     def get_retention_fields(self, memory_ids: list) -> list:
         return self._memory_repo.get_retention_fields(memory_ids)

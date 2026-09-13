@@ -146,6 +146,13 @@ class MemoryRecallChannel:
             return result
 
     async def _query(self, ctx: Any, *, top_k: int, recall_cfg: Mapping[str, Any]) -> list[dict[str, Any]]:
+        # 三级 fallback 取 bot_id
+        bot_id = (getattr(ctx, "bot_id", None)
+                  or getattr(getattr(ctx, "event", None), "self_id", None)
+                  or getattr(ctx, "config", {}).get("bot_id"))
+        if not bot_id:
+            logger.warning("[WaveMemory] bot_id 缺失，recall 样本将不参与增强")
+
         enable_shotgun = _as_bool(recall_cfg.get("enable_shotgun"), False)
         if enable_shotgun:
             context_messages = recall_cfg.get("context_messages") or getattr(ctx, "recent_context", []) or []
@@ -154,6 +161,7 @@ class MemoryRecallChannel:
                 context_messages=list(context_messages),
                 group_id=getattr(ctx, "group_id", None),
                 top_k=top_k,
+                bot_id=bot_id,
             )
             self._last_query_id = getattr(result, "query_id", "") or self.query_engine._last_query_id
             return result
@@ -168,6 +176,7 @@ class MemoryRecallChannel:
             top_k=top_k,
             exclude_sources=exclude_sources,
             source_filter=source_filter,
+            bot_id=bot_id,
         )
         self._last_query_id = getattr(result, "query_id", "") or self.query_engine._last_query_id
         return result
