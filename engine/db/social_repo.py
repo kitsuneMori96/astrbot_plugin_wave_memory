@@ -15,6 +15,20 @@ class SocialRepo:
     def __init__(self, cm: ConnectionManager):
         self.cm = cm
         self._create_tables()
+        self._migrate_user_profiles()
+
+    def _migrate_user_profiles(self):
+        """补 user_profiles 缺失列（Phase 1 重生后兼容）。"""
+        existing = {r[1] for r in self.cm.execute("PRAGMA table_info(user_profiles)").fetchall()}
+        for col, default in [
+            ("id", None),  # PRIMARY KEY 不能 ADD COLUMN，跳过
+            ("group_id", "''"),
+            ("nickname", "''"),
+            ("personality_tags", "''"),
+            ("notes", "''"),
+        ]:
+            if col not in existing and col != "id":
+                self.cm.execute(f"ALTER TABLE user_profiles ADD COLUMN {col} TEXT DEFAULT {default}")
 
     def _create_tables(self):
         self.cm.executescript("""

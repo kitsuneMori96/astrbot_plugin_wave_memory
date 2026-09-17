@@ -51,6 +51,9 @@ class KnowledgeRepo:
 
             CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject);
             CREATE INDEX IF NOT EXISTS idx_facts_object ON facts(object);
+            CREATE INDEX IF NOT EXISTS idx_facts_person ON facts(person_id);
+            CREATE INDEX IF NOT EXISTS idx_facts_group ON facts(knowledge_group);
+            CREATE INDEX IF NOT EXISTS idx_facts_temporal ON facts(temporal_tier);
         """)
         columns = {row[1] for row in self.cm.execute_read("PRAGMA table_info(facts)").fetchall()}
         if "valid_from" not in columns:
@@ -61,6 +64,16 @@ class KnowledgeRepo:
             self.cm.execute_write("ALTER TABLE facts ADD COLUMN last_reinforced REAL")
         if "fact_type" not in columns:
             self.cm.execute_write("ALTER TABLE facts ADD COLUMN fact_type TEXT DEFAULT 'FACTUAL'")
+        if "knowledge_group" not in columns:
+            self.cm.execute_write("ALTER TABLE facts ADD COLUMN knowledge_group INTEGER")
+        if "temporal_tier" not in columns:
+            self.cm.execute_write("ALTER TABLE facts ADD COLUMN temporal_tier TEXT DEFAULT 'status'")
+        if "recallable" not in columns:
+            self.cm.execute_write("ALTER TABLE facts ADD COLUMN recallable INTEGER DEFAULT 0")
+        if "person_id" not in columns:
+            self.cm.execute_write("ALTER TABLE facts ADD COLUMN person_id TEXT")
+        if "subject_type" not in columns:
+            self.cm.execute_write("ALTER TABLE facts ADD COLUMN subject_type TEXT DEFAULT 'PERSON'")
         self.cm.execute_write("UPDATE facts SET last_reinforced = COALESCE(last_reinforced, created_at) WHERE last_reinforced IS NULL")
         self.cm.commit()
 

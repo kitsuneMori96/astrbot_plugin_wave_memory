@@ -23,13 +23,42 @@ CONSOLIDATION_PROMPT = """从以下群聊消息中提取结构化知识。
 {conversation}
 ---
 
+核心判据（每条 facts 都必须过这一刀）：
+这条知识会不会改变她下次说话的方式？不会就不抽。
+
+四组分类（knowledge_group）：
+G1 关于人 — 身份、偏好、能力、负知识
+  ✅ "赣州南康人"  "喜欢gal"  "讨厌被叫全名"  "会画画"
+  ❌ "他刚才在聊聚餐" — 那是对话内容，不是知识
+G2 关于关系 — 谁和谁什么关系、什么张力
+  ✅ "A和B是情侣"  "C和D不对付"
+G3 关于场域 — 梗、黑话、潜规则、历史事件
+  ✅ "这个群'锐评'的用法"  "上次那个大争吵"
+G4 关于她 — 别人怎么评价她、什么话有效、被叫的模式
+  ✅ "有人说她可爱"  "锐评被笑了"
+  ❌ "她刚回复了什么" — 那是流水，不改变行为
+
+时效分层（temporal_tier）：
+- identity：持久不变（籍贯/性格/能力/偏好）→ 不过期
+- status：短期有效（在考研/感冒了）→ 30天过期
+- event：一次性行为（问了外卖/说今天累）→ 写库时跳过不存，但请照样标注
+
+判据补充：
+① 会结束吗？会结束→status，不会结束→identity。"在准备考研"会结束，"喜欢gal"不会结束。
+② 不确定时标 identity。标错成 identity 只是不过期（无害），标错成 status 30天后会被删除（有害）。错误不对称，宁可保守。
+
 请输出 JSON（不要输出其他内容）：
 {{
   "summary": "一句话概括这段对话的核心内容",
   "topics": ["话题1", "话题2"],
   "facts": [
-    {{"subject": "人名或事物", "predicate": "动作或关系", "object": "对象或属性"}},
-    {{"subject": "人名", "predicate": "是/喜欢/说了/使用/计划/纠正/反对", "object": "具体内容"}}
+    {{
+      "subject": "人名",
+      "predicate": "谓词",
+      "object": "内容",
+      "knowledge_group": 1,
+      "temporal_tier": "identity"
+    }}
   ],
   "relations": [
     {{"source": "人物或话题", "target": "人物/话题/事物", "type": "关系类型"}}
@@ -45,7 +74,9 @@ CONSOLIDATION_PROMPT = """从以下群聊消息中提取结构化知识。
 规则：
 - topics 最多 3 个，用简短名词短语
 - facts 最多 5 个，必须是三元组格式，subject 必须包含具体人名
-- predicate 尽量用动词短语（说了/认为/使用/计划/纠正/反对/创作/持有/发现/决定）
+- knowledge_group 必填：1=关于人，2=关系，3=梗/场域，4=关于她；不确定时默认 1
+- temporal_tier 必填：identity=持久，status=短期，event=一次性；不确定时默认 status
+- 关系知识（G2）的 subject 和 object 可以都是人名
 - relations 描述 topics/人物 之间的关联，最多 4 条
 - type 从以下选择：discusses（讨论）、mentions（提及）、decides（决策）、supports（支持/认同）、opposes（反对/不认同）、reacts_to（情绪反应）、creates（创作/制作）、uses（使用/采用）、knows（了解/知道）、relates_to（关联-兜底）
 - social 描述对话中体现的人际关系（最多 2 条，没有则留空数组）
@@ -527,10 +558,11 @@ class ConsolidationService:
         """将 facts 写入 facts 三元组表。
 
         兼容两种格式：
-        - 新格式: [{"subject": "...", "predicate": "...", "object": "..."}]
+        - 新格式: [{"subject": "...", "predicate": "...", "object": "...", "knowledge_group": 1, "temporal_tier": "identity"}]
         - 旧格式: ["陈述句字符串"] — 尝试简单解析
         """
         written = 0
+        skipped_event = 0
         for fact in facts:
             if not fact:
                 continue
@@ -539,14 +571,17 @@ class ConsolidationService:
                 subject = fact.get("subject", "").strip()
                 predicate = fact.get("predicate", "").strip()
                 obj = fact.get("object", "").strip()
+                knowledge_group = fact.get("knowledge_group", 1)
+                temporal_tier = fact.get("temporal_tier", "status")
             elif isinstance(fact, str):
                 # 旧格式兼容：尝试拆分 "A是B" / "A喜欢B"
                 parts = re.split(r"(是|喜欢|认为|说了|决定|提到|觉得|想要|正在|已经)", fact, maxsplit=1)
                 if len(parts) == 3:
                     subject, predicate, obj = parts[0].strip(), parts[1].strip(), parts[2].strip()
                 else:
-                    # 无法解析，跳过
                     continue
+                knowledge_group = 1
+                temporal_tier = "status"
             else:
                 continue
 
@@ -557,15 +592,21 @@ class ConsolidationService:
             if is_identity_contamination(f"{subject} {predicate} {obj}"):
                 continue
 
+            # event 级不写库，但计入统计（免费的质量信号）
+            if temporal_tier == "event":
+                skipped_event += 1
+                logger.debug(f"[Consolidation] event skipped: {subject} {predicate} {obj}")
+                continue
+
             # v2.0: subject 映射为 QQ 号（统一身份）
             subject = self._resolve_to_qq(subject)
 
-            # 排除 bot 自己作为 subject — bot 说的话不是"关于 bot 的事实"
+            # 排除 bot 自己作为 subject
             if self._bot_identifiers and subject in self._bot_identifiers:
                 logger.debug(f"[Consolidation] Skip bot self-fact: {subject}")
                 continue
 
-            # 分类 fact 类型（决定衰减速率）
+            # 分类 fact 类型
             fact_type = classify_fact(subject, predicate, obj)
 
             try:
@@ -580,6 +621,9 @@ class ConsolidationService:
                 written += 1
             except Exception:
                 pass
+
+        if skipped_event:
+            logger.info(f"[Consolidation] event 跳过: {skipped_event} 条（不写库）")
 
         return written
 

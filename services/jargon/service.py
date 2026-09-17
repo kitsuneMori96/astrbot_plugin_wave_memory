@@ -198,7 +198,8 @@ class JargonService:
             cand["_route"] = route
             if route.get("candidate_type") == "person_alias":
                 memory_id = self._resolve_source_memory_id(group_id, word, source_ctx)
-                self._record_person_alias_fact(group_id, word, source_ctx, memory_id)
+                # [Phase 0a] 禁用：不再写入 PERSON_ALIAS fact，消除 alias_or_name 噪音源
+                # self._record_person_alias_fact(group_id, word, source_ctx, memory_id)
                 self._record_diverted_candidate(cand, group_id, route, source_ctx, memory_id, now)
                 continue
             if route.get("candidate_type") in {"technical_noise", "ordinary_word"}:

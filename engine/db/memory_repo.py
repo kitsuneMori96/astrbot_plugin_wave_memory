@@ -53,6 +53,7 @@ class MemoryRepo:
 
             CREATE INDEX IF NOT EXISTS idx_memories_group ON memories(group_id);
             CREATE INDEX IF NOT EXISTS idx_memories_timestamp ON memories(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_memories_group_ts ON memories(group_id, timestamp);
             CREATE INDEX IF NOT EXISTS idx_memory_tags_tag ON memory_tags(tag_id);
         """)
         self.cm.commit()
