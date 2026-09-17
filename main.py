@@ -683,6 +683,7 @@ class WaveMemoryPlugin(Star):
             from .services.injection.channels.safety import SafetyChannel
             from .services.injection.channels.memory_recall import MemoryRecallChannel
             from .services.injection.channels.timeline import TimelineChannel
+            from .services.injection.channels.briefing import BriefingChannel
             from .services.injection.channels.facts import FactsChannel
             from .services.injection.channels.persona import PersonaChannel
             from .services.injection.channels.belief import BeliefChannel
@@ -712,6 +713,7 @@ class WaveMemoryPlugin(Star):
                 safety,
                 MemoryRecallChannel(query_engine=self.query_engine, safety_channel=safety),
                 FTS5Channel(db=self.db),
+                BriefingChannel(db=self.db, safety_channel=safety),
                 TimelineChannel(db=self.db, safety_channel=safety),
                 FactsChannel(db=self.db, facts_decay_rate=getattr(self, "_facts_decay_rate", 0.005)),
                 PersonaChannel(composer=persona_composer, persona_evolution=getattr(self, "persona_evolution", None)),

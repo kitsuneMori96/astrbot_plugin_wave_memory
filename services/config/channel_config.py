@@ -14,6 +14,7 @@ MAX_TIMEOUT_MS = 5000
 KNOWN_CHANNELS = (
     "safety",
     "memory",
+    "briefing",
     "timeline",
     "facts",
     "persona",
@@ -142,6 +143,7 @@ def build_default_channel_config(
         "fewshot": ChannelConfig("fewshot", _enabled_for("fewshot", mode, inject_cfg), priority=50, max_items=3, token_budget=260, timeout_ms=180, modes=_modes_for("fewshot", mode)),
         "book_lore": ChannelConfig("book_lore", _enabled_for("book_lore", mode, inject_cfg), priority=45, max_items=1, token_budget=260, timeout_ms=1200, min_score=0.35, modes=_modes_for("book_lore", mode)),
         "fts5": ChannelConfig("fts5", _enabled_for("fts5", mode, inject_cfg), priority=85, top_k=10, token_budget=350, timeout_ms=180, min_score=0.0, modes=_modes_for("fts5", mode)),
+        "briefing": ChannelConfig("briefing", True, priority=82, max_items=30, token_budget=1000, timeout_ms=300, modes=("full",)),
         "affinity": ChannelConfig("affinity", _enabled_for("affinity", mode, inject_cfg), priority=68, max_items=3, token_budget=180, timeout_ms=120, modes=_modes_for("affinity", mode)),
     }
     return ChannelConfigSet(mode=mode, channels=defaults, recent_dedup_minutes=recent_dedup, trace_enabled=True)
