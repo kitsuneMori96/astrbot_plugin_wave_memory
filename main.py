@@ -123,11 +123,20 @@ def _topic_overlap(text_a: str, text_b: str) -> float:
 
 import re as _re_dedup
 
+# 需要从历史轮完全剥离的 XML 块（无条件剥离）
 _STRIP_PATTERNS = [
     _re_dedup.compile(r"<self_persona>.*?</self_persona>\s*", _re_dedup.DOTALL),
     _re_dedup.compile(r"<sender_profile>.*?</sender_profile>\s*", _re_dedup.DOTALL),
     _re_dedup.compile(r"<wave_style>.*?</wave_style>\s*", _re_dedup.DOTALL),
+    _re_dedup.compile(r"<wave_memory>.*?</wave_memory>\s*", _re_dedup.DOTALL),
+    _re_dedup.compile(r"<image_caption>.*?</image_caption>\s*", _re_dedup.DOTALL),
 ]
+
+# 大型 <system_reminder>（群聊上下文快照）需要剥离，小型 datetime 提醒保留
+_SYSTEM_REMINDER_GROUP_CTX = _re_dedup.compile(
+    r"<system_reminder>.*?(?:You are in a group chat|BEGIN CONTEXT).*?</system_reminder>\s*",
+    _re_dedup.DOTALL,
+)
 
 # 对话不需要的调试/反馈工具，从 req.func_tool 中移除以减少 token 消耗
 _CONVERSATION_UNNEEDED_TOOLS = {
@@ -139,9 +148,13 @@ _CONVERSATION_UNNEEDED_TOOLS = {
 
 
 def _strip_content_text(text: str) -> str:
-    """从文本中剥离 <self_persona>/<sender_profile>/<wave_style> 块。"""
+    """从文本中剥离重复注入块：<self_persona>/<sender_profile>/<wave_style>/
+    <wave_memory>/<image_caption> 以及大型 <system_reminder>（群聊上下文快照）。
+    小型 <system_reminder>（User ID/datetime）保留。
+    """
     for pat in _STRIP_PATTERNS:
         text = pat.sub("", text)
+    text = _SYSTEM_REMINDER_GROUP_CTX.sub("", text)
     return text.strip()
 
 
@@ -149,8 +162,14 @@ def _strip_repeated_injection_blocks(ctxs) -> None:
     """剥离历史 user 消息中的重复注入块，只保留最新一轮。
 
     extra_user_content_parts 会被 assemble_context() 打包进 user 消息的 content，
-    存入对话历史。下一轮加载时这些块还在，导致 <self_persona>/<sender_profile>/
-    <wave_style> 在历史中重复 N 次。此函数清理历史轮的重复，保留最新一轮。
+    存入对话历史。下一轮加载时这些块还在，导致以下内容在历史中重复 N 次：
+    - <self_persona>/<sender_profile>/<wave_style>（插件注入）
+    - <wave_memory>（注入通道输出：memories + facts）
+    - <system_reminder> 含群聊上下文快照（AstrBot GroupChatContext）
+    - <image_caption>（AstrBot 图片描述）
+
+    此函数清理历史轮的重复，保留最新一轮。
+    小型 <system_reminder>（User ID/datetime）和 <Quoted Message> 保留。
     """
     if not ctxs or not isinstance(ctxs, list):
         return
