@@ -328,12 +328,13 @@ class ConversationPlanner:
         msgs = [m for m in (context_messages or []) if (m or "").strip()]
         return "\n".join(msgs[-limit:]) if msgs else "（无）"
 
-    async def _call(self, prompt: str) -> str:
+    async def _call(self, prompt: str, max_tokens: int = None) -> str:
         from .identity_safety import prepend_identity_safety_system_prompt
         resp = await self.llm.text_chat(
             prompt=prompt,
             system_prompt=prepend_identity_safety_system_prompt(None, always=True),
             contexts=[],
+            max_tokens=max_tokens,
         )
         return resp.completion_text or ""
 
@@ -374,7 +375,7 @@ class ConversationPlanner:
             )
 
         try:
-            raw = await self._call(prompt)
+            raw = await self._call(prompt, max_tokens=200)
         except Exception as e:
             logger.warning(f"[ConversationPipeline] plan ({template_key}) LLM failed: {e}")
             return {"reply": forced, "tone": "热情", "detail": "简洁",

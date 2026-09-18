@@ -32,7 +32,9 @@ class LLMFallbackClient:
         self.log_prefix = log_prefix
 
     async def text_chat(self, *, prompt: str, system_prompt: Optional[str] = None,
-                        contexts: Optional[list] = None, **kwargs) -> LLMResponse:
+                        contexts: Optional[list] = None,
+                        max_tokens: Optional[int] = None,
+                        **kwargs) -> LLMResponse:
         """通过 AstrBot provider 调用 LLM。"""
         if not self.provider_ids:
             raise RuntimeError(f"{self.log_prefix} No provider_ids configured")
@@ -49,13 +51,36 @@ class LLMFallbackClient:
                 if system_prompt:
                     full_prompt = f"{system_prompt}\n\n{prompt}"
 
-                response = await asyncio.wait_for(
-                    provider.text_chat(
-                        prompt=full_prompt,
-                        contexts=contexts or [],
-                    ),
-                    timeout=LLM_TIMEOUT_SECONDS,
-                )
+                if max_tokens:
+                    # AstrBot 的 text_chat 不透传 max_tokens 到 API payload，
+                    # 需要拦截 _prepare_chat_payload 将 max_tokens 注入 payloads
+                    original_prepare = provider._prepare_chat_payload
+
+                    async def _patched_prepare(*args, _orig=original_prepare, **kw):
+                        payloads, ctx = await _orig(*args, **kw)
+                        if "max_tokens" not in payloads:
+                            payloads["max_tokens"] = max_tokens
+                        return payloads, ctx
+
+                    provider._prepare_chat_payload = _patched_prepare
+                    try:
+                        response = await asyncio.wait_for(
+                            provider.text_chat(
+                                prompt=full_prompt,
+                                contexts=contexts or [],
+                            ),
+                            timeout=LLM_TIMEOUT_SECONDS,
+                        )
+                    finally:
+                        provider._prepare_chat_payload = original_prepare
+                else:
+                    response = await asyncio.wait_for(
+                        provider.text_chat(
+                            prompt=full_prompt,
+                            contexts=contexts or [],
+                        ),
+                        timeout=LLM_TIMEOUT_SECONDS,
+                    )
 
                 if response and response.completion_text:
                     return LLMResponse(response.completion_text)
