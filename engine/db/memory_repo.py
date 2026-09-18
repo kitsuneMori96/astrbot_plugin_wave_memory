@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Optional
 
 import numpy as np
 
 from .connection import ConnectionManager
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryRepo:
@@ -16,6 +19,7 @@ class MemoryRepo:
     def __init__(self, cm: ConnectionManager):
         self.cm = cm
         self._create_tables()
+        self._migrate_memories()
 
     def _create_tables(self):
         self.cm.executescript("""
@@ -56,6 +60,23 @@ class MemoryRepo:
             CREATE INDEX IF NOT EXISTS idx_memories_group_ts ON memories(group_id, timestamp);
             CREATE INDEX IF NOT EXISTS idx_memory_tags_tag ON memory_tags(tag_id);
         """)
+        self.cm.commit()
+
+    def _migrate_memories(self):
+        """补 memories 缺失列（Phase 1 重生后 schema 漂移修复）。"""
+        existing = {r[1] for r in self.cm.execute("PRAGMA table_info(memories)").fetchall()}
+        for col, default in [
+            ("decay_class", "'STATE'"),
+            ("retention_state", "4"),
+            ("source_msg_id", "NULL"),
+            ("msg_score", "NULL"),
+            ("stability_mult", "1.0"),
+            ("last_recall_at", "NULL"),
+            ("last_decay_at", "NULL"),
+        ]:
+            if col not in existing:
+                self.cm.execute(f"ALTER TABLE memories ADD COLUMN {col} DEFAULT {default}")
+                logger.info(f"[WaveMemory] memories 迁移: 已补列 {col}")
         self.cm.commit()
 
     def add_memory(
