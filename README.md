@@ -143,6 +143,7 @@ WaveMemory 是 AstrBot 记忆插件：负责记录、整理、检索、注入、
 ├─ safety（近期上下文去重 · 身份污染过滤）
 ├─ memory（五阶段语义召回）
 ├─ fts5（人名/专有名词精确召回）
+├─ briefing（L1 唤醒简报 · 被@时注入消息流水）
 ├─ timeline（相关时间线事件）
 ├─ facts（三元组事实）
 ├─ persona（自我人格/经历/对象画像）
