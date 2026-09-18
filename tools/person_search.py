@@ -19,10 +19,7 @@ class WaveMemoryPersonSearchTool(FunctionTool[AstrAgentContext]):
     """按人物搜索记忆：查找某人说过的话、相关事件、社交关系。"""
 
     name: str = "wave_memory_person_search"
-    description: str = (
-        "按人物搜索记忆。可以查找某人说过的话、关于某人的记忆、某人的社交关系。"
-        "支持用昵称或QQ号查找。当用户问'某某人最近在干嘛'、'谁和谁关系好'时使用。"
-    )
+    description: str = "按人物搜索记忆（发言/关系/画像）"
     parameters: dict = field(default_factory=lambda: {
         "type": "object",
         "properties": {
@@ -33,7 +30,7 @@ class WaveMemoryPersonSearchTool(FunctionTool[AstrAgentContext]):
             "query_type": {
                 "type": "string",
                 "enum": ["recent", "about", "social", "profile"],
-                "description": "查询类型：recent=最近发言, about=关于此人的记忆, social=社交关系, profile=人物画像",
+                "description": "recent=最近发言, about=相关记忆, social=社交关系, profile=人物画像",
                 "default": "recent"
             },
             "limit": {

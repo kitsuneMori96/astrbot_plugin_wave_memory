@@ -17,7 +17,7 @@ class WaveMemorySearchTool(FunctionTool[AstrAgentContext]):
     """让模型主动搜索记忆的工具。"""
 
     name: str = "wave_memory_search"
-    description: str = "搜索历史记忆和对话记录。当需要回忆之前聊过的内容、查找群友说过的话、或确认历史事实时使用。"
+    description: str = "搜索历史记忆和对话记录"
     parameters: dict = field(default_factory=lambda: {
         "type": "object",
         "properties": {
@@ -72,7 +72,7 @@ class WaveMemoryRememberTool(FunctionTool[AstrAgentContext]):
     """让模型主动存储重要信息的工具。"""
 
     name: str = "wave_memory_remember"
-    description: str = "主动记住一条重要信息。当用户告诉你需要记住的事情、或你判断某个信息值得长期保存时使用。"
+    description: str = "记住一条重要信息"
     parameters: dict = field(default_factory=lambda: {
         "type": "object",
         "properties": {

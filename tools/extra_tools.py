@@ -23,10 +23,7 @@ class WaveMemoryAffinityTool(FunctionTool[AstrAgentContext]):
     """查询社交关系：互动排行、活跃用户、某人画像。"""
 
     name: str = "wave_memory_affinity"
-    description: str = (
-        "查询社交信息。mode=ranking 查互动排行（谁和你聊最多），"
-        "mode=active 查最近活跃用户，mode=single 查某人的互动信息。"
-    )
+    description: str = "查询社交信息：互动排行/活跃用户/某人画像"
     parameters: dict = field(default_factory=lambda: {
         "type": "object",
         "properties": {
@@ -42,23 +39,23 @@ class WaveMemoryAffinityTool(FunctionTool[AstrAgentContext]):
             },
             "scope": {
                 "type": "string",
-                "description": "群范围：current_group(当前群或指定group_id)/global(全部群合并)/all_groups(按群分别展示)",
+                "description": "群范围：current_group/global/all_groups",
                 "enum": ["current_group", "global", "all_groups"],
                 "default": "global"
             },
             "group_id": {
                 "type": "string",
-                "description": "指定群号；传入后 scope=current_group 会分析这个群，而不是只能依赖当前上下文"
+                "description": "指定群号（scope=current_group 时使用）"
             },
             "bot_scope": {
                 "type": "string",
-                "description": "bot 范围：current_bot(当前bot)/all_bots(全部bot)。也可直接传 bot_id 指定某个bot人格",
+                "description": "bot 范围：current_bot/all_bots",
                 "enum": ["current_bot", "all_bots"],
                 "default": "current_bot"
             },
             "bot_id": {
                 "type": "string",
-                "description": "指定 bot 的 db_id，例如 yushu 或 baizz；传入后只查询该 bot 的好感度画像"
+                "description": "指定 bot 的 db_id"
             },
         },
         "required": [],
@@ -235,10 +232,7 @@ class WaveMemoryFactsTool(FunctionTool[AstrAgentContext]):
     """查询事实三元组（知识图谱）。"""
 
     name: str = "wave_memory_facts"
-    description: str = (
-        "搜索记忆中的事实三元组（知识图谱）。"
-        "可以用关键词搜索相关的 主体→关系→客体 知识。"
-    )
+    description: str = "搜索事实三元组（知识图谱）"
     parameters: dict = field(default_factory=lambda: {
         "type": "object",
         "properties": {
@@ -295,10 +289,7 @@ class WaveMemoryTagGraphTool(FunctionTool[AstrAgentContext]):
     """查询标签共现关系图。"""
 
     name: str = "wave_memory_tag_graph"
-    description: str = (
-        "查询标签的关系网络。提供标签名可以查看它的关联标签和相关记忆。"
-        "不提供标签名则返回热门标签列表。"
-    )
+    description: str = "查询标签关联网络"
     parameters: dict = field(default_factory=lambda: {
         "type": "object",
         "properties": {

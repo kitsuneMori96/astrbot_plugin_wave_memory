@@ -121,6 +121,96 @@ def _topic_overlap(text_a: str, text_b: str) -> float:
     return 2.0 * inter / (len(ta) + len(tb))
 
 
+import re as _re_dedup
+
+_STRIP_PATTERNS = [
+    _re_dedup.compile(r"<self_persona>.*?</self_persona>\s*", _re_dedup.DOTALL),
+    _re_dedup.compile(r"<sender_profile>.*?</sender_profile>\s*", _re_dedup.DOTALL),
+    _re_dedup.compile(r"<wave_style>.*?</wave_style>\s*", _re_dedup.DOTALL),
+]
+
+# 对话不需要的调试/反馈工具，从 req.func_tool 中移除以减少 token 消耗
+_CONVERSATION_UNNEEDED_TOOLS = {
+    "wave_memory_explain_injection",
+    "wave_memory_feedback_memory",
+    "wave_memory_suggest_config",
+    "wave_memory_submit_review_candidate",
+}
+
+
+def _strip_content_text(text: str) -> str:
+    """从文本中剥离 <self_persona>/<sender_profile>/<wave_style> 块。"""
+    for pat in _STRIP_PATTERNS:
+        text = pat.sub("", text)
+    return text.strip()
+
+
+def _strip_repeated_injection_blocks(ctxs) -> None:
+    """剥离历史 user 消息中的重复注入块，只保留最新一轮。
+
+    extra_user_content_parts 会被 assemble_context() 打包进 user 消息的 content，
+    存入对话历史。下一轮加载时这些块还在，导致 <self_persona>/<sender_profile>/
+    <wave_style> 在历史中重复 N 次。此函数清理历史轮的重复，保留最新一轮。
+    """
+    if not ctxs or not isinstance(ctxs, list):
+        return
+
+    # 找到最新一个 user 消息的索引
+    last_user_idx = -1
+    for i in range(len(ctxs) - 1, -1, -1):
+        msg = ctxs[i]
+        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", "")
+        if role == "user":
+            last_user_idx = i
+            break
+
+    if last_user_idx < 0:
+        return
+
+    # 清理除最新 user 消息外的所有 user 消息
+    for i, msg in enumerate(ctxs):
+        if i == last_user_idx:
+            continue
+        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", "")
+        if role != "user":
+            continue
+
+        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+
+        if isinstance(content, str):
+            cleaned = _strip_content_text(content)
+            if cleaned != content:
+                if isinstance(msg, dict):
+                    msg["content"] = cleaned
+                else:
+                    msg.content = cleaned
+
+        elif isinstance(content, list):
+            new_parts = []
+            for part in content:
+                if isinstance(part, dict):
+                    text = part.get("text", "")
+                    if text:
+                        cleaned = _strip_content_text(text)
+                        if cleaned:
+                            new_parts.append({**part, "text": cleaned})
+                    else:
+                        new_parts.append(part)
+                else:
+                    text = getattr(part, "text", "")
+                    if text:
+                        cleaned = _strip_content_text(text)
+                        if cleaned:
+                            part.text = cleaned
+                            new_parts.append(part)
+                    else:
+                        new_parts.append(part)
+            if isinstance(msg, dict):
+                msg["content"] = new_parts
+            else:
+                msg.content = new_parts
+
+
 @dataclass
 class BotProfile:
     """配置驱动的 Bot 身份描述，消除所有硬编码。"""
@@ -2395,6 +2485,18 @@ class WaveMemoryPlugin(Star):
                     _ctxs = req.contexts
                 if group_id:
                     self._label_context_senders(group_id, _ctxs)
+                # 去重：剥离历史 user 消息中的 <self_persona>/<sender_profile>/<wave_style>，
+                # 只保留最新一轮注入，避免重复 token 膨胀
+                _strip_repeated_injection_blocks(_ctxs)
+        except Exception:
+            pass
+
+        # 工具过滤：移除对话不需要的调试/反馈工具，减少 token 消耗
+        try:
+            _ft = getattr(req, "func_tool", None)
+            if _ft is not None:
+                for _tool_name in _CONVERSATION_UNNEEDED_TOOLS:
+                    _ft.remove_tool(_tool_name)
         except Exception:
             pass
 

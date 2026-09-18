@@ -23,10 +23,7 @@ class WaveMemoryDeepSearchTool(FunctionTool[AstrAgentContext]):
     """
 
     name: str = "wave_memory_deep_search"
-    description: str = (
-        "深度搜索历史对话记录。使用关键词精确匹配，并返回匹配消息前后的上下文。"
-        "适合查找特定话题、追溯事件经过、确认谁说过什么。"
-    )
+    description: str = "关键词精确搜索历史对话，附带上下文"
     parameters: dict = field(default_factory=lambda: {
         "type": "object",
         "properties": {

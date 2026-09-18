@@ -23,10 +23,7 @@ class BookLoreSearchTool(FunctionTool[AstrAgentContext]):
     """书设语义搜索工具：在书设知识库中搜索实体、笔记和关系。"""
 
     name: str = "book_lore_search"
-    description: str = (
-        "在书设知识库中语义搜索。可以搜索人物、势力、地点等实体信息，"
-        "也可以搜索创作笔记和世界观设定。支持按类型过滤。"
-    )
+    description: str = "语义搜索书设知识库"
     parameters: dict = field(default_factory=lambda: {
         "type": "object",
         "properties": {
@@ -142,10 +139,7 @@ class BookLoreGraphTool(FunctionTool[AstrAgentContext]):
     """书设实体图谱工具：查看实体详情和关系网络。"""
 
     name: str = "book_lore_graph"
-    description: str = (
-        "查看书设实体的详细信息和关系网络。"
-        "可以查看人物、势力、地点等实体的描述和它们之间的关系。"
-    )
+    description: str = "查看书设实体详情和关系网络"
     parameters: dict = field(default_factory=lambda: {
         "type": "object",
         "properties": {
