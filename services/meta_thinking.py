@@ -213,10 +213,12 @@ class MetaThinking:
         # 兴趣词：基础通用词 + 从 bot 配置注入的关键词
         self.FIXED_INTERESTS = self._BASE_INTERESTS | frozenset(extra_interests or [])
 
-        # Provider 链：优先 default_model，fallback 到旧格式 provider_1/2/3
-        default_model = self.config.get("default_model", "")
+        # Provider 链：优先顶层 metathinking_model，再 default_model，fallback 到旧格式
+        plugin_cfg = getattr(self, '_plugin_config', {}) or {}
+        default_model = plugin_cfg.get("metathinking_model", "") or self.config.get("default_model", "")
         meta_fallback_ids = (
-            provider_ids_from_config(self.config, prefix="provider_")
+            parse_provider_ids(plugin_cfg.get("meta_thinking_fallback_ids", ""))
+            or provider_ids_from_config(self.config, prefix="provider_")
             or parse_provider_ids(self.config.get("provider_fallback_ids", ""))
         )
         self.provider_ids = build_provider_chain(default_model, meta_fallback_ids or parse_provider_ids(global_fallback_ids))

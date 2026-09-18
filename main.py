@@ -1337,7 +1337,8 @@ class WaveMemoryPlugin(Star):
             if planner_enabled is None:
                 planner_enabled = True
             self.planner_enabled = bool(planner_enabled)
-            planner_provider = (planner_cfg.get("planner_provider_id", "") or "").strip() \
+            planner_provider = (self.config.get("planner_provider_id", "") or "").strip() \
+                or (planner_cfg.get("planner_provider_id", "") or "").strip() \
                 or getattr(self, "tag_llm_provider_id", "")
             planner_llm = LLMFallbackClient(
                 context=self.context,

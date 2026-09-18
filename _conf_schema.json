@@ -22,13 +22,28 @@
     "_special": "select_provider",
     "restart_required": true
   },
-  "_models_hint": {
-    "description": "💡 其他模型配置项（需展开下方分组）",
+  "metathinking_model": {
+    "description": "MetaThinking 判断模型",
     "type": "string",
-    "hint": "MetaThinking 判断模型 → MetaThinking 内心判断层配置 > 默认模型；Planner 风格模型 → 三段式对话架构 > Planner 专用 Provider ID",
-    "obvious_hint": true,
-    "default": "下方分组内",
-    "_readonly": true
+    "hint": "用于主动对话判定（要不要回/语气/详略）的 LLM Provider ID。留空则使用下方 MetaThinking 分组内的 default_model。",
+    "default": "",
+    "_special": "select_provider",
+    "restart_required": true
+  },
+  "meta_thinking_fallback_ids": {
+    "description": "MetaThinking 备用模型链",
+    "type": "string",
+    "hint": "主模型不可用时的备选 Provider ID，逗号分隔多个，按顺序尝试。留空则使用下方 MetaThinking 分组内的 provider_fallback_ids。",
+    "default": "",
+    "restart_required": true
+  },
+  "planner_provider_id": {
+    "description": "Planner 风格模型",
+    "type": "string",
+    "hint": "三段式对话架构中 Planner 判定用的 LLM Provider ID。判定调用频繁（每条候选一次），建议配便宜快速的。留空则使用下方 Planner 分组内的 planner_provider_id，再留空回退 tag_llm_provider_id。",
+    "default": "",
+    "_special": "select_provider",
+    "restart_required": true
   },
   "_system_status": {
     "description": "⚡ WaveMemory 系统运行状态说明",
@@ -464,16 +479,16 @@
         "restart_required": true
       },
       "default_model": {
-        "description": "默认模型",
-        "hint": "用于 MetaThinking 判断/主动插话的模型 Provider ID（如 'deepseek/deepseek-v4-flash'）。留空时必须配置 provider_fallback_ids，否则主动对话判断失败。",
+        "description": "默认模型（已被顶部 MetaThinking 判断模型 替代）",
+        "hint": "建议改用顶部「MetaThinking 判断模型」配置项。此处仍可填写，顶部留空时自动回退到此值。",
         "type": "string",
         "default": "",
         "_special": "select_provider",
         "restart_required": true
       },
       "provider_fallback_ids": {
-        "description": "备用 Provider ID（逗号分隔）",
-        "hint": "default_model 不可用时的备选链，逗号分隔多个 Provider ID，按顺序尝试。",
+        "description": "备用 Provider ID（已被顶部 MetaThinking 备用模型链 替代）",
+        "hint": "建议改用顶部「MetaThinking 备用模型链」配置项。此处仍可填写，顶部留空时自动回退到此值。",
         "type": "string",
         "default": "",
         "restart_required": true
@@ -548,8 +563,8 @@
         "default": true
       },
       "planner_provider_id": {
-        "description": "Planner 专用 Provider ID（留空回退 tag_llm_provider_id）",
-        "hint": "判定调用频繁（每条候选一次），建议配便宜快速的模型。",
+        "description": "Planner 专用 Provider ID（已被顶部 Planner 风格模型 替代）",
+        "hint": "建议改用顶部「Planner 风格模型」配置项。此处仍可填写，顶部留空时自动回退到此值，再留空回退 tag_llm_provider_id。",
         "type": "string",
         "default": ""
       }
