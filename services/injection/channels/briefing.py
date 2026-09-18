@@ -77,11 +77,7 @@ class BriefingChannel:
             return InjectionResult.empty(self.name, reason="briefing requires group_id")
 
         try:
-            bot_id = (
-                getattr(ctx, "bot_id", None)
-                or getattr(ctx, "bot_profile_id", None)
-                or ""
-            )
+            bot_id = ctx.bot_id or ctx.bot_profile_id or ""
             if not bot_id:
                 logger.warning("[WaveMemory] briefing: bot_id 缺失，无法定位 bot 上次回复，降级为最近消息")
             now = float(getattr(ctx, "now", 0.0) or time.time())
