@@ -57,6 +57,7 @@ class WaveMemoryWebUI:
         livingmemory_facade_enabled: bool | None = None,
         livingmemory_alias_tools_registered: bool = False,
         detected_memory_plugins: list[dict[str, Any]] | None = None,
+        llm_trace_store=None,
     ):
         # 注入所有服务到全局容器
         container = get_container()
@@ -81,6 +82,7 @@ class WaveMemoryWebUI:
             livingmemory_facade_enabled=livingmemory_facade_enabled,
             livingmemory_alias_tools_registered=livingmemory_alias_tools_registered,
             detected_memory_plugins=detected_memory_plugins,
+            llm_trace_store=llm_trace_store,
         )
 
         # 创建服务器实例

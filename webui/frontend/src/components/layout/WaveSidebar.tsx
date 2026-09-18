@@ -20,7 +20,7 @@ import {
 const routeGroups = [
   { label: '日常运营', paths: ['/dashboard', '/memories', '/prompts', '/soul'] },
   { label: '数据管理', paths: ['/import', '/bindings', '/beliefs', '/jargon', '/blackbox'] },
-  { label: '开发调试', paths: ['/injection', '/channels', '/learning-objects', '/agent-feedback'] },
+  { label: '开发调试', paths: ['/injection', '/llm-debug', '/channels', '/learning-objects', '/agent-feedback'] },
   { label: '系统维护', paths: ['/settings', '/compatibility'] },
 ]
 

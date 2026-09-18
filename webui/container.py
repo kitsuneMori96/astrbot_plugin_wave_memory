@@ -47,6 +47,9 @@ class ServiceContainer:
         self.livingmemory_alias_tools_registered: bool = False
         self.detected_memory_plugins: list[dict[str, Any]] = []
 
+        # ─── LLM 调试 ───
+        self.llm_trace_store: Any = None
+
         # ─── 灵魂子系统 ───
         self.desire_engine: Any = None
         self.concern_tracker: Any = None
@@ -84,6 +87,7 @@ class ServiceContainer:
         concern_tracker=None,
         mood_trajectory=None,
         subjective_time=None,
+        llm_trace_store=None,
     ) -> None:
         """注入所有服务引用。"""
         self.db = db
@@ -111,6 +115,7 @@ class ServiceContainer:
         self.concern_tracker = concern_tracker
         self.mood_trajectory = mood_trajectory
         self.subjective_time = subjective_time
+        self.llm_trace_store = llm_trace_store
 
     @classmethod
     def reset(cls) -> None:

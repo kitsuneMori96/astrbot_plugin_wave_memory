@@ -34,6 +34,7 @@ class LLMFallbackClient:
     async def text_chat(self, *, prompt: str, system_prompt: Optional[str] = None,
                         contexts: Optional[list] = None,
                         max_tokens: Optional[int] = None,
+                        _trace_store=None, _trace_id: Optional[str] = None,
                         **kwargs) -> LLMResponse:
         """通过 AstrBot provider 调用 LLM。"""
         if not self.provider_ids:
@@ -50,6 +51,9 @@ class LLMFallbackClient:
                 full_prompt = prompt
                 if system_prompt:
                     full_prompt = f"{system_prompt}\n\n{prompt}"
+
+                import time as _time
+                _call_start = _time.monotonic()
 
                 if max_tokens:
                     # AstrBot 的 text_chat 不透传 max_tokens 到 API payload，
@@ -82,13 +86,38 @@ class LLMFallbackClient:
                         timeout=LLM_TIMEOUT_SECONDS,
                     )
 
+                _latency_ms = (_time.monotonic() - _call_start) * 1000
+
                 if response and response.completion_text:
+                    # 回写 trace
+                    if _trace_store and _trace_id:
+                        try:
+                            _trace_store.update_response(
+                                _trace_id,
+                                provider_id=provider_id,
+                                latency_ms=_latency_ms,
+                                status="ok",
+                                response_preview=response.completion_text[:300],
+                            )
+                        except Exception:
+                            pass
                     return LLMResponse(response.completion_text)
 
             except Exception as e:
                 last_error = e
                 logger.warning(f"{self.log_prefix} provider '{provider_id}' failed: {e}")
                 continue
+
+        # 所有 provider 都失败时记录错误
+        if _trace_store and _trace_id:
+            try:
+                _trace_store.update_response(
+                    _trace_id,
+                    status="error",
+                    error=str(last_error or "All providers failed"),
+                )
+            except Exception:
+                pass
 
         if last_error:
             logger.error(f"{self.log_prefix} LLM 调用失败: {last_error}")

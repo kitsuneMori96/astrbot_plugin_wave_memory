@@ -60,6 +60,7 @@ from .services.dream import DreamService
 from .services.study_service import StudyService
 from .services.self_reflect import SelfReflectService
 from .services.llm_fallback import LLMFallbackClient, build_provider_chain
+from .services.llm_trace_store import LlmTraceStore
 
 # 运行时错误收集（WebUI 可视化）
 def _record_err(source: str, msg):
@@ -1198,6 +1199,10 @@ class WaveMemoryPlugin(Star):
         if llm_tools:
             self.context.add_llm_tools(*llm_tools)
 
+        # LLM 请求调试 trace store
+        self.llm_trace_store = LlmTraceStore(self.db.conn)
+        self.llm_trace_store.ensure_schema()
+
         # 启动 WebUI
         if self.webui_enabled:
             try:
@@ -1225,6 +1230,7 @@ class WaveMemoryPlugin(Star):
                     livingmemory_facade_enabled=self.livingmemory_compat_enabled,
                     livingmemory_alias_tools_registered=self.livingmemory_alias_tools_registered,
                     detected_memory_plugins=self.detected_memory_plugins,
+                    llm_trace_store=self.llm_trace_store,
                 )
                 await self.webui.start()
             except Exception as e:
@@ -2742,11 +2748,50 @@ class WaveMemoryPlugin(Star):
             tracker["count"] += 1
             # v2.0: 不再硬拦截，把频率信息注入 persona 让 bot 自己判断
 
+        # ─── LLM 请求快照：记录完整请求体用于 token 调试 ───
+        try:
+            if getattr(self, 'llm_trace_store', None):
+                _extra_parts_raw = []
+                for _part in (getattr(req, 'extra_user_content_parts', None) or []):
+                    if hasattr(_part, 'text'):
+                        _extra_parts_raw.append(_part.text)
+                    elif isinstance(_part, str):
+                        _extra_parts_raw.append(_part)
+                _trace_id = self.llm_trace_store.record(
+                    group_id=group_id or None,
+                    sender_id=sender_id or None,
+                    message=message,
+                    system_prompt=getattr(req, 'system_prompt', '') or '',
+                    contexts=getattr(req, 'contexts', None) or [],
+                    extra_parts=_extra_parts_raw,
+                    tools=getattr(req, 'func_tool', None),
+                )
+                event._llm_trace_id = _trace_id
+        except Exception:
+            pass
+
         # ─── 态度判断由 inject_memory 的 PersonaEvolution 通道统一完成 ───
         # 不再有独立 LLM 调用。bot 在主对话中用自己的人格自然思考态度。
         # 好感度变化靠 LifecycleService 互动频率 + 极端事件规则驱动。
 
     @filter.on_llm_response()
+    async def capture_llm_response(self, event: AstrMessageEvent, resp=None):
+        """捕获 LLM 响应回写到 trace store（token 调试用）。"""
+        try:
+            _trace_id = getattr(event, '_llm_trace_id', None)
+            if not _trace_id or not getattr(self, 'llm_trace_store', None):
+                return
+            if not resp or isinstance(resp, (list, tuple)):
+                return
+            text = getattr(resp, 'completion_text', '') or ''
+            self.llm_trace_store.update_response(
+                _trace_id,
+                status="ok",
+                response_preview=text[:300],
+            )
+        except Exception:
+            pass
+
     @filter.on_llm_response()
     async def strip_emoji_on_response(self, event: AstrMessageEvent, resp=None):
         """剥离回复中的 emoji/表情符号（人设要求不用，正则兜底保证）。"""

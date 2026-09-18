@@ -50,12 +50,16 @@ try:
         from .prompts import prompts_bp
     except Exception:  # pragma: no cover - 新旧版本兼容
         prompts_bp = None
+    try:
+        from .llm_debug import llm_debug_bp
+    except Exception:  # pragma: no cover - 新旧版本兼容
+        llm_debug_bp = None
 except Exception:  # pragma: no cover - 本地单测未安装 Quart 时只导入 helper
     class Blueprint:  # type: ignore[no-redef]
         pass
 
     auth_bp = pages_bp = explore_bp = memories_bp = tags_bp = config_bp = system_bp = None
-    beliefs_bp = soul_bp = jargon_bp = kg_bp = injection_observatory_bp = channel_config_bp = learning_object_review_bp = agent_feedback_bp = compatibility_bp = blackbox_bp = bindings_bp = prompts_bp = None
+    beliefs_bp = soul_bp = jargon_bp = kg_bp = injection_observatory_bp = channel_config_bp = learning_object_review_bp = agent_feedback_bp = compatibility_bp = blackbox_bp = bindings_bp = prompts_bp = llm_debug_bp = None
 
 
 def get_blueprints() -> List[Blueprint]:
@@ -81,5 +85,6 @@ def get_blueprints() -> List[Blueprint]:
             blackbox_bp,
             bindings_bp,
             prompts_bp,
+            llm_debug_bp,
         ] if bp is not None
     ]

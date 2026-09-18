@@ -34,6 +34,7 @@ import { PromptsPage } from '@/pages/prompts/PromptsPage'
 import { BlackboxHubPage } from '@/pages/blackbox/BlackboxHubPage'
 import { BlackboxPeoplePage, BlackboxPersonDetailPage } from '@/pages/blackbox'
 import { BlackboxIndexesPage } from '@/pages/blackbox/BlackboxIndexesPage'
+import { LlmDebugPage } from '@/pages/debug/LlmDebugPage'
 
 
 export interface AppRoute {
@@ -73,6 +74,13 @@ export const appRoutes: AppRoute[] = [
     description: 'trace 筛选、通道瀑布和最终注入预览',
     icon: ActivityIcon,
     element: InjectionPage,
+  },
+  {
+    path: '/llm-debug',
+    title: 'LLM 调试台',
+    description: '请求体快照、token 分解与组件高亮',
+    icon: ActivityIcon,
+    element: LlmDebugPage,
   },
   {
     path: '/channels',
