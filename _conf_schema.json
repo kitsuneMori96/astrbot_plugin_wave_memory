@@ -1,12 +1,4 @@
 {
-  "_system_status": {
-    "description": "⚡ WaveMemory 系统运行状态说明",
-    "type": "string",
-    "hint": "本页配置系统基础能力开关和模型选择。核心交互机制：(1) 记忆注入：允许机器人结合历史上下文在聊天中主动提及过去的交往经历；(2) 深度社交认知：无需独立调用LLM，系统根据互动次数和事实三元组自动沉淀出对每个群友的用户画像，实现自然的陪伴调教；(3) 情绪半衰期防刷机制：辱骂等恶意事件3次后自动进入安全冷却期。",
-    "obvious_hint": true,
-    "default": "仅供说明，无需修改",
-    "_readonly": true
-  },
   "embedding_provider_id": {
     "description": "向量特征模型 (Embedding) 提供商",
     "type": "string",
@@ -29,6 +21,14 @@
     "default": "",
     "_special": "select_provider",
     "restart_required": true
+  },
+  "_system_status": {
+    "description": "⚡ WaveMemory 系统运行状态说明",
+    "type": "string",
+    "hint": "本页配置系统基础能力开关和模型选择。核心交互机制：(1) 记忆注入：允许机器人结合历史上下文在聊天中主动提及过去的交往经历；(2) 深度社交认知：无需独立调用LLM，系统根据互动次数和事实三元组自动沉淀出对每个群友的用户画像，实现自然的陪伴调教；(3) 情绪半衰期防刷机制：辱骂等恶意事件3次后自动进入安全冷却期。",
+    "obvious_hint": true,
+    "default": "仅供说明，无需修改",
+    "_readonly": true
   },
   "WebUI_Settings": {
     "description": "WebUI 管理控制台配置",
