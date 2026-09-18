@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Mapping
 from typing import Any
 
 from ..channel_base import InjectionResult
 from .safety import SafetyChannel, is_channel_allowed_in_mode
+
+logger = logging.getLogger(__name__)
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -66,6 +69,7 @@ class BriefingChannel:
             return InjectionResult.disabled(self.name, reason="briefing disabled by config")
 
         max_items = _as_int(channel_cfg.get("max_items"), 30)
+        token_budget = _as_int(channel_cfg.get("token_budget"), 1000)
         if max_items <= 0:
             return InjectionResult.empty(self.name, reason="briefing max_items is zero")
 
@@ -73,7 +77,13 @@ class BriefingChannel:
             return InjectionResult.empty(self.name, reason="briefing requires group_id")
 
         try:
-            bot_id = getattr(ctx, "bot_profile_id", "") or ""
+            bot_id = (
+                getattr(ctx, "bot_id", None)
+                or getattr(ctx, "bot_profile_id", None)
+                or ""
+            )
+            if not bot_id:
+                logger.warning("[WaveMemory] briefing: bot_id 缺失，无法定位 bot 上次回复，降级为最近消息")
             now = float(getattr(ctx, "now", 0.0) or time.time())
 
             # 1. 查 bot 最后回复时间（兼容两种 sender_id 写入方式）
@@ -99,8 +109,8 @@ class BriefingChannel:
                 time_str = time.strftime("%H:%M", time.localtime(ts))
                 content = (msg.get("content") or "")[:100]
                 line = f"{name}({time_str}): {content}"
-                line_tokens = len(line) // 2
-                if total_tokens + line_tokens > 1000:
+                line_tokens = len(line)
+                if total_tokens + line_tokens > token_budget:
                     break
                 lines.append(line)
                 total_tokens += line_tokens
